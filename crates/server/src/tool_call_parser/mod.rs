@@ -14,21 +14,21 @@
 //! Two formats exist in the Qwen family and we expose a trait so the
 //! format-specific logic is one file each:
 //! - **Hermes-JSON** (`hermes.rs`): `<tool_call>\n{...JSON...}\n</tool_call>`.
-//! Qwen3 / Qwen3.5 / Qwen3.6 with the Qwen-official (HuggingFace-pushed)
-//! chat template.
+//!   Qwen3 / Qwen3.5 / Qwen3.6 with the Qwen-official (HuggingFace-pushed)
+//!   chat template.
 //! - **Qwen3-Coder XML** (`qwen3_coder.rs`): nested XML with
-//! `<function=name>…<parameter=k>v</parameter>…</function>` inside a
-//! `<tool_call>`. Qwen3-Coder family and — per the T1.3 parity-cert
-//! finding — the Unsloth "UD" Qwen3.6 quants on this rig.
-//! Both parsers conform to [`ToolCallParser`]. Selection at request
-//! time goes through [`dispatcher`], which honours the `tool_call_format`
-//! request field (`"hermes" | "qwen3_coder" | "auto"`) and falls back to
-//! an architecture-based default when the caller says `"auto"` or omits
-//! it.
-//! The `arguments` field emitted by [`ParserEvent::ToolCallArgumentsDelta`]
-//! / collected across the turn is always a JSON-encoded *string* — never
-//! an object — so the server wire format stays stable. This guards
-//! llama.cpp #20198.
+//!   `<function=name>…<parameter=k>v</parameter>…</function>` inside a
+//!   `<tool_call>`. Qwen3-Coder family and — per the T1.3 parity-cert
+//!   finding — the Unsloth "UD" Qwen3.6 quants on this rig.
+//!   Both parsers conform to [`ToolCallParser`]. Selection at request
+//!   time goes through [`dispatcher`], which honours the `tool_call_format`
+//!   request field (`"hermes" | "qwen3_coder" | "auto"`) and falls back to
+//!   an architecture-based default when the caller says `"auto"` or omits
+//!   it.
+//!   The `arguments` field emitted by [`ParserEvent::ToolCallArgumentsDelta`]
+//!   / collected across the turn is always a JSON-encoded *string* — never
+//!   an object — so the server wire format stays stable. This guards
+//!   llama.cpp #20198.
 
 use anyhow::{anyhow, Result};
 
@@ -104,10 +104,10 @@ impl ParserEvent {
 /// - `TextDelta` chunks concatenate into `content`.
 /// - `ThinkDelta` is discarded today (reasoning_content is V3 scope).
 /// - Each `ToolCallOpen` + its `ToolCallArgumentsDelta`s + matching
-/// `ToolCallClose` build one [`crate::api::ToolCall`].
+///   `ToolCallClose` build one [`crate::api::ToolCall`].
 /// - Close events whose matching Open never fired still produce a
-/// `ToolCall` with an empty name — imperfect, but preserves parser
-/// events rather than dropping them.
+///   `ToolCall` with an empty name — imperfect, but preserves parser
+///   events rather than dropping them.
 pub fn split_events(events: Vec<ParserEvent>) -> (String, Vec<crate::api::ToolCall>) {
     use crate::api::{FunctionCall, ToolCall};
     let mut content = String::new();
@@ -202,16 +202,16 @@ impl ToolCallFormat {
 /// Choose a parser format, honouring (in precedence order):
 /// 1. An explicit `request_override` — `Some("hermes" | "qwen3_coder")`.
 /// 2. `"auto"` or `None` — fall back to the architecture default.
-/// Architecture defaults are deliberately conservative:
+///   Architecture defaults are deliberately conservative:
 /// - `qwen35moe` (our V1 model arch) defaults to **`Hermes`**.
-/// **Caveat**: the specific Qwen3.6 GGUF on the V1 rig (Unsloth's
-/// `UD-Q8_K_XL` build) ships a **Coder-XML** chat template — see
-/// `certs/chat_template/qwen35moe_tools/README.md`. Clients running
-/// that GGUF should set `tool_call_format: "qwen3_coder"` explicitly.
-/// A finer-grained auto-detection from the loaded GGUF template will
-/// land as a follow-up once we reliably probe the template shape.
+///   **Caveat**: the specific Qwen3.6 GGUF on the V1 rig (Unsloth's
+///   `UD-Q8_K_XL` build) ships a **Coder-XML** chat template — see
+///   `certs/chat_template/qwen35moe_tools/README.md`. Clients running
+///   that GGUF should set `tool_call_format: "qwen3_coder"` explicitly.
+///   A finer-grained auto-detection from the loaded GGUF template will
+///   land as a follow-up once we reliably probe the template shape.
 /// - any other arch → `Hermes` (safest default — the open-source
-/// standard used across vLLM / SGLang / llama.cpp for non-Coder Qwens).
+///   standard used across vLLM / SGLang / llama.cpp for non-Coder Qwens).
 pub fn choose_format(
     request_override: Option<&str>,
     server_default: ToolCallFormat,

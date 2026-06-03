@@ -56,8 +56,8 @@ pub fn forward<C: ForwardCtx>(
 /// Each attention / GDN layer routes through the `_mixed` ctx methods
 /// (one launch covering both phases) instead of two separate calls; FFN
 /// + residual + embed run uniformly at `n = K + N`. The output head
-/// emits N+1 rows: the (K-1)-th prefill row (slot_p's next-token logit)
-/// followed by N decode rows (per decode slot).
+///   emits N+1 rows: the (K-1)-th prefill row (slot_p's next-token logit)
+///   followed by N decode rows (per decode slot).
 ///
 /// See `doc/MIXED_BATCH_V2_PLAN.md` Phase K3.
 pub fn forward_mixed<C: ForwardCtx>(

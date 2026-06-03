@@ -5,17 +5,17 @@
 //! the standard tool. This module provides a coarse alternative:
 //! * Caller enables a thread-local section timer via [`enable`].
 //! * Forward code along the hot path inserts [`mark`] calls at
-//! well-known section boundaries, each of which lazily allocates
-//! a timing-enabled `HipEvent` and records it on the supplied
-//! stream. When the timer is disabled, [`mark`] is a single
-//! thread-local check (~ns) and a fast-return.
+//!   well-known section boundaries, each of which lazily allocates
+//!   a timing-enabled `HipEvent` and records it on the supplied
+//!   stream. When the timer is disabled, [`mark`] is a single
+//!   thread-local check (~ns) and a fast-return.
 //! * After the workload completes, caller calls [`flush`] to drain
-//! the recorded events and compute per-section ms via
-//! `hipEventElapsedTime`. Events are pairwise consecutive — section
-//! `name[i]` ms = `event[i+1].elapsed_since(event[i])`.
-//! The instrumentation never changes the production hot path's behaviour;
-//! all it adds when enabled is one event-record per mark (low-µs cost on
-//! gfx906) and `O(N_marks)` heap allocations.
+//!   the recorded events and compute per-section ms via
+//!   `hipEventElapsedTime`. Events are pairwise consecutive — section
+//!   `name[i]` ms = `event[i+1].elapsed_since(event[i])`.
+//!   The instrumentation never changes the production hot path's behaviour;
+//!   all it adds when enabled is one event-record per mark (low-µs cost on
+//!   gfx906) and `O(N_marks)` heap allocations.
 
 use std::cell::RefCell;
 

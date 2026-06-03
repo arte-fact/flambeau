@@ -5,13 +5,13 @@
 //! cheap to derive.
 //! Design notes:
 //! - Device context. Modules are loaded into the current HIP context's
-//! device. Call `HipDevice::bind()` on the owning device before constructing
-//! a module and before every launch — same rule as `HipDevice` itself.
+//!   device. Call `HipDevice::bind()` on the owning device before constructing
+//!   a module and before every launch — same rule as `HipDevice` itself.
 //! - Args are type-erased at the ABI. `hipModuleLaunchKernel` takes a
-//! `void**` of argument pointers; we expose a tiny builder that takes
-//! anything `Copy` via `&T`, then addresses of those slots form the array.
+//!   `void**` of argument pointers; we expose a tiny builder that takes
+//!   anything `Copy` via `&T`, then addresses of those slots form the array.
 //! - Stream ownership. `launch` takes `&HipStream`; the stream must live on
-//! the same device as the module.
+//!   the same device as the module.
 
 use std::collections::HashMap;
 use std::ffi::CString;
@@ -396,7 +396,7 @@ impl HipKernel<'_> {
     /// `args`.
     /// # Safety
     /// - Argument storage referenced by `args` must live until the stream
-    /// consumes the launch (typically: until the subsequent `synchronize`).
+    ///   consumes the launch (typically: until the subsequent `synchronize`).
     /// - `cfg.grid` × `cfg.block` must not exceed device limits.
     /// - Any device pointers in `args` must be valid on this kernel's device.
     pub unsafe fn launch(
@@ -441,10 +441,10 @@ impl HipKernel<'_> {
     /// a tight loop without re-running the builder each iteration.
     /// # Safety
     /// - `args_ptr` must point to a valid array of at least the number
-    /// of arguments this kernel expects.
+    ///   of arguments this kernel expects.
     /// - Each entry must point to storage matching the kernel's signature
-    /// at the corresponding position, and that storage must remain live
-    /// until the stream consumes the launch.
+    ///   at the corresponding position, and that storage must remain live
+    ///   until the stream consumes the launch.
     pub unsafe fn launch_raw(
         &self,
         stream: &HipStream,

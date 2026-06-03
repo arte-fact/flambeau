@@ -5,14 +5,14 @@
 //! is one symbol lookup (`hipModuleGetFunction`) + `hipModuleLaunchKernel`.
 //! Architectural placement:
 //! - Op wrappers here **never** parse hsaco, never write dispatch predicates
-//! from env flags. They resolve variant selection through the committed
-//! `KernelDescriptor` tables in `flambeau-backend-hip::impls` (architectural
-//! rule 1: dispatch lives in `dispatch/<backend>/<arch>.toml`, mirrored by
-//! the Rust table).
+//!   from env flags. They resolve variant selection through the committed
+//!   `KernelDescriptor` tables in `flambeau-backend-hip::impls` (architectural
+//!   rule 1: dispatch lives in `dispatch/<backend>/<arch>.toml`, mirrored by
+//!   the Rust table).
 //! - The lifetime story: each op call borrows `&OpsRegistry` and a `&HipStream`;
-//! all kernel args are locals in the launch function so they live until
-//! `kernel.launch(...)` returns. This matches the pattern already in
-//! `flambeau-bench::sweep_*`.
+//!   all kernel args are locals in the launch function so they live until
+//!   `kernel.launch(...)` returns. This matches the pattern already in
+//!   `flambeau-bench::sweep_*`.
 
 use std::collections::HashMap;
 

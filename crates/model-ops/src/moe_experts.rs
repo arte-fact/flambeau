@@ -1092,9 +1092,9 @@ impl MoeExperts {
     /// [`Self::forward_prefill`] but writes the per-rank partial via
     /// `moe_combine_no_residual_f16`; caller's AR folds the residual
     /// + cross-rank sum together. `self.intermediate` must equal
-    /// `moe_intermediate_size / tp_world`. Set
-    /// [`Self::with_tile8_min_tokens`] to gate the tile8 path on a
-    /// prompt-length floor when running at `tp_world >= 2`.
+    ///   `moe_intermediate_size / tp_world`. Set
+    ///   [`Self::with_tile8_min_tokens`] to gate the tile8 path on a
+    ///   prompt-length floor when running at `tp_world >= 2`.
     pub fn forward_prefill_tp<O: Ops>(
         &self,
         ops: &O,

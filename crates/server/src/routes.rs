@@ -322,21 +322,21 @@ impl ServerState {
     /// - `FLAMBEAU_PREFIX_CACHE` must be set.
     /// - Topology must be PP or TP (Hybrid bails).
     /// - Prompt must have at least one new complete chunk past
-    /// `n_already_matched`.
+    ///   `n_already_matched`.
     /// - Prompt must be at least 50 tokens (cache-hit savings won't
-    /// justify the host-RAM cost on tiny prompts).
-    /// Errors are logged and swallowed — capture is opportunistic; a
-    /// failed snapshot must not break the caller's request.
-    /// **#229 V1** — capture the post-prefill KV+GDN state plus the
-    /// last-position logits row into the prefix cache. V1 only inserts
-    /// full-prompt entries — partial-chunk-boundary captures need
-    /// GDN-at-position snapshotting (V2). Keyed by the full chain
-    /// (chunk-keys including partial tail) so future identical
-    /// prompts hit and can skip prefill entirely.
-    /// `last_logits` is the prefill's last-position F32 vocab row,
-    /// the same one the caller is about to feed into the first-token
-    /// sampler. Cloned into the cache entry; ~600 KB on Qwen3.6.
-    /// Eligibility:
+    ///   justify the host-RAM cost on tiny prompts).
+    ///   Errors are logged and swallowed — capture is opportunistic; a
+    ///   failed snapshot must not break the caller's request.
+    ///   **#229 V1** — capture the post-prefill KV+GDN state plus the
+    ///   last-position logits row into the prefix cache. V1 only inserts
+    ///   full-prompt entries — partial-chunk-boundary captures need
+    ///   GDN-at-position snapshotting (V2). Keyed by the full chain
+    ///   (chunk-keys including partial tail) so future identical
+    ///   prompts hit and can skip prefill entirely.
+    ///   `last_logits` is the prefill's last-position F32 vocab row,
+    ///   the same one the caller is about to feed into the first-token
+    ///   sampler. Cloned into the cache entry; ~600 KB on Qwen3.6.
+    ///   Eligibility:
     /// - `FLAMBEAU_PREFIX_CACHE` set.
     /// - Topology PP or TP (Hybrid bails).
     /// - Prompt ≥ 50 tokens AND at least one full chunk in the chain.

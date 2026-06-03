@@ -5,11 +5,11 @@
 //! - `tokenizer.ggml.tokens`: vocab strings (unicode-escaped for byte bytes)
 //! - `tokenizer.ggml.merges`: "a b" BPE merge pairs
 //! - `tokenizer.ggml.bos/eos/padding_token_id`: special ids
-//! llama.cpp's implementation lives in `src/llama-vocab.cpp`. This module
-//! reproduces enough of its "gpt2" + "qwen35"/"qwen2" BPE-load path to give
-//! byte-identical token IDs on the `parity_vs_llama_cpp.rs` prompts.
-//! Covered pre-tokenizers: "default", "gpt-2", "llama-bpe", "llama3",
-//! "qwen2", "qwen35". Others return an error — add them as models arrive.
+//!   llama.cpp's implementation lives in `src/llama-vocab.cpp`. This module
+//!   reproduces enough of its "gpt2" + "qwen35"/"qwen2" BPE-load path to give
+//!   byte-identical token IDs on the `parity_vs_llama_cpp.rs` prompts.
+//!   Covered pre-tokenizers: "default", "gpt-2", "llama-bpe", "llama3",
+//!   "qwen2", "qwen35". Others return an error — add them as models arrive.
 
 use anyhow::{anyhow, Context, Result};
 use tokenizers::models::bpe::{Vocab, BPE};
@@ -394,7 +394,7 @@ fn gemma4_pre_tok() -> Result<PreTokenizerWrapper> {
 /// - Qwen-Coder: `<|fim_prefix|>` / `<|fim_suffix|>` / `<|fim_middle|>`
 /// - StarCoder / Code Llama: `<fim_prefix>` / `<fim_suffix>` / `<fim_middle>`
 /// - DeepSeek-Coder: `<｜fim▁begin｜>` / `<｜fim▁hole｜>` / `<｜fim▁end｜>`
-/// (the pipe is U+FF5C, the separator U+2581).
+///   (the pipe is U+FF5C, the separator U+2581).
 fn detect_fim_tokens(tokens_arr: &[crate::gguf::Value]) -> Option<FimTokens> {
     let first = |aliases: &[&str]| -> Option<u32> {
         aliases.iter().find_map(|a| find_vocab_id(tokens_arr, a))

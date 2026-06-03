@@ -3,28 +3,28 @@
 //! across a TP mesh of `world` ranks. The three variants follow standard
 //! Megatron-LM nomenclature:
 //! - [`WeightLayout::Replicated`] — every rank holds the full tensor.
-//! Used for 1-D parameters (norms, biases that aren't on a sharded
-//! projection's output dim) and for global tensors small enough to
-//! trade memory for AllReduce-free dispatch (token-embd in V1; later
-//! vocab-shardable).
+//!   Used for 1-D parameters (norms, biases that aren't on a sharded
+//!   projection's output dim) and for global tensors small enough to
+//!   trade memory for AllReduce-free dispatch (token-embd in V1; later
+//!   vocab-shardable).
 //! - [`WeightLayout::ColParallel`] — split along the *output* dimension.
-//! Each rank computes `Y_r = X · W_r^T` on the full input and emits
-//! `1/world` of the output rows. No AllReduce required at this stage.
+//!   Each rank computes `Y_r = X · W_r^T` on the full input and emits
+//!   `1/world` of the output rows. No AllReduce required at this stage.
 //! - [`WeightLayout::RowParallel`] — split along the *input* dimension.
-//! Each rank computes `Y_r = X_r · W_r^T` on its input slice and emits
-//! a *partial* output. AllReduce-sum on the partial buffer reconstructs
-//! the full output (this is where `BarP2pAllReduce` lives in ).
-//! "Output dim" / "input dim" are framework conventions; the concrete
-//! tensor axis is recorded in `dim` so the slicing code () knows
-//! which axis to cut. For `[rows, cols]` matmul weights stored as
-//! `[output_dim=rows, input_dim=cols]`:
+//!   Each rank computes `Y_r = X_r · W_r^T` on its input slice and emits
+//!   a *partial* output. AllReduce-sum on the partial buffer reconstructs
+//!   the full output (this is where `BarP2pAllReduce` lives in ).
+//!   "Output dim" / "input dim" are framework conventions; the concrete
+//!   tensor axis is recorded in `dim` so the slicing code () knows
+//!   which axis to cut. For `[rows, cols]` matmul weights stored as
+//!   `[output_dim=rows, input_dim=cols]`:
 //! - ColParallel splits dim 0 (rows = output features).
 //! - RowParallel splits dim 1 (cols = input features).
-//! For 1-D tensors that *are* sharded (biases on a ColParallel projection
-//! output), use ColParallel with `dim = 0`.
-//! Model-family-specific tensor-name → layout maps live in the model
-//! crate (e.g. `crates/models/qwen3-moe/src/tp_layout.rs`); this module
-//! only owns the enum + helpers.
+//!   For 1-D tensors that *are* sharded (biases on a ColParallel projection
+//!   output), use ColParallel with `dim = 0`.
+//!   Model-family-specific tensor-name → layout maps live in the model
+//!   crate (e.g. `crates/models/qwen3-moe/src/tp_layout.rs`); this module
+//!   only owns the enum + helpers.
 
 use std::fmt;
 
@@ -53,22 +53,22 @@ pub enum WeightLayout {
     /// `kq_replicated` controls whether the K and Q sub-slabs are
     /// split or replicated across ranks:
     /// - `false` (default, `qwen3next` / `rep_inner` head mapping):
-    /// contiguous TP split — each rank gets `num_k_heads/world` K
-    /// heads and `num_v_heads/world` V heads. Local
-    /// `V[v] → K[v / n_rep]` stays fully on-rank because adjacent V
-    /// heads share a K head.
+    ///   contiguous TP split — each rank gets `num_k_heads/world` K
+    ///   heads and `num_v_heads/world` V heads. Local
+    ///   `V[v] → K[v / n_rep]` stays fully on-rank because adjacent V
+    ///   heads share a K head.
     /// - `true` (`qwen35moe` / `qwen36moe` / `rep_outer` head mapping):
-    /// contiguous TP split is structurally broken — local
-    /// `V[v] → K[v % H_k]` would wrap to K heads on other ranks.
-    /// Workaround (Megatron's standard for incompatible GQA splits):
-    /// replicate K and Q across ranks (full slabs on every rank),
-    /// split only V along the v-head axis. Per-rank conv channels
-    /// become `local_d_inner + 2·full_qk_size`. The downstream
-    /// `ssm_out` is RowParallel{dim=1} on `local_d_inner` so the
-    /// AR-fold pattern is unchanged.
-    /// Divisibility: `num_v_heads % world == 0` always; `num_k_heads %
+    ///   contiguous TP split is structurally broken — local
+    ///   `V[v] → K[v % H_k]` would wrap to K heads on other ranks.
+    ///   Workaround (Megatron's standard for incompatible GQA splits):
+    ///   replicate K and Q across ranks (full slabs on every rank),
+    ///   split only V along the v-head axis. Per-rank conv channels
+    ///   become `local_d_inner + 2·full_qk_size`. The downstream
+    ///   `ssm_out` is RowParallel{dim=1} on `local_d_inner` so the
+    ///   AR-fold pattern is unchanged.
+    ///   Divisibility: `num_v_heads % world == 0` always; `num_k_heads %
     /// world == 0` only when `kq_replicated == false`. The slicing
-    /// function in `qwen3-moe::tp_slice` validates these at apply time.
+    ///   function in `qwen3-moe::tp_slice` validates these at apply time.
     FusedQkvParallel {
         world: u32,
         num_v_heads: u32,

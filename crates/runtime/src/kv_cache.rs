@@ -6,16 +6,16 @@
 //! prefill kernels consume `k_buffer()` / `v_buffer()` at `current_tokens`.
 //! Follow-ups (own files, own types):
 //! * `KvCache<F16Transposed, D>` — K stored with `[head_dim, max_tokens]`
-//! inner-most order to let flash-attn-v2 prefill stream without an
-//! extra transpose.
+//!   inner-most order to let flash-attn-v2 prefill stream without an
+//!   extra transpose.
 //! * `KvCache<Q8Contig, D>` + `KvCache<Q8Transposed, D>` — 2× HBM
-//! saving; requires the quality cert gate.
+//!   saving; requires the quality cert gate.
 //! * `KvCache<TurboQ4Contig, D>` / `KvCache<TurboQ5Contig, D>` (V2 —
-//! deliberately out of V1 scope per CLAUDE.md).
-//! The dispatcher resolves attention impls against the *concrete* layout
-//! type, so an "F16 attention" kernel is statically-disallowed from
-//! dispatching on a `KvCache<Q8Contig>`. No runtime polymorphism, no
-//! downcasts.
+//!   deliberately out of V1 scope per CLAUDE.md).
+//!   The dispatcher resolves attention impls against the *concrete* layout
+//!   type, so an "F16 attention" kernel is statically-disallowed from
+//!   dispatching on a `KvCache<Q8Contig>`. No runtime polymorphism, no
+//!   downcasts.
 
 use std::marker::PhantomData;
 

@@ -485,11 +485,11 @@ impl HipCluster {
     /// natural follow-up if we ever have to shuffle > 4 MiB between ranks.
     /// # Safety
     /// - `src_ptr` must point to at least `bytes` valid device bytes on
-    /// the source rank's HIP device.
+    ///   the source rank's HIP device.
     /// - `dst_ptr` must point to at least `bytes` valid device bytes on
-    /// the destination rank's HIP device.
+    ///   the destination rank's HIP device.
     /// - No other stream on either device may concurrently access the
-    /// source or destination regions.
+    ///   source or destination regions.
     pub unsafe fn peer_copy_via_host(
         &self,
         dst_ptr: DevicePtr,
@@ -746,16 +746,16 @@ impl HipCluster {
     /// Same-rank and rank-out-of-range paths mirror the blocking variant.
     /// # Safety
     /// - `src_ptr` / `dst_ptr` must be valid for `bytes` on their respective
-    /// devices.
+    ///   devices.
     /// - `src_stream` must be on `src_rank`'s device; `dst_stream` on
-    /// `dst_rank`'s device.
+    ///   `dst_rank`'s device.
     /// - No other work may concurrently alias the pinned bounce buffer
-    /// bytes for `src_rank` between the DtoH and HtoD on different streams.
-    /// In practice this means: do not issue two overlapping async peer
-    /// copies from the SAME source rank on different lanes without
-    /// per-lane bounce buffers — the current impl has one bounce per rank.
-    /// 5.d works around this by pacing: each ubatch stage completes
-    /// its DtoH before the next stage starts its DtoH on the same rank.
+    ///   bytes for `src_rank` between the DtoH and HtoD on different streams.
+    ///   In practice this means: do not issue two overlapping async peer
+    ///   copies from the SAME source rank on different lanes without
+    ///   per-lane bounce buffers — the current impl has one bounce per rank.
+    ///   5.d works around this by pacing: each ubatch stage completes
+    ///   its DtoH before the next stage starts its DtoH on the same rank.
     pub unsafe fn peer_copy_via_host_async(
         &self,
         dst_ptr: DevicePtr,

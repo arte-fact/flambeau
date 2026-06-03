@@ -9,9 +9,9 @@
 //! Sweep:
 //! - N ∈ {1, 2, 4, 8}
 //! - n_kv_tokens per slot: heterogeneous within the batch (stress the
-//! per-slot loop bound in the kernel)
+//!   per-slot loop bound in the kernel)
 //! - (n_heads_q, n_heads_kv): (32, 4) for Qwen3.5 GQA-32/4 and
-//! (16, 2) for Qwen3.6 GQA-16/2
+//!   (16, 2) for Qwen3.6 GQA-16/2
 //! - head_dim ∈ {128, 256, 512} — 512 covers gemma4 full-attn layers
 
 #![cfg(feature = "hip")]

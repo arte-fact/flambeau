@@ -24,13 +24,13 @@ use super::OpsRegistry;
 /// - `gate, beta`: `(B, H, L)` — one scalar per (b, h, t)
 /// - `state_in`: `(B, H, 128, 128)` stored col-outer (see kernel).
 /// - `state_out`: same shape and layout; may alias `state_in` (the kernel
-/// loads state_in into registers at entry and writes state_out at exit).
+///   loads state_in into registers at entry and writes state_out at exit).
 /// - `attn_out`: `(B, H, L, 128)`
-/// `n_rep = H_v / H_kv` drives implicit GQA broadcast for Q/K (no caller-side
-/// expand). `n_rep = 1` reduces to the no-GQA path.
-/// Launch: grid `(H, B, ceil(S_v / warps_per_block))`, block
-/// `(WARP_SIZE=64, 4, 1)` — 4 warps per block, each warp owns one output
-/// column. `warps_per_block = 4` ⇒ grid_z = `S_v / 4 = 32` at S_v=128.
+///   `n_rep = H_v / H_kv` drives implicit GQA broadcast for Q/K (no caller-side
+///   expand). `n_rep = 1` reduces to the no-GQA path.
+///   Launch: grid `(H, B, ceil(S_v / warps_per_block))`, block
+///   `(WARP_SIZE=64, 4, 1)` — 4 warps per block, each warp owns one output
+///   column. `warps_per_block = 4` ⇒ grid_z = `S_v / 4 = 32` at S_v=128.
 pub fn gdn_state_step_f32_s128(
     reg: &OpsRegistry,
     stream: &HipStream,

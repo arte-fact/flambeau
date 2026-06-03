@@ -29,8 +29,8 @@ use super::OpsRegistry;
 /// [`flambeau_quant::BlockQ8_1Mmq`] layout. The dispatcher picks:
 /// - `act_q8_1` → MMVQ and Mmq4Warp kernels (36 B per-row blocks)
 /// - `act_q8_1_mmq` → MmqLdsX64 kernel (144 B DS4 blocks)
-/// Decode-path callers that never hit the MmqLdsX64 recipe can pass a null
-/// [`DevicePtr`] for `act_q8_1_mmq`; use [`qmatmul_decode`] for ergonomics.
+///   Decode-path callers that never hit the MmqLdsX64 recipe can pass a null
+///   [`DevicePtr`] for `act_q8_1_mmq`; use [`qmatmul_decode`] for ergonomics.
 pub fn qmatmul(
     reg: &OpsRegistry,
     stream: &HipStream,

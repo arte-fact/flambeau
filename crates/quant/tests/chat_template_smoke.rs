@@ -5,11 +5,11 @@
 //! 1. Produces non-empty output.
 //! 2. Contains the expected role/content markup for each message.
 //! 3. With `add_generation_prompt=true`, ends with an open assistant turn
-//! (`<|im_start|>assistant\n`) — so the model decodes into it.
-//! Full llama.cpp byte-exact parity is a larger follow-up (requires
-//! extracting the exact whitespace + macro-rendering llama.cpp does; the
-//! Qwen template has conditional branches for tools/images/thinking that
-//! we only exercise in the "happy path" here).
+//!   (`<|im_start|>assistant\n`) — so the model decodes into it.
+//!   Full llama.cpp byte-exact parity is a larger follow-up (requires
+//!   extracting the exact whitespace + macro-rendering llama.cpp does; the
+//!   Qwen template has conditional branches for tools/images/thinking that
+//!   we only exercise in the "happy path" here).
 
 use flambeau_quant::{ChatMessage, ChatTemplate, GgufFile};
 

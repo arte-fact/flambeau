@@ -122,7 +122,7 @@ impl ChatTemplate {
     /// Load `tokenizer.chat_template` from a GGUF and pre-compile it.
     /// # Errors
     /// - `anyhow` wrapping "tokenizer.chat_template missing" if the GGUF
-    /// lacks the metadata key.
+    ///   lacks the metadata key.
     /// - Any error [`from_string`] can return (minijinja parse failure).
     pub fn load_from_gguf(file: &GgufFile) -> Result<Self> {
         let tpl_str = file
@@ -187,17 +187,17 @@ impl ChatTemplate {
     /// calling [`render`].
     /// `enable_thinking`:
     /// - `Some(false)` — bind `enable_thinking=false` in Jinja context.
-    /// Qwen3.6's template renders a closed `<think>\n\n</think>\n\n`
-    /// after the generation-prompt assistant header, keeping the
-    /// model in non-thinking mode (Qwen's recommended stable-agent
-    /// default).
+    ///   Qwen3.6's template renders a closed `<think>\n\n</think>\n\n`
+    ///   after the generation-prompt assistant header, keeping the
+    ///   model in non-thinking mode (Qwen's recommended stable-agent
+    ///   default).
     /// - `Some(true)` — bind `enable_thinking=true`. The template opens
-    /// a `<think>\n` block for reasoning generation.
+    ///   a `<think>\n` block for reasoning generation.
     /// - `None` — leave the variable unbound. The template's
-    /// `enable_thinking is defined` check is false, which takes the
-    /// open-`<think>` branch. This is what llama.cpp's
-    /// `test-chat-template` does when no `enable_thinking` is passed
-    /// in the JSON input, and is the behaviour this matches byte-for-byte.
+    ///   `enable_thinking is defined` check is false, which takes the
+    ///   open-`<think>` branch. This is what llama.cpp's
+    ///   `test-chat-template` does when no `enable_thinking` is passed
+    ///   in the JSON input, and is the behaviour this matches byte-for-byte.
     ///
     /// # Errors
     /// Same as [`render`].

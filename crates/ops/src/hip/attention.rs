@@ -24,9 +24,9 @@ use super::OpsRegistry;
 /// - `k_cache[n_tokens_kv, n_heads_kv, head_dim]` F16 contiguous
 /// - `v_cache` same shape as K
 /// - `out[n_heads_q, head_dim]` F16
-/// Launch: one block per Q head, `head_dim` threads/block (one thread per
-/// output lane). Kernel supports `head_dim ∈ {128, 256}` — both
-/// Qwen3.5 (GQA-32/4, head_dim=128) and Qwen3.6 (GQA-16/2, head_dim=256).
+///   Launch: one block per Q head, `head_dim` threads/block (one thread per
+///   output lane). Kernel supports `head_dim ∈ {128, 256}` — both
+///   Qwen3.5 (GQA-32/4, head_dim=128) and Qwen3.6 (GQA-16/2, head_dim=256).
 pub fn attention_decode_f16(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -127,15 +127,15 @@ pub fn attention_decode_f16_slots(
 /// - `k_cache_ptrs[n_slots]`: device addresses of each slot's K cache.
 /// - `v_cache_ptrs[n_slots]`: device addresses of each slot's V cache.
 /// - `n_tokens_kv[n_slots]`: per-slot KV-tail length (post-append).
-/// Q and out are contiguous batched layouts:
-/// `q[n_slots, n_heads_q, head_dim]` F16
-/// `out[n_slots, n_heads_q, head_dim]` F16
-/// Per-slot K/V layouts (pointed-to memory) match
-/// [`attention_decode_f16`]: `[n_tokens, n_heads_kv, head_dim]` F16.
-/// Launch: `gridDim = (n_heads_q, n_slots)`, `blockDim = (head_dim,)`.
-/// At `n_slots = 1` the kernel produces output bit-identical to
-/// [`attention_decode_f16_slots`] for the same inputs (regression guard
-/// for the wiring task #266c).
+///   Q and out are contiguous batched layouts:
+///   `q[n_slots, n_heads_q, head_dim]` F16
+///   `out[n_slots, n_heads_q, head_dim]` F16
+///   Per-slot K/V layouts (pointed-to memory) match
+///   [`attention_decode_f16`]: `[n_tokens, n_heads_kv, head_dim]` F16.
+///   Launch: `gridDim = (n_heads_q, n_slots)`, `blockDim = (head_dim,)`.
+///   At `n_slots = 1` the kernel produces output bit-identical to
+///   [`attention_decode_f16_slots`] for the same inputs (regression guard
+///   for the wiring task #266c).
 /// # Safety
 /// All device pointers must outlive the kernel launch and remain valid
 /// on the stream's device. `k_cache_ptrs` / `v_cache_ptrs` / `n_tokens_kv`
@@ -583,15 +583,15 @@ pub fn kv_append_f16_batched_slots(
 /// (16 heads × 1 block = 27 % of 60 CUs at head_dim=256).
 /// Two passes:
 /// 1. `flambeau_attention_decode_f16_splitk_chunk` — grid
-/// `(n_heads_q, n_chunks)`, each block owns one (q_head, chunk) pair
-/// and emits `(m_c, s_c, o_c[head_dim])` into `partials_*` scratch.
+///   `(n_heads_q, n_chunks)`, each block owns one (q_head, chunk) pair
+///   and emits `(m_c, s_c, o_c[head_dim])` into `partials_*` scratch.
 /// 2. `flambeau_attention_decode_f16_splitk_combine` — grid
-/// `(n_heads_q,)`, merges the `n_chunks` partials per head into the
-/// final output using online-softmax rescaling.
-/// Scratch sizing (caller-provided, f32):
+///   `(n_heads_q,)`, merges the `n_chunks` partials per head into the
+///   final output using online-softmax rescaling.
+///   Scratch sizing (caller-provided, f32):
 /// * `partials_m` / `partials_s`: `n_heads_q * n_chunks` floats each
 /// * `partials_o`: `n_heads_q * n_chunks * head_dim` floats
-/// Measured (Qwen3.6 shape, head_dim=256, 16/2, MI50):
+///   Measured (Qwen3.6 shape, head_dim=256, 16/2, MI50):
 /// * n_tokens=2048: single-pass 2647 µs → split-K 340 µs = **7.78×**
 /// * n_tokens=4096: single-pass 5210 µs → split-K 662 µs = **7.87×**
 #[allow(clippy::too_many_arguments)]
@@ -957,14 +957,14 @@ pub fn attention_decode_q8_kv_splitk(
 
 /// Prefill attention with Q8_0 KV cache. Dispatches on `n_q_tokens`:
 /// - `n_q_tokens >= 4` → BR-tiled flash-tile kernel (LDS K/V tile reuse,
-/// mirrors the F16 flash-tile path; cooperative load dequants Q8 → F32
-/// into LDS, score loop is identical to F16 flash-tile after that).
+///   mirrors the F16 flash-tile path; cooperative load dequants Q8 → F32
+///   into LDS, score loop is identical to F16 flash-tile after that).
 /// - `n_q_tokens < 4` → oracle kernel (one block per `(q_token, q_head)`,
-/// dp4a score loop, V FP-dequant per element).
-/// closes the prefill regression where Q8
-/// was stuck on the oracle path (~0.90× F16). Used by the batched-Q8-
-/// prefill driver — replaces the per-token Q8 prefill fallback with
-/// one launch per layer per ubatch chunk.
+///   dp4a score loop, V FP-dequant per element).
+///   closes the prefill regression where Q8
+///   was stuck on the oracle path (~0.90× F16). Used by the batched-Q8-
+///   prefill driver — replaces the per-token Q8 prefill fallback with
+///   one launch per layer per ubatch chunk.
 #[allow(clippy::too_many_arguments)]
 pub fn attention_prefill_q8_kv(
     reg: &OpsRegistry,
@@ -1114,13 +1114,13 @@ pub fn split_q_gate_f16(
 /// `k_token_0..k_token_{q_offset + i}`).
 /// Dispatches:
 /// - `attention_prefill_flash_tile_f16` (candle port —
-/// BR=4 LDS-tiled flash-attn v2) when `n_q_tokens >= 4` and head_dim
-/// ∈ {64, 128, 256}. Per-call time on gfx906 is ~5× the previous
-/// oracle kernel at pp512 (measured 2026-04-22: 2994 µs → target
-/// ≤800 µs).
+///   BR=4 LDS-tiled flash-attn v2) when `n_q_tokens >= 4` and head_dim
+///   ∈ {64, 128, 256}. Per-call time on gfx906 is ~5× the previous
+///   oracle kernel at pp512 (measured 2026-04-22: 2994 µs → target
+///   ≤800 µs).
 /// - The per-(q_token, q_head) oracle kernel (`attention_prefill_f16`)
-/// otherwise. Shape grid covers the n_q < 4 edge that flash-tile's
-/// BR=4 coop-load pattern under-utilises.
+///   otherwise. Shape grid covers the n_q < 4 edge that flash-tile's
+///   BR=4 coop-load pattern under-utilises.
 pub fn attention_prefill_f16(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -1165,14 +1165,14 @@ pub fn attention_prefill_f16(
 /// a different `start_position` by calling `HipGraphExec::set_slot`.
 /// The relevant pos-varying scalars are:
 /// - `n_k_tokens` — total K tokens the causal mask stops at (grows each
-/// ubatch as the KV cache fills).
+///   ubatch as the KV cache fills).
 /// - `q_offset` — row offset of the Q block into the global causal grid
-/// (equals `start_position`).
-/// Both kernels (flash_tile + oracle) place these at different arg
-/// indices; the slot recorder captures whichever path n_q_tokens
-/// selected. Capturing at a particular n_q and replaying at a different
-/// n_q is unsupported (different path → different node layout).
-/// [`ScalarSlot`]: flambeau_backend_hip::ScalarSlot
+///   (equals `start_position`).
+///   Both kernels (flash_tile + oracle) place these at different arg
+///   indices; the slot recorder captures whichever path n_q_tokens
+///   selected. Capturing at a particular n_q and replaying at a different
+///   n_q is unsupported (different path → different node layout).
+///   [`ScalarSlot`]: flambeau_backend_hip::ScalarSlot
 #[allow(clippy::too_many_arguments)]
 pub fn attention_prefill_f16_slots(
     reg: &OpsRegistry,

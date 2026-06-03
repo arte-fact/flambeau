@@ -13,23 +13,23 @@
 //! Emits:
 //! - `ToolCallOpen{ index, name }` at `<function=NAME>`.
 //! - `ToolCallArgumentsDelta{ index, arguments }` once at `</function>`
-//! with the JSON-encoded parameter object as a **string** (guards
-//! llama.cpp #20198).
+//!   with the JSON-encoded parameter object as a **string** (guards
+//!   llama.cpp #20198).
 //! - `ToolCallClose{ index }` at `</tool_call>`.
 //! - `TextDelta(..)` for any free-text content outside tool calls.
-//! Parameter values are literal strings from `<parameter=K>\n…\n</parameter>`
-//! — multi-line and angle-bracket-containing values pass through
-//! unchanged. Parameter ORDER is preserved in the emitted JSON object
-//! via `serde_json::Map` (workspace-wide `preserve_order` feature).
-//! Ambiguous-prefix hardening (buffer-before-emit for partial `<` tag
-//! starts in free text and inside parameter bodies) is T2.3's scope;
-//! for T2.2 we use the minimum-viable tail-holdback approach: never
-//! emit the last `MAX_TAG_LEN` bytes of the buffer while in a state
-//! that might see a tag next, so a tag straddling a chunk boundary
-//! doesn't get mis-parsed.
-//! `<think>` interaction is also T2.3; today `<think>` runs inside a
-//! `Text` state get emitted as normal `TextDelta` (never promoted to a
-//! tool call) because none of the tool tags start with `<th`.
+//!   Parameter values are literal strings from `<parameter=K>\n…\n</parameter>`
+//!   — multi-line and angle-bracket-containing values pass through
+//!   unchanged. Parameter ORDER is preserved in the emitted JSON object
+//!   via `serde_json::Map` (workspace-wide `preserve_order` feature).
+//!   Ambiguous-prefix hardening (buffer-before-emit for partial `<` tag
+//!   starts in free text and inside parameter bodies) is T2.3's scope;
+//!   for T2.2 we use the minimum-viable tail-holdback approach: never
+//!   emit the last `MAX_TAG_LEN` bytes of the buffer while in a state
+//!   that might see a tag next, so a tag straddling a chunk boundary
+//!   doesn't get mis-parsed.
+//!   `<think>` interaction is also T2.3; today `<think>` runs inside a
+//!   `Text` state get emitted as normal `TextDelta` (never promoted to a
+//!   tool call) because none of the tool tags start with `<th`.
 
 use serde_json::{json, Value};
 

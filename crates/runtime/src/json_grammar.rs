@@ -8,15 +8,15 @@
 //! - balanced braces and brackets
 //! - string escape handling (\\, \", \n, \t, \uXXXX prefix)
 //! - number / true / false / null literal validity
-//! What it does NOT enforce (intentional, V1):
+//!   What it does NOT enforce (intentional, V1):
 //! - JSON Schema (use the json_schema field for tighter constraints in V2)
 //! - key uniqueness
 //! - UTF-8 codepoint completeness past the BPE boundary (the streaming
-//! detokenizer already handles that)
-//! At every byte the [`JsonState::is_complete`] predicate tells the
-//! sampler whether stopping right now would produce a valid JSON value
-//! (so we can let the model emit `<|im_end|>` only at top-level
-//! completion).
+//!   detokenizer already handles that)
+//!   At every byte the [`JsonState::is_complete`] predicate tells the
+//!   sampler whether stopping right now would produce a valid JSON value
+//!   (so we can let the model emit `<|im_end|>` only at top-level
+//!   completion).
 
 use std::collections::VecDeque;
 

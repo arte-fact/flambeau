@@ -1076,7 +1076,7 @@ mod tests {
 /// - an array of strings (batch),
 /// - a single token id array,
 /// - an array of token id arrays.
-/// V1 only handles strings; integer-array forms return 400.
+///   V1 only handles strings; integer-array forms return 400.
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(untagged)]
 pub enum EmbeddingsInput {

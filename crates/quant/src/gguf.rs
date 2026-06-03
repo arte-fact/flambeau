@@ -3,14 +3,14 @@
 //! Candle's `gguf_file.rs` is the primary port reference.
 //! Design notes:
 //! - The file is `mmap`'d and held as an `Arc<Mmap>`. Tensor reads return a
-//! byte slice that borrows from the mmap for as long as the reader lives —
-//! no copy into an owned `Vec<u8>`.
+//!   byte slice that borrows from the mmap for as long as the reader lives —
+//!   no copy into an owned `Vec<u8>`.
 //! - Per-rank tensor-range reads (`tensor_row_range`, `tensor_expert_range`)
-//! are the X5 sharded-load pattern: a rank loads only its shard from disk,
-//! avoiding the 2× VRAM spike of "load full → narrow on-device".
+//!   are the X5 sharded-load pattern: a rank loads only its shard from disk,
+//!   avoiding the 2× VRAM spike of "load full → narrow on-device".
 //! - Metadata values are decoded eagerly (they're small). Tensor payloads are
-//! never decoded here — callers either dequantise via [`crate::dequant`] or
-//! hand the raw bytes to a backend-specific upload path.
+//!   never decoded here — callers either dequantise via [`crate::dequant`] or
+//!   hand the raw bytes to a backend-specific upload path.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -225,9 +225,9 @@ impl GgufFile {
     /// Open `path`, mmap it, parse the header and tensor index.
     /// # Errors
     /// - `std::io::Error` wrapped as `QuantError::Io` if the file can't be
-    /// opened or mmapped.
+    ///   opened or mmapped.
     /// - Propagates [`from_mmap`] errors: `BadMagic`, `UnsupportedVersion`,
-    /// `TruncatedHeader`, or a metadata/tensor-index parse error.
+    ///   `TruncatedHeader`, or a metadata/tensor-index parse error.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
         // Parse part 0 first so we can inspect its metadata for split info.
@@ -301,7 +301,7 @@ impl GgufFile {
     /// - `QuantError::BadMagic` if the blob doesn't start with `GGUF`.
     /// - `QuantError::UnsupportedVersion` for versions outside {2, 3}.
     /// - `QuantError::TruncatedHeader` if any metadata or tensor-index read
-    /// runs past the mmap's length.
+    ///   runs past the mmap's length.
     /// - `QuantError::Io` wrapping a `byteorder` short-read error.
     pub fn from_mmap(path: PathBuf, mmap: Arc<Mmap>) -> Result<Self> {
         let (parsed, metadata, tensors, tensor_order, tensor_data_offset) =
@@ -378,7 +378,7 @@ impl GgufFile {
     /// # Errors
     /// - `QuantError::TensorNotFound` if `name` is not in the tensor index.
     /// - `QuantError::TruncatedTensor` if the recorded tensor extent runs
-    /// past the mmap's length.
+    ///   past the mmap's length.
     pub fn tensor_raw(&self, name: &str) -> Result<&[u8]> {
         let info = self.info(name)?;
         self.raw_for(info, 0, info.size_in_bytes())
@@ -501,8 +501,8 @@ impl GgufFile {
     /// # Errors
     /// - `QuantError::UnknownTensor` if `name` is not indexed.
     /// - `QuantError::RangeOutOfBounds` if the tensor isn't 2D, rows aren't
-    /// aligned to the dtype's block boundary, or `row_start + row_count`
-    /// exceeds the row count.
+    ///   aligned to the dtype's block boundary, or `row_start + row_count`
+    ///   exceeds the row count.
     /// - `QuantError::TruncatedTensor` if the underlying mmap is short.
     pub fn tensor_row_range_raw(
         &self,

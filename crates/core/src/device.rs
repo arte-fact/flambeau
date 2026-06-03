@@ -5,12 +5,12 @@
 //! `flambeau-backend-cuda` (V2).
 //! Design notes:
 //! - Allocation returns a `DevicePtr` newtype — opaque to consumers. Backends
-//! cast to their real pointer type internally.
+//!   cast to their real pointer type internally.
 //! - Streams are **explicit**: every kernel launch / memcpy / collective takes
-//! `&Stream`. No hidden `hipDeviceSynchronize` except at session boundaries
-//! (architectural rule 7 from CLAUDE.md).
+//!   `&Stream`. No hidden `hipDeviceSynchronize` except at session boundaries
+//!   (architectural rule 7 from CLAUDE.md).
 //! - `DeviceError` is the common failure type. Backends wrap their native
-//! error codes (hipError_t, ncclResult_t) behind this with a string context.
+//!   error codes (hipError_t, ncclResult_t) behind this with a string context.
 
 use std::fmt;
 

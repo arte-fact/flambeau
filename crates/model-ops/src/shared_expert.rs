@@ -6,8 +6,8 @@
 //! Pipeline:
 //!
 //! 1. `quantize_f16_q8_1(x_norm)`
-//! 2-3. gate + up (fused `mmvq_q8_0_gate_up` when both Q8_0, else two `mmvq`)
-//! 4-5. fused `swiglu_f32_to_q8_1` when `intermediate % 32 == 0`,
+//!   2-3. gate + up (fused `mmvq_q8_0_gate_up` when both Q8_0, else two `mmvq`)
+//!   4-5. fused `swiglu_f32_to_q8_1` when `intermediate % 32 == 0`,
 //!      else `swiglu_f32_to_f16` + `quantize_f16_q8_1`
 //! 6. down `mmvq` → F32
 //! 7. `cast_f16_to_f32(x_norm)` + `shared_expert_scale_f32` (in place)

@@ -81,12 +81,12 @@ enum Cmd {
         /// / mesh topology:
         /// - `pp` — pipeline-parallel (V1 default, LayerAssignment-based).
         /// - `tp` — tensor-parallel (Megatron-style per-tensor sharding
-        /// with BAR1 P2P AllReduce).
+        ///   with BAR1 P2P AllReduce).
         /// - `pp+tp` (alias `hybrid`) — manual PP-of-TP. Requires both
-        /// `--pp-size` and `--tp-size`; `pp_size * tp_size` must equal
-        /// `--devices` count. Devices are interpreted in stage-major
-        /// order. flambeau does not autodetect the right topology —
-        /// pick one with the bracket-bench harness.
+        ///   `--pp-size` and `--tp-size`; `pp_size * tp_size` must equal
+        ///   `--devices` count. Devices are interpreted in stage-major
+        ///   order. flambeau does not autodetect the right topology —
+        ///   pick one with the bracket-bench harness.
         #[arg(long = "mesh-mode", default_value = "pp")]
         mesh_mode: String,
         /// TP world size when `--mesh-mode tp`, or per-stage

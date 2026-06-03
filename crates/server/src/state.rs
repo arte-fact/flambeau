@@ -94,19 +94,19 @@ impl SamplingParams {
     /// - `min_p` → `0.0` (off). Passed through when positive.
     /// - `repetition_penalty` → `1.0` (off) unless the client provides one.
     /// - `presence_penalty` → `0.0` (OpenAI default) unless client-set.
-    /// An earlier default of `1.5` was lifted from a community claim
-    /// about Qwen3.5's "stable agent setup"; in practice it is far too
-    /// aggressive for normal chat — every token already in history
-    /// loses 1.5 nats, and on long generations the distribution drifts
-    /// into degenerate synonym-spam (verified live). Keep it 0.0;
-    /// callers doing agent loops can opt into a small positive value.
+    ///   An earlier default of `1.5` was lifted from a community claim
+    ///   about Qwen3.5's "stable agent setup"; in practice it is far too
+    ///   aggressive for normal chat — every token already in history
+    ///   loses 1.5 nats, and on long generations the distribution drifts
+    ///   into degenerate synonym-spam (verified live). Keep it 0.0;
+    ///   callers doing agent loops can opt into a small positive value.
     /// - `frequency_penalty` → `0.0` unless client-supplied.
     /// - `max_tokens` → `4096` when omitted; capped at `8192` to keep a
-    /// single request from monopolising the server. Earlier 2048 cap
-    /// silently truncated long answers (`finish=length` after exactly
-    /// 2048 tokens regardless of the request); earlier 512 default
-    /// was too tight for code-generation requests via curl/clients
-    /// that don't pass `max_tokens` explicitly.
+    ///   single request from monopolising the server. Earlier 2048 cap
+    ///   silently truncated long answers (`finish=length` after exactly
+    ///   2048 tokens regardless of the request); earlier 512 default
+    ///   was too tight for code-generation requests via curl/clients
+    ///   that don't pass `max_tokens` explicitly.
     #[allow(clippy::too_many_arguments)]
     pub fn from_parts(
         temperature: Option<f32>,
@@ -192,8 +192,8 @@ impl SamplingParams {
 /// - `null` / missing → empty
 /// - a single string → one-element vec
 /// - an array of strings → first 4 non-empty entries
-/// OpenAI caps the array at 4 entries; longer arrays are truncated rather
-/// than rejected so a misconfigured client gets a usable response.
+///   OpenAI caps the array at 4 entries; longer arrays are truncated rather
+///   than rejected so a misconfigured client gets a usable response.
 pub fn parse_stop(stop: Option<&serde_json::Value>) -> Vec<String> {
     let Some(v) = stop else { return Vec::new() };
     match v {

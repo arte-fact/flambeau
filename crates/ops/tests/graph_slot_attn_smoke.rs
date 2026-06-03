@@ -2,18 +2,18 @@
 //! `HipGraphExec` capture + `set_slot` update.
 //! Plan:
 //! 1. Run `attention_prefill_f16` uncaptured at (n_k_tokens=N_K_FINAL,
-//! q_offset=Q_OFF_FINAL) → reference output.
+//!   q_offset=Q_OFF_FINAL) → reference output.
 //! 2. Capture `attention_prefill_f16_slots` at (N_K_INIT, Q_OFF_INIT),
-//! tagging both pos-varying scalars. Discard the first launch's
-//! output (captured at the wrong pos).
+//!   tagging both pos-varying scalars. Discard the first launch's
+//!   output (captured at the wrong pos).
 //! 3. Update both slots via `HipGraphExec::set_slot`, replay.
 //! 4. Assert the post-update output bit-matches the reference.
-//! Q/K/V buffers are deterministic small F16 values so the kernel
-//! output stays in a narrow range. We rely on F16 bit-equality (via
-//! `assert_eq` on the raw `u16` bits after cast) — the same kernel
-//! launched with the same inputs on gfx906 should produce identical
-//! outputs regardless of whether it came through a graph replay or
-//! direct dispatch.
+//!   Q/K/V buffers are deterministic small F16 values so the kernel
+//!   output stays in a narrow range. We rely on F16 bit-equality (via
+//!   `assert_eq` on the raw `u16` bits after cast) — the same kernel
+//!   launched with the same inputs on gfx906 should produce identical
+//!   outputs regardless of whether it came through a graph replay or
+//!   direct dispatch.
 
 #![cfg(feature = "hip")]
 #![expect(

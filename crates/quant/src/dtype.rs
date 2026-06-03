@@ -84,7 +84,7 @@ pub enum GgmlDType {
     /// 74 B/block, 256 elements: `[half d, u16 qs[32], u8 scales[8]]`. Each
     /// `qs` u16 packs a 9-bit codebook index (into 512-entry `iq2xs_grid`)
     /// + a 7-bit sign-LUT index. Per-sub-block 4-bit scale lives in
-    /// `scales`. Used in UD-Q2_K_XL alongside IQ2_XXS / IQ3_XXS.
+    ///   `scales`. Used in UD-Q2_K_XL alongside IQ2_XXS / IQ3_XXS.
     Iq2Xs,
     /// IQ2_S — 2.5 bpw non-linear, 82 B/block, 256 elements:
     /// `[half d, u8 qs[64], u8 qh[8], u8 scales[8]]`. 10-bit codebook

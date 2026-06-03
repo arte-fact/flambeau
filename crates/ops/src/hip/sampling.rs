@@ -80,13 +80,13 @@ pub fn apply_penalties_f32(
 /// logit reads internally).
 /// Shapes:
 /// - `logits` `[vocab]` F32 — the LM-head output for one token, in
-/// place where the forward kernel left it.
+///   place where the forward kernel left it.
 /// - `out_ids` `[k]` i32 — sorted-descending-by-prob token ids.
 /// - `out_probs` `[k]` F32 — softmax-normalised probabilities,
-/// renormalised so the kept K sum to 1.
-/// Args:
+///   renormalised so the kept K sum to 1.
+///   Args:
 /// - `inv_temp` — `1.0 / temperature` (caller passes `1.0` when
-/// `temperature <= 0`; the kernel applies the multiply uniformly).
+///   `temperature <= 0`; the kernel applies the multiply uniformly).
 /// - `k` ≤ [`SAMPLER_K_OUT_MAX`].
 /// # Errors
 /// - `k <= 0` or `k > SAMPLER_K_OUT_MAX`.

@@ -1,13 +1,13 @@
 //! `HipDevice` and `HipStream` — safe wrappers around `libamdhip64`.
 //! One `HipDevice` ≈ one GPU. Internally it owns:
 //! - a default stream (every implicit launch goes here unless the caller
-//! creates another stream);
+//!   creates another stream);
 //! - a device id used by `hipSetDevice` before any operation.
-//! The device is pinned to its id — `HipDevice::new(0)` sets the context to
-//! device 0 and expects every subsequent operation on that instance to happen
-//! on that device. Callers holding devices for multiple GPUs must call
-//! `bind()` (or its equivalent `hipSetDevice`) before issuing work on a
-//! device that isn't the current HIP context.
+//!   The device is pinned to its id — `HipDevice::new(0)` sets the context to
+//!   device 0 and expects every subsequent operation on that instance to happen
+//!   on that device. Callers holding devices for multiple GPUs must call
+//!   `bind()` (or its equivalent `hipSetDevice`) before issuing work on a
+//!   device that isn't the current HIP context.
 
 use std::os::raw::c_int;
 use std::ptr;
@@ -788,9 +788,9 @@ impl HipGraphExec {
     /// values for those pointers are re-snapshotted.
     /// # Safety
     /// - `new_value` must have the exact size + type the captured
-    /// kernel expects at this arg slot. Wrong size writes garbage.
+    ///   kernel expects at this arg slot. Wrong size writes garbage.
     /// - `new_value` must remain live until this call returns (the HIP
-    /// runtime copies the value-by-pointer during SetParams).
+    ///   runtime copies the value-by-pointer during SetParams).
     pub unsafe fn set_slot<T>(
         &self,
         slot: crate::graph_capture::ScalarSlot,

@@ -10,16 +10,16 @@
 //! into a single header-prefixed block.
 //! - [`WeightLayout::Replicated`] — return the full mmap slice.
 //! - [`WeightLayout::ColParallel`] with `dim = 0` — return a contiguous
-//! row range `[rank·outer/world, (rank+1)·outer/world)`. Borrowed
-//! from the mmap (zero-copy).
+//!   row range `[rank·outer/world, (rank+1)·outer/world)`. Borrowed
+//!   from the mmap (zero-copy).
 //! - [`WeightLayout::RowParallel`] with `dim = 1` — return a packed
-//! per-rank buffer: for each row, copy the column subrange
-//! `[rank·inner/world, (rank+1)·inner/world)`. Owned because the
-//! slice isn't contiguous in the mmap.
-//! Other (`dim` value, layout) combinations are rejected as
-//! [`SliceError::UnsupportedAxis`] — keeps the surface honest while
-//! the model surface is small. (MoE 3-D tensors) will extend
-//! the dim list when needed.
+//!   per-rank buffer: for each row, copy the column subrange
+//!   `[rank·inner/world, (rank+1)·inner/world)`. Owned because the
+//!   slice isn't contiguous in the mmap.
+//!   Other (`dim` value, layout) combinations are rejected as
+//!   [`SliceError::UnsupportedAxis`] — keeps the surface honest while
+//!   the model surface is small. (MoE 3-D tensors) will extend
+//!   the dim list when needed.
 //! ## Quantised-tensor block alignment
 //! ColParallel: rows are block-aligned by construction; any multiple-
 //! of-`world` row count is also a multiple of the block alignment, so
@@ -81,7 +81,7 @@ pub enum SliceError {
 /// # Errors
 /// - [`SliceError`] for layout / divisibility / alignment violations.
 /// - Propagated `anyhow::Error` from the underlying `GgufFile` accessors
-/// (unknown tensor, mmap truncated, etc.).
+///   (unknown tensor, mmap truncated, etc.).
 pub fn slice_for_tp<'a>(
     file: &'a GgufFile,
     name: &str,
@@ -404,12 +404,12 @@ fn slice_row_parallel_dim2_3d<'a>(
 /// `outer = V_part_full + 2 · K_part_full` where:
 /// - `V_part_full = num_v_heads · head_v_dim`
 /// - `K_part_full = num_k_heads · head_k_dim`
-/// (Q and K share the GDN head shape; total = 1·V + 1·K + 1·Q.)
-/// Per rank, we want `[V_local | K_local | Q_local]` re-assembled
-/// where each sub-slab is the rank's contiguous head slice. For
-/// quantised dtypes the rows must already be block-aligned (any
-/// 2-D ggml tensor is); the per-sub-slab row counts must each
-/// individually divide cleanly by `world`.
+///   (Q and K share the GDN head shape; total = 1·V + 1·K + 1·Q.)
+///   Per rank, we want `[V_local | K_local | Q_local]` re-assembled
+///   where each sub-slab is the rank's contiguous head slice. For
+///   quantised dtypes the rows must already be block-aligned (any
+///   2-D ggml tensor is); the per-sub-slab row counts must each
+///   individually divide cleanly by `world`.
 fn slice_fused_qkv_parallel<'a>(
     file: &'a GgufFile,
     name: &str,

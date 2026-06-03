@@ -7,11 +7,11 @@
 //! `cluster::probe_and_enable_peer_access`).
 //! Two operating modes:
 //! - **residual** (`residual_tpN`) — `hidden += partial_local + Σ peers`
-//! on each rank. Used after attention output proj and FFN down proj
-//! where the sharded result must be folded into the residual stream.
+//!   on each rank. Used after attention output proj and FFN down proj
+//!   where the sharded result must be folded into the residual stream.
 //! - **sum** (`sum_tpN`) — `partial_local += Σ peers` (no residual add).
-//! Used at the LM-head output-AR boundary where the post-AR value
-//! *is* the final result, no residual to fold.
+//!   Used at the LM-head output-AR boundary where the post-AR value
+//!   *is* the final result, no residual to fold.
 //! ## Ordering contract (caller responsibility)
 //! The kernel reads peer partials at launch time. The producer GEMV that
 //! wrote each rank's `partial[r]` must have completed *and been visible
@@ -169,11 +169,11 @@ impl BarP2pAllReduce {
     /// Load the AllReduce hsaco onto every rank.
     /// # Errors
     /// - The cluster's peer-access matrix isn't fully connected
-    /// (`HipCluster::peer_access_full` returned `false`). The
-    /// kernel-launched AR path is unsafe to engage in this case;
-    /// the caller must fall back to host-bounce.
+    ///   (`HipCluster::peer_access_full` returned `false`). The
+    ///   kernel-launched AR path is unsafe to engage in this case;
+    ///   the caller must fall back to host-bounce.
     /// - The `p2p_allreduce_residual` hsaco wasn't compiled into
-    /// `flambeau-kernels-hip` (build.rs failure or `HIP_SKIP_BUILD=1`).
+    ///   `flambeau-kernels-hip` (build.rs failure or `HIP_SKIP_BUILD=1`).
     /// - Any per-rank `hipDeviceBind` / `hipModuleLoadData` failure.
     pub fn new(cluster: Arc<HipCluster>) -> DeviceResult<Self> {
         if !cluster.peer_access_full() {
@@ -241,11 +241,11 @@ impl BarP2pAllReduce {
     /// (fp16). Each rank's launch goes on `streams[r]`.
     /// # Safety
     /// - `hidden[r]` and `partial[r]` must be valid for `elem_count`
-    /// `__half` values on rank `r`'s device.
+    ///   `__half` values on rank `r`'s device.
     /// - Producer writes to `partial[k]` must be ordered against
-    /// `streams[r]` for every peer `k ≠ r` (typically via
-    /// `hipEventRecord` on the producer stream + `hipStreamWaitEvent`
-    /// on `streams[r]`); see the module-level "Ordering contract".
+    ///   `streams[r]` for every peer `k ≠ r` (typically via
+    ///   `hipEventRecord` on the producer stream + `hipStreamWaitEvent`
+    ///   on `streams[r]`); see the module-level "Ordering contract".
     /// - `streams[r]` must be on rank `r`'s device.
     pub unsafe fn residual_tp4(
         &self,
@@ -375,9 +375,9 @@ impl BarP2pAllReduce {
     /// kernel; per-thread element count is `n / 256`).
     /// # Safety
     /// - `hidden[r]`, `partial[r]`, `out_norm[r]` valid for `n` `__half`
-    /// elements on rank `r`'s device.
+    ///   elements on rank `r`'s device.
     /// - `rms_weight[r]` valid for `n` `__half` elements (Replicated
-    /// per the layout table).
+    ///   per the layout table).
     /// - Producer-stream ordering as in `residual_tp4`.
     pub unsafe fn residual_rmsnorm_tp4(
         &self,

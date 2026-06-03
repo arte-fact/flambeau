@@ -12,7 +12,7 @@ use crate::tensor::Tensor;
 
 /// Inputs:
 /// - `logits[n_tokens, n_experts]` F32 — router-projection output.
-/// Outputs:
+///   Outputs:
 /// - `out_ids[n_tokens, k]` I32 — selected expert indices.
 /// - `out_weights[n_tokens, k]` F32 — normalised weights summing to 1
 ///   over `k` per token.

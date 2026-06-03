@@ -840,9 +840,9 @@ pub trait Ops {
 
     /// Batched-slots single-token conv trio (assemble + causal_conv1d
     /// + history shift) collapsed into one launch across N slots, each
-    /// with its own conv-history buffer. `slot_history_ptrs` is
-    /// `[N] u64`; `qkv_mixed` and `conv_out` are slot-major
-    /// `[N, conv_channels]`.
+    ///   with its own conv-history buffer. `slot_history_ptrs` is
+    ///   `[N] u64`; `qkv_mixed` and `conv_out` are slot-major
+    ///   `[N, conv_channels]`.
     fn gdn_conv_trio_decode_f32_batched_slots(
         &self,
         slot_history_ptrs: DevicePtr,

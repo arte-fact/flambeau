@@ -7,10 +7,10 @@
 //! trait; the dispatcher selects an impl at runtime using a shape-predicate
 //! table (`dispatch/<backend>/<arch>.toml`).
 //! + surface: [`QMatMul`] as the first op. The four MMVQ + two MMQ
-//! kernels we've landed register as `KernelImpl<QMatMul, HipDevice>`. This
-//! trait surface is deliberately minimal — it replaces bare impl-id strings
-//! with typed references, without pulling in async / gradient / scheduler
-//! concerns (those are + territory).
+//!   kernels we've landed register as `KernelImpl<QMatMul, HipDevice>`. This
+//!   trait surface is deliberately minimal — it replaces bare impl-id strings
+//!   with typed references, without pulling in async / gradient / scheduler
+//!   concerns (those are + territory).
 
 use crate::device::Device;
 
@@ -58,7 +58,7 @@ pub struct OpContract {
 /// `ID` matches the `impl` column, `applies` is the runtime evaluation of
 /// the row's `shape` predicate, and `cert()` points at the `certs/` file.
 /// + only wires the lookup — registration happens in backend crates
-/// and is pulled together by the dispatcher in (model forward-pass).
+///   and is pulled together by the dispatcher in (model forward-pass).
 pub trait KernelImpl<O: Op, D: Device>: Send + Sync + 'static {
     /// Stable identifier. Used in `dispatch/*.toml` rows + `certs/*.json`.
     const ID: &'static str;

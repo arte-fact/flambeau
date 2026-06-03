@@ -9,9 +9,9 @@
 //!
 //! Decode pipeline (single token):
 //!  1. fused rmsnorm(x_in) + Q8_1 quant
-//!  2+3. `attn_qkv` + `attn_gate` (fused mmvq_q8_0 / mmvq_q4_0_gate_up
+//!    2+3. `attn_qkv` + `attn_gate` (fused mmvq_q8_0 / mmvq_q4_0_gate_up
 //!       when both same dtype, else separate mmvq per branch)
-//!  4+5. `ssm_alpha` + `ssm_beta` (fused mmvq_q8_0 if both Q8_0, else
+//!    4+5. `ssm_alpha` + `ssm_beta` (fused mmvq_q8_0 if both Q8_0, else
 //!       separate)
 //!  6. assemble conv input + causal conv1d + shift conv history
 //!  7. silu(conv_out)
@@ -20,7 +20,7 @@
 //! 10. scale Q by 1 / sqrt(head_k_dim)
 //! 11. fused gdn_state_step_alphabeta
 //! 12. ssm_norm (rmsnorm_f32 on state_out)
-//! 13+14. fused swiglu(z, out_normed) → Q8_1 (or unfused pair if
+//!   13+14. fused swiglu(z, out_normed) → Q8_1 (or unfused pair if
 //!        d_inner is not a multiple of 32)
 //! 15. ssm_out projection (mmvq)
 //! 16. cast F32 → F16 → delta_out

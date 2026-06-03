@@ -20,21 +20,21 @@ use std::cmp::Ordering;
 /// Full sampler config for one decode step.
 /// Field semantics mirror OpenAI / vLLM:
 /// - `temperature == 0.0` → greedy (skip softmax, argmax). Historical
-/// `Sampling::Greedy` variant maps to `temperature = 0.0` here.
+///   `Sampling::Greedy` variant maps to `temperature = 0.0` here.
 /// - `top_p = None` → no top-p filter.
 /// - `top_k = None` → no top-k filter.
 /// - `min_p = None` → no min-p filter.
 /// - `repetition_penalty = 1.0` → disabled. Non-1 values scale the
-/// logit of previously-seen tokens (`logit /= penalty` when
-/// `logit > 0`, `logit *= penalty` otherwise) — the llama.cpp
-/// convention, shared by Qwen's `generation_config.json`.
+///   logit of previously-seen tokens (`logit /= penalty` when
+///   `logit > 0`, `logit *= penalty` otherwise) — the llama.cpp
+///   convention, shared by Qwen's `generation_config.json`.
 /// - `presence_penalty = 0.0` → disabled. Subtracts `penalty` from the
-/// logit of any token appearing at least once in history.
+///   logit of any token appearing at least once in history.
 /// - `frequency_penalty = 0.0` → disabled. Subtracts
-/// `penalty * count_in_history` from the logit of each token.
-/// Penalty semantics match OpenAI's reference: penalties are applied
-/// IN-PLACE to logits before any filter or softmax. History is the
-/// caller's per-turn generated-tokens slice.
+///   `penalty * count_in_history` from the logit of each token.
+///   Penalty semantics match OpenAI's reference: penalties are applied
+///   IN-PLACE to logits before any filter or softmax. History is the
+///   caller's per-turn generated-tokens slice.
 #[derive(Debug, Clone)]
 pub struct Sampling {
     pub temperature: f32,

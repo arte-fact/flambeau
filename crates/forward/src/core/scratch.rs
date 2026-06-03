@@ -427,8 +427,8 @@ impl PagedKvCacheConfig {
     /// then divides the remaining budget by `2 * page_size * kv_width
     /// * 2` (K and V pools, F16). The result is clamped to at least
     /// `max_slots * max_pages_per_slot` so every slot can fill its
-    /// table even when the budget is just enough; a larger budget
-    /// leaves spare pages for cross-slot sharing (E4 prefix cache).
+    ///   table even when the budget is just enough; a larger budget
+    ///   leaves spare pages for cross-slot sharing (E4 prefix cache).
     pub fn from_vram_budget(
         per_layer_budget_bytes: usize,
         page_size: usize,

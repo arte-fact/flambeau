@@ -2,9 +2,9 @@
 //!
 //! Builds the FIM prompt from prefix/suffix (+ optional middle prime,
 //! + optional repo-context blocks) and runs the standard sampling
-//! engine with `relax_stop_mask=true` (FIM completions sit outside the
-//! chat template, so the engine's chat-flavoured stop biases must be
-//! disabled).
+//!   engine with `relax_stop_mask=true` (FIM completions sit outside the
+//!   chat template, so the engine's chat-flavoured stop biases must be
+//!   disabled).
 
 use anyhow::Result;
 use axum::extract::State;
