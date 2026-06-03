@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "impl_id": "quantize_q8_1_mmq_gfx906",
+  "backend": "hip",
+  "arch": "gfx906",
+  "op": "quantize",
+  "dtype_weight": "F32",
+  "dtype_activation": "Q8_1_MMQ",
+  "tolerance_formula": "|max_rel_err| <= 1e-2 (~1.25× Q8_1 noise floor)",
+  "results": [
+    {
+      "m": 1,
+      "k": 2048,
+      "n": 1,
+      "seed": 45324,
+      "max_rel_err": 0.0041990546,
+      "tolerance": 0.01,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 5120,
+      "n": 1,
+      "seed": 45324,
+      "max_rel_err": 0.0043529985,
+      "tolerance": 0.01,
+      "pass": true
+    },
+    {
+      "m": 8,
+      "k": 2048,
+      "n": 1,
+      "seed": 45324,
+      "max_rel_err": 0.0043529985,
+      "tolerance": 0.01,
+      "pass": true
+    },
+    {
+      "m": 128,
+      "k": 2048,
+      "n": 1,
+      "seed": 45324,
+      "max_rel_err": 0.0043931613,
+      "tolerance": 0.01,
+      "pass": true
+    },
+    {
+      "m": 128,
+      "k": 5120,
+      "n": 1,
+      "seed": 45324,
+      "max_rel_err": 0.0043931613,
+      "tolerance": 0.01,
+      "pass": true
+    },
+    {
+      "m": 512,
+      "k": 2048,
+      "n": 1,
+      "seed": 45324,
+      "max_rel_err": 0.0043931613,
+      "tolerance": 0.01,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-06-03T13:02:25Z",
+  "rig": "threadreaper-gfx906",
+  "pmc": null
+}

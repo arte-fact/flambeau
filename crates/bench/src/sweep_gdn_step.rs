@@ -202,6 +202,7 @@ fn run_shape(
         let h_i = h_v as i32;
         let l_i = l as i32;
         let n_rep_i = n_rep as i32;
+        let rep_inner_i: i32 = 0;
         let q_ptr: u64 = d_q.as_usize() as u64;
         let k_ptr: u64 = d_k.as_usize() as u64;
         let v_ptr: u64 = d_v.as_usize() as u64;
@@ -223,6 +224,7 @@ fn run_shape(
         args.push(&h_i);
         args.push(&l_i);
         args.push(&n_rep_i);
+        args.push(&rep_inner_i);
         let cfg = LaunchCfg {
             grid: (h_v as u32, b as u32, (S_V as u32) / 4),
             block: (64, 4, 1),

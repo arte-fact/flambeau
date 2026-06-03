@@ -43,6 +43,12 @@ pub const DIRECT_CALL_KERNELS_GFX906: &[DirectCallKernel] = &[
         impl_id: "mmq_f16_q8_1_gfx906",
         cert_rel_path: "certs/hip/gfx906/mmq_f16_q8_1_gfx906.json",
     },
+    // V2.29.a — tile-M F16 × Q8_1 MMQ for m >= 8. Call-site dispatched
+    // alongside mmq_f16_q8_1 inside qmatmul.rs::dispatch_qmatmul.
+    DirectCallKernel {
+        impl_id: "mmq_f16_tile_gfx906",
+        cert_rel_path: "certs/hip/gfx906/mmq_f16_tile_gfx906.json",
+    },
     // 2.a / 3.a / indexed-MoE MMVQ for Q8_0 / Q4_0 / Q6_K
     // expert weights. Routing is by GGUF tensor dtype, not shape.
     DirectCallKernel {
@@ -160,6 +166,13 @@ pub const DIRECT_CALL_KERNELS_GFX906: &[DirectCallKernel] = &[
         impl_id: "indexed_moe_mmq_q3_k_down_tile8_gfx906",
         cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q3_k_down_tile8_gfx906.json",
     },
+    // C10 — fused alpha-beta + state-step for Gated-Delta-Net (Qwen3.6).
+    // Single impl for the alphabeta op; routed via `expect_module` at the
+    // call site in `ops::hip::recurrent::gdn_state_step_alphabeta_f32_s128`.
+    DirectCallKernel {
+        impl_id: "gdn_state_step_alphabeta_f32_s128_gfx906",
+        cert_rel_path: "certs/hip/gfx906/gdn_state_step_alphabeta_f32_s128_gfx906.json",
+    },
 ];
 
 /// Catalog of kernels that are **not** dispatched at runtime but are kept
@@ -183,6 +196,41 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
         impl_id: "attention_prefill_flash_tile_f16_gfx906",
         cert_rel_path: "certs/hip/gfx906/attention_prefill_flash_tile_f16_gfx906.json",
     },
+    // single-row indexed-MoE MMVQ baseline. Production ships r2 (and Q6_K
+    // dp4a); this stays as the A/B reference it was promoted from.
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmvq_q4_k_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q4_k_gfx906.json",
+    },
+    // PP hand-off bandwidth cert. Exercised by `bench sweep
+    // peer_copy_via_host` on the rig; not a kernel-launch dispatch.
+    DirectCallKernel {
+        impl_id: "peer_copy_via_host_gfx906",
+        cert_rel_path: "certs/hip/gfx906/peer_copy_via_host_gfx906.json",
+    },
+    // 4-warp LDS-tiled MMQ placeholders. Superseded by wave64 in production
+    // (Q4_K wave64, Q6_K wave64, Q8_0 wave64_tile16). Kept as bench A/B
+    // baselines — `sweep_mmq` runs them as Q{4,6}K4Warp / Q8_04Warp variants
+    // alongside the shipped kernels so the comparison stays live. See CLI
+    // PMC-refresh target list at `crates/cli/src/main.rs`.
+    DirectCallKernel {
+        impl_id: "qmatmul_q4_K_mmq_4warp_lds_gfx906",
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q4_K_mmq_4warp_lds_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "qmatmul_q6_K_mmq_4warp_lds_gfx906",
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q6_K_mmq_4warp_lds_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "qmatmul_q8_0_mmq_4warp_lds_gfx906",
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q8_0_mmq_4warp_lds_gfx906.json",
+    },
+    // superseded Q8_0 MMQ wave64 by wave64_tile16 at m >= 128. Wave64 stays
+    // as the bench baseline (PMC-refresh target).
+    DirectCallKernel {
+        impl_id: "qmatmul_q8_0_mmq_wave64_gfx906",
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q8_0_mmq_wave64_gfx906.json",
+    },
     // single-row MMVQ references. Production dispatches r2/r4/dp4a at
     // m < 128 for the K-quants; the single_row kernels stay as cross-check
     // baselines (called out in the TOML header).
@@ -205,5 +253,18 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
     DirectCallKernel {
         impl_id: "qmatmul_q6_K_mmvq_single_row_gfx906",
         cert_rel_path: "certs/hip/gfx906/qmatmul_q6_K_mmvq_single_row_gfx906.json",
+    },
+    // Q6_K multi-row r4. Superseded by dp4a at runtime; r4 remains
+    // a cross-check baseline invoked from the PMC-refresh target list.
+    DirectCallKernel {
+        impl_id: "qmatmul_q6_K_mmvq_nw1_r4_gfx906",
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q6_K_mmvq_nw1_r4_gfx906.json",
+    },
+    // turbo Q8_1 quantise — bench-only sanity (the forward path uses
+    // `quantize_f16_q8_1` via `DIRECT_CALL_KERNELS_GFX906`, which is a
+    // distinct kernel).
+    DirectCallKernel {
+        impl_id: "quantize_q8_1_mmq_gfx906",
+        cert_rel_path: "certs/hip/gfx906/quantize_q8_1_mmq_gfx906.json",
     },
 ];
