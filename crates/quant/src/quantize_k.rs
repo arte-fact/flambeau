@@ -44,7 +44,6 @@ const GROUP_MAX_EPS: f32 = 1e-15;
 /// squares (scale, min) for the current quantised values. Returns the
 /// best scale found; writes the chosen `l` codes into `out_l` and the
 /// negated min into `*the_min`. Used by Q2_K (nmax=3) and Q4_K (nmax=15).
-#[allow(clippy::too_many_arguments)]
 fn make_qkx2_quants(
     n: usize,
     nmax: i32,

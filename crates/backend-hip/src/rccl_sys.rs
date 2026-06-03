@@ -1,14 +1,6 @@
 //! Minimal FFI to RCCL (`librccl`). Hand-written — see `sys.rs` for the
 //! HIP-runtime equivalent and the same rationale.
 
-#![allow(
-    non_camel_case_types,
-    non_snake_case,
-    dead_code,
-    reason = "hand-written FFI bindings mirror C NCCL/RCCL symbol names; `dead_code` \
-              covers symbols held for future collectives that are declared but not yet \
-              wired."
-)]
 #![expect(
     clippy::undocumented_unsafe_blocks,
     reason = "RCCL FFI — every unsafe block wraps an ncclGroup* / ncclAllReduce* / \

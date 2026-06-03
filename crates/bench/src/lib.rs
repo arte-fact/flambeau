@@ -5,13 +5,6 @@
 //! cert — the build-time gate from architecture rule 2.
 //! Matrix / PMC / dispatch-A/B land in + on the same scaffolding.
 
-#![allow(
-    clippy::too_many_arguments,
-    reason = "sweep harnesses pass device + kernel handles + shape scalars + seed through \
-              flat parameter lists; matches the kernel launcher signatures they exercise. \
-              Scoped at crate level because sweep bodies are `#[cfg(feature = \"hip\")]` \
-              gated and `#[expect]` would be unfulfilled on non-hip builds."
-)]
 
 pub mod cert;
 pub mod dispatch;

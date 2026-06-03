@@ -111,7 +111,6 @@ pub fn rope_neox_partial_f16(
 /// gemma4 Q-norm and K-norm paths. Saves 2 launches + 1 DtoD memcpy
 /// per call. `head_dim` must be 64 / 128 / 256 / 512 (one wrapper per
 /// supported width); `rotated_dims` ≤ `head_dim`.
-#[allow(clippy::too_many_arguments)]
 pub fn rmsnorm_rope_neox_partial_f16(
     reg: &OpsRegistry,
     stream: &HipStream,

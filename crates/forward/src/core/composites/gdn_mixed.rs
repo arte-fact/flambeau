@@ -39,7 +39,6 @@ fn quant_handle(qw: &QuantWeight, dims: [usize; 2]) -> WeightHandle {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn gdn_layer_mixed_local<H: TopologyHooks>(
     state: &mut CoreState<'_>,
     hooks: &mut H,

@@ -121,7 +121,6 @@ pub trait Model: Send + Sync + 'static {
     /// next-token logit) and `decode_logits_refs` (rows 1..=N).
     /// Default bails — only archs that opt into the mixed-batch path
     /// (qwen35-v2, qwen35moe-v2 today) override this.
-    #[allow(clippy::too_many_arguments)]
     fn forward_mixed_decode(
         &self,
         _ctx: &dyn SessionContext,

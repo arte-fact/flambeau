@@ -288,7 +288,6 @@ pub fn bar_ar_sum_f32(
 /// payload halving in S1; the launch-count win is what matters).
 /// `n_rows` blocks of 256 threads; per-row hidden `n` must satisfy
 /// `n <= 8192`. `resid_out` must NOT alias `resid_in`.
-#[allow(clippy::too_many_arguments)]
 pub fn bar_ar_postattn_residual_rmsnorm_f32_to_f16(
     coord: &BarArCoordinator,
     rank: usize,
@@ -455,7 +454,6 @@ pub fn bar_ar_residual_f16(
 /// rank-local F16 partial; `residual_inout_f16` is the per-rank
 /// residual (updated in-place to `residual + Σ peers`); `out_norm`
 /// receives the rmsnormed result. TP=2 only.
-#[allow(clippy::too_many_arguments)]
 pub fn bar_ar_residual_rmsnorm_f16(
     coord: &BarArCoordinator,
     rank: usize,

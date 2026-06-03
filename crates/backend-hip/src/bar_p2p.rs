@@ -791,7 +791,6 @@ impl BarP2pAllReduce {
     /// `out_norm` receives `rmsnorm(hidden + Σ partials, rms_weight)`;
     /// `hidden` is also updated in-place. Same canonical-order /
     /// producer-sync contract as [`Self::residual_tp2_rank`].
-    #[allow(clippy::too_many_arguments)]
     pub unsafe fn residual_rmsnorm_tp2_rank(
         &self,
         rank: usize,
@@ -910,7 +909,6 @@ impl BarP2pAllReduce {
     ///   `resid_in` (kernel reads resid_in and writes resid_out in the
     ///   same pass; aliasing would race).
     /// - Producer-stream ordering as in [`Self::sum_tp2_f32_rank`].
-    #[allow(clippy::too_many_arguments)]
     pub unsafe fn postattn_residual_rmsnorm_f32_to_f16_tp2_rank(
         &self,
         rank: usize,
@@ -958,7 +956,6 @@ impl BarP2pAllReduce {
     /// TP=4 sibling of [`Self::postattn_residual_rmsnorm_f32_to_f16_tp2_rank`].
     /// # Safety
     /// Same contract; 3 peer F32 partials instead of 1.
-    #[allow(clippy::too_many_arguments)]
     pub unsafe fn postattn_residual_rmsnorm_f32_to_f16_tp4_rank(
         &self,
         rank: usize,

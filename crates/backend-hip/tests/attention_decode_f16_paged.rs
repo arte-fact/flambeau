@@ -71,7 +71,6 @@ fn copy_back_f16(dev: &HipDevice, src: DevicePtr, n: usize) -> Vec<f16> {
     out
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_case(
     n_slots: usize,
     n_heads_q: usize,

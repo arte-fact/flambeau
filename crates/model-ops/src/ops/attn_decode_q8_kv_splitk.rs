@@ -11,7 +11,6 @@ use crate::dtype::{F16, F32, Q8_0};
 use crate::error::Result;
 use crate::tensor::Tensor;
 
-#[allow(clippy::too_many_arguments)]
 pub fn attn_decode_q8_kv_splitk(
     q: &Tensor<F16>,
     k_cache: &Tensor<Q8_0>,

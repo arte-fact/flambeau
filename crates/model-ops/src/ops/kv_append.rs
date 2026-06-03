@@ -11,7 +11,6 @@ use crate::error::Result;
 use crate::tensor::Tensor;
 
 /// Two stream-ordered DtoD memcpys (K and V) into per-layer caches.
-#[allow(clippy::too_many_arguments)]
 pub fn kv_append_f16(
     k_src: &Tensor<F16>,
     v_src: &Tensor<F16>,

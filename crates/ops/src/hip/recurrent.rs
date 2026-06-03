@@ -159,7 +159,6 @@ pub fn gdn_alpha_beta_f32(
 /// same warp-reduce signatures); the cert sweep verifies parity
 /// against `gdn_state_step_f32_s128 ∘ gdn_alpha_beta_f32` on Qwen3.6
 /// shapes.
-#[allow(clippy::too_many_arguments)]
 pub fn gdn_state_step_alphabeta_f32_s128(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -240,7 +239,6 @@ pub fn gdn_state_step_alphabeta_f32_s128(
 /// `u64` array on the device containing the per-slot
 /// `GdnLayerState::state` base pointers. Same buffer for both is fine
 /// when in-place (the existing kernel's pattern).
-#[allow(clippy::too_many_arguments)]
 pub fn gdn_state_step_alphabeta_f32_s128_batched_slots(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -317,7 +315,6 @@ pub fn gdn_state_step_alphabeta_f32_s128_batched_slots(
 /// no inter-block sync). Caller writes per-slot history base pointers
 /// into a device array sized `[N] u64` and passes its base via
 /// `slot_history_ptrs`.
-#[allow(clippy::too_many_arguments)]
 pub fn gdn_conv_trio_decode_f32_batched_slots(
     reg: &OpsRegistry,
     stream: &HipStream,

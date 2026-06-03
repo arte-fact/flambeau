@@ -206,11 +206,6 @@ impl HipEvent {
         self.device_id
     }
 
-    #[allow(
-        dead_code,
-        reason = "FFI accessor mirroring HipStream::raw; kept for symmetry \
-                  even when no current call site needs the raw event handle."
-    )]
     pub(crate) fn raw(&self) -> crate::sys::hipEvent_t {
         self.ptr
     }
@@ -924,11 +919,6 @@ impl HipGraphExec {
 }
 
 #[derive(Clone, Copy, Debug)]
-#[allow(
-    dead_code,
-    reason = "Kernel variant is matched on (kernel_or_memcpy_node_handle) but no current \
-              caller picks it; kept paired with Memcpy for the future graph-kernel-update path."
-)]
 enum NodeBucket {
     Kernel,
     Memcpy,

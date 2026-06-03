@@ -67,7 +67,6 @@ pub trait Ops {
     /// vs. `N × per-slot mmvq_q4_0_gate_up_t128` launches in the
     /// per-slot fallback. Activations slot-major `[N, k]` Q8_1;
     /// outputs slot-major `[N, n_rows_*]` F32.
-    #[allow(clippy::too_many_arguments)]
     fn mmvq_q4_0_gate_up_row_tile_batched(
         &self,
         gate_w: DevicePtr,
@@ -215,7 +214,6 @@ pub trait Ops {
 
     // -- attention (decode + prefill) --
 
-    #[allow(clippy::too_many_arguments)]
     fn attention_decode_f16(
         &self,
         q: DevicePtr,
@@ -234,7 +232,6 @@ pub trait Ops {
     /// `n_tokens_kv_slot` is `Some`, the recorder tags the
     /// `n_tokens_kv` kernel arg so the caller can update it per
     /// replay via `HipGraphExec::set_slot`.
-    #[allow(clippy::too_many_arguments)]
     fn attention_decode_f16_slots(
         &self,
         q: DevicePtr,
@@ -286,7 +283,6 @@ pub trait Ops {
     /// `attention_prefill_f16`; per-`t` K/V row resolved via
     /// `block_table[t / page_size] * page_size + (t & (page_size - 1))`.
     /// `page_size` must be a power of two.
-    #[allow(clippy::too_many_arguments)]
     fn attention_prefill_f16_paged(
         &self,
         q: DevicePtr,
@@ -310,7 +306,6 @@ pub trait Ops {
     /// the slot's row of the block table per token. The host must
     /// pre-populate `block_table` for `[start_pos, start_pos +
     /// n_tokens)`. `page_size` must be a power of two.
-    #[allow(clippy::too_many_arguments)]
     fn kv_append_f16_paged_prefill(
         &self,
         k_src: DevicePtr,
@@ -329,7 +324,6 @@ pub trait Ops {
     /// currently maps to. `block_tables` is `[n_slots,
     /// max_pages_per_slot]` u32 row-major. `page_size` must be a power
     /// of two.
-    #[allow(clippy::too_many_arguments)]
     fn kv_append_f16_paged_slots(
         &self,
         k_src: DevicePtr,
@@ -347,7 +341,6 @@ pub trait Ops {
     /// PagedAttention sibling of `attention_decode_f16_batched`. Reads
     /// K/V per-token rows through the slot's block-table indirection.
     /// `page_size` must be a power of two.
-    #[allow(clippy::too_many_arguments)]
     fn attention_decode_f16_paged(
         &self,
         q_batched: DevicePtr,
@@ -367,7 +360,6 @@ pub trait Ops {
 
     /// Fused V unit-RMSNorm + KV-cache append (K direct copy, V normed).
     /// See `hip::attention::kv_append_v_unit_norm_f16`.
-    #[allow(clippy::too_many_arguments)]
     fn kv_append_v_unit_norm_f16(
         &self,
         k_src: DevicePtr,
@@ -381,7 +373,6 @@ pub trait Ops {
         eps: f32,
     ) -> Result<()>;
 
-    #[allow(clippy::too_many_arguments)]
     fn attention_decode_f16_splitk(
         &self,
         q: DevicePtr,
@@ -418,7 +409,6 @@ pub trait Ops {
         window_size: i32,
     ) -> Result<()>;
 
-    #[allow(clippy::too_many_arguments)]
     fn attention_decode_q8_kv(
         &self,
         q: DevicePtr,
@@ -433,7 +423,6 @@ pub trait Ops {
         window_size: i32,
     ) -> Result<()>;
 
-    #[allow(clippy::too_many_arguments)]
     fn attention_decode_q8_kv_splitk(
         &self,
         q: DevicePtr,
@@ -452,7 +441,6 @@ pub trait Ops {
         window_size: i32,
     ) -> Result<()>;
 
-    #[allow(clippy::too_many_arguments)]
     fn attention_prefill_q8_kv(
         &self,
         q: DevicePtr,
@@ -469,7 +457,6 @@ pub trait Ops {
         window_size: i32,
     ) -> Result<()>;
 
-    #[allow(clippy::too_many_arguments)]
     fn attention_prefill_f16(
         &self,
         q: DevicePtr,
@@ -489,7 +476,6 @@ pub trait Ops {
     /// Graph-capture variant of `attention_prefill_f16`. When
     /// `n_k_slot` / `q_off_slot` are `Some`, the recorder tags those
     /// kernel args for per-replay updates.
-    #[allow(clippy::too_many_arguments)]
     fn attention_prefill_f16_slots(
         &self,
         q: DevicePtr,
@@ -592,7 +578,6 @@ pub trait Ops {
     /// `resid_out = resid_in + rmsnorm(x * weight)`. `resid_out` may
     /// alias `resid_in` for in-place. Same launch shape as
     /// `rmsnorm_f32_to_f16`.
-    #[allow(clippy::too_many_arguments)]
     fn rmsnorm_f32_to_f16_add_residual(
         &self,
         x_f32: DevicePtr,
@@ -607,7 +592,6 @@ pub trait Ops {
     /// F16-input sibling of `rmsnorm_f32_to_f16_add_residual`. Used
     /// after an F16 AR sum (gemma4 post-attn / post-ffn path when the
     /// safety predicate allows skipping the F32 AR widening).
-    #[allow(clippy::too_many_arguments)]
     fn rmsnorm_f16_to_f16_add_residual(
         &self,
         x_f16: DevicePtr,
@@ -712,7 +696,6 @@ pub trait Ops {
 
     /// Fused per-head rmsnorm + partial NeoX RoPE, F16 in-place. See
     /// `hip::pe::rmsnorm_rope_neox_partial_f16` for the math.
-    #[allow(clippy::too_many_arguments)]
     fn rmsnorm_rope_neox_partial_f16(
         &self,
         x: DevicePtr,
@@ -818,7 +801,6 @@ pub trait Ops {
     /// are `[B] u64` device arrays of those base pointers. Activations
     /// (q/k/v/alpha/beta/attn_out) are slot-major `[B, L, H, S_v]`.
     /// Same compute as `gdn_state_step_alphabeta_f32_s128`.
-    #[allow(clippy::too_many_arguments)]
     fn gdn_state_step_alphabeta_f32_s128_batched_slots(
         &self,
         q: DevicePtr,

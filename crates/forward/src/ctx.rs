@@ -82,7 +82,6 @@ pub trait ForwardCtx {
     ///
     /// Default impl bails — only the engine ctx implements this today.
     /// See `doc/MIXED_BATCH_V2_PLAN.md` Phase K1.
-    #[allow(clippy::too_many_arguments)]
     fn standard_attn_mixed(
         &mut self,
         input: &Tensor<F16>,
@@ -156,7 +155,6 @@ pub trait ForwardCtx {
     /// `[n_layer, n_tokens_total, pe]` table.
     /// Default impl panics — only impls that own a Pool can run the
     /// apply (engine, testing).
-    #[allow(clippy::too_many_arguments)]
     fn per_layer_embd_apply(
         &mut self,
         resid: &mut Tensor<F16>,
@@ -197,7 +195,6 @@ pub trait ForwardCtx {
     /// [`crate::per_layer_embd::build_inp_per_layer_table_with_proj`]
     /// (Q5_K dequant + rmsnorm + add + scale), producing a layer-major
     /// `[n_layer, n_tokens, pe]` table HtoD-uploaded to `table_dev`.
-    #[allow(clippy::too_many_arguments)]
     fn per_layer_embd_build_table(
         &mut self,
         main_embd_host_f16: &[half::f16],
@@ -265,7 +262,6 @@ pub struct QuantWeight {
 }
 
 impl QuantWeight {
-    #[allow(clippy::too_many_arguments)]
     pub fn qmatmul(
         &self,
         act_q8_1: &Tensor<flambeau_model_ops::Q8_1>,

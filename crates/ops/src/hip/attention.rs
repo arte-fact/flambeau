@@ -64,7 +64,6 @@ pub fn attention_decode_f16(
 /// via `KernelArgs::push_slot` so the graph recorder can bind the
 /// slot. Caller then updates the slot per replay via
 /// `HipGraphExec::set_slot` to track the growing KV cache tail.
-#[allow(clippy::too_many_arguments)]
 pub fn attention_decode_f16_slots(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -143,8 +142,6 @@ pub fn attention_decode_f16_slots(
 /// `k_cache_ptrs[s]` and `v_cache_ptrs[s]` must point at ≥ `n_tokens_kv[s] *
 /// n_heads_kv * head_dim` F16 elements. `q` / `out` must each point at
 /// ≥ `n_slots * n_heads_q * head_dim` F16 elements.
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 pub fn attention_decode_f16_batched(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -230,7 +227,6 @@ pub fn attention_decode_f16_batched(
 /// `(n_tokens_kv[s] - 1) / page_size < max_pages_per_slot`. `q_batched`
 /// and `out_batched` must each point at ≥ `n_slots * n_heads_q *
 /// head_dim` F16 elements.
-#[allow(clippy::too_many_arguments)]
 pub fn attention_decode_f16_paged(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -318,7 +314,6 @@ pub fn attention_decode_f16_paged(
 /// `v_src` must point at ≥ `n_slots * kv_width` F16 elements.
 /// `slot_write_pos` must point at ≥ `n_slots` i32 elements with each
 /// `(slot_write_pos[s] / page_size) < max_pages_per_slot`.
-#[allow(clippy::too_many_arguments)]
 pub fn kv_append_f16_paged_slots(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -390,7 +385,6 @@ pub fn kv_append_f16_paged_slots(
 /// # Safety
 /// Mirrors `attention_decode_f16_paged`'s safety contract for K/V
 /// pool sizes and block-table extent.
-#[allow(clippy::too_many_arguments)]
 pub fn attention_prefill_f16_paged(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -476,7 +470,6 @@ pub fn attention_prefill_f16_paged(
 /// must point at ≥ `(start_pos + n_tokens) / page_size + 1` u32
 /// elements. `k_src` / `v_src` must each point at ≥ `n_tokens *
 /// kv_width` F16 elements.
-#[allow(clippy::too_many_arguments)]
 pub fn kv_append_f16_paged_prefill(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -596,7 +589,6 @@ pub fn kv_append_f16_batched_slots(
 /// Measured (Qwen3.6 shape, head_dim=256, 16/2, MI50):
 /// * n_tokens=2048: single-pass 2647 µs → split-K 340 µs = **7.78×**
 /// * n_tokens=4096: single-pass 5210 µs → split-K 662 µs = **7.87×**
-#[allow(clippy::too_many_arguments)]
 pub fn attention_decode_f16_splitk(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -692,7 +684,6 @@ pub fn attention_decode_f16_splitk(
 /// Same partials sizing as `attention_decode_f16_splitk`. Phase 2
 /// (`flambeau_attention_decode_f16_splitk_combine`) is shared and
 /// unmodified.
-#[allow(clippy::too_many_arguments)]
 pub fn attention_decode_f16_splitk_h2(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -804,7 +795,6 @@ pub fn splitk_chunk_size(n_tokens_kv: usize) -> usize {
 /// Decode attention with Q8_0-quantised KV. Same args as the F16 variant;
 /// `k_cache` / `v_cache` hold `flambeau_block_q8_0` blocks laid out as
 /// `[n_tokens_kv, n_heads_kv, head_dim/32]` row-major.
-#[allow(clippy::too_many_arguments)]
 pub fn attention_decode_q8_kv(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -865,7 +855,6 @@ pub fn attention_decode_q8_kv(
 /// Closes the long-context Q8↔F16 gap (single-pass `attention_decode_q8_kv`
 /// is the same shape as the single-pass F16 kernel and pays the same 7.78×
 /// occupancy penalty past 256 KV tokens).
-#[allow(clippy::too_many_arguments)]
 pub fn attention_decode_q8_kv_splitk(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -967,7 +956,6 @@ pub fn attention_decode_q8_kv_splitk(
 ///   was stuck on the oracle path (~0.90× F16). Used by the batched-Q8-
 ///   prefill driver — replaces the per-token Q8 prefill fallback with
 ///   one launch per layer per ubatch chunk.
-#[allow(clippy::too_many_arguments)]
 pub fn attention_prefill_q8_kv(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -1175,7 +1163,6 @@ pub fn attention_prefill_f16(
 ///   selected. Capturing at a particular n_q and replaying at a different
 ///   n_q is unsupported (different path → different node layout).
 ///   [`ScalarSlot`]: flambeau_backend_hip::ScalarSlot
-#[allow(clippy::too_many_arguments)]
 pub fn attention_prefill_f16_slots(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -1302,7 +1289,6 @@ fn push_scalar_maybe_slot<'a, T: 'a>(
 /// `k_cache` / `v_cache`: F16 [max_seq, n_kv_heads, head_dim] slot.
 /// `write_pos`: starting row offset within the slot.
 /// `head_dim` ∈ {64, 128, 256, 512}.
-#[allow(clippy::too_many_arguments)]
 pub fn kv_append_v_unit_norm_f16(
     reg: &OpsRegistry,
     stream: &HipStream,

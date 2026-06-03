@@ -21,7 +21,6 @@ use crate::tensor::Tensor;
 /// `slot_v_dst_ptrs` hold `[n_slots] u64` pointer-arrays — each
 /// pointer is the slot's KV slab base. `slot_write_pos` is a device
 /// `[n_slots] i32` of pre-bump tail indices (each slot's position).
-#[allow(clippy::too_many_arguments)]
 pub fn kv_append_f16_batched_slots(
     k_src: &Tensor<F16>,
     v_src: &Tensor<F16>,
@@ -60,7 +59,6 @@ pub fn kv_append_f16_batched_slots(
 /// `n_tokens_kv` device array. `q_batched` is `[n_slots, n_heads_q,
 /// head_dim]` slot-major F16; `out_batched` matches. `k_cache_ptrs` /
 /// `v_cache_ptrs` are `[n_slots] u64` device pointer arrays.
-#[allow(clippy::too_many_arguments)]
 pub fn attn_decode_f16_batched(
     q_batched: &Tensor<F16>,
     k_cache_ptrs: flambeau_core::DevicePtr,
@@ -112,7 +110,6 @@ pub fn attn_decode_f16_batched(
 /// `attn_prefill_f16`; per-`t` K/V row resolved via
 /// `block_table[t / page_size] * page_size + (t & (page_size - 1))`.
 /// `page_size` must be a power of two.
-#[allow(clippy::too_many_arguments)]
 pub fn attn_prefill_f16_paged(
     q: &Tensor<F16>,
     k_pool: flambeau_core::DevicePtr,
@@ -177,7 +174,6 @@ pub fn attn_prefill_f16_paged(
 /// `PagePool::acquire_for` for each new page boundary and memcpying
 /// the acquired page indices to the device-side block-table region.
 /// `page_size` MUST be a power of two.
-#[allow(clippy::too_many_arguments)]
 pub fn kv_append_f16_paged_prefill(
     k_src: &Tensor<F16>,
     v_src: &Tensor<F16>,
@@ -227,7 +223,6 @@ pub fn kv_append_f16_paged_prefill(
 /// `block_tables[slot_ids[i] * max_pages_per_slot + write_pos[i] /
 /// page_size]` with a valid page index BEFORE calling — the kernel
 /// never allocates pages. `page_size` MUST be a power of two.
-#[allow(clippy::too_many_arguments)]
 pub fn kv_append_f16_paged_slots(
     k_src: &Tensor<F16>,
     v_src: &Tensor<F16>,
@@ -276,7 +271,6 @@ pub fn kv_append_f16_paged_slots(
 /// PagedAttention sibling of [`attn_decode_f16_batched`]. Reads K/V
 /// per-token rows through the slot's block-table indirection.
 /// `page_size` MUST be a power of two.
-#[allow(clippy::too_many_arguments)]
 pub fn attn_decode_f16_paged(
     q_batched: &Tensor<F16>,
     k_pool: flambeau_core::DevicePtr,

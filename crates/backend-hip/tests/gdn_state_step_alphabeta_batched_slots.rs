@@ -82,7 +82,6 @@ struct Outs {
     bs_attn: Vec<f32>,
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_both(
     b: usize,
     h_v: usize,

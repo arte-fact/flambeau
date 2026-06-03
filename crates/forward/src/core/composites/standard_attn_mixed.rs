@@ -21,7 +21,6 @@ use flambeau_model_ops::{Tensor, F16, F32, I32, Q8_1};
 use crate::core::{CoreState, TopologyHooks};
 use crate::ctx::AttnWeights;
 
-#[allow(clippy::too_many_arguments)]
 pub fn standard_attn_mixed_local<H: TopologyHooks>(
     state: &mut CoreState<'_>,
     hooks: &mut H,

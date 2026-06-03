@@ -13,7 +13,6 @@ use crate::tensor::Tensor;
 /// Caller must size partials at `n_heads_q * n_chunks` (m, s) and
 /// `n_heads_q * n_chunks * head_dim` (o), where `n_chunks =
 /// ceil(n_tokens_kv / chunk_size)`.
-#[allow(clippy::too_many_arguments)]
 pub fn attn_decode_f16_splitk(
     q: &Tensor<F16>,
     k_cache: &Tensor<F16>,

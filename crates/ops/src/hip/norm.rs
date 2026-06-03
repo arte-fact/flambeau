@@ -232,7 +232,6 @@ pub fn rmsnorm_f32_to_f16(
 /// post-attn / post-ffn paths. One pass over each row; `resid_out`
 /// may alias `resid_in` for in-place. Same launch shape as
 /// `rmsnorm_f32_to_f16`.
-#[allow(clippy::too_many_arguments)]
 pub fn rmsnorm_f32_to_f16_add_residual(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -269,7 +268,6 @@ pub fn rmsnorm_f32_to_f16_add_residual(
 /// F16 delta (caller has cast / AR-summed already), rmsnorms with an
 /// F16 weight, adds to `resid_in`, writes `resid_out`. `resid_out`
 /// may alias `resid_in` for in-place. Same launch shape.
-#[allow(clippy::too_many_arguments)]
 pub fn rmsnorm_f16_to_f16_add_residual(
     reg: &OpsRegistry,
     stream: &HipStream,

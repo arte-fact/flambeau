@@ -12,7 +12,6 @@
 //! mmvq_q4_0_gemma_shape -- --nocapture`.
 
 #![cfg(feature = "hip")]
-#![allow(clippy::undocumented_unsafe_blocks)]
 
 use flambeau_backend_hip::{device_count, HipDevice, HipModule, KernelArgs, LaunchCfg};
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};

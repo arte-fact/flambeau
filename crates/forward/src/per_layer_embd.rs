@@ -205,7 +205,6 @@ pub fn table_slice_ptr(table_base: DevicePtr, il: usize, pe: usize) -> DevicePtr
 /// 2. proj  = proj_matmul_f32[token, layer, :] * (1 / sqrt(hidden))
 /// 3. proj  = rmsnorm(proj, per_layer_proj_norm)
 /// 4. out[layer, token, :] = (table + proj) * (1 / sqrt(2))
-#[allow(clippy::too_many_arguments)]
 pub fn build_inp_per_layer_table_with_proj(
     tok_embd_rows_raw: &[u8],
     tok_embd_dtype: GgmlDType,
@@ -301,7 +300,6 @@ pub fn build_inp_per_layer_table_with_proj(
 /// `model_proj_raw` covers the full `[pe * n_layer, hidden]` matrix
 /// (BF16 or F32 on disk). `proj_norm_raw` is the `[pe]` F32 norm
 /// weight. Output layout: layer-major, `out[il * pe + i]`.
-#[allow(clippy::too_many_arguments)]
 pub fn build_inp_per_layer_table(
     tok_embd_row_raw: &[u8],
     tok_embd_dtype: GgmlDType,

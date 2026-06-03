@@ -167,7 +167,6 @@ pub fn row_bytes_for_dtype(dtype: GgmlDType, hidden: usize) -> Result<usize> {
 /// gather kernel that bypasses the host round-trip is a future
 /// optimisation candidate but has not been measured to be on any
 /// hot-path bottleneck.
-#[allow(clippy::too_many_arguments)]
 pub fn embed_token_host(
     device: &HipDevice,
     stream: &HipStream,

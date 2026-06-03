@@ -23,7 +23,6 @@ use super::primitives::{dtype_qmatmul_native, f32_to_q8_0_bytes, upload_bytes, w
 /// Pack the per-rank [Q | K | V] byte slab. `row_bytes` is the
 /// on-disk row stride (inner dim × bytes-per-element, accounting
 /// for quant block packing). Returns `(packed_bytes, per_rank_rows)`.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn pack_gdn_qkv_slab(
     name: &str,
     raw: &[u8],
@@ -76,7 +75,6 @@ pub(super) fn pack_gdn_qkv_slab(
 /// Upload a `[conv_channels, hidden]` GDN fused-QKV quant weight,
 /// sharded per `kq_replicated`. Native dtypes ride bytes-as-is;
 /// F16 / BF16 / F32 fall back to dequant → Q8_0 on host.
-#[allow(clippy::too_many_arguments)]
 pub fn upload_gdn_fused_qkv_quant(
     file: &GgufFile,
     device: &HipDevice,
@@ -162,7 +160,6 @@ pub fn upload_gdn_fused_qkv_quant(
 
 /// Upload a `[conv_channels, conv_kernel]` F32 GDN fused-QKV tensor
 /// (`ssm_conv1d`), sharded per `kq_replicated`.
-#[allow(clippy::too_many_arguments)]
 pub fn upload_gdn_fused_qkv_f32(
     file: &GgufFile,
     device: &HipDevice,

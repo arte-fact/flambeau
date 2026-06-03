@@ -81,7 +81,6 @@ pub trait TopologyHooks {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn ar_residual_rmsnorm_f16(
         &mut self,
         residual_inout: DevicePtr,
@@ -121,7 +120,6 @@ pub trait TopologyHooks {
     /// Collapses the `ar_sum_f32` + `rmsnorm_f32_to_f16_add_residual`
     /// 2-launch sequence into one. `resid_out` must NOT alias
     /// `resid_in`. Default bails; gate with the `supports_…` flag.
-    #[allow(clippy::too_many_arguments)]
     fn ar_postattn_residual_rmsnorm_f32_to_f16(
         &mut self,
         proj_local_f32: DevicePtr,

@@ -137,7 +137,6 @@ pub fn qmatmul_q5_1(
 /// Fused gate+up decode for Q4_0 dense FFN — one launch produces both
 /// projections, sharing the Q8_1 activation HBM read. Caller guarantees
 /// `n_rows_gate == n_rows_up == n` and `m == 1`.
-#[allow(clippy::too_many_arguments)]
 pub fn mmvq_q4_0_gate_up_t128_decode(
     gate_w: &Tensor<Q4_0>,
     up_w: &Tensor<Q4_0>,
@@ -170,7 +169,6 @@ pub fn mmvq_q4_0_gate_up_t128_decode(
 /// Fused K+V decode for Q4_0 attention — one launch produces both
 /// projections in F16 directly, sharing the Q8_1 activation HBM read.
 /// K and V must share shape `[n, k]`; caller guarantees `m == 1`.
-#[allow(clippy::too_many_arguments)]
 pub fn mmvq_q4_0_kv_decode_f16(
     k_w: &Tensor<Q4_0>,
     v_w: &Tensor<Q4_0>,
@@ -191,7 +189,6 @@ pub fn mmvq_q4_0_kv_decode_f16(
     ops.mmvq_q4_0_kv_f16dst(k_w.ptr, v_w.ptr, act_q8_1.ptr, k_out.ptr, v_out.ptr, n, k)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn qmatmul_dispatch(
     weight_ptr: flambeau_core::DevicePtr,
     act_q8_1_ptr: flambeau_core::DevicePtr,

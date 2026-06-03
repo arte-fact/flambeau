@@ -22,7 +22,6 @@ use crate::tensor::Tensor;
 const QK8_0: usize = 32;
 const Q8_0_BLOCK_BYTES: usize = 34;
 
-#[allow(clippy::too_many_arguments)]
 pub fn kv_append_f16_to_q8(
     k_src: &Tensor<F16>,
     v_src: &Tensor<F16>,

@@ -742,7 +742,6 @@ fn run_q4_0_moe_shape(
     ))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_q5_0_moe_shape(
     dev: &HipDevice,
     kernel: &HipKernel<'_>,
@@ -862,7 +861,6 @@ fn run_q5_0_moe_shape(
     ))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_q5_1_moe_shape(
     dev: &HipDevice,
     kernel: &HipKernel<'_>,

@@ -11,7 +11,6 @@ use crate::error::Result;
 use crate::tensor::Tensor;
 
 /// Q has 1 token, K/V cover `n_tokens_kv`. Output `[n_heads_q, head_dim]` F16.
-#[allow(clippy::too_many_arguments)]
 pub fn attn_decode_f16(
     q: &Tensor<F16>,
     k_cache: &Tensor<F16>,
@@ -77,7 +76,6 @@ pub fn attn_decode_f16(
 }
 
 #[cfg(test)]
-#[allow(clippy::too_many_arguments)]
 fn cpu_attn_decode(
     q: &[f32],       // [n_heads_q, head_dim]
     k_cache: &[f32], // [n_tokens, n_heads_kv, head_dim]

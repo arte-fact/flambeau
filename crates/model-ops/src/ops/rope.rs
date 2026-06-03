@@ -48,7 +48,6 @@ pub fn rope_f16(
 
 /// Dims `rotated_dims..head_dim` pass through. `rotated_dims` must
 /// be even and ≤ `head_dim`.
-#[allow(clippy::too_many_arguments)]
 pub fn rope_neox_partial_f16(
     x: &mut Tensor<F16>,
     positions: &Tensor<I32>,

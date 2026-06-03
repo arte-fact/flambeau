@@ -15,7 +15,6 @@ use crate::tensor::Tensor;
 
 /// `q`/`out` are `[n_q_tokens, n_heads_q, head_dim]` F16;
 /// `k_cache`/`v_cache` are `[n_k_tokens, n_heads_kv, head_dim]` F16.
-#[allow(clippy::too_many_arguments)]
 pub fn attn_prefill_f16(
     q: &Tensor<F16>,
     k_cache: &Tensor<F16>,
@@ -91,7 +90,6 @@ pub fn attn_prefill_f16(
 }
 
 #[cfg(test)]
-#[allow(clippy::too_many_arguments)]
 fn cpu_attn_prefill(
     q: &[f32],
     k_cache: &[f32],
@@ -152,7 +150,6 @@ mod tests {
     use flambeau_core::Device;
     use half::f16;
 
-    #[allow(clippy::too_many_arguments)]
     fn run_case(
         n_q_tokens: usize,
         n_heads_q: usize,

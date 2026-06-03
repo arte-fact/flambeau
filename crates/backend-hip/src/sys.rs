@@ -6,13 +6,6 @@
 //! The `hipError_t` enum has hundreds of values; we treat it as an i32 and
 //! rely on `hipGetErrorString` to format anything non-zero.
 
-#![allow(
-    non_camel_case_types,
-    non_snake_case,
-    reason = "hand-written FFI bindings mirror C HIP symbol names (hipError_t, \
-              hipDeviceSynchronize, …). Renaming breaks one-to-one correspondence \
-              with the upstream header and complicates diffs against ROCm releases."
-)]
 
 use std::os::raw::{c_char, c_int, c_uint, c_void};
 
@@ -276,10 +269,6 @@ pub type hipEvent_t = *mut c_void;
 
 // Flag passed to hipEventCreateWithFlags for a latency-optimised event
 // (no timing — we only use events for dependency tracking, not profiling).
-#[allow(
-    non_upper_case_globals,
-    reason = "verbatim FFI binding name from HIP runtime headers"
-)]
 pub const hipEventDisableTiming: c_uint = 0x2;
 
 /// `hipHostMalloc` flag bits from `hip_runtime_api.h`. Use `Portable` to

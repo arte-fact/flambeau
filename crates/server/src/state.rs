@@ -107,7 +107,6 @@ impl SamplingParams {
     ///   2048 tokens regardless of the request); earlier 512 default
     ///   was too tight for code-generation requests via curl/clients
     ///   that don't pass `max_tokens` explicitly.
-    #[allow(clippy::too_many_arguments)]
     pub fn from_parts(
         temperature: Option<f32>,
         top_p: Option<f32>,

@@ -820,7 +820,6 @@ pub fn indexed_moe_mmvq_q4_0(
 /// the 5th-bit DP4A from `mmvq_q5_0`: per block, decode adds
 /// `16 · sumi_bit · d_x · d_y` and subtracts `16 · d_x · s_y` for the
 /// (q5 − 16) offset.
-#[allow(clippy::too_many_arguments)]
 pub fn indexed_moe_mmvq_q5_0(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -863,7 +862,6 @@ pub fn indexed_moe_mmvq_q5_0(
 
 /// Q5_1 indexed-MoE MMVQ. Q5_0 indexed structure with the Q4_1-style
 /// `m·s_y` correction (Q5_1 is affine: y = d·q5 + m).
-#[allow(clippy::too_many_arguments)]
 pub fn indexed_moe_mmvq_q5_1(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -2427,7 +2425,6 @@ pub fn indexed_moe_mmq_q4_0_down_tile8(
 
 /// Q5_0 gate+up tile8 MoE MMQ. Q4_0 tile8 structure + the 5th-bit
 /// ladder: per-block dot is `d_x·(d_y·(sumi_nib + 16·sumi_bit) - 16·s_y)`.
-#[allow(clippy::too_many_arguments)]
 pub fn indexed_moe_mmq_q5_0_gate_up_tile8(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -2529,7 +2526,6 @@ pub fn indexed_moe_mmq_q5_0_down_tile8(
 
 /// Q5_1 gate+up tile8 MoE MMQ. Q5_0 tile8 structure with Q4_1-style
 /// per-block reduction `d_x·d_y·(sumi_nib + 16·sumi_bit) + m_x·s_y`.
-#[allow(clippy::too_many_arguments)]
 pub fn indexed_moe_mmq_q5_1_gate_up_tile8(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -2682,7 +2678,6 @@ pub fn indexed_moe_mmq_q4_1_down_tile8(
 /// Q4_1 gate+up tile8 MoE MMQ. Q4_0 gate+up structure with Q4_1's affine
 /// reduction `d_x · d_y · sumi + m_x · s_y` per block, mirror of the
 /// `indexed_moe_mmq_q4_1_down_tile8` sibling.
-#[allow(clippy::too_many_arguments)]
 pub fn indexed_moe_mmq_q4_1_gate_up_tile8(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -3021,7 +3016,6 @@ pub fn indexed_moe_mmq_q5_k_down_tile8(
 /// Q5_K gate+up tile8 MoE MMQ. Q5_K down tile8 decode (per-element ql+qh
 /// 5-bit, per-sub-block (sc, m) → d·sumi_d·sc − dmin·sumi_y·m) fused for
 /// two output projections.
-#[allow(clippy::too_many_arguments)]
 pub fn indexed_moe_mmq_q5_k_gate_up_tile8(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -3077,7 +3071,6 @@ pub fn indexed_moe_mmq_q5_k_gate_up_tile8(
 /// Q6_K gate+up tile8 MoE MMQ. Q6_K down tile8 decode (ql+qh 6-bit lookup,
 /// per-16-element scale, `(raw − 32)·y = raw·y − 32·Σy` bias-correction)
 /// fused for two output projections.
-#[allow(clippy::too_many_arguments)]
 pub fn indexed_moe_mmq_q6_k_gate_up_tile8(
     reg: &OpsRegistry,
     stream: &HipStream,

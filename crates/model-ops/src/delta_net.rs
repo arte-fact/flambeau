@@ -293,7 +293,6 @@ pub struct DeltaNetLayer {
 }
 
 impl DeltaNetLayer {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         attn_qkv: WeightHandle,
         attn_gate: WeightHandle,
@@ -548,7 +547,6 @@ impl DeltaNetLayer {
     /// Single-token decode through the GDN block. Mutates `state`
     /// (the recurrent state) and `conv_history` (the conv1d history)
     /// in-place. Writes pre-residual output to `delta_out`.
-    #[allow(clippy::too_many_arguments)]
     pub fn forward_decode<O: Ops>(
         &self,
         ops: &O,
@@ -578,7 +576,6 @@ impl DeltaNetLayer {
     /// ssm_out mmvq and the F16 cast. Under TP the v2 composite
     /// supplies a callback that AR-sums across ranks; under non-TP
     /// topologies pass `None` (equivalent to `forward_decode`).
-    #[allow(clippy::too_many_arguments)]
     pub fn forward_decode_with_ar_hook<O: Ops>(
         &self,
         ops: &O,
@@ -865,7 +862,6 @@ impl DeltaNetLayer {
     /// Activation inputs/outputs `x_in_base` and `delta_out_base` are
     /// slot-major `[n_slots, hidden]` F16. The AR callback fires once
     /// per slot on its `ssm_out_f32[slot]` partial.
-    #[allow(clippy::too_many_arguments)]
     pub fn forward_decode_with_ar_hook_batched_slots<O: Ops>(
         &self,
         ops: &O,
@@ -1236,7 +1232,6 @@ impl DeltaNetLayer {
     /// (F16 `[L, hidden]`). The recurrent state-step kernel is
     /// L-aware and keeps the per-head `[S_v, S_v]` state register-
     /// resident across the whole L recurrence in a single launch.
-    #[allow(clippy::too_many_arguments)]
     pub fn forward_prefill<O: Ops>(
         &self,
         ops: &O,
@@ -1268,7 +1263,6 @@ impl DeltaNetLayer {
     /// Like `forward_prefill` but with an AR hook on the `ssm_out_f32`
     /// partial buffer between the row-parallel ssm_out qmatmul and the
     /// F32→F16 cast. Mirrors [`Self::forward_decode_with_ar_hook`].
-    #[allow(clippy::too_many_arguments)]
     pub fn forward_prefill_with_ar_hook<O: Ops>(
         &self,
         ops: &O,

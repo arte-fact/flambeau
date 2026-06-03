@@ -76,7 +76,6 @@ impl TopologyHooks for TpHooks {
         self.n_ranks == 2 && self.bar.is_some()
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn ar_residual_rmsnorm_f16(
         &mut self,
         residual_inout: DevicePtr,
@@ -127,7 +126,6 @@ impl TopologyHooks for TpHooks {
         matches!(self.n_ranks, 2 | 4) && self.bar.is_some()
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn ar_postattn_residual_rmsnorm_f32_to_f16(
         &mut self,
         proj_local_f32: DevicePtr,
@@ -217,7 +215,6 @@ impl TopologyHooks for HybridHooks {
         self.tp_size == 2 && self.bar.is_some()
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn ar_residual_rmsnorm_f16(
         &mut self,
         residual_inout: DevicePtr,
@@ -268,7 +265,6 @@ impl TopologyHooks for HybridHooks {
         matches!(self.tp_size, 2 | 4) && self.bar.is_some()
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn ar_postattn_residual_rmsnorm_f32_to_f16(
         &mut self,
         proj_local_f32: DevicePtr,
@@ -736,7 +732,6 @@ impl<'a> ForwardEngine<'a, TpHooks, SoloStage> {
 }
 
 impl<'a> ForwardEngine<'a, NoopHooks, PpStage<'a>> {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         device: &'a HipDevice,
         stream: &'a HipStream,
@@ -762,7 +757,6 @@ impl<'a> ForwardEngine<'a, NoopHooks, PpStage<'a>> {
 }
 
 impl<'a> ForwardEngine<'a, HybridHooks, HybStage<'a>> {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         device: &'a HipDevice,
         stream: &'a HipStream,

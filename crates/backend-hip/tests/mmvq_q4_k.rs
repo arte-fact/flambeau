@@ -238,10 +238,6 @@ fn max_rel_err(got: &[f32], reference: &[f32]) -> f32 {
         .fold(0.0f32, f32::max)
 }
 
-#[allow(
-    dead_code,
-    reason = "printf-style cert debug helper; called ad-hoc when investigating correctness regressions. `#[allow]` because the whole fn body is `#[cfg(feature = \"hip\")]` gated"
-)]
 fn debug_worst(got: &[f32], reference: &[f32]) {
     let mut worst = (0usize, 0.0f32);
     for (i, (g, r)) in got.iter().zip(reference).enumerate() {

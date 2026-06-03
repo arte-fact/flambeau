@@ -70,7 +70,6 @@ pub fn upload_router_f16(
 /// Col-shard along GGUF dim-0 (output rows). Native dtypes ride a
 /// contiguous byte slice per rank; F16 / BF16 / F32 fall back to
 /// dequant → row-slice → Q8_0.
-#[allow(clippy::too_many_arguments)]
 pub fn upload_col_sharded_quant(
     file: &GgufFile,
     device: &HipDevice,
@@ -131,7 +130,6 @@ pub fn upload_col_sharded_quant(
 
 /// Row-shard along GGUF dim-1 (input cols). Same dequant-fallback
 /// policy as `upload_col_sharded_quant`.
-#[allow(clippy::too_many_arguments)]
 pub fn upload_row_sharded_quant(
     file: &GgufFile,
     device: &HipDevice,
