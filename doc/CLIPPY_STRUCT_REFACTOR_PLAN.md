@@ -132,7 +132,7 @@ Next-session restart plan:
 | total warnings | 478 | 478 | 456 | 447 | 437 | 434 | 413 | 414 | 411 | 378 | 344 |
 | `too_many_arguments` | 315 | 315 | 291 | 282 | 272 | 269 | 234 | 230 | 224 | 191 | 157 |
 | errors | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
-| cumulative LOC delta | 0 | +232 | +10 | +12 | −136 | −162 | −46 | −93 | −157 | −509 | tbd |
+| cumulative LOC delta | 0 | +232 | +10 | +12 | −136 | −162 | −46 | −93 | −157 | −509 | −774 |
 
 LOC deltas per commit (insertions − deletions, from `git show --stat`):
 
@@ -152,7 +152,7 @@ LOC deltas per commit (insertions − deletions, from `git show --stat`):
 | P2f2 | `b46878f` | 82 | 129 | −47 | 4 |
 | P2f3 | `bd95e29` | 101 | 165 | −64 | 6 |
 | P2f4 | `9c269ff` | 382 | 734 | −352 | 33 |
-| P2f5 | (pending) | tbd | tbd | tbd | 34 |
+| P2f5 | `5e99a56` | 339 | 604 | −265 | 34 |
 
 ## Non-goals
 
