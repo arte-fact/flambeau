@@ -480,6 +480,20 @@ impl MoeExperts {
         let top_k = self.top_k;
         let hidden = self.hidden;
         let dtype = self.ffn_gate_exps.dtype;
+        macro_rules! iq_gate_up_split {
+            ($ops:ident, $self:ident, $scratch:ident, $op:ident, $tag:literal,
+             $nb:expr, $inter:ident, $n_tokens:ident, $top_k:ident) => {{
+                let nb = $nb;
+                $ops.$op(
+                    $self.ffn_gate_exps.ptr, $scratch.x_q8_1, $scratch.expert_ids,
+                    $scratch.gate_out_f32, $inter, $n_tokens, $top_k, nb,
+                ).context(concat!("indexed_moe gate ", $tag, " split"))?;
+                $ops.$op(
+                    $self.ffn_up_exps.ptr, $scratch.x_q8_1, $scratch.expert_ids,
+                    $scratch.up_out_f32, $inter, $n_tokens, $top_k, nb,
+                ).context(concat!("indexed_moe up ", $tag, " split"))
+            }};
+        }
         match dtype {
             QDtype::Q4_K => {
                 let nb = hidden / QK_K;
@@ -604,159 +618,15 @@ impl MoeExperts {
                 )
                 .context("indexed_moe up q6_k split")
             }
-            QDtype::IQ4_XS => {
-                let nb = hidden / QK_K;
-                ops.indexed_moe_mmvq_iq4_xs(
-                    self.ffn_gate_exps.ptr,
-                    scratch.x_q8_1,
-                    scratch.expert_ids,
-                    scratch.gate_out_f32,
-                    inter, n_tokens, top_k, nb,
-                ).context("indexed_moe gate iq4_xs split")?;
-                ops.indexed_moe_mmvq_iq4_xs(
-                    self.ffn_up_exps.ptr,
-                    scratch.x_q8_1,
-                    scratch.expert_ids,
-                    scratch.up_out_f32,
-                    inter, n_tokens, top_k, nb,
-                ).context("indexed_moe up iq4_xs split")
-            }
-            QDtype::IQ4_NL => {
-                let nb = hidden / 32;
-                ops.indexed_moe_mmvq_iq4_nl(
-                    self.ffn_gate_exps.ptr,
-                    scratch.x_q8_1,
-                    scratch.expert_ids,
-                    scratch.gate_out_f32,
-                    inter, n_tokens, top_k, nb,
-                ).context("indexed_moe gate iq4_nl split")?;
-                ops.indexed_moe_mmvq_iq4_nl(
-                    self.ffn_up_exps.ptr,
-                    scratch.x_q8_1,
-                    scratch.expert_ids,
-                    scratch.up_out_f32,
-                    inter, n_tokens, top_k, nb,
-                ).context("indexed_moe up iq4_nl split")
-            }
-            QDtype::IQ3_XXS => {
-                let nb = hidden / QK_K;
-                ops.indexed_moe_mmvq_iq3_xxs(
-                    self.ffn_gate_exps.ptr,
-                    scratch.x_q8_1,
-                    scratch.expert_ids,
-                    scratch.gate_out_f32,
-                    inter, n_tokens, top_k, nb,
-                ).context("indexed_moe gate iq3_xxs split")?;
-                ops.indexed_moe_mmvq_iq3_xxs(
-                    self.ffn_up_exps.ptr,
-                    scratch.x_q8_1,
-                    scratch.expert_ids,
-                    scratch.up_out_f32,
-                    inter, n_tokens, top_k, nb,
-                ).context("indexed_moe up iq3_xxs split")
-            }
-            QDtype::IQ3_S => {
-                let nb = hidden / QK_K;
-                ops.indexed_moe_mmvq_iq3_s(
-                    self.ffn_gate_exps.ptr,
-                    scratch.x_q8_1,
-                    scratch.expert_ids,
-                    scratch.gate_out_f32,
-                    inter, n_tokens, top_k, nb,
-                ).context("indexed_moe gate iq3_s split")?;
-                ops.indexed_moe_mmvq_iq3_s(
-                    self.ffn_up_exps.ptr,
-                    scratch.x_q8_1,
-                    scratch.expert_ids,
-                    scratch.up_out_f32,
-                    inter, n_tokens, top_k, nb,
-                ).context("indexed_moe up iq3_s split")
-            }
-            QDtype::IQ2_XXS => {
-                let nb = hidden / QK_K;
-                ops.indexed_moe_mmvq_iq2_xxs(
-                    self.ffn_gate_exps.ptr,
-                    scratch.x_q8_1,
-                    scratch.expert_ids,
-                    scratch.gate_out_f32,
-                    inter, n_tokens, top_k, nb,
-                ).context("indexed_moe gate iq2_xxs split")?;
-                ops.indexed_moe_mmvq_iq2_xxs(
-                    self.ffn_up_exps.ptr,
-                    scratch.x_q8_1,
-                    scratch.expert_ids,
-                    scratch.up_out_f32,
-                    inter, n_tokens, top_k, nb,
-                ).context("indexed_moe up iq2_xxs split")
-            }
-            QDtype::IQ2_XS => {
-                let nb = hidden / QK_K;
-                ops.indexed_moe_mmvq_iq2_xs(
-                    self.ffn_gate_exps.ptr,
-                    scratch.x_q8_1,
-                    scratch.expert_ids,
-                    scratch.gate_out_f32,
-                    inter, n_tokens, top_k, nb,
-                ).context("indexed_moe gate iq2_xs split")?;
-                ops.indexed_moe_mmvq_iq2_xs(
-                    self.ffn_up_exps.ptr,
-                    scratch.x_q8_1,
-                    scratch.expert_ids,
-                    scratch.up_out_f32,
-                    inter, n_tokens, top_k, nb,
-                ).context("indexed_moe up iq2_xs split")
-            }
-            QDtype::IQ2_S => {
-                let nb = hidden / QK_K;
-                ops.indexed_moe_mmvq_iq2_s(
-                    self.ffn_gate_exps.ptr,
-                    scratch.x_q8_1,
-                    scratch.expert_ids,
-                    scratch.gate_out_f32,
-                    inter, n_tokens, top_k, nb,
-                ).context("indexed_moe gate iq2_s split")?;
-                ops.indexed_moe_mmvq_iq2_s(
-                    self.ffn_up_exps.ptr,
-                    scratch.x_q8_1,
-                    scratch.expert_ids,
-                    scratch.up_out_f32,
-                    inter, n_tokens, top_k, nb,
-                ).context("indexed_moe up iq2_s split")
-            }
-            QDtype::IQ1_S => {
-                let nb = hidden / QK_K;
-                ops.indexed_moe_mmvq_iq1_s(
-                    self.ffn_gate_exps.ptr,
-                    scratch.x_q8_1,
-                    scratch.expert_ids,
-                    scratch.gate_out_f32,
-                    inter, n_tokens, top_k, nb,
-                ).context("indexed_moe gate iq1_s split")?;
-                ops.indexed_moe_mmvq_iq1_s(
-                    self.ffn_up_exps.ptr,
-                    scratch.x_q8_1,
-                    scratch.expert_ids,
-                    scratch.up_out_f32,
-                    inter, n_tokens, top_k, nb,
-                ).context("indexed_moe up iq1_s split")
-            }
-            QDtype::IQ1_M => {
-                let nb = hidden / QK_K;
-                ops.indexed_moe_mmvq_iq1_m(
-                    self.ffn_gate_exps.ptr,
-                    scratch.x_q8_1,
-                    scratch.expert_ids,
-                    scratch.gate_out_f32,
-                    inter, n_tokens, top_k, nb,
-                ).context("indexed_moe gate iq1_m split")?;
-                ops.indexed_moe_mmvq_iq1_m(
-                    self.ffn_up_exps.ptr,
-                    scratch.x_q8_1,
-                    scratch.expert_ids,
-                    scratch.up_out_f32,
-                    inter, n_tokens, top_k, nb,
-                ).context("indexed_moe up iq1_m split")
-            }
+            QDtype::IQ4_XS  => iq_gate_up_split!(ops, self, scratch, indexed_moe_mmvq_iq4_xs,  "iq4_xs",  hidden / QK_K, inter, n_tokens, top_k),
+            QDtype::IQ4_NL  => iq_gate_up_split!(ops, self, scratch, indexed_moe_mmvq_iq4_nl,  "iq4_nl",  hidden / 32,   inter, n_tokens, top_k),
+            QDtype::IQ3_XXS => iq_gate_up_split!(ops, self, scratch, indexed_moe_mmvq_iq3_xxs, "iq3_xxs", hidden / QK_K, inter, n_tokens, top_k),
+            QDtype::IQ3_S   => iq_gate_up_split!(ops, self, scratch, indexed_moe_mmvq_iq3_s,   "iq3_s",   hidden / QK_K, inter, n_tokens, top_k),
+            QDtype::IQ2_XXS => iq_gate_up_split!(ops, self, scratch, indexed_moe_mmvq_iq2_xxs, "iq2_xxs", hidden / QK_K, inter, n_tokens, top_k),
+            QDtype::IQ2_XS  => iq_gate_up_split!(ops, self, scratch, indexed_moe_mmvq_iq2_xs,  "iq2_xs",  hidden / QK_K, inter, n_tokens, top_k),
+            QDtype::IQ2_S   => iq_gate_up_split!(ops, self, scratch, indexed_moe_mmvq_iq2_s,   "iq2_s",   hidden / QK_K, inter, n_tokens, top_k),
+            QDtype::IQ1_S   => iq_gate_up_split!(ops, self, scratch, indexed_moe_mmvq_iq1_s,   "iq1_s",   hidden / QK_K, inter, n_tokens, top_k),
+            QDtype::IQ1_M   => iq_gate_up_split!(ops, self, scratch, indexed_moe_mmvq_iq1_m,   "iq1_m",   hidden / QK_K, inter, n_tokens, top_k),
             other => {
                 bail!("MoeExperts gate dtype {other:?} not supported (expected Q4_K / Q3_K / Q5_K / Q6_K / Q8_0 / Q4_0 / IQ family)")
             }
@@ -769,6 +639,17 @@ impl MoeExperts {
         let n_tokens_eff = self.top_k;
         let top_k_inner = 1;
         let dtype = self.ffn_down_exps.dtype;
+        macro_rules! iq_down {
+            ($ops:ident, $self:ident, $scratch:ident, $op:ident, $tag:literal,
+             $nb:expr, $hidden:ident, $n_tokens_eff:ident, $top_k_inner:ident) => {{
+                let nb = $nb;
+                $ops.$op(
+                    $self.ffn_down_exps.ptr, $scratch.activated_q8_1,
+                    $scratch.expert_ids, $scratch.down_f32,
+                    $hidden, $n_tokens_eff, $top_k_inner, nb,
+                ).context(concat!("indexed_moe down ", $tag))
+            }};
+        }
         match dtype {
             QDtype::Q4_K => {
                 let nb = inter / QK_K;
@@ -868,78 +749,15 @@ impl MoeExperts {
                 )
                 .context("indexed_moe down q4_1")
             }
-            QDtype::IQ4_XS => {
-                let nb = inter / QK_K;
-                ops.indexed_moe_mmvq_iq4_xs(
-                    self.ffn_down_exps.ptr, scratch.activated_q8_1,
-                    scratch.expert_ids, scratch.down_f32,
-                    hidden, n_tokens_eff, top_k_inner, nb,
-                ).context("indexed_moe down iq4_xs")
-            }
-            QDtype::IQ4_NL => {
-                let nb = inter / 32;
-                ops.indexed_moe_mmvq_iq4_nl(
-                    self.ffn_down_exps.ptr, scratch.activated_q8_1,
-                    scratch.expert_ids, scratch.down_f32,
-                    hidden, n_tokens_eff, top_k_inner, nb,
-                ).context("indexed_moe down iq4_nl")
-            }
-            QDtype::IQ3_XXS => {
-                let nb = inter / QK_K;
-                ops.indexed_moe_mmvq_iq3_xxs(
-                    self.ffn_down_exps.ptr, scratch.activated_q8_1,
-                    scratch.expert_ids, scratch.down_f32,
-                    hidden, n_tokens_eff, top_k_inner, nb,
-                ).context("indexed_moe down iq3_xxs")
-            }
-            QDtype::IQ3_S => {
-                let nb = inter / QK_K;
-                ops.indexed_moe_mmvq_iq3_s(
-                    self.ffn_down_exps.ptr, scratch.activated_q8_1,
-                    scratch.expert_ids, scratch.down_f32,
-                    hidden, n_tokens_eff, top_k_inner, nb,
-                ).context("indexed_moe down iq3_s")
-            }
-            QDtype::IQ2_XXS => {
-                let nb = inter / QK_K;
-                ops.indexed_moe_mmvq_iq2_xxs(
-                    self.ffn_down_exps.ptr, scratch.activated_q8_1,
-                    scratch.expert_ids, scratch.down_f32,
-                    hidden, n_tokens_eff, top_k_inner, nb,
-                ).context("indexed_moe down iq2_xxs")
-            }
-            QDtype::IQ2_XS => {
-                let nb = inter / QK_K;
-                ops.indexed_moe_mmvq_iq2_xs(
-                    self.ffn_down_exps.ptr, scratch.activated_q8_1,
-                    scratch.expert_ids, scratch.down_f32,
-                    hidden, n_tokens_eff, top_k_inner, nb,
-                ).context("indexed_moe down iq2_xs")
-            }
-            QDtype::IQ2_S => {
-                let nb = inter / QK_K;
-                ops.indexed_moe_mmvq_iq2_s(
-                    self.ffn_down_exps.ptr, scratch.activated_q8_1,
-                    scratch.expert_ids, scratch.down_f32,
-                    hidden, n_tokens_eff, top_k_inner, nb,
-                ).context("indexed_moe down iq2_s")
-            }
-            QDtype::IQ1_S => {
-                let nb = inter / QK_K;
-                ops.indexed_moe_mmvq_iq1_s(
-                    self.ffn_down_exps.ptr, scratch.activated_q8_1,
-                    scratch.expert_ids, scratch.down_f32,
-                    hidden, n_tokens_eff, top_k_inner, nb,
-                ).context("indexed_moe down iq1_s")
-            }
-            QDtype::IQ1_M => {
-                let nb = inter / QK_K;
-                ops.indexed_moe_mmvq_iq1_m(
-                    self.ffn_down_exps.ptr, scratch.activated_q8_1,
-                    scratch.expert_ids, scratch.down_f32,
-                    hidden, n_tokens_eff, top_k_inner, nb,
-                ).context("indexed_moe down iq1_m")
-            }
+            QDtype::IQ4_XS  => iq_down!(ops, self, scratch, indexed_moe_mmvq_iq4_xs,  "iq4_xs",  inter / QK_K, hidden, n_tokens_eff, top_k_inner),
+            QDtype::IQ4_NL  => iq_down!(ops, self, scratch, indexed_moe_mmvq_iq4_nl,  "iq4_nl",  inter / 32,   hidden, n_tokens_eff, top_k_inner),
+            QDtype::IQ3_XXS => iq_down!(ops, self, scratch, indexed_moe_mmvq_iq3_xxs, "iq3_xxs", inter / QK_K, hidden, n_tokens_eff, top_k_inner),
+            QDtype::IQ3_S   => iq_down!(ops, self, scratch, indexed_moe_mmvq_iq3_s,   "iq3_s",   inter / QK_K, hidden, n_tokens_eff, top_k_inner),
+            QDtype::IQ2_XXS => iq_down!(ops, self, scratch, indexed_moe_mmvq_iq2_xxs, "iq2_xxs", inter / QK_K, hidden, n_tokens_eff, top_k_inner),
+            QDtype::IQ2_XS  => iq_down!(ops, self, scratch, indexed_moe_mmvq_iq2_xs,  "iq2_xs",  inter / QK_K, hidden, n_tokens_eff, top_k_inner),
+            QDtype::IQ2_S   => iq_down!(ops, self, scratch, indexed_moe_mmvq_iq2_s,   "iq2_s",   inter / QK_K, hidden, n_tokens_eff, top_k_inner),
+            QDtype::IQ1_S   => iq_down!(ops, self, scratch, indexed_moe_mmvq_iq1_s,   "iq1_s",   inter / QK_K, hidden, n_tokens_eff, top_k_inner),
+            QDtype::IQ1_M   => iq_down!(ops, self, scratch, indexed_moe_mmvq_iq1_m,   "iq1_m",   inter / QK_K, hidden, n_tokens_eff, top_k_inner),
             other => bail!(
                 "MoeExperts down dtype {other:?} not supported (expected Q4_K / Q5_K / Q6_K / Q8_0 / Q4_0 / Q4_1 / IQ family)"
             ),
