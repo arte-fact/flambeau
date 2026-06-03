@@ -20,9 +20,7 @@ pub fn qmatmul_q8_0(
     act_q8_1: &Tensor<Q8_1>,
     act_q8_1_mmq: &Tensor<Q8_1>,
     output: &mut Tensor<F32>,
-    m: usize,
-    k: usize,
-    n: usize,
+    shape: flambeau_ops::MatmulShape,
     ops: &HipOps<'_>,
 ) -> Result<()> {
     qmatmul_dispatch(
@@ -30,9 +28,7 @@ pub fn qmatmul_q8_0(
         act_q8_1.ptr,
         act_q8_1_mmq.ptr,
         output,
-        m,
-        k,
-        n,
+        shape,
         QDtype::Q8_0,
         ops,
     )
@@ -44,9 +40,7 @@ pub fn qmatmul_q4_0(
     act_q8_1: &Tensor<Q8_1>,
     act_q8_1_mmq: &Tensor<Q8_1>,
     output: &mut Tensor<F32>,
-    m: usize,
-    k: usize,
-    n: usize,
+    shape: flambeau_ops::MatmulShape,
     ops: &HipOps<'_>,
 ) -> Result<()> {
     qmatmul_dispatch(
@@ -54,9 +48,7 @@ pub fn qmatmul_q4_0(
         act_q8_1.ptr,
         act_q8_1_mmq.ptr,
         output,
-        m,
-        k,
-        n,
+        shape,
         QDtype::Q4_0,
         ops,
     )
@@ -68,9 +60,7 @@ pub fn qmatmul_q4_1(
     act_q8_1: &Tensor<Q8_1>,
     act_q8_1_mmq: &Tensor<Q8_1>,
     output: &mut Tensor<F32>,
-    m: usize,
-    k: usize,
-    n: usize,
+    shape: flambeau_ops::MatmulShape,
     ops: &HipOps<'_>,
 ) -> Result<()> {
     qmatmul_dispatch(
@@ -78,9 +68,7 @@ pub fn qmatmul_q4_1(
         act_q8_1.ptr,
         act_q8_1_mmq.ptr,
         output,
-        m,
-        k,
-        n,
+        shape,
         QDtype::Q4_1,
         ops,
     )
@@ -92,9 +80,7 @@ pub fn qmatmul_q5_0(
     act_q8_1: &Tensor<Q8_1>,
     act_q8_1_mmq: &Tensor<Q8_1>,
     output: &mut Tensor<F32>,
-    m: usize,
-    k: usize,
-    n: usize,
+    shape: flambeau_ops::MatmulShape,
     ops: &HipOps<'_>,
 ) -> Result<()> {
     qmatmul_dispatch(
@@ -102,9 +88,7 @@ pub fn qmatmul_q5_0(
         act_q8_1.ptr,
         act_q8_1_mmq.ptr,
         output,
-        m,
-        k,
-        n,
+        shape,
         QDtype::Q5_0,
         ops,
     )
@@ -116,9 +100,7 @@ pub fn qmatmul_q5_1(
     act_q8_1: &Tensor<Q8_1>,
     act_q8_1_mmq: &Tensor<Q8_1>,
     output: &mut Tensor<F32>,
-    m: usize,
-    k: usize,
-    n: usize,
+    shape: flambeau_ops::MatmulShape,
     ops: &HipOps<'_>,
 ) -> Result<()> {
     qmatmul_dispatch(
@@ -126,9 +108,7 @@ pub fn qmatmul_q5_1(
         act_q8_1.ptr,
         act_q8_1_mmq.ptr,
         output,
-        m,
-        k,
-        n,
+        shape,
         QDtype::Q5_1,
         ops,
     )
@@ -204,17 +184,17 @@ fn qmatmul_dispatch(
     act_q8_1_ptr: flambeau_core::DevicePtr,
     act_q8_1_mmq_ptr: flambeau_core::DevicePtr,
     output: &mut Tensor<F32>,
-    m: usize,
-    k: usize,
-    n: usize,
+    shape: flambeau_ops::MatmulShape,
     dtype: QDtype,
     ops: &HipOps<'_>,
 ) -> Result<()> {
-    if output.n_elems < m * n {
+    if output.n_elems < shape.m * shape.n {
         bail!(
-            "qmatmul ({dtype:?}): output has {} F32 elems, need >= {m}*{n}={}",
+            "qmatmul ({dtype:?}): output has {} F32 elems, need >= {}*{}={}",
             output.n_elems,
-            m * n
+            shape.m,
+            shape.n,
+            shape.m * shape.n
         );
     }
     ops.qmatmul(
@@ -224,7 +204,7 @@ fn qmatmul_dispatch(
             act_q8_1_mmq: act_q8_1_mmq_ptr,
             dst: output.ptr,
         },
-        flambeau_ops::MatmulShape { m, k, n },
+        shape,
         dtype,
     )
 }
@@ -299,9 +279,7 @@ mod tests {
             &act_q8_1_t,
             &act_mmq_null,
             &mut out_t,
-            M,
-            K,
-            N,
+            flambeau_ops::MatmulShape { m: M, k: K, n: N },
             &ops,
         )
         .expect("qmatmul_q8_0");
