@@ -44,8 +44,8 @@ pub use sig::{
     KvAppendPagedSlotsShape, KvAppendVUnitShape, MoeCombineBuffers,
     MoeCombineNoResidualBuffers, MoeCombineShape, MoeCombineTwoResidualsBuffers,
     MoeMmvqSortedBuffers, MoeSortBuffers, MoeSortPaddedBuffers, MoeSortPaddedShape, MoeSortShape,
-    NormBuffers, NormFusedAddBuffers, NormResidualBuffers, NormShape, OpCtx, QmatmulBuffers,
-    RopeBuffers, RopeFusedBuffers, RopePartialShape, RopeShape,
+    MmvqKvF16Buffers, NormBuffers, NormFusedAddBuffers, NormResidualBuffers, NormShape, OpCtx,
+    QmatmulBuffers, RopeBuffers, RopeFusedBuffers, RopePartialShape, RopeShape,
 };
 
 #[cfg(feature = "hip")]

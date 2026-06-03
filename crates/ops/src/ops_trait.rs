@@ -92,11 +92,7 @@ pub trait Ops {
 
     fn mmvq_q4_0_kv_f16dst(
         &self,
-        k_w: DevicePtr,
-        v_w: DevicePtr,
-        y_q8_1: DevicePtr,
-        k_out_f16: DevicePtr,
-        v_out_f16: DevicePtr,
+        buf: crate::MmvqKvF16Buffers,
         n_rows_kv: usize,
         k: usize,
     ) -> Result<()>;
@@ -127,11 +123,8 @@ pub trait Ops {
 
     fn mmvq(
         &self,
-        weights: DevicePtr,
-        act_q8_1: DevicePtr,
-        dst: DevicePtr,
-        n_rows: usize,
-        k: usize,
+        buf: crate::MmvqBuffers,
+        shape: crate::MmvqShape,
         dtype_weight: QDtype,
     ) -> Result<()>;
 
@@ -142,22 +135,15 @@ pub trait Ops {
     /// / Q8_0 today; other dtypes bail. #120.
     fn mmvq_f16_direct(
         &self,
-        weights: DevicePtr,
-        act_q8_1: DevicePtr,
-        dst_f16: DevicePtr,
-        n_rows: usize,
-        k: usize,
+        buf: crate::MmvqBuffers,
+        shape: crate::MmvqShape,
         dtype_weight: QDtype,
     ) -> Result<()>;
 
     fn mmq(
         &self,
-        weights: DevicePtr,
-        act_q8_1: DevicePtr,
-        dst: DevicePtr,
-        m: usize,
-        k: usize,
-        n: usize,
+        buf: crate::MmvqBuffers,
+        shape: crate::MatmulShape,
         dtype_weight: QDtype,
     ) -> Result<()>;
 

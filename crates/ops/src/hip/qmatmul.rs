@@ -670,16 +670,19 @@ pub fn mmvq_q4_0_warpcoop64(
 /// launches into a single launch — net 3 launches saved per full-attn
 /// layer per rank.
 pub fn mmvq_q4_0_kv_f16dst(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    k_w: DevicePtr,
-    v_w: DevicePtr,
-    y_q8_1: DevicePtr,
-    k_out_f16: DevicePtr,
-    v_out_f16: DevicePtr,
+    ctx: crate::OpCtx<'_>,
+    buf: crate::MmvqKvF16Buffers,
     n_rows_kv: usize,
     k: usize,
 ) -> Result<()> {
+    let crate::OpCtx { reg, stream } = ctx;
+    let crate::MmvqKvF16Buffers {
+        k_w,
+        v_w,
+        y_q8_1,
+        k_out_f16,
+        v_out_f16,
+    } = buf;
     let module = reg.expect_module("mmvq_q4_0_kv_f16dst_dp4a")?;
     let kernel = module.kernel("flambeau_mmvq_q4_0_kv_f16dst_dp4a_q8_1")?;
     let n_rows_i = n_rows_kv as i32;
@@ -1031,15 +1034,18 @@ pub fn mmvq_q5_k_gate_up(
 }
 
 pub fn mmvq(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    weights: DevicePtr,
-    act_q8_1: DevicePtr,
-    dst: DevicePtr,
-    n_rows: usize,
-    k: usize,
+    ctx: crate::OpCtx<'_>,
+    buf: crate::MmvqBuffers,
+    shape: crate::MmvqShape,
     dtype_weight: QDtype,
 ) -> Result<()> {
+    let crate::OpCtx { reg, stream } = ctx;
+    let crate::MmvqBuffers {
+        weights,
+        act_q8_1,
+        dst,
+    } = buf;
+    let crate::MmvqShape { n_rows, k } = shape;
     if dtype_weight == QDtype::F16 {
         return mmvq_f16_launch(reg, stream, weights, act_q8_1, dst, n_rows, k);
     }
@@ -1129,15 +1135,18 @@ pub fn mmvq(
 /// extending the set is mechanical (add the templated thunk in the
 /// kernel + a `match` arm here).
 pub fn mmvq_f16_direct(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    weights: DevicePtr,
-    act_q8_1: DevicePtr,
-    dst_f16: DevicePtr,
-    n_rows: usize,
-    k: usize,
+    ctx: crate::OpCtx<'_>,
+    buf: crate::MmvqBuffers,
+    shape: crate::MmvqShape,
     dtype_weight: QDtype,
 ) -> Result<()> {
+    let crate::OpCtx { reg, stream } = ctx;
+    let crate::MmvqBuffers {
+        weights,
+        act_q8_1,
+        dst: dst_f16,
+    } = buf;
+    let crate::MmvqShape { n_rows, k } = shape;
     // Per-dtype (stem, entry, threads, rows_per_block, units_per_row).
     // units_per_row matches the kernel's second-to-last int param:
     //   - Q4_0..Q8_0  → n_blocks_per_row     = k / 32
@@ -1470,16 +1479,18 @@ fn mmvq_f16_launch(
 /// Prefill-path MMQ for M batch rows. `m` must be ≥ the dispatch floor for
 /// the dtype (e.g. 128 for Q4_K/Q6_K/Q8_0 4-warp).
 pub fn mmq(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    weights: DevicePtr,
-    act_q8_1: DevicePtr,
-    dst: DevicePtr,
-    m: usize,
-    k: usize,
-    n: usize,
+    ctx: crate::OpCtx<'_>,
+    buf: crate::MmvqBuffers,
+    shape: crate::MatmulShape,
     dtype_weight: QDtype,
 ) -> Result<()> {
+    let crate::OpCtx { reg, stream } = ctx;
+    let crate::MmvqBuffers {
+        weights,
+        act_q8_1,
+        dst,
+    } = buf;
+    let crate::MatmulShape { m, k, n } = shape;
     let cfg = QMatMulCfg {
         dtype_weight,
         dtype_activation: QDtype::Q8_1,

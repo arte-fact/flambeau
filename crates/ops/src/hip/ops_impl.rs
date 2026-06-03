@@ -133,25 +133,11 @@ impl<'a> Ops for HipOps<'a> {
 
     fn mmvq_q4_0_kv_f16dst(
         &self,
-        k_w: DevicePtr,
-        v_w: DevicePtr,
-        y_q8_1: DevicePtr,
-        k_out_f16: DevicePtr,
-        v_out_f16: DevicePtr,
+        buf: crate::MmvqKvF16Buffers,
         n_rows_kv: usize,
         k: usize,
     ) -> Result<()> {
-        super::qmatmul::mmvq_q4_0_kv_f16dst(
-            self.reg,
-            self.stream,
-            k_w,
-            v_w,
-            y_q8_1,
-            k_out_f16,
-            v_out_f16,
-            n_rows_kv,
-            k,
-        )
+        super::qmatmul::mmvq_q4_0_kv_f16dst(self.ctx(), buf, n_rows_kv, k)
     }
 
     fn mmvq_q4_0_gate_up(
@@ -216,67 +202,29 @@ impl<'a> Ops for HipOps<'a> {
 
     fn mmvq(
         &self,
-        weights: DevicePtr,
-        act_q8_1: DevicePtr,
-        dst: DevicePtr,
-        n_rows: usize,
-        k: usize,
+        buf: crate::MmvqBuffers,
+        shape: crate::MmvqShape,
         dtype_weight: QDtype,
     ) -> Result<()> {
-        super::qmatmul::mmvq(
-            self.reg,
-            self.stream,
-            weights,
-            act_q8_1,
-            dst,
-            n_rows,
-            k,
-            dtype_weight,
-        )
+        super::qmatmul::mmvq(self.ctx(), buf, shape, dtype_weight)
     }
 
     fn mmvq_f16_direct(
         &self,
-        weights: DevicePtr,
-        act_q8_1: DevicePtr,
-        dst_f16: DevicePtr,
-        n_rows: usize,
-        k: usize,
+        buf: crate::MmvqBuffers,
+        shape: crate::MmvqShape,
         dtype_weight: QDtype,
     ) -> Result<()> {
-        super::qmatmul::mmvq_f16_direct(
-            self.reg,
-            self.stream,
-            weights,
-            act_q8_1,
-            dst_f16,
-            n_rows,
-            k,
-            dtype_weight,
-        )
+        super::qmatmul::mmvq_f16_direct(self.ctx(), buf, shape, dtype_weight)
     }
 
     fn mmq(
         &self,
-        weights: DevicePtr,
-        act_q8_1: DevicePtr,
-        dst: DevicePtr,
-        m: usize,
-        k: usize,
-        n: usize,
+        buf: crate::MmvqBuffers,
+        shape: crate::MatmulShape,
         dtype_weight: QDtype,
     ) -> Result<()> {
-        super::qmatmul::mmq(
-            self.reg,
-            self.stream,
-            weights,
-            act_q8_1,
-            dst,
-            m,
-            k,
-            n,
-            dtype_weight,
-        )
+        super::qmatmul::mmq(self.ctx(), buf, shape, dtype_weight)
     }
 
     // -- attention --

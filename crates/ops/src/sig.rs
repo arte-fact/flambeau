@@ -43,6 +43,18 @@ pub struct QmatmulBuffers {
     pub dst: DevicePtr,
 }
 
+/// Fused K+V MMVQ buffers for the `mmvq_q4_0_kv_f16dst` dispatcher.
+/// Used on TP full-attn layers where K and V share their projection
+/// activation; both outputs land in F16 in one launch.
+#[derive(Copy, Clone, Debug)]
+pub struct MmvqKvF16Buffers {
+    pub k_w: DevicePtr,
+    pub v_w: DevicePtr,
+    pub y_q8_1: DevicePtr,
+    pub k_out_f16: DevicePtr,
+    pub v_out_f16: DevicePtr,
+}
+
 #[derive(Copy, Clone, Debug)]
 pub struct MmvqGateUpBuffers {
     pub gate_w: DevicePtr,

@@ -186,7 +186,17 @@ pub fn mmvq_q4_0_kv_decode_f16(
             v_out.n_elems
         );
     }
-    ops.mmvq_q4_0_kv_f16dst(k_w.ptr, v_w.ptr, act_q8_1.ptr, k_out.ptr, v_out.ptr, n, k)
+    ops.mmvq_q4_0_kv_f16dst(
+        flambeau_ops::MmvqKvF16Buffers {
+            k_w: k_w.ptr,
+            v_w: v_w.ptr,
+            y_q8_1: act_q8_1.ptr,
+            k_out_f16: k_out.ptr,
+            v_out_f16: v_out.ptr,
+        },
+        n,
+        k,
+    )
 }
 
 fn qmatmul_dispatch(

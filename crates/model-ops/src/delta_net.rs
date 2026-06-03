@@ -675,20 +675,22 @@ impl DeltaNetLayer {
             .context("attn_qkv + attn_gate fused mmvq_q4_0_t128")?;
         } else {
             ops.mmvq(
-                self.attn_qkv.ptr,
-                scratch.x_q8_1,
-                scratch.qkv_mixed_f32,
-                conv_channels,
-                hidden,
+                flambeau_ops::MmvqBuffers {
+                    weights: self.attn_qkv.ptr,
+                    act_q8_1: scratch.x_q8_1,
+                    dst: scratch.qkv_mixed_f32,
+                },
+                flambeau_ops::MmvqShape { n_rows: conv_channels, k: hidden },
                 qkv_dt,
             )
             .context("attn_qkv mmvq")?;
             ops.mmvq(
-                self.attn_gate.ptr,
-                scratch.x_q8_1,
-                scratch.z_f32,
-                d_inner,
-                hidden,
+                flambeau_ops::MmvqBuffers {
+                    weights: self.attn_gate.ptr,
+                    act_q8_1: scratch.x_q8_1,
+                    dst: scratch.z_f32,
+                },
+                flambeau_ops::MmvqShape { n_rows: d_inner, k: hidden },
                 gate_dt,
             )
             .context("attn_gate mmvq")?;
@@ -706,20 +708,22 @@ impl DeltaNetLayer {
             .context("ssm alpha+beta fused mmvq_q8_0")?;
         } else {
             ops.mmvq(
-                self.ssm_alpha.ptr,
-                scratch.x_q8_1,
-                scratch.alpha_f32,
-                num_v_heads,
-                hidden,
+                flambeau_ops::MmvqBuffers {
+                    weights: self.ssm_alpha.ptr,
+                    act_q8_1: scratch.x_q8_1,
+                    dst: scratch.alpha_f32,
+                },
+                flambeau_ops::MmvqShape { n_rows: num_v_heads, k: hidden },
                 alpha_dt,
             )
             .context("ssm_alpha mmvq")?;
             ops.mmvq(
-                self.ssm_beta.ptr,
-                scratch.x_q8_1,
-                scratch.beta_f32,
-                num_v_heads,
-                hidden,
+                flambeau_ops::MmvqBuffers {
+                    weights: self.ssm_beta.ptr,
+                    act_q8_1: scratch.x_q8_1,
+                    dst: scratch.beta_f32,
+                },
+                flambeau_ops::MmvqShape { n_rows: num_v_heads, k: hidden },
                 beta_dt,
             )
             .context("ssm_beta mmvq")?;
@@ -858,11 +862,12 @@ impl DeltaNetLayer {
         // 15. ssm_out projection. Output is rank-local partial under
         // TP (d_inner is per-rank); `ar_partial_callback` AR-sums it.
         ops.mmvq(
-            self.ssm_out.ptr,
-            scratch.gated_q8_1,
-            scratch.ssm_out_f32,
-            hidden,
-            d_inner,
+            flambeau_ops::MmvqBuffers {
+                weights: self.ssm_out.ptr,
+                act_q8_1: scratch.gated_q8_1,
+                dst: scratch.ssm_out_f32,
+            },
+            flambeau_ops::MmvqShape { n_rows: hidden, k: d_inner },
             self.ssm_out.dtype,
         )
         .context("ssm_out mmvq")?;
@@ -1019,10 +1024,32 @@ impl DeltaNetLayer {
                     )
                     .context("gdn batched: attn_qkv + attn_gate fused mmvq_q4_0_t128")?;
                 } else {
-                    ops.mmvq(self.attn_qkv.ptr, x_q8_1_i, qkv_mixed_i, conv_channels, hidden, qkv_dt)
-                        .context("gdn batched: attn_qkv mmvq")?;
-                    ops.mmvq(self.attn_gate.ptr, x_q8_1_i, z_i, d_inner, hidden, gate_dt)
-                        .context("gdn batched: attn_gate mmvq")?;
+                    ops.mmvq(
+                        flambeau_ops::MmvqBuffers {
+                            weights: self.attn_qkv.ptr,
+                            act_q8_1: x_q8_1_i,
+                            dst: qkv_mixed_i,
+                        },
+                        flambeau_ops::MmvqShape {
+                            n_rows: conv_channels,
+                            k: hidden,
+                        },
+                        qkv_dt,
+                    )
+                    .context("gdn batched: attn_qkv mmvq")?;
+                    ops.mmvq(
+                        flambeau_ops::MmvqBuffers {
+                            weights: self.attn_gate.ptr,
+                            act_q8_1: x_q8_1_i,
+                            dst: z_i,
+                        },
+                        flambeau_ops::MmvqShape {
+                            n_rows: d_inner,
+                            k: hidden,
+                        },
+                        gate_dt,
+                    )
+                    .context("gdn batched: attn_gate mmvq")?;
                 }
             }
         }
@@ -1078,9 +1105,31 @@ impl DeltaNetLayer {
                     )
                     .context("gdn batched: ssm alpha+beta fused mmvq_q8_0")?;
                 } else {
-                    ops.mmvq(self.ssm_alpha.ptr, x_q8_1_i, alpha_i, num_v_heads, hidden, alpha_dt)
+                    ops.mmvq(
+                        flambeau_ops::MmvqBuffers {
+                            weights: self.ssm_alpha.ptr,
+                            act_q8_1: x_q8_1_i,
+                            dst: alpha_i,
+                        },
+                        flambeau_ops::MmvqShape {
+                            n_rows: num_v_heads,
+                            k: hidden,
+                        },
+                        alpha_dt,
+                    )
                         .context("gdn batched: ssm_alpha mmvq")?;
-                    ops.mmvq(self.ssm_beta.ptr, x_q8_1_i, beta_i, num_v_heads, hidden, beta_dt)
+                    ops.mmvq(
+                        flambeau_ops::MmvqBuffers {
+                            weights: self.ssm_beta.ptr,
+                            act_q8_1: x_q8_1_i,
+                            dst: beta_i,
+                        },
+                        flambeau_ops::MmvqShape {
+                            n_rows: num_v_heads,
+                            k: hidden,
+                        },
+                        beta_dt,
+                    )
                         .context("gdn batched: ssm_beta mmvq")?;
                 }
             }
@@ -1234,11 +1283,12 @@ impl DeltaNetLayer {
                 let gated_q8_1_i = scratch.gated_q8_1.offset_bytes(i * gated_q8_1_row_bytes);
                 let ssm_out_i = scratch.ssm_out_f32.offset_bytes(i * ssm_out_row_bytes);
                 ops.mmvq(
-                    self.ssm_out.ptr,
-                    gated_q8_1_i,
-                    ssm_out_i,
-                    hidden,
-                    d_inner,
+                    flambeau_ops::MmvqBuffers {
+                        weights: self.ssm_out.ptr,
+                        act_q8_1: gated_q8_1_i,
+                        dst: ssm_out_i,
+                    },
+                    flambeau_ops::MmvqShape { n_rows: hidden, k: d_inner },
                     self.ssm_out.dtype,
                 )
                 .context("gdn batched: ssm_out mmvq (per-slot fallback)")?;

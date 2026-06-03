@@ -349,20 +349,22 @@ impl SharedExpert {
             .context("shexp gate+up fused mmvq_q5_k")?;
         } else {
             ops.mmvq(
-                self.ffn_gate_shexp.ptr,
-                scratch.x_q8_1,
-                scratch.gate_f32,
-                inter,
-                hidden,
+                flambeau_ops::MmvqBuffers {
+                    weights: self.ffn_gate_shexp.ptr,
+                    act_q8_1: scratch.x_q8_1,
+                    dst: scratch.gate_f32,
+                },
+                flambeau_ops::MmvqShape { n_rows: inter, k: hidden },
                 self.ffn_gate_shexp.dtype,
             )
             .context("shexp gate mmvq")?;
             ops.mmvq(
-                self.ffn_up_shexp.ptr,
-                scratch.x_q8_1,
-                scratch.up_f32,
-                inter,
-                hidden,
+                flambeau_ops::MmvqBuffers {
+                    weights: self.ffn_up_shexp.ptr,
+                    act_q8_1: scratch.x_q8_1,
+                    dst: scratch.up_f32,
+                },
+                flambeau_ops::MmvqShape { n_rows: inter, k: hidden },
                 self.ffn_up_shexp.dtype,
             )
             .context("shexp up mmvq")?;
@@ -407,11 +409,12 @@ impl SharedExpert {
 
         // 6. down matmul → F32 (caller's `down_out_f32` ptr).
         ops.mmvq(
-            self.ffn_down_shexp.ptr,
-            scratch.activated_q8_1,
-            down_out_f32,
-            hidden,
-            inter,
+            flambeau_ops::MmvqBuffers {
+                weights: self.ffn_down_shexp.ptr,
+                act_q8_1: scratch.activated_q8_1,
+                dst: down_out_f32,
+            },
+            flambeau_ops::MmvqShape { n_rows: hidden, k: inter },
             self.ffn_down_shexp.dtype,
         )
         .context("shexp down mmvq")?;

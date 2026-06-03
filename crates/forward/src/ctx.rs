@@ -346,11 +346,12 @@ impl QuantWeight {
         }
         <flambeau_ops::HipOps<'_> as flambeau_ops::Ops>::mmvq_f16_direct(
             ops,
-            self.ptr,
-            act_q8_1.ptr,
-            output.ptr,
-            n,
-            k,
+            flambeau_ops::MmvqBuffers {
+                weights: self.ptr,
+                act_q8_1: act_q8_1.ptr,
+                dst: output.ptr,
+            },
+            flambeau_ops::MmvqShape { n_rows: n, k },
             self.dtype,
         )
     }
