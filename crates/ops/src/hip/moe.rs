@@ -861,20 +861,13 @@ pub fn indexed_moe_mmvq_q4_1(
 /// halving the launch count for MoE Q4_0 decode vs calling
 /// `indexed_moe_mmvq_q4_0` twice.
 pub fn indexed_moe_mmvq_q4_0_gate_up(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    w_gate: DevicePtr,
-    w_up: DevicePtr,
-    y: DevicePtr,
-    expert_ids: DevicePtr,
-    gate_out: DevicePtr,
-    up_out: DevicePtr,
-    n_rows: usize,
-    n_tokens: usize,
-    top_k: usize,
-    n_blocks_per_row: usize,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MoeMmvqGateUpBuffers,
+    shape: crate::MoeMmvqShape,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmvq_q4_0_gate_up_dp4a")?;
+    let crate::MoeMmvqGateUpBuffers { gate_w: w_gate, up_w: w_up, act: y, expert_ids, gate_out, up_out } = buffers;
+    let crate::MoeMmvqShape { n_rows, n_tokens, top_k, n_sb_per_row: n_blocks_per_row } = shape;
+    let module = ctx.reg.expect_module("indexed_moe_mmvq_q4_0_gate_up_dp4a")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmvq_q4_0_gate_up_dp4a_q8_1")?;
     let n_rows_i = n_rows as i32;
     let n_tokens_i = n_tokens as i32;
@@ -902,7 +895,7 @@ pub fn indexed_moe_mmvq_q4_0_gate_up(
         block: (256, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
@@ -957,20 +950,13 @@ pub fn indexed_moe_mmvq_q8_0(
 /// Q8_1 activation int32 once per block and produces both gate and up
 /// outputs, halving the MoE decode launch count for Q8_0 expert weights.
 pub fn indexed_moe_mmvq_q8_0_gate_up(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    w_gate: DevicePtr,
-    w_up: DevicePtr,
-    y: DevicePtr,
-    expert_ids: DevicePtr,
-    gate_out: DevicePtr,
-    up_out: DevicePtr,
-    n_rows: usize,
-    n_tokens: usize,
-    top_k: usize,
-    n_blocks_per_row: usize,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MoeMmvqGateUpBuffers,
+    shape: crate::MoeMmvqShape,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmvq_q8_0_gate_up_dp4a")?;
+    let crate::MoeMmvqGateUpBuffers { gate_w: w_gate, up_w: w_up, act: y, expert_ids, gate_out, up_out } = buffers;
+    let crate::MoeMmvqShape { n_rows, n_tokens, top_k, n_sb_per_row: n_blocks_per_row } = shape;
+    let module = ctx.reg.expect_module("indexed_moe_mmvq_q8_0_gate_up_dp4a")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmvq_q8_0_gate_up_dp4a_q8_1")?;
     let n_rows_i = n_rows as i32;
     let n_tokens_i = n_tokens as i32;
@@ -998,7 +984,7 @@ pub fn indexed_moe_mmvq_q8_0_gate_up(
         block: (256, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 

@@ -525,32 +525,40 @@ impl MoeExperts {
             QDtype::Q8_0 => {
                 let nb = hidden / 32;
                 ops.indexed_moe_mmvq_q8_0_gate_up(
-                    self.ffn_gate_exps.ptr,
-                    self.ffn_up_exps.ptr,
-                    scratch.x_q8_1,
-                    scratch.expert_ids,
-                    scratch.gate_out_f32,
-                    scratch.up_out_f32,
-                    inter,
-                    n_tokens,
-                    top_k,
-                    nb,
+                    flambeau_ops::MoeMmvqGateUpBuffers {
+                        gate_w: self.ffn_gate_exps.ptr,
+                        up_w: self.ffn_up_exps.ptr,
+                        act: scratch.x_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        gate_out: scratch.gate_out_f32,
+                        up_out: scratch.up_out_f32,
+                    },
+                    flambeau_ops::MoeMmvqShape {
+                        n_rows: inter,
+                        n_tokens: n_tokens,
+                        top_k: top_k,
+                        n_sb_per_row: nb,
+                    },
                 )
                 .context("indexed_moe gate+up q8_0 fused")
             }
             QDtype::Q4_0 => {
                 let nb = hidden / 32;
                 ops.indexed_moe_mmvq_q4_0_gate_up(
-                    self.ffn_gate_exps.ptr,
-                    self.ffn_up_exps.ptr,
-                    scratch.x_q8_1,
-                    scratch.expert_ids,
-                    scratch.gate_out_f32,
-                    scratch.up_out_f32,
-                    inter,
-                    n_tokens,
-                    top_k,
-                    nb,
+                    flambeau_ops::MoeMmvqGateUpBuffers {
+                        gate_w: self.ffn_gate_exps.ptr,
+                        up_w: self.ffn_up_exps.ptr,
+                        act: scratch.x_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        gate_out: scratch.gate_out_f32,
+                        up_out: scratch.up_out_f32,
+                    },
+                    flambeau_ops::MoeMmvqShape {
+                        n_rows: inter,
+                        n_tokens: n_tokens,
+                        top_k: top_k,
+                        n_sb_per_row: nb,
+                    },
                 )
                 .context("indexed_moe gate+up q4_0 fused")
             }
@@ -1903,16 +1911,20 @@ impl MoeExperts {
             QDtype::Q4_0 => {
                 let nb = hidden / 32;
                 ops.indexed_moe_mmvq_q4_0_gate_up(
-                    self.ffn_gate_exps.ptr,
-                    self.ffn_up_exps.ptr,
-                    scratch.x_q8_1,
-                    scratch.expert_ids,
-                    scratch.gate_out_f32,
-                    scratch.up_out_f32,
-                    inter,
-                    prompt_len,
-                    top_k,
-                    nb,
+                    flambeau_ops::MoeMmvqGateUpBuffers {
+                        gate_w: self.ffn_gate_exps.ptr,
+                        up_w: self.ffn_up_exps.ptr,
+                        act: scratch.x_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        gate_out: scratch.gate_out_f32,
+                        up_out: scratch.up_out_f32,
+                    },
+                    flambeau_ops::MoeMmvqShape {
+                        n_rows: inter,
+                        n_tokens: prompt_len,
+                        top_k: top_k,
+                        n_sb_per_row: nb,
+                    },
                 )
                 .context("prefill indexed_moe gate+up q4_0 mmvq")
             }
