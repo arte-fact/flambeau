@@ -68,7 +68,7 @@ pub fn apply_penalties_f32(
     args.push(&presence_penalty);
     args.push(&frequency_penalty);
     let block: u32 = 256;
-    let grid: u32 = ((n_pairs as u32) + block - 1) / block;
+    let grid: u32 = (n_pairs as u32).div_ceil(block);
     let cfg = LaunchCfg::one_d(grid, block);
     unsafe { kernel.launch(stream, cfg, args)? };
     Ok(())

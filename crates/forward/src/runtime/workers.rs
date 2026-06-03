@@ -6,7 +6,7 @@
 
 use std::marker::PhantomData;
 use std::sync::mpsc::{self, Receiver, SyncSender};
-use std::sync::{Arc, Barrier};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use anyhow::{Context, Result};

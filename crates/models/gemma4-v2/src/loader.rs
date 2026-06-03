@@ -129,9 +129,9 @@ fn load_with_shard(
         }
     }
     let mut allocs: Vec<(DevicePtr, usize)> = Vec::new();
-    let owns_embed = layer_range.map_or(true, |(s, _)| s == 0);
-    let owns_lm_head = layer_range.map_or(true, |(_, e)| e == config.num_layers);
-    let in_range = |li: usize| -> bool { layer_range.map_or(true, |(s, e)| li >= s && li < e) };
+    let owns_embed = layer_range.is_none_or(|(s, _)| s == 0);
+    let owns_lm_head = layer_range.is_none_or(|(_, e)| e == config.num_layers);
+    let in_range = |li: usize| -> bool { layer_range.is_none_or(|(s, e)| li >= s && li < e) };
 
     // Gemma4: inpL *= sqrt(n_embd) post-embed.
     let embedding = if owns_embed {
@@ -539,8 +539,8 @@ fn load_with_shard(
             .context("per_layer_model_proj.weight info")?;
 
         let tok_embd_row_bytes = {
-            let bs = tok_embd_info.dtype.block_size() as usize;
-            let ts = tok_embd_info.dtype.type_size() as usize;
+            let bs = tok_embd_info.dtype.block_size();
+            let ts = tok_embd_info.dtype.type_size();
             let row_elems = tok_embd_info.dims.get(1).copied().unwrap_or(0) as usize;
             if row_elems == 0 || row_elems % bs != 0 {
                 bail!(

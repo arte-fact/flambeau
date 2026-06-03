@@ -173,18 +173,15 @@ pub enum RouterInput {
 
 /// Expert activation function. Used between gate/up and down.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Default)]
 pub enum Activation {
     /// `silu(gate) * up` — qwen3.x convention.
+    #[default]
     SwiGLU,
     /// `gelu(gate) * up` — gemma4 convention (ggml tanh-approximation GELU).
     Gelu,
 }
 
-impl Default for Activation {
-    fn default() -> Self {
-        Self::SwiGLU
-    }
-}
 
 /// How router logits become per-expert weights.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

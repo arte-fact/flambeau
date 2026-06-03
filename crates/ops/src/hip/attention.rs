@@ -165,7 +165,7 @@ pub fn attention_decode_f16_batched(
         "attention_decode_f16_batched: head_dim {head_dim} not supported (expected 64, 128, 256, or 512)"
     );
     assert!(
-        n_slots >= 1 && n_slots <= 32,
+        (1..=32).contains(&n_slots),
         "attention_decode_f16_batched: n_slots {n_slots} out of supported range [1, 32]"
     );
     let module = reg.expect_module("attention_decode_f16_batched")?;
@@ -253,7 +253,7 @@ pub fn attention_decode_f16_paged(
         "attention_decode_f16_paged: head_dim {head_dim} not supported (expected 64, 128, 256, or 512)"
     );
     assert!(
-        n_slots >= 1 && n_slots <= 32,
+        (1..=32).contains(&n_slots),
         "attention_decode_f16_paged: n_slots {n_slots} out of supported range [1, 32]"
     );
     assert!(

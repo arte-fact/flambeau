@@ -79,7 +79,7 @@ fn main() {
         .expect("write to String is infallible");
     }
     hsaco_rs.push_str("\npub static CATALOGUE: &[(&str, &[u8])] = &[\n");
-    for (stem, _) in &entries {
+    for stem in entries.keys() {
         let const_name = stem.to_uppercase();
         writeln!(hsaco_rs, "    (\"{stem}\", {const_name}_HSACO),")
             .expect("write to String is infallible");

@@ -209,6 +209,16 @@ pub fn parse_stop(stop: Option<&serde_json::Value>) -> Vec<String> {
     }
 }
 
+fn default_seed() -> u64 {
+    // Non-deterministic if `seed` omitted — uses the current-time nanos
+    // to avoid repeating exact outputs per-request.
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0xC0FFEE)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,14 +353,4 @@ mod tests {
         );
         assert!(p.sampling.temperature.abs() < 1e-6);
     }
-}
-
-fn default_seed() -> u64 {
-    // Non-deterministic if `seed` omitted — uses the current-time nanos
-    // to avoid repeating exact outputs per-request.
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0xC0FFEE)
 }

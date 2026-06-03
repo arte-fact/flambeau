@@ -182,7 +182,7 @@ fn run_both(n_rows: usize, k: usize, n_slots: usize, seed: u64) -> Outs {
         args.push(&dst);
         args.push(&n_rows_i);
         args.push(&n_sb_i);
-        let grid = ((n_rows + 1) / 2) as u32;
+        let grid = n_rows.div_ceil(2) as u32;
         let cfg = LaunchCfg::one_d(grid, 64);
         unsafe { k_k3.launch(stream, cfg, args).unwrap() };
         stream.synchronize().unwrap();

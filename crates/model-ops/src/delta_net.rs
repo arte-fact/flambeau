@@ -936,7 +936,7 @@ impl DeltaNetLayer {
         // launch. Only firing for n_slots ∈ [2, 4] — the kernel only
         // specialises N up to 4.
         let use_q4_0_gate_up_row_tile =
-            fuse_q4_0 && matches!(n_slots, 2 | 3 | 4);
+            fuse_q4_0 && matches!(n_slots, 2..=4);
 
         // 1. per-slot rmsnorm+quant. Writes slot-major into scratch.x_q8_1.
         for i in 0..n_slots {
@@ -1013,7 +1013,7 @@ impl DeltaNetLayer {
         // weight read once across all N slots vs. N per-slot reads
         // in the fused path). Fused path retained for n_slots == 1
         // and for dtypes the slot-batched dispatch doesn't cover.
-        let use_alphabeta_batched = matches!(n_slots, 2 | 3 | 4);
+        let use_alphabeta_batched = matches!(n_slots, 2..=4);
         if use_alphabeta_batched {
             ops.qmatmul(
                 self.ssm_alpha.ptr,
@@ -1185,7 +1185,7 @@ impl DeltaNetLayer {
         // (1 weight read per N slots vs N reads in the per-slot fallback).
         // ssm_out is the largest weight in the GDN block — biggest absolute
         // weight-HBM saving in Phase 2 outside the gate+up row-tile.
-        let use_ssm_out_batched = matches!(n_slots, 2 | 3 | 4);
+        let use_ssm_out_batched = matches!(n_slots, 2..=4);
         if use_ssm_out_batched {
             ops.qmatmul(
                 self.ssm_out.ptr,

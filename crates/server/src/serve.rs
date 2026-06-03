@@ -9,7 +9,7 @@ use flambeau_backend_hip::{device_count, HipCluster};
 use flambeau_quant::GgufFile;
 use flambeau_runtime::Registry;
 use tokio::sync::Mutex;
-use tracing::{info, warn};
+use tracing::info;
 
 /// mesh topology selector. PP-V1 default; TP engages the
 /// Qwen3MoETpModel loader + the BarP2pAllReduce-based forward path.
@@ -19,10 +19,12 @@ use tracing::{info, warn};
 /// the right topology for a given rig (the bracket-bench harness in
 /// produces the data, the operator picks the winner).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum MeshMode {
     /// Pipeline parallelism — V1 default. `LayerAssignment` distributes
     /// whole layers across ranks; one `peer_copy_via_host` per stage
     /// transition.
+    #[default]
     Pp,
     /// Tensor parallelism — every rank holds every layer (sliced).
     /// `world` ranks; intra-layer Megatron splits + BAR1 P2P AllReduce.
@@ -120,11 +122,6 @@ pub struct ServeConfig {
     pub layer_split: Option<Vec<usize>>,
 }
 
-impl Default for MeshMode {
-    fn default() -> Self {
-        MeshMode::Pp
-    }
-}
 
 /// Blocking serve loop — loads the model, starts the HTTP server, runs
 /// until terminated. Caller owns the tokio runtime.

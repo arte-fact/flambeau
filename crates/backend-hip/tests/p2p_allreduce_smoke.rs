@@ -227,7 +227,7 @@ fn tp4_residual_correctness_sweep_and_latency() {
         // time + a per-rank stream sync), peer reads observe the just-uploaded
         // peer values: HtoD is on the source rank's default stream which
         // synchronised before this loop.
-        let blocks = ((n as u32) + TP4_BLOCK_THREADS * 2 - 1) / (TP4_BLOCK_THREADS * 2);
+        let blocks = (n as u32).div_ceil(TP4_BLOCK_THREADS * 2);
         let cfg = LaunchCfg::one_d(blocks, TP4_BLOCK_THREADS);
 
         // Warm pass — first kernel launch on a freshly-loaded module pays
@@ -442,7 +442,7 @@ fn tp4_sum_f32_correctness_sweep_and_latency() {
         }
 
         // F32 kernel: 1 element per thread (no half2 packing).
-        let blocks = ((n as u32) + TP4_BLOCK_THREADS - 1) / TP4_BLOCK_THREADS;
+        let blocks = (n as u32).div_ceil(TP4_BLOCK_THREADS);
         let cfg = LaunchCfg::one_d(blocks, TP4_BLOCK_THREADS);
 
         // Unlike the residual kernel — which writes to `hidden[r]` (rank-

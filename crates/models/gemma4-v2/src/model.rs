@@ -265,8 +265,8 @@ fn build_main_embd_host_f16(
     let hidden = globals.main_embd_hidden;
     let dtype = globals.main_embd_token_embd_dtype;
     let raw = &globals.main_embd_token_embd_raw;
-    let bs = dtype.block_size() as usize;
-    let ts = dtype.type_size() as usize;
+    let bs = dtype.block_size();
+    let ts = dtype.type_size();
     if hidden % bs != 0 {
         bail!("token_embd hidden {hidden} % block_size {bs} != 0 for {dtype:?}");
     }

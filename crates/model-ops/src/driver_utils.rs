@@ -148,8 +148,8 @@ pub fn quant_f32_to_q8_0(raw: &[u8], src_dtype: GgmlDType) -> Result<(Vec<u8>, G
 /// Asserts the contraction dim divides cleanly into the dtype's
 /// block size — otherwise the GGUF layout is malformed.
 pub fn row_bytes_for_dtype(dtype: GgmlDType, hidden: usize) -> Result<usize> {
-    let bs = dtype.block_size() as usize;
-    let ts = dtype.type_size() as usize;
+    let bs = dtype.block_size();
+    let ts = dtype.type_size();
     if hidden % bs != 0 {
         bail!("hidden {hidden} % block_size {bs} != 0 for {dtype:?}");
     }

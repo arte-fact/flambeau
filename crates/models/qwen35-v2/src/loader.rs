@@ -68,9 +68,9 @@ fn load_with_shard(
     let tp_mode = gdn_tp_mode_for(config.gdn, n_ranks);
     let g = per_rank_gdn_dims(config.gdn, n_ranks);
 
-    let owns_embed = layer_range.map_or(true, |(s, _)| s == 0);
-    let owns_lm_head = layer_range.map_or(true, |(_, e)| e == config.num_layers);
-    let in_range = |li: usize| -> bool { layer_range.map_or(true, |(s, e)| li >= s && li < e) };
+    let owns_embed = layer_range.is_none_or(|(s, _)| s == 0);
+    let owns_lm_head = layer_range.is_none_or(|(_, e)| e == config.num_layers);
+    let in_range = |li: usize| -> bool { layer_range.is_none_or(|(s, e)| li >= s && li < e) };
 
     let embedding = if owns_embed {
         load_embedding(

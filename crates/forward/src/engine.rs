@@ -4,14 +4,13 @@
 //! (peer-buffer + handoff barrier).
 
 use std::ops::Range;
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
 use flambeau_backend_hip::{HipDevice, HipEvent, HipStream};
 use flambeau_core::{CopyDirection, Device, DevicePtr};
 use flambeau_model_ops::{Tensor, F16};
 use flambeau_ops::OpsRegistry;
-use half::f16;
 
 use crate::core::{composites, CoreState, NoopHooks, ScratchPool, TopologyHooks};
 use crate::ctx::{

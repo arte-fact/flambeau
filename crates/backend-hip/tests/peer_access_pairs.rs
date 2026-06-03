@@ -19,7 +19,7 @@ fn maybe_skip() -> Option<i32> {
 #[test]
 fn pair_matrix_each_two_device_subset() {
     let Some(n) = maybe_skip() else { return };
-    let n = n as i32;
+    let n = n;
     if n < 2 {
         eprintln!("[skip] need >= 2 devices (have {n})");
         return;

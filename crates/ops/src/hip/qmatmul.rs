@@ -519,7 +519,7 @@ pub fn mmvq_q5_k_r2_batched(
     args.push(&n_rows_i);
     args.push(&n_superblocks_i);
     // 64 threads/block = 1 wave64 (r2 multi-row pattern); grid = ceil(n_rows / 2).
-    let n_row_pairs = ((n_rows + 1) / 2) as u32;
+    let n_row_pairs = n_rows.div_ceil(2) as u32;
     let cfg = LaunchCfg::one_d(n_row_pairs, 64);
     unsafe { kernel.launch(stream, cfg, args)? };
     Ok(())

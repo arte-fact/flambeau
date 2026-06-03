@@ -184,7 +184,7 @@ fn bench_one(dev: &HipDevice, n_rows: usize, k: usize, n_slots: usize) -> (f32, 
         (ms * 1000.0) / (ITERS as f32)
     };
 
-    let k3_us = bench(&k_k3, ((n_rows + 1) / 2) as u32, 64);
+    let k3_us = bench(&k_k3, n_rows.div_ceil(2) as u32, 64);
     let rt_us = bench(&k_rt, (n_rows as u32).div_ceil(8), 256);
 
     unsafe {
