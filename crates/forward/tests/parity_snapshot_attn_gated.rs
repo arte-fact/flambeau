@@ -13,7 +13,7 @@ use flambeau_backend_hip::HipDevice;
 use flambeau_core::Device;
 use flambeau_forward::core::ScratchConfig;
 use flambeau_forward::ctx::{
-    AttnWeights, EmbeddingWeights, ForwardCtx, LmHeadWeights, ModelLayout, RopeVariant,
+    AttnWeights, EmbeddingWeights, ForwardCtx, LmHeadWeights, RopeVariant,
 };
 use flambeau_forward::{ScratchPool, SingleDeviceForwardCtx};
 use flambeau_ops::OpsRegistry;
@@ -119,11 +119,6 @@ fn parity_snapshot_attn_gated_single_token() {
             per_layer_kv_layouts: None,
     };
     let mut pool = ScratchPool::new(&device, cfg).expect("ScratchPool::new");
-    let layout = ModelLayout {
-        num_layers: 1,
-        hidden: HIDDEN,
-        kv_max_seq_len: MAX_SEQ_LEN,
-    };
 
     let logits: Vec<f32>;
     {

@@ -246,8 +246,6 @@ mod attn_microbench {
 
             // Per-call HBM traffic: K+V read = n_tokens × n_heads_kv × head_dim × 2 B × 2.
             let kv_bytes = (N_TOKENS_KV * N_HEADS_KV * head_dim * 2 * 2) as f64;
-            let bandwidth_gb_s = kv_bytes / per_call_us / 1024.0; // µs × GB → 1024 MB / 1024 µs = GB/s ish
-            // Fix bandwidth math: bytes / µs = MB/s ÷ 1024 = GB/s? bytes / µs = bytes × 1e6 / s.
             let bandwidth_gb_s = kv_bytes / 1024.0 / 1024.0 / 1024.0 / (per_call_us / 1e6);
 
             println!(

@@ -189,9 +189,6 @@ impl TensorInfo {
 /// data section, addressed via `TensorInfo.split_idx`.
 #[derive(Debug)]
 struct SplitMmap {
-    /// Path the mmap came from. Unused on the hot path; kept for `{:?}`
-    /// debug output and future per-split error context.
-    path: PathBuf,
     mmap: Arc<Mmap>,
     /// Byte offset within this split file at which its tensor data section
     /// starts (alignment-rounded after the per-split metadata + tensor index).
@@ -305,7 +302,7 @@ impl GgufFile {
     /// - `QuantError::Io` wrapping a `byteorder` short-read error.
     pub fn from_mmap(path: PathBuf, mmap: Arc<Mmap>) -> Result<Self> {
         let (parsed, metadata, tensors, tensor_order, tensor_data_offset) =
-            parse_gguf_header(path.clone(), mmap)?;
+            parse_gguf_header(mmap)?;
         let version = parsed.version;
         Ok(Self {
             path,
@@ -346,7 +343,7 @@ impl GgufFile {
         // A concurrent writer modifying the file would make reads unsafe, but
         // model weights are a cold artefact — callers must not mutate them.
         let mmap = unsafe { Mmap::map(&file)? };
-        let (parsed, md, mut tensors, order, offset) = parse_gguf_header(path, Arc::new(mmap))?;
+        let (parsed, md, mut tensors, order, offset) = parse_gguf_header(Arc::new(mmap))?;
         for info in tensors.values_mut() {
             info.split_idx = split_idx;
         }
@@ -628,7 +625,6 @@ fn read_value(cur: &mut Cursor<&[u8]>, vt: ValueType) -> Result<Value> {
 /// mmap + path; gets converted to `SplitMmap` once the data-section offset
 /// is computed.
 struct ParsedSplit {
-    path: PathBuf,
     version: GgufVersion,
     mmap: Arc<Mmap>,
 }
@@ -636,7 +632,6 @@ struct ParsedSplit {
 impl ParsedSplit {
     fn into_split(self, tensor_data_offset: u64) -> SplitMmap {
         SplitMmap {
-            path: self.path,
             mmap: self.mmap,
             tensor_data_offset,
         }
@@ -646,7 +641,6 @@ impl ParsedSplit {
 /// Parse the GGUF header on `mmap`. Returns (ParsedSplit, metadata,
 /// tensors-without-split-idx, tensor_order, tensor_data_offset).
 fn parse_gguf_header(
-    path: PathBuf,
     mmap: Arc<Mmap>,
 ) -> Result<(
     ParsedSplit,
@@ -708,11 +702,7 @@ fn parse_gguf_header(
         .unwrap_or(DEFAULT_ALIGNMENT);
     let tensor_data_offset = header_end.div_ceil(alignment) * alignment;
 
-    let parsed = ParsedSplit {
-        path,
-        version,
-        mmap,
-    };
+    let parsed = ParsedSplit { version, mmap };
     Ok((parsed, metadata, tensors, tensor_order, tensor_data_offset))
 }
 

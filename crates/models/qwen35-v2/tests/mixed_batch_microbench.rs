@@ -69,7 +69,7 @@ fn bench_one(
     // Build deterministic tokens / positions / slot_ids.
     let tokens: Vec<u32> = (0..n_total as u32).map(|i| (i + 1) % 50).collect();
     let mut pref_positions: Vec<usize> = (0..k).collect();
-    let mut pref_slots: Vec<usize> = vec![0usize; k];
+    let pref_slots: Vec<usize> = vec![0usize; k];
     let mut dec_positions: Vec<usize> = vec![0usize; n_dec];
     let dec_slots: Vec<usize> = (1..=n_dec).collect();
 

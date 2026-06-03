@@ -34,7 +34,7 @@ mod common;
 
 use common::{det_signal, DeviceAllocs};
 use flambeau_backend_hip::HipDevice;
-use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
+use flambeau_core::Device;
 use flambeau_forward::core::ScratchConfig;
 use flambeau_forward::ctx::{
     EmbeddingWeights, ForwardCtx, GdnDims, GdnWeights, LmHeadWeights, ModelLayout,

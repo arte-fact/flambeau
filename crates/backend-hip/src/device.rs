@@ -206,10 +206,6 @@ impl HipEvent {
         self.device_id
     }
 
-    pub(crate) fn raw(&self) -> crate::sys::hipEvent_t {
-        self.ptr
-    }
-
     /// Record this event on `stream`. After previous work on `stream`
     /// completes, the event transitions to the recorded state.
     pub fn record(&self, stream: &HipStream) -> DeviceResult<()> {
@@ -723,8 +719,7 @@ impl HipGraphExec {
         let shadow = &mut shadows[binding.memcpy_node_idx];
         shadow.dst = new_dst.0;
 
-        let node =
-            self.kernel_or_memcpy_node_handle(binding.memcpy_node_idx, NodeBucket::Memcpy)?;
+        let node = self.memcpy_node_handle(binding.memcpy_node_idx)?;
         // SAFETY: exec + node are live. dst is a caller-provided live
         // device pointer per the outer unsafe contract. src / count /
         // kind come from the shadow (capture-time values, valid to
@@ -744,16 +739,8 @@ impl HipGraphExec {
         )
     }
 
-    fn kernel_or_memcpy_node_handle(
-        &self,
-        idx: usize,
-        bucket: NodeBucket,
-    ) -> DeviceResult<crate::sys::hipGraphNode_t> {
-        let nodes = match bucket {
-            NodeBucket::Kernel => &self.kernel_nodes,
-            NodeBucket::Memcpy => &self.memcpy_nodes,
-        };
-        nodes
+    fn memcpy_node_handle(&self, idx: usize) -> DeviceResult<crate::sys::hipGraphNode_t> {
+        self.memcpy_nodes
             .get(idx)
             .copied()
             .map(|u| u as crate::sys::hipGraphNode_t)
@@ -761,8 +748,8 @@ impl HipGraphExec {
                 backend: BACKEND,
                 code: -1,
                 message: format!(
-                    "{bucket:?} node({idx}) out of range (have {} nodes)",
-                    nodes.len()
+                    "Memcpy node({idx}) out of range (have {} nodes)",
+                    self.memcpy_nodes.len()
                 ),
             })
     }
@@ -916,12 +903,6 @@ impl HipGraphExec {
             "hipGraphLaunch",
         )
     }
-}
-
-#[derive(Clone, Copy, Debug)]
-enum NodeBucket {
-    Kernel,
-    Memcpy,
 }
 
 /// Walk every node of `graph`, bucketed by type, preserving dispatch
