@@ -3023,26 +3023,20 @@ pub fn shared_expert_scale_f32(
 /// One thread per `(token, hidden)` slot. All tensors F16 except
 /// `weights[n_tokens, top_k]` F32.
 pub fn moe_combine_f16(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    expert_outs: DevicePtr,
-    weights: DevicePtr,
-    residual: DevicePtr,
-    out: DevicePtr,
-    n_tokens: usize,
-    top_k: usize,
-    hidden: usize,
+    ctx: crate::OpCtx<'_>,
+    buf: crate::MoeCombineBuffers,
+    shape: crate::MoeCombineShape,
 ) -> Result<()> {
-    let module = reg.expect_module("moe_combine_f16")?;
+    let module = ctx.reg.expect_module("moe_combine_f16")?;
     let kernel = module.kernel("flambeau_moe_combine_f16")?;
 
-    let n_tokens_i = n_tokens as i32;
-    let top_k_i = top_k as i32;
-    let hidden_i = hidden as i32;
-    let e_ptr: u64 = expert_outs.as_usize() as u64;
-    let w_ptr: u64 = weights.as_usize() as u64;
-    let r_ptr: u64 = residual.as_usize() as u64;
-    let o_ptr: u64 = out.as_usize() as u64;
+    let n_tokens_i = shape.n_tokens as i32;
+    let top_k_i = shape.top_k as i32;
+    let hidden_i = shape.hidden as i32;
+    let e_ptr: u64 = buf.expert_outs.as_usize() as u64;
+    let w_ptr: u64 = buf.weights.as_usize() as u64;
+    let r_ptr: u64 = buf.residual.as_usize() as u64;
+    let o_ptr: u64 = buf.out.as_usize() as u64;
     let mut args = KernelArgs::new();
     args.push(&e_ptr);
     args.push(&w_ptr);
@@ -3051,9 +3045,9 @@ pub fn moe_combine_f16(
     args.push(&n_tokens_i);
     args.push(&top_k_i);
     args.push(&hidden_i);
-    let total = n_tokens * hidden;
+    let total = shape.n_tokens * shape.hidden;
     let cfg = LaunchCfg::one_d(total.div_ceil(256) as u32, 256);
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
@@ -3062,24 +3056,19 @@ pub fn moe_combine_f16(
 /// Used by the TP-sharded MoE forward where the residual stream is
 /// folded later by the AllReduce-residual kernel.
 pub fn moe_combine_no_residual_f16(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    expert_outs: DevicePtr,
-    weights: DevicePtr,
-    out: DevicePtr,
-    n_tokens: usize,
-    top_k: usize,
-    hidden: usize,
+    ctx: crate::OpCtx<'_>,
+    buf: crate::MoeCombineNoResidualBuffers,
+    shape: crate::MoeCombineShape,
 ) -> Result<()> {
-    let module = reg.expect_module("moe_combine_no_residual_f16")?;
+    let module = ctx.reg.expect_module("moe_combine_no_residual_f16")?;
     let kernel = module.kernel("flambeau_moe_combine_no_residual_f16")?;
 
-    let n_tokens_i = n_tokens as i32;
-    let top_k_i = top_k as i32;
-    let hidden_i = hidden as i32;
-    let e_ptr: u64 = expert_outs.as_usize() as u64;
-    let w_ptr: u64 = weights.as_usize() as u64;
-    let o_ptr: u64 = out.as_usize() as u64;
+    let n_tokens_i = shape.n_tokens as i32;
+    let top_k_i = shape.top_k as i32;
+    let hidden_i = shape.hidden as i32;
+    let e_ptr: u64 = buf.expert_outs.as_usize() as u64;
+    let w_ptr: u64 = buf.weights.as_usize() as u64;
+    let o_ptr: u64 = buf.out.as_usize() as u64;
     let mut args = KernelArgs::new();
     args.push(&e_ptr);
     args.push(&w_ptr);
@@ -3087,11 +3076,11 @@ pub fn moe_combine_no_residual_f16(
     args.push(&n_tokens_i);
     args.push(&top_k_i);
     args.push(&hidden_i);
-    let total = n_tokens * hidden;
+    let total = shape.n_tokens * shape.hidden;
     let cfg = LaunchCfg::one_d(total.div_ceil(256) as u32, 256);
     // SAFETY: args reference live device pointers + CPU values; kernel
     // writes hidden-element F16 output. Caller's contract.
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
@@ -3100,24 +3089,19 @@ pub fn moe_combine_no_residual_f16(
 /// head_dim=512 + Q8_0 path where V-norm spikes propagate into down
 /// outputs and F16 cast saturates.
 pub fn moe_combine_no_residual_f32(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    expert_outs: DevicePtr,
-    weights: DevicePtr,
-    out: DevicePtr,
-    n_tokens: usize,
-    top_k: usize,
-    hidden: usize,
+    ctx: crate::OpCtx<'_>,
+    buf: crate::MoeCombineNoResidualBuffers,
+    shape: crate::MoeCombineShape,
 ) -> Result<()> {
-    let module = reg.expect_module("moe_combine_no_residual_f32")?;
+    let module = ctx.reg.expect_module("moe_combine_no_residual_f32")?;
     let kernel = module.kernel("flambeau_moe_combine_no_residual_f32")?;
 
-    let n_tokens_i = n_tokens as i32;
-    let top_k_i = top_k as i32;
-    let hidden_i = hidden as i32;
-    let e_ptr: u64 = expert_outs.as_usize() as u64;
-    let w_ptr: u64 = weights.as_usize() as u64;
-    let o_ptr: u64 = out.as_usize() as u64;
+    let n_tokens_i = shape.n_tokens as i32;
+    let top_k_i = shape.top_k as i32;
+    let hidden_i = shape.hidden as i32;
+    let e_ptr: u64 = buf.expert_outs.as_usize() as u64;
+    let w_ptr: u64 = buf.weights.as_usize() as u64;
+    let o_ptr: u64 = buf.out.as_usize() as u64;
     let mut args = KernelArgs::new();
     args.push(&e_ptr);
     args.push(&w_ptr);
@@ -3125,11 +3109,11 @@ pub fn moe_combine_no_residual_f32(
     args.push(&n_tokens_i);
     args.push(&top_k_i);
     args.push(&hidden_i);
-    let total = n_tokens * hidden;
+    let total = shape.n_tokens * shape.hidden;
     let cfg = LaunchCfg::one_d(total.div_ceil(256) as u32, 256);
     // SAFETY: args reference live device pointers + CPU values; kernel
     // writes hidden-element F32 output. Caller's contract.
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
@@ -3137,28 +3121,21 @@ pub fn moe_combine_no_residual_f32(
 /// sums them inline. Saves one `add_f16` launch per layer per token on the
 /// shared-expert path (`moe_residual = mid + shared_delta`).
 pub fn moe_combine_two_residuals_f16(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    expert_outs: DevicePtr,
-    weights: DevicePtr,
-    residual1: DevicePtr,
-    residual2: DevicePtr,
-    out: DevicePtr,
-    n_tokens: usize,
-    top_k: usize,
-    hidden: usize,
+    ctx: crate::OpCtx<'_>,
+    buf: crate::MoeCombineTwoResidualsBuffers,
+    shape: crate::MoeCombineShape,
 ) -> Result<()> {
-    let module = reg.expect_module("moe_combine_two_residuals_f16")?;
+    let module = ctx.reg.expect_module("moe_combine_two_residuals_f16")?;
     let kernel = module.kernel("flambeau_moe_combine_two_residuals_f16")?;
 
-    let n_tokens_i = n_tokens as i32;
-    let top_k_i = top_k as i32;
-    let hidden_i = hidden as i32;
-    let e_ptr: u64 = expert_outs.as_usize() as u64;
-    let w_ptr: u64 = weights.as_usize() as u64;
-    let r1_ptr: u64 = residual1.as_usize() as u64;
-    let r2_ptr: u64 = residual2.as_usize() as u64;
-    let o_ptr: u64 = out.as_usize() as u64;
+    let n_tokens_i = shape.n_tokens as i32;
+    let top_k_i = shape.top_k as i32;
+    let hidden_i = shape.hidden as i32;
+    let e_ptr: u64 = buf.expert_outs.as_usize() as u64;
+    let w_ptr: u64 = buf.weights.as_usize() as u64;
+    let r1_ptr: u64 = buf.residual1.as_usize() as u64;
+    let r2_ptr: u64 = buf.residual2.as_usize() as u64;
+    let o_ptr: u64 = buf.out.as_usize() as u64;
     let mut args = KernelArgs::new();
     args.push(&e_ptr);
     args.push(&w_ptr);
@@ -3168,9 +3145,9 @@ pub fn moe_combine_two_residuals_f16(
     args.push(&n_tokens_i);
     args.push(&top_k_i);
     args.push(&hidden_i);
-    let total = n_tokens * hidden;
+    let total = shape.n_tokens * shape.hidden;
     let cfg = LaunchCfg::one_d(total.div_ceil(256) as u32, 256);
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 

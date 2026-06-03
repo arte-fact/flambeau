@@ -41,10 +41,11 @@ pub use sig::{
     MoeMmqTile8DownBuffers, MoeMmqTile8GateUpBuffers, MoeMmvqGateUpSortedBuffers, MoeMmvqShape,
     KvAppendBatchedSlotsBuffers, KvAppendBatchedSlotsShape, KvAppendBuffers,
     KvAppendPagedPrefillBuffers, KvAppendPagedPrefillShape, KvAppendPagedSlotsBuffers,
-    KvAppendPagedSlotsShape, KvAppendVUnitShape, MoeMmvqSortedBuffers, MoeSortBuffers,
-    MoeSortPaddedBuffers, MoeSortPaddedShape, MoeSortShape, NormBuffers, NormFusedAddBuffers,
-    NormResidualBuffers, NormShape, OpCtx, RopeBuffers, RopeFusedBuffers, RopePartialShape,
-    RopeShape,
+    KvAppendPagedSlotsShape, KvAppendVUnitShape, MoeCombineBuffers,
+    MoeCombineNoResidualBuffers, MoeCombineShape, MoeCombineTwoResidualsBuffers,
+    MoeMmvqSortedBuffers, MoeSortBuffers, MoeSortPaddedBuffers, MoeSortPaddedShape, MoeSortShape,
+    NormBuffers, NormFusedAddBuffers, NormResidualBuffers, NormShape, OpCtx, RopeBuffers,
+    RopeFusedBuffers, RopePartialShape, RopeShape,
 };
 
 #[cfg(feature = "hip")]

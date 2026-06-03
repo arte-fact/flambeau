@@ -2047,92 +2047,34 @@ impl<'a> Ops for HipOps<'a> {
 
     fn moe_combine_f16(
         &self,
-        expert_outs: DevicePtr,
-        weights: DevicePtr,
-        residual: DevicePtr,
-        out: DevicePtr,
-        n_tokens: usize,
-        top_k: usize,
-        hidden: usize,
+        buf: crate::MoeCombineBuffers,
+        shape: crate::MoeCombineShape,
     ) -> Result<()> {
-        super::moe::moe_combine_f16(
-            self.reg,
-            self.stream,
-            expert_outs,
-            weights,
-            residual,
-            out,
-            n_tokens,
-            top_k,
-            hidden,
-        )
+        super::moe::moe_combine_f16(self.ctx(), buf, shape)
     }
 
     fn moe_combine_no_residual_f16(
         &self,
-        expert_outs: DevicePtr,
-        weights: DevicePtr,
-        out: DevicePtr,
-        n_tokens: usize,
-        top_k: usize,
-        hidden: usize,
+        buf: crate::MoeCombineNoResidualBuffers,
+        shape: crate::MoeCombineShape,
     ) -> Result<()> {
-        super::moe::moe_combine_no_residual_f16(
-            self.reg,
-            self.stream,
-            expert_outs,
-            weights,
-            out,
-            n_tokens,
-            top_k,
-            hidden,
-        )
+        super::moe::moe_combine_no_residual_f16(self.ctx(), buf, shape)
     }
 
     fn moe_combine_no_residual_f32(
         &self,
-        expert_outs: DevicePtr,
-        weights: DevicePtr,
-        out: DevicePtr,
-        n_tokens: usize,
-        top_k: usize,
-        hidden: usize,
+        buf: crate::MoeCombineNoResidualBuffers,
+        shape: crate::MoeCombineShape,
     ) -> Result<()> {
-        super::moe::moe_combine_no_residual_f32(
-            self.reg,
-            self.stream,
-            expert_outs,
-            weights,
-            out,
-            n_tokens,
-            top_k,
-            hidden,
-        )
+        super::moe::moe_combine_no_residual_f32(self.ctx(), buf, shape)
     }
 
     fn moe_combine_two_residuals_f16(
         &self,
-        expert_outs: DevicePtr,
-        weights: DevicePtr,
-        residual1: DevicePtr,
-        residual2: DevicePtr,
-        out: DevicePtr,
-        n_tokens: usize,
-        top_k: usize,
-        hidden: usize,
+        buf: crate::MoeCombineTwoResidualsBuffers,
+        shape: crate::MoeCombineShape,
     ) -> Result<()> {
-        super::moe::moe_combine_two_residuals_f16(
-            self.reg,
-            self.stream,
-            expert_outs,
-            weights,
-            residual1,
-            residual2,
-            out,
-            n_tokens,
-            top_k,
-            hidden,
-        )
+        super::moe::moe_combine_two_residuals_f16(self.ctx(), buf, shape)
     }
 
     fn moe_sort_by_expert(

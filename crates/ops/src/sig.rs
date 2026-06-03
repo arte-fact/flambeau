@@ -462,3 +462,36 @@ pub struct MoeSortPaddedShape {
     pub max_tokens: usize,
     pub top_k: usize,
 }
+
+// --- MoE combine family ----------------------------------------------------
+
+#[derive(Copy, Clone, Debug)]
+pub struct MoeCombineBuffers {
+    pub expert_outs: DevicePtr,
+    pub weights: DevicePtr,
+    pub residual: DevicePtr,
+    pub out: DevicePtr,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct MoeCombineNoResidualBuffers {
+    pub expert_outs: DevicePtr,
+    pub weights: DevicePtr,
+    pub out: DevicePtr,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct MoeCombineTwoResidualsBuffers {
+    pub expert_outs: DevicePtr,
+    pub weights: DevicePtr,
+    pub residual1: DevicePtr,
+    pub residual2: DevicePtr,
+    pub out: DevicePtr,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct MoeCombineShape {
+    pub n_tokens: usize,
+    pub top_k: usize,
+    pub hidden: usize,
+}

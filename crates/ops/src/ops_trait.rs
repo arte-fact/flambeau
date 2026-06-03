@@ -1057,45 +1057,26 @@ pub trait Ops {
 
     fn moe_combine_f16(
         &self,
-        expert_outs: DevicePtr,
-        weights: DevicePtr,
-        residual: DevicePtr,
-        out: DevicePtr,
-        n_tokens: usize,
-        top_k: usize,
-        hidden: usize,
+        buf: crate::MoeCombineBuffers,
+        shape: crate::MoeCombineShape,
     ) -> Result<()>;
 
     fn moe_combine_no_residual_f16(
         &self,
-        expert_outs: DevicePtr,
-        weights: DevicePtr,
-        out: DevicePtr,
-        n_tokens: usize,
-        top_k: usize,
-        hidden: usize,
+        buf: crate::MoeCombineNoResidualBuffers,
+        shape: crate::MoeCombineShape,
     ) -> Result<()>;
 
     fn moe_combine_no_residual_f32(
         &self,
-        expert_outs: DevicePtr,
-        weights: DevicePtr,
-        out: DevicePtr,
-        n_tokens: usize,
-        top_k: usize,
-        hidden: usize,
+        buf: crate::MoeCombineNoResidualBuffers,
+        shape: crate::MoeCombineShape,
     ) -> Result<()>;
 
     fn moe_combine_two_residuals_f16(
         &self,
-        expert_outs: DevicePtr,
-        weights: DevicePtr,
-        residual1: DevicePtr,
-        residual2: DevicePtr,
-        out: DevicePtr,
-        n_tokens: usize,
-        top_k: usize,
-        hidden: usize,
+        buf: crate::MoeCombineTwoResidualsBuffers,
+        shape: crate::MoeCombineShape,
     ) -> Result<()>;
 
     fn moe_sort_by_expert(

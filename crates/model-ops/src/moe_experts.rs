@@ -919,25 +919,33 @@ impl MoeExperts {
         // delta as a fused two-residual combine).
         if let Some(extra) = extra_residual {
             ops.moe_combine_two_residuals_f16(
-                scratch.down_f16,
-                scratch.expert_weights,
-                residual,
-                extra,
-                out,
-                1,
-                top_k,
-                hidden,
+                flambeau_ops::MoeCombineTwoResidualsBuffers {
+                    expert_outs: scratch.down_f16,
+                    weights: scratch.expert_weights,
+                    residual1: residual,
+                    residual2: extra,
+                    out,
+                },
+                flambeau_ops::MoeCombineShape {
+                    n_tokens: 1,
+                    top_k,
+                    hidden,
+                },
             )
             .context("moe_combine_two_residuals_f16")?;
         } else {
             ops.moe_combine_f16(
-                scratch.down_f16,
-                scratch.expert_weights,
-                residual,
-                out,
-                1,
-                top_k,
-                hidden,
+                flambeau_ops::MoeCombineBuffers {
+                    expert_outs: scratch.down_f16,
+                    weights: scratch.expert_weights,
+                    residual,
+                    out,
+                },
+                flambeau_ops::MoeCombineShape {
+                    n_tokens: 1,
+                    top_k,
+                    hidden,
+                },
             )
             .context("moe_combine_f16")?;
         }
@@ -1015,12 +1023,16 @@ impl MoeExperts {
         // 7. Weighted sum WITHOUT residual: partial = Σ w_k · down_k.
         // Residual is folded by the AR that follows.
         ops.moe_combine_no_residual_f16(
-            scratch.down_f16,
-            scratch.expert_weights,
-            partial_out,
-            1,
-            top_k,
-            hidden,
+            flambeau_ops::MoeCombineNoResidualBuffers {
+                expert_outs: scratch.down_f16,
+                weights: scratch.expert_weights,
+                out: partial_out,
+            },
+            flambeau_ops::MoeCombineShape {
+                n_tokens: 1,
+                top_k,
+                hidden,
+            },
         )
         .context("moe (TP) combine_no_residual_f16")?;
         Ok(())
@@ -1081,12 +1093,16 @@ impl MoeExperts {
         self.down(ops, scratch)?;
         // F32 combine: read F32 down outputs directly, write F32 partial.
         ops.moe_combine_no_residual_f32(
-            scratch.down_f32,
-            scratch.expert_weights,
-            partial_out_f32,
-            1,
-            top_k,
-            hidden,
+            flambeau_ops::MoeCombineNoResidualBuffers {
+                expert_outs: scratch.down_f32,
+                weights: scratch.expert_weights,
+                out: partial_out_f32,
+            },
+            flambeau_ops::MoeCombineShape {
+                n_tokens: 1,
+                top_k,
+                hidden,
+            },
         )
         .context("moe (TP-F32) combine_no_residual_f32")?;
         Ok(())
@@ -1189,12 +1205,16 @@ impl MoeExperts {
     ) -> Result<()> {
         self.prefill_compute_expert_outs(ops, x_norm, prompt_len, scratch)?;
         ops.moe_combine_no_residual_f16(
-            scratch.down_f16,
-            scratch.expert_weights,
-            partial_out,
-            prompt_len,
-            self.top_k,
-            self.hidden,
+            flambeau_ops::MoeCombineNoResidualBuffers {
+                expert_outs: scratch.down_f16,
+                weights: scratch.expert_weights,
+                out: partial_out,
+            },
+            flambeau_ops::MoeCombineShape {
+                n_tokens: prompt_len,
+                top_k: self.top_k,
+                hidden: self.hidden,
+            },
         )
         .context("prefill (TP) combine_no_residual_f16")
     }
@@ -1217,12 +1237,16 @@ impl MoeExperts {
     ) -> Result<()> {
         self.prefill_compute_expert_outs(ops, x_norm, prompt_len, scratch)?;
         ops.moe_combine_no_residual_f32(
-            scratch.down_f32,
-            scratch.expert_weights,
-            partial_out_f32,
-            prompt_len,
-            self.top_k,
-            self.hidden,
+            flambeau_ops::MoeCombineNoResidualBuffers {
+                expert_outs: scratch.down_f32,
+                weights: scratch.expert_weights,
+                out: partial_out_f32,
+            },
+            flambeau_ops::MoeCombineShape {
+                n_tokens: prompt_len,
+                top_k: self.top_k,
+                hidden: self.hidden,
+            },
         )
         .context("prefill (TP-F32) combine_no_residual_f32")
     }
@@ -2140,25 +2164,33 @@ impl MoeExperts {
     ) -> Result<()> {
         if let Some(extra) = extra_residual {
             ops.moe_combine_two_residuals_f16(
-                scratch.down_f16,
-                scratch.expert_weights,
-                residual,
-                extra,
-                out,
-                prompt_len,
-                self.top_k,
-                self.hidden,
+                flambeau_ops::MoeCombineTwoResidualsBuffers {
+                    expert_outs: scratch.down_f16,
+                    weights: scratch.expert_weights,
+                    residual1: residual,
+                    residual2: extra,
+                    out,
+                },
+                flambeau_ops::MoeCombineShape {
+                    n_tokens: prompt_len,
+                    top_k: self.top_k,
+                    hidden: self.hidden,
+                },
             )
             .context("prefill moe_combine_two_residuals_f16")
         } else {
             ops.moe_combine_f16(
-                scratch.down_f16,
-                scratch.expert_weights,
-                residual,
-                out,
-                prompt_len,
-                self.top_k,
-                self.hidden,
+                flambeau_ops::MoeCombineBuffers {
+                    expert_outs: scratch.down_f16,
+                    weights: scratch.expert_weights,
+                    residual,
+                    out,
+                },
+                flambeau_ops::MoeCombineShape {
+                    n_tokens: prompt_len,
+                    top_k: self.top_k,
+                    hidden: self.hidden,
+                },
             )
             .context("prefill moe_combine_f16")
         }
