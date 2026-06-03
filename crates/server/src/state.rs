@@ -85,6 +85,37 @@ impl ModelDefaults {
     }
 }
 
+/// Raw OpenAI sampling knobs, all optional. Each `None` falls back to
+/// the matching [`ModelDefaults`] entry, then to the unbiased OpenAI
+/// default documented on [`SamplingParams::from_parts`].
+#[derive(Debug, Clone, Default)]
+pub struct SamplingKnobs {
+    pub temperature: Option<f32>,
+    pub top_p: Option<f32>,
+    pub top_k: Option<u32>,
+    pub min_p: Option<f32>,
+    pub repetition_penalty: Option<f32>,
+    pub presence_penalty: Option<f32>,
+    pub frequency_penalty: Option<f32>,
+}
+
+/// Per-request generation budget + stop conditions.
+#[derive(Debug, Clone, Default)]
+pub struct GenerationLimits {
+    pub max_tokens: Option<u32>,
+    pub seed: Option<u64>,
+    pub stop_strings: Vec<String>,
+}
+
+/// Response-mode flags + structured-output primer.
+#[derive(Debug, Clone, Default)]
+pub struct ResponseMode {
+    pub json_mode: bool,
+    pub collect_logprobs: Option<u32>,
+    pub enable_thinking: bool,
+    pub json_prime_bytes: Vec<u8>,
+}
+
 impl SamplingParams {
     /// Derive from OpenAI params. Defaults match the OpenAI surface so
     /// that an unconfigured client gets unbiased sampling.
@@ -108,22 +139,27 @@ impl SamplingParams {
     ///   was too tight for code-generation requests via curl/clients
     ///   that don't pass `max_tokens` explicitly.
     pub fn from_parts(
-        temperature: Option<f32>,
-        top_p: Option<f32>,
-        top_k: Option<u32>,
-        min_p: Option<f32>,
-        repetition_penalty: Option<f32>,
-        presence_penalty: Option<f32>,
-        frequency_penalty: Option<f32>,
-        max_tokens: Option<u32>,
-        seed: Option<u64>,
-        json_mode: bool,
-        stop_strings: Vec<String>,
-        collect_logprobs: Option<u32>,
-        enable_thinking: bool,
-        json_prime_bytes: Vec<u8>,
+        knobs: SamplingKnobs,
+        limits: GenerationLimits,
+        mode: ResponseMode,
         defaults: &ModelDefaults,
     ) -> Self {
+        let SamplingKnobs {
+            temperature,
+            top_p,
+            top_k,
+            min_p,
+            repetition_penalty,
+            presence_penalty,
+            frequency_penalty,
+        } = knobs;
+        let GenerationLimits { max_tokens, seed, stop_strings } = limits;
+        let ResponseMode {
+            json_mode,
+            collect_logprobs,
+            enable_thinking,
+            json_prime_bytes,
+        } = mode;
         // Resolution order: explicit OpenAI request → GGUF model
         // default → OpenAI/unbiased fallback. `temperature == 0.0`
         // is a documented greedy override and must NOT fall back to
@@ -265,23 +301,20 @@ mod tests {
         ModelDefaults::default()
     }
 
+    fn knobs_with_temp(t: Option<f32>) -> SamplingKnobs {
+        SamplingKnobs { temperature: t, ..Default::default() }
+    }
+
+    fn mode_json(json_mode: bool) -> ResponseMode {
+        ResponseMode { json_mode, ..Default::default() }
+    }
+
     #[test]
     fn p04_json_mode_no_explicit_temp_clamps_to_low() {
         let p = SamplingParams::from_parts(
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            /*json_mode=*/ true,
-            vec![],
-            None,
-            false,
-            vec![],
+            knobs_with_temp(None),
+            GenerationLimits::default(),
+            mode_json(true),
             &defaults_none(),
         );
         assert!((p.sampling.temperature - 0.2).abs() < 1e-6);
@@ -290,20 +323,9 @@ mod tests {
     #[test]
     fn p04_json_mode_explicit_temp_wins() {
         let p = SamplingParams::from_parts(
-            Some(0.9),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            /*json_mode=*/ true,
-            vec![],
-            None,
-            false,
-            vec![],
+            knobs_with_temp(Some(0.9)),
+            GenerationLimits::default(),
+            mode_json(true),
             &defaults_none(),
         );
         assert!((p.sampling.temperature - 0.9).abs() < 1e-6);
@@ -312,20 +334,9 @@ mod tests {
     #[test]
     fn p04_non_json_mode_keeps_default() {
         let p = SamplingParams::from_parts(
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            /*json_mode=*/ false,
-            vec![],
-            None,
-            false,
-            vec![],
+            knobs_with_temp(None),
+            GenerationLimits::default(),
+            mode_json(false),
             &defaults_none(),
         );
         assert!((p.sampling.temperature - 1.0).abs() < 1e-6);
@@ -334,20 +345,9 @@ mod tests {
     #[test]
     fn p04_json_mode_explicit_zero_temp_stays_greedy() {
         let p = SamplingParams::from_parts(
-            Some(0.0),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            /*json_mode=*/ true,
-            vec![],
-            None,
-            false,
-            vec![],
+            knobs_with_temp(Some(0.0)),
+            GenerationLimits::default(),
+            mode_json(true),
             &defaults_none(),
         );
         assert!(p.sampling.temperature.abs() < 1e-6);

@@ -150,20 +150,26 @@ pub async fn chat_completions(
         .map(|s| s.as_bytes().to_vec())
         .unwrap_or_default();
     let params = SamplingParams::from_parts(
-        req.temperature,
-        req.top_p,
-        req.top_k,
-        req.min_p,
-        req.repetition_penalty,
-        req.presence_penalty,
-        req.frequency_penalty,
-        req.max_tokens,
-        req.seed,
-        json_mode,
-        stop_strings,
-        collect_logprobs,
-        req.enable_thinking.unwrap_or(false),
-        json_prime_bytes,
+        crate::state::SamplingKnobs {
+            temperature: req.temperature,
+            top_p: req.top_p,
+            top_k: req.top_k,
+            min_p: req.min_p,
+            repetition_penalty: req.repetition_penalty,
+            presence_penalty: req.presence_penalty,
+            frequency_penalty: req.frequency_penalty,
+        },
+        crate::state::GenerationLimits {
+            max_tokens: req.max_tokens,
+            seed: req.seed,
+            stop_strings,
+        },
+        crate::state::ResponseMode {
+            json_mode,
+            collect_logprobs,
+            enable_thinking: req.enable_thinking.unwrap_or(false),
+            json_prime_bytes,
+        },
         &state.model_defaults,
     );
     let assistant_prefill_active = assistant_prefill.is_some();

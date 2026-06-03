@@ -82,20 +82,18 @@ pub async fn messages_anthropic(
 
     let stop_strings = req.stop_sequences.clone().unwrap_or_default();
     let params = SamplingParams::from_parts(
-        req.temperature,
-        req.top_p,
-        req.top_k,
-        None,
-        None,
-        None,
-        None,
-        Some(req.max_tokens),
-        None,
-        false,
-        stop_strings.clone(),
-        None,
-        false,
-        vec![],
+        crate::state::SamplingKnobs {
+            temperature: req.temperature,
+            top_p: req.top_p,
+            top_k: req.top_k,
+            ..Default::default()
+        },
+        crate::state::GenerationLimits {
+            max_tokens: Some(req.max_tokens),
+            seed: None,
+            stop_strings: stop_strings.clone(),
+        },
+        crate::state::ResponseMode::default(),
         &state.model_defaults,
     );
 

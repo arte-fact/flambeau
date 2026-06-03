@@ -30,20 +30,17 @@ pub async fn completions(
     }
     let stop_strings = parse_stop(req.stop.as_ref());
     let params = SamplingParams::from_parts(
-        req.temperature,
-        req.top_p,
-        None,
-        None,
-        None,
-        None,
-        None,
-        req.max_tokens,
-        req.seed,
-        false,
-        stop_strings,
-        None,
-        false,
-        vec![],
+        crate::state::SamplingKnobs {
+            temperature: req.temperature,
+            top_p: req.top_p,
+            ..Default::default()
+        },
+        crate::state::GenerationLimits {
+            max_tokens: req.max_tokens,
+            seed: req.seed,
+            stop_strings,
+        },
+        crate::state::ResponseMode::default(),
         &state.model_defaults,
     );
 
