@@ -229,9 +229,8 @@ impl Model for V2Model {
             return shared.forward_one_token_into_slot(token, position, slot_id, out);
         }
         shared.forward_decode_batched(&tuples)?;
-        for i in 0..n {
+        for (i, out) in logits_refs.iter_mut().enumerate().take(n) {
             let row = shared.logits_row(i, vocab);
-            let out: &mut Vec<f32> = logits_refs[i];
             out.clear();
             out.extend_from_slice(row);
         }
@@ -313,9 +312,8 @@ impl Model for V2Model {
         prefill_logits_out.clear();
         prefill_logits_out.extend_from_slice(row);
         // Rows 1..=N = decode logits, one per decode slot in caller's order.
-        for i in 0..decode_slots.len() {
+        for (i, out) in decode_logits_refs.iter_mut().enumerate().take(decode_slots.len()) {
             let row = shared.logits_row(i + 1, vocab);
-            let out: &mut Vec<f32> = decode_logits_refs[i];
             out.clear();
             out.extend_from_slice(row);
         }

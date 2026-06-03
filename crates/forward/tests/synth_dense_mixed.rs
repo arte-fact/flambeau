@@ -17,7 +17,7 @@ mod common;
 use common::{det_signal, DeviceAllocs};
 use flambeau_backend_hip::HipDevice;
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
-use flambeau_forward::core::ScratchConfig;
+use flambeau_forward::core::{MixedBatch, ScratchConfig};
 use flambeau_forward::ctx::{AttnWeights, ForwardCtx, RopeVariant};
 use flambeau_forward::{ScratchPool, SingleDeviceForwardCtx};
 use flambeau_model_ops::{Tensor, F16};
@@ -191,7 +191,17 @@ fn synth_mixed_matches_separate_calls() {
         slot_ids.extend(1..=N_DECODE);
 
         let delta = ctx
-            .standard_attn_mixed(&resid_mix, &attn, 0, &positions, &slot_ids, K_PREFILL, None)
+            .standard_attn_mixed(
+                &resid_mix,
+                &attn,
+                0,
+                MixedBatch {
+                    positions: &positions,
+                    slot_ids: &slot_ids,
+                    prefill_rows: K_PREFILL,
+                },
+                None,
+            )
             .expect("standard_attn_mixed")
             .expect("mixed delta");
         let delta_all = read_f16(&device, delta.ptr, n_total * HIDDEN);

@@ -52,26 +52,20 @@ pub fn standard_attn_mixed_local<H: TopologyHooks>(
     let slot_p = slot_ids[0];
     // Prefill rows must all share slot_p and have contiguous positions.
     let pos0 = positions[0];
-    for i in 0..k {
-        if slot_ids[i] != slot_p {
-            bail!(
-                "standard_attn_mixed: prefill row {i} slot {} != slot_p {slot_p}",
-                slot_ids[i]
-            );
+    for (i, (&slot, &pos)) in slot_ids.iter().zip(positions.iter()).enumerate().take(k) {
+        if slot != slot_p {
+            bail!("standard_attn_mixed: prefill row {i} slot {slot} != slot_p {slot_p}");
         }
-        if positions[i] != pos0 + i {
+        if pos != pos0 + i {
             bail!(
-                "standard_attn_mixed: prefill row {i} pos {} not contiguous from pos0={pos0}",
-                positions[i]
+                "standard_attn_mixed: prefill row {i} pos {pos} not contiguous from pos0={pos0}"
             );
         }
     }
-    // Decode rows must not collide with slot_p (Sarathi disjointness).
-    for i in k..n {
-        if slot_ids[i] == slot_p {
+    for (i, &slot) in slot_ids.iter().enumerate().take(n).skip(k) {
+        if slot == slot_p {
             bail!(
-                "standard_attn_mixed: decode row {i} slot {} collides with prefill slot_p {slot_p}",
-                slot_ids[i]
+                "standard_attn_mixed: decode row {i} slot {slot} collides with prefill slot_p {slot_p}"
             );
         }
     }

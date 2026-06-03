@@ -46,11 +46,13 @@ fn session_forward_mixed_smoke() {
     let mut session = Session::<Qwen35V2>::new(
         file,
         topology,
-        Some(CTX_CAP),
-        PREFILL_UBATCH.max(K_PREFILL + N_DECODE),
-        max_slots,
-        None,
-        flambeau_forward::KvLayout::F16Contig,
+        flambeau_forward::LaunchParams {
+            ctx_cap: Some(CTX_CAP),
+            prefill_ubatch: PREFILL_UBATCH.max(K_PREFILL + N_DECODE),
+            max_slots,
+            paged_kv_pages: None,
+            kv_layout: flambeau_forward::KvLayout::F16Contig,
+        },
     )
     .expect("Session<Qwen35V2>::new");
 

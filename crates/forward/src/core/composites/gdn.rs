@@ -254,8 +254,7 @@ pub fn gdn_layer_local<H: TopologyHooks>(
                 Some(&mut ar_cb),
             )?;
         } else {
-            for i in 0..n_tokens {
-                let slot = slot_ids[i];
+            for (i, &slot) in slot_ids.iter().enumerate().take(n_tokens) {
                 let in_i = input.ptr.offset_bytes(i * row_bytes);
                 let out_i = delta_ptr.offset_bytes(i * row_bytes);
                 let state_i = layer_state.state.offset_bytes(slot * state_bytes_per_slot);

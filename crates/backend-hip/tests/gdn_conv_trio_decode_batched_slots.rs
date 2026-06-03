@@ -114,14 +114,14 @@ fn run_both(n_slots: usize, conv_channels: usize, conv_kernel: usize, seed: u64)
     let row_bytes = conv_channels * 4;
     {
         let stream = dev.default_stream();
-        for s in 0..n_slots {
+        for (s, &history_ptr) in d_ref_history.iter().enumerate().take(n_slots) {
             // assemble: K-1 history rows then 1 qkv row
             unsafe {
                 dev.memcpy_async(
                     stream,
                     CopyDirection::DeviceToDevice,
                     d_ref_conv_input,
-                    d_ref_history[s],
+                    history_ptr,
                     (conv_kernel - 1) * row_bytes,
                 )
                 .unwrap();
@@ -160,7 +160,7 @@ fn run_both(n_slots: usize, conv_channels: usize, conv_kernel: usize, seed: u64)
                 dev.memcpy_async(
                     stream,
                     CopyDirection::DeviceToDevice,
-                    d_ref_history[s],
+                    history_ptr,
                     DevicePtr(d_ref_conv_input.as_usize() + row_bytes),
                     (conv_kernel - 1) * row_bytes,
                 )

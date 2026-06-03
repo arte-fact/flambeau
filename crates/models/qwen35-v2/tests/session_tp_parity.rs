@@ -36,11 +36,13 @@ fn session_qwen35_9b_tp_size_2_argmax_matches_sd() {
         Topology::Tp {
             devices: vec![0, 1],
         },
-        None,
-        1,
-        1,
-        None,
-        flambeau_forward::KvLayout::F16Contig,
+        flambeau_forward::LaunchParams {
+            ctx_cap: None,
+            prefill_ubatch: 1,
+            max_slots: 1,
+            paged_kv_pages: None,
+            kv_layout: flambeau_forward::KvLayout::F16Contig,
+        },
     )
     .expect("Session<Qwen35V2> TP=2");
 

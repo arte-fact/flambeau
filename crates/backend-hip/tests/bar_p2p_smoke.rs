@@ -107,8 +107,8 @@ fn bar_p2p_residual_tp4_round_trip() {
     let partial_sum_f32: Vec<f32> = (0..N)
         .map(|i| {
             let mut acc = 0.0f32;
-            for r in 0..4 {
-                acc += host_partials[r][i].to_f32();
+            for hp in host_partials.iter().take(4) {
+                acc += hp[i].to_f32();
             }
             acc
         })

@@ -3206,8 +3206,8 @@ pub fn build_expert_buckets(
     // One bucket_expert entry per MMQ_X chunk. We can fill this up-front
     // because we already know each expert contributes
     // `count.div_ceil(MMQ_X)` chunks in ascending-id order.
-    for e in 0..n_experts {
-        let c = counts[e] as usize;
+    for (e, &count) in counts.iter().enumerate().take(n_experts) {
+        let c = count as usize;
         if c == 0 {
             continue;
         }

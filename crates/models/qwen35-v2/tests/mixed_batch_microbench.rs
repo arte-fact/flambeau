@@ -100,11 +100,11 @@ fn bench_one(
     for it in 0..n_iter {
         // Advance positions per iteration (decode slots step by 1; prefill
         // continues from K * iter).
-        for j in 0..k {
-            pref_positions[j] = it * k + j;
+        for (j, slot) in pref_positions.iter_mut().enumerate().take(k) {
+            *slot = it * k + j;
         }
-        for j in 0..n_dec {
-            dec_positions[j] = (it * k + k) + j; // arbitrary distinct
+        for (j, slot) in dec_positions.iter_mut().enumerate().take(n_dec) {
+            *slot = (it * k + k) + j; // arbitrary distinct
         }
         if pref_positions[k - 1] >= max_seq_len {
             break;
@@ -128,11 +128,12 @@ fn bench_one(
     // Timed: MIXED
     let mut t_mix = 0.0f64;
     for it in 0..n_iter {
-        for j in 0..k {
-            mixed_positions[j] = it * k + j;
+        let (pref_slice, dec_slice) = mixed_positions.split_at_mut(k);
+        for (j, slot) in pref_slice.iter_mut().enumerate() {
+            *slot = it * k + j;
         }
-        for j in 0..n_dec {
-            mixed_positions[k + j] = (it * k + k) + j;
+        for (j, slot) in dec_slice.iter_mut().enumerate().take(n_dec) {
+            *slot = (it * k + k) + j;
         }
         if mixed_positions[k - 1] >= max_seq_len {
             break;

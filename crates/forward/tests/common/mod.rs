@@ -50,11 +50,6 @@ impl DeviceAllocs {
         unsafe { Tensor::<F16>::from_raw(ptr, host_f16.len()) }
     }
 
-    pub fn upload_f32(&mut self, host_f32: &[f32]) -> Tensor<flambeau_model_ops::F32> {
-        let (ptr, _) = self.upload(host_f32);
-        unsafe { Tensor::<flambeau_model_ops::F32>::from_raw(ptr, host_f32.len()) }
-    }
-
     pub fn upload_q8_0(&mut self, host_f32: &[f32], rows: usize, cols: usize) -> QuantWeight {
         assert_eq!(host_f32.len(), rows * cols);
         assert!(cols % 32 == 0, "Q8_0 needs cols % 32 == 0");

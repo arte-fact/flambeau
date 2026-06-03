@@ -887,14 +887,7 @@ fn run_completion_blocking_ids(
             if !relax_stop_mask {
                 for &sid in stop_ids {
                     if (sid as usize) < logits_buf.len() {
-                        // Sampler-G — `<think>` / `</think>` always
-                        // get NEG_INFINITY, even outside the early
-                        // window: the chat template ran with
-                        // `enable_thinking=false` so the model
-                        // should never emit them.
-                        if always_stop_ids.contains(&sid) {
-                            logits_buf[sid as usize] = f32::NEG_INFINITY;
-                        } else if force_mask {
+                        if always_stop_ids.contains(&sid) || force_mask {
                             logits_buf[sid as usize] = f32::NEG_INFINITY;
                         } else {
                             logits_buf[sid as usize] -= STOP_BIAS;
@@ -1287,13 +1280,7 @@ pub(crate) fn run_completion_blocking_streaming(
         if !relax_stop_mask {
             for &sid in stop_ids {
                 if (sid as usize) < logits_buf.len() {
-                    // Sampler-G — always_stop_ids (`<think>`/`</think>`)
-                    // get NEG_INFINITY in every step, even outside the
-                    // early-window mask. The model should never emit
-                    // them when `enable_thinking=false`.
-                    if always_stop_ids.contains(&sid) {
-                        logits_buf[sid as usize] = f32::NEG_INFINITY;
-                    } else if force_mask {
+                    if always_stop_ids.contains(&sid) || force_mask {
                         logits_buf[sid as usize] = f32::NEG_INFINITY;
                     } else {
                         logits_buf[sid as usize] -= STOP_BIAS;

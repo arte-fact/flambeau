@@ -18,7 +18,9 @@
 use anyhow::Result;
 use flambeau_backend_hip::{device_count, HipDevice};
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
-use flambeau_ops::{mlp, norm, pe, softmax, OpsRegistry};
+use flambeau_ops::{
+    mlp, norm, pe, softmax, OpCtx, OpsRegistry, SoftmaxMaskedBuffers, SoftmaxMaskedKnobs,
+};
 use half::f16;
 
 fn dev_or_skip() -> Option<HipDevice> {
@@ -207,7 +209,11 @@ fn softmax_masked_runs_with_zero_mask() -> Result<()> {
     let d_s = upload(&dev, &scores);
     let d_m = upload(&dev, &mask);
     let d_o = dev.alloc(m * k * 2)?;
-    softmax::softmax_masked_f16(&reg, dev.default_stream(), d_s, d_m, d_o, m, k, 1.0)?;
+    softmax::softmax_masked_f16(
+        OpCtx { reg: &reg, stream: dev.default_stream() },
+        SoftmaxMaskedBuffers { scores: d_s, mask: d_m, out: d_o },
+        SoftmaxMaskedKnobs { m, k, scale: 1.0 },
+    )?;
     dev.default_stream().synchronize()?;
     let mut out = vec![f16::from_f32(0.0); m * k];
     unsafe {

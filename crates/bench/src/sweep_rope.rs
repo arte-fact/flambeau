@@ -1,10 +1,11 @@
 //! RoPE correctness sweep.
 //! Two-part cert:
 //! 1. **Round-trip**: rotate with positions `p`, then rotate again with
-//! positions `-p` — should land back at the input modulo F16 round-off.
-//! This catches axis-flip bugs, wrong pair grouping, etc.
+//!    positions `-p` — should land back at the input modulo F16 round-off.
+//!    This catches axis-flip bugs, wrong pair grouping, etc.
 //! 2. **Fixed-angle oracle**: positions = 1, theta_base = 10000, compare
-//! against a CPU F32 reference. This catches the actual angle formula.
+//!    against a CPU F32 reference. This catches the actual angle formula.
+//!
 //! Shapes: Qwen3.6's head_dim = 128, n_heads_q = 32, n_heads_kv = 4.
 //! Sequence lengths from decode (1) through short prefill (128).
 

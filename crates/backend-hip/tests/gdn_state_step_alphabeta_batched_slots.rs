@@ -174,7 +174,7 @@ fn run_both(
     let grid_z = (S_V as u32) / WARPS_PER_BLOCK;
 
     // REF: run per-slot with B=1.
-    for slot in 0..b {
+    for (slot, &state_ptr) in d_ref_state.iter().enumerate().take(b) {
         let stream = dev.default_stream();
         let b_kernel_i = 1i32;
         let q_off: u64 = (d_q.as_usize() + slot * l * h_kv * S_V * 4) as u64;
@@ -184,8 +184,8 @@ fn run_both(
         let beta_off: u64 = (d_beta.as_usize() + slot * l * h_v * 4) as u64;
         let dt_ptr: u64 = d_dt.as_usize() as u64;
         let sa_ptr: u64 = d_sa.as_usize() as u64;
-        let sin_ptr: u64 = d_ref_state[slot].as_usize() as u64;
-        let sout_ptr: u64 = d_ref_state[slot].as_usize() as u64;
+        let sin_ptr: u64 = state_ptr.as_usize() as u64;
+        let sout_ptr: u64 = state_ptr.as_usize() as u64;
         let attn_off: u64 = (d_ref_attn.as_usize() + slot * l * h_v * S_V * 4) as u64;
         let mut args = KernelArgs::new();
         args.push(&q_off);

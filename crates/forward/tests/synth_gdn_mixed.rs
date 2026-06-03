@@ -14,12 +14,17 @@ mod common;
 use common::{det_signal, DeviceAllocs};
 use flambeau_backend_hip::HipDevice;
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
-use flambeau_forward::core::ScratchConfig;
+use flambeau_forward::core::{GdnMixedBatch, ScratchConfig};
 use flambeau_forward::ctx::{ForwardCtx, GdnDims, GdnWeights};
 use flambeau_forward::{ScratchPool, SingleDeviceForwardCtx};
 use flambeau_model_ops::{Tensor, F16};
 use flambeau_ops::OpsRegistry;
 use half::f16;
+
+fn upload_f32_tensor(allocs: &mut DeviceAllocs, host: &[f32]) -> Tensor<flambeau_model_ops::F32> {
+    let (ptr, _) = allocs.upload(host);
+    unsafe { Tensor::<flambeau_model_ops::F32>::from_raw(ptr, host.len()) }
+}
 
 const HIDDEN: usize = 256;
 const HEAD_K_DIM: usize = 128;
@@ -54,10 +59,10 @@ fn build_gdn_weights(allocs: &mut DeviceAllocs, dims: GdnDims) -> GdnWeights {
             HIDDEN,
         ),
         ssm_out: allocs.upload_q8_0(&det_signal(HIDDEN * d_inner, seed + 5), HIDDEN, d_inner),
-        ssm_dt_bias: allocs.upload_f32(&det_signal(NUM_V_HEADS, seed + 6)),
-        ssm_a: allocs.upload_f32(&det_signal(NUM_V_HEADS, seed + 7)),
-        ssm_conv1d: allocs.upload_f32(&det_signal(CONV_KERNEL * conv_channels, seed + 8)),
-        ssm_norm_w: allocs.upload_f32(&vec![1.0_f32; HEAD_V_DIM]),
+        ssm_dt_bias: upload_f32_tensor(allocs, &det_signal(NUM_V_HEADS, seed + 6)),
+        ssm_a: upload_f32_tensor(allocs, &det_signal(NUM_V_HEADS, seed + 7)),
+        ssm_conv1d: upload_f32_tensor(allocs, &det_signal(CONV_KERNEL * conv_channels, seed + 8)),
+        ssm_norm_w: upload_f32_tensor(allocs, &vec![1.0_f32; HEAD_V_DIM]),
         dims,
         rms_eps: RMS_EPS,
         rep_inner_layout: false,
@@ -225,7 +230,16 @@ fn synth_gdn_mixed_matches_separate_calls() {
         let mut slot_ids = vec![0usize; K_PREFILL];
         slot_ids.extend(1..=N_DECODE);
         let delta = ctx
-            .gdn_layer_mixed(&resid_mix, &weights, 0, &slot_ids, K_PREFILL, None)
+            .gdn_layer_mixed(
+                &resid_mix,
+                &weights,
+                0,
+                GdnMixedBatch {
+                    slot_ids: &slot_ids,
+                    prefill_rows: K_PREFILL,
+                },
+                None,
+            )
             .expect("gdn_layer_mixed")
             .expect("mixed delta");
         let all = read_f16(&device, delta.ptr, n_total * HIDDEN);

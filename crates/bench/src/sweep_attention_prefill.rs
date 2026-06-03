@@ -2,6 +2,7 @@
 //! Covers both V1 head_dim values:
 //! - head_dim=128, GQA-32/4 — Qwen3.5 family.
 //! - head_dim=256, GQA-16/2 — Qwen3.6 family.
+//!
 //! Varies Q token count (the novel axis vs decode) and KV cache size.
 //! Causal mask is applied inside the kernel via a per-(q_token) context
 //! limit.

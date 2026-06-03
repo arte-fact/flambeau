@@ -89,8 +89,8 @@ fn make_qkx2_quants(
         min = 0.0;
     }
     if max == min {
-        for i in 0..n {
-            out_l[i] = 0;
+        for slot in out_l.iter_mut().take(n) {
+            *slot = 0;
         }
         *the_min = -min;
         return 0.0;
@@ -165,8 +165,8 @@ fn make_q3_quants(n: usize, nmax: i32, x: &[f32], out_l: &mut [i8], do_rmse: boo
         }
     }
     if amax < GROUP_MAX_EPS {
-        for i in 0..n {
-            out_l[i] = 0;
+        for slot in out_l.iter_mut().take(n) {
+            *slot = 0;
         }
         return 0.0;
     }
@@ -207,8 +207,8 @@ fn make_q3_quants(n: usize, nmax: i32, x: &[f32], out_l: &mut [i8], do_rmse: boo
                 break;
             }
         }
-        for i in 0..n {
-            out_l[i] = (out_l[i] as i32 + nmax) as i8;
+        for slot in out_l.iter_mut().take(n) {
+            *slot = (*slot as i32 + nmax) as i8;
         }
         return if suml2 > 0.0 { sumlx / suml2 } else { 0.0 };
     }
@@ -403,10 +403,10 @@ fn pack_block_q3_k(xi: &[f32], out: &mut [u8]) {
 
     let mut m_idx = 0usize;
     let mut hm: u8 = 1;
-    for j in 0..QK_K {
-        if local_l[j] > 3 {
+    for slot in local_l.iter_mut().take(QK_K) {
+        if *slot > 3 {
             hmask[m_idx] |= hm;
-            local_l[j] -= 4;
+            *slot -= 4;
         }
         m_idx += 1;
         if m_idx == QK_K / 8 {

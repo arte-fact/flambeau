@@ -961,8 +961,8 @@ fn check(rc: c_int, tag: &str) -> DeviceResult<()> {
 fn probe_and_enable_peer_access(devices: &[HipDevice]) -> DeviceResult<Vec<Vec<bool>>> {
     let n = devices.len();
     let mut matrix = vec![vec![false; n]; n];
-    for i in 0..n {
-        matrix[i][i] = true;
+    for (i, row) in matrix.iter_mut().enumerate() {
+        row[i] = true;
     }
     if n < 2 {
         return Ok(matrix);

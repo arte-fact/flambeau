@@ -96,10 +96,9 @@ fn launch_tp<A: Arch>(
     Ok(handles)
 }
 
-/// Runtime knobs shared by every worker (orchestrate-level launchers
-/// + `WorkerHandle::spawn` + `init_rank`). Separate from the GGUF
-/// `Arc` because the worker variants take it by ref or by clone
-/// independently.
+/// Runtime knobs shared by every worker (orchestrate-level launchers,
+/// `WorkerHandle::spawn`, `init_rank`). Separate from the GGUF `Arc`
+/// because the worker variants take it by ref or by clone independently.
 #[derive(Copy, Clone, Debug)]
 pub struct LaunchParams {
     pub ctx_cap: Option<usize>,
@@ -241,8 +240,7 @@ fn launch_hybrid<A: Arch>(
         // producer's lazy peer_send alloc runs.
         const MAX_HIDDEN: usize = 8192;
         let max_bytes = params.prefill_ubatch * MAX_HIDDEN * 2;
-        for k in 0..src_ranks.len() {
-            let consumer_dev = dst_ranks[k];
+        for (k, &consumer_dev) in dst_ranks.iter().enumerate().take(src_ranks.len()) {
             edges_at_transition.push(
                 new_peer_edge_prealloc(consumer_dev, max_bytes).with_context(|| {
                     format!(

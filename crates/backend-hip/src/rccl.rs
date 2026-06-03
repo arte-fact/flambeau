@@ -387,6 +387,6 @@ fn device_err_ctx(ctx: &'static str) -> impl Fn(flambeau_core::DeviceError) -> C
     }
 }
 
-fn stream_raw(s: &<HipDevice as Device>::Stream) -> crate::sys::hipStream_t {
+fn stream_raw(s: &<HipDevice as Device>::Stream) -> crate::sys::HipStreamT {
     s.raw_handle() as *mut std::os::raw::c_void
 }

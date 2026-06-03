@@ -98,12 +98,12 @@ fn cpu_rope_interleaved(
     n_heads: usize,
     head_dim: usize,
 ) {
-    for t in 0..n_tokens {
+    for (t, &pos) in positions.iter().enumerate().take(n_tokens) {
         for h in 0..n_heads {
             for pair in 0..head_dim / 2 {
                 let exponent = 2.0_f32 * (pair as f32) / (head_dim as f32);
                 let inv_freq = 1.0_f32 / theta_base.powf(exponent);
-                let angle = (positions[t] as f32) * inv_freq;
+                let angle = (pos as f32) * inv_freq;
                 let c = angle.cos();
                 let s = angle.sin();
                 let base = (t * n_heads + h) * head_dim + 2 * pair;
@@ -127,13 +127,13 @@ fn cpu_rope_neox_partial(
     rotated_dims: usize,
 ) {
     let half = rotated_dims / 2;
-    for t in 0..n_tokens {
+    for (t, &pos) in positions.iter().enumerate().take(n_tokens) {
         for h in 0..n_heads {
             let head_base = (t * n_heads + h) * head_dim;
             for pair in 0..half {
                 let exponent = 2.0_f32 * (pair as f32) / (rotated_dims as f32);
                 let inv_freq = 1.0_f32 / theta_base.powf(exponent);
-                let angle = (positions[t] as f32) * inv_freq;
+                let angle = (pos as f32) * inv_freq;
                 let c = angle.cos();
                 let s = angle.sin();
                 let lo = head_base + pair;

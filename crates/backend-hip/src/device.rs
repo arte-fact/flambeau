@@ -17,7 +17,7 @@ use flambeau_core::{CopyDirection, Device, DeviceError, DevicePtr, DeviceResult,
 use crate::sys::{
     self, error_string, hipFree, hipGetDevice, hipGetDeviceCount, hipMalloc, hipMemcpyAsync,
     hipMemcpyKind, hipSetDevice, hipStreamCreate, hipStreamCreateWithFlags, hipStreamDestroy,
-    hipStreamSynchronize, hipStream_t, HIP_SUCCESS,
+    hipStreamSynchronize, HipStreamT, HIP_SUCCESS,
 };
 
 const BACKEND: &str = "hip";
@@ -70,9 +70,9 @@ pub fn current_device() -> DeviceResult<i32> {
     Ok(id)
 }
 
-/// A HIP stream. Drop destroys the underlying `hipStream_t`.
+/// A HIP stream. Drop destroys the underlying `HipStreamT`.
 pub struct HipStream {
-    ptr: hipStream_t,
+    ptr: HipStreamT,
     device_id: i32,
 }
 
@@ -85,7 +85,7 @@ impl std::fmt::Debug for HipStream {
     }
 }
 
-// SAFETY: `hipStream_t` is an opaque driver handle with no Rust-side aliasing.
+// SAFETY: `HipStreamT` is an opaque driver handle with no Rust-side aliasing.
 // HIP streams are documented as safe to pass between threads (operations
 // serialise within a stream driver-side). `HipStream` owns its handle and
 // destroys it on drop, so there is no cross-thread double-free risk.
@@ -102,9 +102,9 @@ impl HipStream {
     /// the null stream). For truly-concurrent streams on the same device
     /// use [`Self::new_non_blocking`].
     pub fn new(device_id: i32) -> DeviceResult<Self> {
-        let mut s: hipStream_t = ptr::null_mut();
+        let mut s: HipStreamT = ptr::null_mut();
         // SAFETY: `hipStreamCreate` writes a stream handle through the
-        // out-pointer. `&mut s` is valid for writes of a `hipStream_t`.
+        // out-pointer. `&mut s` is valid for writes of a `HipStreamT`.
         check(unsafe { hipStreamCreate(&raw mut s) }, "hipStreamCreate")?;
         Ok(Self { ptr: s, device_id })
     }
@@ -116,7 +116,7 @@ impl HipStream {
     /// 5.d async ubatch pipeline truly overlaps lanes on the same
     /// device.
     pub fn new_non_blocking(device_id: i32) -> DeviceResult<Self> {
-        let mut s: hipStream_t = ptr::null_mut();
+        let mut s: HipStreamT = ptr::null_mut();
         const HIP_STREAM_NON_BLOCKING: std::os::raw::c_uint = 1;
         // SAFETY: `hipStreamCreateWithFlags` writes an opaque handle.
         check(
@@ -130,7 +130,7 @@ impl HipStream {
         self.device_id
     }
 
-    pub(crate) fn raw(&self) -> hipStream_t {
+    pub(crate) fn raw(&self) -> HipStreamT {
         self.ptr
     }
 }
@@ -165,10 +165,10 @@ impl Stream for HipStream {
 
 /// 5.b — HIP event for cross-stream DAG scheduling. Used by the async
 /// peer-copy pipeline in `HipCluster::peer_copy_via_host_async`.
-/// Created with `hipEventDisableTiming` — we never call `hipEventElapsedTime`,
+/// Created with `HIP_EVENT_DISABLE_TIMING` — we never call `hipEventElapsedTime`,
 /// just `hipEventRecord` / `hipStreamWaitEvent`. Drop destroys the handle.
 pub struct HipEvent {
-    ptr: crate::sys::hipEvent_t,
+    ptr: crate::sys::HipEventT,
     device_id: i32,
 }
 
@@ -181,7 +181,7 @@ impl std::fmt::Debug for HipEvent {
     }
 }
 
-// SAFETY: hipEvent_t is an opaque driver handle. Events are thread-safe
+// SAFETY: HipEventT is an opaque driver handle. Events are thread-safe
 // per the HIP runtime contract; record/wait ops serialise at the driver.
 unsafe impl Send for HipEvent {}
 unsafe impl Sync for HipEvent {}
@@ -190,12 +190,12 @@ impl HipEvent {
     /// Create a new timing-disabled event on `device_id`. Caller must have
     /// `bind(device_id)` in effect.
     pub fn new(device_id: i32) -> DeviceResult<Self> {
-        let mut e: crate::sys::hipEvent_t = ptr::null_mut();
+        let mut e: crate::sys::HipEventT = ptr::null_mut();
         // SAFETY: `hipEventCreateWithFlags` writes an opaque handle through
-        // the out-pointer. `&mut e` is valid for a `hipEvent_t`.
+        // the out-pointer. `&mut e` is valid for a `HipEventT`.
         check(
             unsafe {
-                crate::sys::hipEventCreateWithFlags(&raw mut e, crate::sys::hipEventDisableTiming)
+                crate::sys::hipEventCreateWithFlags(&raw mut e, crate::sys::HIP_EVENT_DISABLE_TIMING)
             },
             "hipEventCreateWithFlags",
         )?;
@@ -228,12 +228,12 @@ impl HipEvent {
     }
 
     /// timing-enabled event constructor (omits
-    /// `hipEventDisableTiming` so `hipEventElapsedTime` returns valid
+    /// `HIP_EVENT_DISABLE_TIMING` so `hipEventElapsedTime` returns valid
     /// data). Use only for profiling instrumentation; the timing-
     /// disabled `new()` is cheaper for ordering-only events on the
     /// production hot path.
     pub fn new_timing(device_id: i32) -> DeviceResult<Self> {
-        let mut e: crate::sys::hipEvent_t = ptr::null_mut();
+        let mut e: crate::sys::HipEventT = ptr::null_mut();
         // SAFETY: hipEventCreate writes through the out-pointer; flags
         // default = timing enabled.
         check(
@@ -288,16 +288,16 @@ impl Drop for HipEvent {
 /// return we end capture, instantiate, and hold the executable. Drop
 /// destroys both the recording graph and the instantiated exec.
 pub struct HipGraphExec {
-    exec: crate::sys::hipGraphExec_t,
+    exec: crate::sys::HipGraphExecT,
     /// Source graph kept alive for the lifetime of the exec. HIP's node
     /// introspection (`hipGraphKernelNodeGetParams`) requires the source
     /// graph be live; destroying it before reads fails with
     /// `hipErrorInvalidValue`. Destroyed in Drop after the exec.
-    graph: crate::sys::hipGraph_t,
+    graph: crate::sys::HipGraphT,
     device_id: i32,
     /// Kernel-type nodes in dispatch order, enumerated at capture time
     /// via `hipGraphGetNodes` + `hipGraphNodeGetType` filtering. Stored
-    /// in a Vec<usize> because `hipGraphNode_t` is a `*mut c_void` and
+    /// in a Vec<usize> because `HipGraphNodeT` is a `*mut c_void` and
     /// doesn't implement Send/Sync out of the box; we cast back when
     /// calling the param-update FFI.
     kernel_nodes: Vec<usize>,
@@ -367,7 +367,7 @@ impl std::fmt::Debug for HipGraphExec {
     }
 }
 
-// SAFETY: hipGraphExec_t is an opaque driver handle. Graph-exec launch is
+// SAFETY: HipGraphExecT is an opaque driver handle. Graph-exec launch is
 // documented thread-safe on HIP — the same exec can be replayed from
 // multiple threads as long as the stream argument is not shared.
 unsafe impl Send for HipGraphExec {}
@@ -404,7 +404,7 @@ impl HipGraphExec {
 
         let closure_result = f(stream);
 
-        let mut graph: crate::sys::hipGraph_t = ptr::null_mut();
+        let mut graph: crate::sys::HipGraphT = ptr::null_mut();
         // SAFETY: end capture writes the recorded graph through &graph.
         // Must be called whether the closure failed or not — otherwise the
         // stream stays in capture mode and every subsequent submit errors.
@@ -425,7 +425,7 @@ impl HipGraphExec {
         // because `hipGraph*NodeGetParams` requires a live source graph.
         let (kernel_nodes, memcpy_nodes) = unsafe { collect_nodes_by_type(graph) }?;
 
-        let mut exec: crate::sys::hipGraphExec_t = ptr::null_mut();
+        let mut exec: crate::sys::HipGraphExecT = ptr::null_mut();
         // SAFETY: graph is the handle just returned by end-capture. The
         // err_node + log_buf out-params are optional; pass null / zero.
         let inst_code = unsafe {
@@ -465,8 +465,8 @@ impl HipGraphExec {
         // populate shadows for nodes that have at least one slot bound
         // (lazy init for others happens on first set_slot — see `set_slot`).
         let mut node_shadows: Vec<NodeShadow> = Vec::with_capacity(kernel_nodes.len());
-        for node_idx in 0..kernel_nodes.len() {
-            let node = kernel_nodes[node_idx] as crate::sys::hipGraphNode_t;
+        for (node_idx, &raw_node) in kernel_nodes.iter().enumerate() {
+            let node = raw_node as crate::sys::HipGraphNodeT;
             let mut params = crate::sys::hipKernelNodeParams {
                 block_dim: crate::sys::hipDim3::default(),
                 extra: ptr::null_mut(),
@@ -566,7 +566,7 @@ impl HipGraphExec {
         // argument` on the first launch (ROCm 7.1.1 issue —
         // multi-stream concurrent capture without a shared graph
         // target rejects launches).
-        let mut shared_graph: crate::sys::hipGraph_t = ptr::null_mut();
+        let mut shared_graph: crate::sys::HipGraphT = ptr::null_mut();
         check(
             unsafe { crate::sys::hipGraphCreate(&raw mut shared_graph, 0) },
             "hipGraphCreate",
@@ -592,7 +592,7 @@ impl HipGraphExec {
             };
             if code != HIP_SUCCESS {
                 for prior in &streams[..i] {
-                    let mut g: crate::sys::hipGraph_t = ptr::null_mut();
+                    let mut g: crate::sys::HipGraphT = ptr::null_mut();
                     let _ = unsafe { crate::sys::hipStreamEndCapture(prior.raw(), &raw mut g) };
                 }
                 let _ = unsafe { crate::sys::hipGraphDestroy(shared_graph) };
@@ -647,7 +647,7 @@ impl HipGraphExec {
             if trace {
                 eprintln!("[capture_into_shared_graph] end capture stream {i}");
             }
-            let mut out_graph: crate::sys::hipGraph_t = ptr::null_mut();
+            let mut out_graph: crate::sys::HipGraphT = ptr::null_mut();
             let code = unsafe { crate::sys::hipStreamEndCapture(stream.raw(), &raw mut out_graph) };
             if trace {
                 eprintln!(
@@ -739,11 +739,11 @@ impl HipGraphExec {
         )
     }
 
-    fn memcpy_node_handle(&self, idx: usize) -> DeviceResult<crate::sys::hipGraphNode_t> {
+    fn memcpy_node_handle(&self, idx: usize) -> DeviceResult<crate::sys::HipGraphNodeT> {
         self.memcpy_nodes
             .get(idx)
             .copied()
-            .map(|u| u as crate::sys::hipGraphNode_t)
+            .map(|u| u as crate::sys::HipGraphNodeT)
             .ok_or_else(|| DeviceError::Backend {
                 backend: BACKEND,
                 code: -1,
@@ -877,11 +877,11 @@ impl HipGraphExec {
         )
     }
 
-    fn kernel_node_handle(&self, idx: usize) -> DeviceResult<crate::sys::hipGraphNode_t> {
+    fn kernel_node_handle(&self, idx: usize) -> DeviceResult<crate::sys::HipGraphNodeT> {
         self.kernel_nodes
             .get(idx)
             .copied()
-            .map(|u| u as crate::sys::hipGraphNode_t)
+            .map(|u| u as crate::sys::HipGraphNodeT)
             .ok_or_else(|| DeviceError::Backend {
                 backend: BACKEND,
                 code: -1,
@@ -914,9 +914,9 @@ impl HipGraphExec {
 /// host nodes, empty nodes, graph nodes) are currently discarded —
 /// none of them are emitted by our current forward-path ops.
 /// # Safety
-/// `graph` must be a live, end-captured `hipGraph_t`.
+/// `graph` must be a live, end-captured `HipGraphT`.
 unsafe fn collect_nodes_by_type(
-    graph: crate::sys::hipGraph_t,
+    graph: crate::sys::HipGraphT,
 ) -> DeviceResult<(Vec<usize>, Vec<usize>)> {
     let mut count: usize = 0;
     // SAFETY: hipGraphGetNodes with nodes=null writes count through
@@ -928,7 +928,7 @@ unsafe fn collect_nodes_by_type(
     if count == 0 {
         return Ok((Vec::new(), Vec::new()));
     }
-    let mut nodes: Vec<crate::sys::hipGraphNode_t> = vec![ptr::null_mut(); count];
+    let mut nodes: Vec<crate::sys::HipGraphNodeT> = vec![ptr::null_mut(); count];
     let mut out_count = count;
     // SAFETY: nodes buffer has `count` slots; out_count starts at count.
     check(

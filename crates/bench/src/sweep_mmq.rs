@@ -1007,10 +1007,10 @@ fn tame_weight_scales(dtype: Dtype, mut raw: Vec<u8>) -> Vec<u8> {
                 // small positive fp16 (~1e-3); see mmvq_iq1_m randomize_block.
                 let pin_nib = [0x0u16, 0x5, 0x8, 0x0];
                 let sc_off = QK_K / 8 + QK_K / 16;
-                for i in 0..4 {
+                for (i, &nib) in pin_nib.iter().enumerate() {
                     let off = sc_off + 2 * i;
                     let lo = u16::from_le_bytes([block[off], block[off + 1]]);
-                    let new = (lo & 0x0FFF) | (pin_nib[i] << 12);
+                    let new = (lo & 0x0FFF) | (nib << 12);
                     block[off..off + 2].copy_from_slice(&new.to_le_bytes());
                 }
             }

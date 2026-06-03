@@ -58,19 +58,15 @@ pub fn gdn_layer_mixed_local<H: TopologyHooks>(
     }
     let n_dec = n_tokens - k;
     let slot_p = slot_ids[0];
-    for i in 0..k {
-        if slot_ids[i] != slot_p {
-            bail!(
-                "gdn_layer_mixed: prefill row {i} slot {} != slot_p {slot_p}",
-                slot_ids[i]
-            );
+    for (i, &slot) in slot_ids.iter().enumerate().take(k) {
+        if slot != slot_p {
+            bail!("gdn_layer_mixed: prefill row {i} slot {slot} != slot_p {slot_p}");
         }
     }
-    for i in k..n_tokens {
-        if slot_ids[i] == slot_p {
+    for (i, &slot) in slot_ids.iter().enumerate().take(n_tokens).skip(k) {
+        if slot == slot_p {
             bail!(
-                "gdn_layer_mixed: decode row {i} slot {} collides with prefill slot_p {slot_p}",
-                slot_ids[i]
+                "gdn_layer_mixed: decode row {i} slot {slot} collides with prefill slot_p {slot_p}"
             );
         }
     }

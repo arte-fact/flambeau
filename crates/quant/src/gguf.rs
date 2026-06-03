@@ -315,16 +315,7 @@ impl GgufFile {
         })
     }
 
-    fn open_one_split(
-        path: PathBuf,
-        split_idx: u16,
-    ) -> Result<(
-        ParsedSplit,
-        HashMap<String, Value>,
-        HashMap<String, TensorInfo>,
-        Vec<String>,
-        u64,
-    )> {
+    fn open_one_split(path: PathBuf, split_idx: u16) -> Result<ParsedSplitTuple> {
         use std::os::unix::io::AsRawFd;
         let file = File::open(&path)?;
         // 7: mirror llama.cpp's loader hints. SEQUENTIAL tells the
@@ -638,17 +629,20 @@ impl ParsedSplit {
     }
 }
 
-/// Parse the GGUF header on `mmap`. Returns (ParsedSplit, metadata,
-/// tensors-without-split-idx, tensor_order, tensor_data_offset).
-fn parse_gguf_header(
-    mmap: Arc<Mmap>,
-) -> Result<(
+/// `(ParsedSplit, metadata, tensors-without-split-idx, tensor_order,
+/// tensor_data_offset)` returned by [`parse_gguf_header`] and the
+/// per-split header opener.
+type ParsedSplitTuple = (
     ParsedSplit,
     HashMap<String, Value>,
     HashMap<String, TensorInfo>,
     Vec<String>,
     u64,
-)> {
+);
+
+/// Parse the GGUF header on `mmap`. Returns (ParsedSplit, metadata,
+/// tensors-without-split-idx, tensor_order, tensor_data_offset).
+fn parse_gguf_header(mmap: Arc<Mmap>) -> Result<ParsedSplitTuple> {
     let mut cur = Cursor::new(&mmap[..]);
 
     let magic = cur.read_u32::<LittleEndian>()?;

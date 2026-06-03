@@ -67,12 +67,11 @@ fn copy_back_f16(dev: &HipDevice, src: DevicePtr, n: usize) -> Vec<f16> {
     out
 }
 
-fn run_case(
-    n_slots: usize,
-    kv_width: usize,
-    max_seq_len: usize,
-    seed: u64,
-) -> (Vec<Vec<f16>>, Vec<Vec<f16>>, Vec<Vec<f16>>, Vec<Vec<f16>>) {
+/// Outputs of a kv_append parity case — per-slot vectors of:
+/// `(k_cache, v_cache, k_ref, v_ref)`.
+type CaseResult = (Vec<Vec<f16>>, Vec<Vec<f16>>, Vec<Vec<f16>>, Vec<Vec<f16>>);
+
+fn run_case(n_slots: usize, kv_width: usize, max_seq_len: usize, seed: u64) -> CaseResult {
     let dev = HipDevice::new(0).unwrap();
     dev.bind().unwrap();
 

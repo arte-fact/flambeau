@@ -139,9 +139,8 @@ fn run_parity(
     let mut all_q: Vec<f16> = Vec::with_capacity(n_slots * q_per_slot);
     let mut per_slot_k: Vec<Vec<f16>> = Vec::with_capacity(n_slots);
     let mut per_slot_v: Vec<Vec<f16>> = Vec::with_capacity(n_slots);
-    for s in 0..n_slots {
+    for (s, &kv_n) in slot_kv_lens.iter().enumerate().take(n_slots) {
         all_q.extend(seeded_f16(seed.wrapping_add(s as u64 * 7 + 1), q_per_slot));
-        let kv_n = slot_kv_lens[s];
         per_slot_k.push(seeded_f16(
             seed.wrapping_add(s as u64 * 7 + 2),
             kv_n * kv_stride_per_token,

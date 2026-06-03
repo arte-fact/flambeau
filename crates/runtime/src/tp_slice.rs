@@ -406,13 +406,16 @@ fn slice_row_parallel_dim2_3d<'a>(
 /// `outer = V_part_full + 2 · K_part_full` where:
 /// - `V_part_full = num_v_heads · head_v_dim`
 /// - `K_part_full = num_k_heads · head_k_dim`
-///   (Q and K share the GDN head shape; total = 1·V + 1·K + 1·Q.)
-///   Per rank, we want `[V_local | K_local | Q_local]` re-assembled
-///   where each sub-slab is the rank's contiguous head slice. For
-///   quantised dtypes the rows must already be block-aligned (any
-///   2-D ggml tensor is); the per-sub-slab row counts must each
-///   individually divide cleanly by `world`.
+///
 /// Per-tensor head geometry for [`WeightLayout::FusedQkvParallel`].
+///
+/// Encodes the QKV fusion shape:
+/// `[V_local | K_local | Q_local]` re-assembled per rank, where each
+/// sub-slab is the rank's contiguous head slice. For quantised dtypes
+/// the rows must already be block-aligned (any 2-D ggml tensor is);
+/// the per-sub-slab row counts must each individually divide cleanly
+/// by `world`. (Q and K share the GDN head shape;
+/// total = 1·V + 1·K + 1·Q.)
 #[derive(Copy, Clone, Debug)]
 pub struct FusedQkvSpec {
     pub num_v_heads: u32,

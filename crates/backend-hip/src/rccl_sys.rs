@@ -10,7 +10,7 @@
 
 use std::os::raw::{c_char, c_int, c_void};
 
-use crate::sys::hipStream_t;
+use crate::sys::HipStreamT;
 
 pub const NCCL_UNIQUE_ID_BYTES: usize = 128;
 pub const NCCL_SUCCESS: c_int = 0;
@@ -76,7 +76,7 @@ extern "C" {
         datatype: ncclDataType_t,
         op: ncclRedOp_t,
         comm: ncclComm_t,
-        stream: hipStream_t,
+        stream: HipStreamT,
     ) -> c_int;
 
     pub fn ncclAllGather(
@@ -85,7 +85,7 @@ extern "C" {
         sendcount: usize,
         datatype: ncclDataType_t,
         comm: ncclComm_t,
-        stream: hipStream_t,
+        stream: HipStreamT,
     ) -> c_int;
 
     pub fn ncclBroadcast(
@@ -95,7 +95,7 @@ extern "C" {
         datatype: ncclDataType_t,
         root: c_int,
         comm: ncclComm_t,
-        stream: hipStream_t,
+        stream: HipStreamT,
     ) -> c_int;
 
     pub fn ncclSend(
@@ -104,7 +104,7 @@ extern "C" {
         datatype: ncclDataType_t,
         peer: c_int,
         comm: ncclComm_t,
-        stream: hipStream_t,
+        stream: HipStreamT,
     ) -> c_int;
     pub fn ncclRecv(
         recvbuff: *mut c_void,
@@ -112,7 +112,7 @@ extern "C" {
         datatype: ncclDataType_t,
         peer: c_int,
         comm: ncclComm_t,
-        stream: hipStream_t,
+        stream: HipStreamT,
     ) -> c_int;
 
     pub fn ncclGroupStart() -> c_int;

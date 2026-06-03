@@ -445,11 +445,7 @@ impl PagedKvCacheConfig {
         let overhead = table_bytes + lens_bytes;
         let usable = per_layer_budget_bytes.saturating_sub(overhead);
         let bytes_per_page_pair = 2 * page_size * kv_width * std::mem::size_of::<u16>();
-        let from_budget = if bytes_per_page_pair == 0 {
-            0
-        } else {
-            usable / bytes_per_page_pair
-        };
+        let from_budget = usable.checked_div(bytes_per_page_pair).unwrap_or(0);
         let min_pages = max_slots * max_pages_per_slot;
         let n_pages = from_budget.max(min_pages);
         Self {

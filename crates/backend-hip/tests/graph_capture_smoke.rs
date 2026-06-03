@@ -211,12 +211,11 @@ fn kernel_param_update_scale_f32() {
         .unwrap();
     }
     stream.synchronize().unwrap();
-    for i in 0..n {
+    for (i, &got) in y_host.iter().enumerate().take(n) {
         let expect = (i + 1) as f32 * 2.0;
         assert!(
-            (y_host[i] - expect).abs() < 1e-4,
-            "post-capture launch y[{i}]={} want {expect}",
-            y_host[i]
+            (got - expect).abs() < 1e-4,
+            "post-capture launch y[{i}]={got} want {expect}"
         );
     }
 
@@ -273,12 +272,11 @@ fn kernel_param_update_scale_f32() {
         .unwrap();
     }
     stream.synchronize().unwrap();
-    for i in 0..n {
+    for (i, &got) in y_host.iter().enumerate().take(n) {
         let expect = (i + 1) as f32 * 5.0;
         assert!(
-            (y_host[i] - expect).abs() < 1e-3,
-            "post-param-update launch y[{i}]={} want {expect}",
-            y_host[i]
+            (got - expect).abs() < 1e-3,
+            "post-param-update launch y[{i}]={got} want {expect}"
         );
     }
 

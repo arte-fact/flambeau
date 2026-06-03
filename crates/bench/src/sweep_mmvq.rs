@@ -859,10 +859,10 @@ fn tame_scales(dtype: Dtype, raw: Vec<u8>) -> Vec<u8> {
                 // Target d_bits = 0x0850. Distribute nibbles 0x0, 0x5, 0x8, 0x0.
                 let pin_nib = [0x0u16, 0x5, 0x8, 0x0];
                 let sc_off = QK_K / 8 + QK_K / 16; // scales array offset in BlockIq1M (no d)
-                for i in 0..4 {
+                for (i, &nib) in pin_nib.iter().enumerate() {
                     let off = sc_off + 2 * i;
                     let lo = u16::from_le_bytes([block[off], block[off + 1]]);
-                    let new = (lo & 0x0FFF) | (pin_nib[i] << 12);
+                    let new = (lo & 0x0FFF) | (nib << 12);
                     block[off..off + 2].copy_from_slice(&new.to_le_bytes());
                 }
             }

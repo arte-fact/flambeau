@@ -24,7 +24,18 @@ fn parity_dump_v2() {
 
     let file = GgufFile::open(&path).expect("open gguf");
     let mut session =
-        Session::<Qwen35V2>::new(file, Topology::SingleDevice { device: 0 }, None, 1, 1, None, flambeau_forward::KvLayout::F16Contig).expect("Session SD");
+        Session::<Qwen35V2>::new(
+            file,
+            Topology::SingleDevice { device: 0 },
+            flambeau_forward::LaunchParams {
+                ctx_cap: None,
+                prefill_ubatch: 1,
+                max_slots: 1,
+                paged_kv_pages: None,
+                kv_layout: flambeau_forward::KvLayout::F16Contig,
+            },
+        )
+        .expect("Session SD");
 
     let mut f = std::fs::File::create(&out_path).expect("create dump");
     for (i, &t) in PROMPT.iter().enumerate() {

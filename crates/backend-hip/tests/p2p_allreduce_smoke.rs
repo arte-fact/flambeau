@@ -199,8 +199,8 @@ fn tp4_residual_correctness_sweep_and_latency() {
         let ref_partial_sum_f32: Vec<f32> = (0..n)
             .map(|i| {
                 let mut acc = 0.0f32;
-                for r in 0..4 {
-                    acc += host_partials[r][i].to_f32();
+                for hp in host_partials.iter().take(4) {
+                    acc += hp[i].to_f32();
                 }
                 acc
             })
@@ -232,9 +232,9 @@ fn tp4_residual_correctness_sweep_and_latency() {
 
         // Warm pass — first kernel launch on a freshly-loaded module pays
         // a one-time JIT cost; we want timing on the steady state.
-        for r in 0..4 {
+        for (r, module) in modules.iter().enumerate().take(4) {
             cluster.device(r).bind().unwrap();
-            let kern: HipKernel<'_> = modules[r].kernel(TP4_RESIDUAL_FN).unwrap();
+            let kern: HipKernel<'_> = module.kernel(TP4_RESIDUAL_FN).unwrap();
             launch_residual_tp4(&kern, cluster.device(r), cfg, &d_hiddens, &d_partials, r, n);
         }
         for r in 0..4 {
@@ -428,17 +428,17 @@ fn tp4_sum_f32_correctness_sweep_and_latency() {
         let reference_sum: Vec<f32> = (0..n)
             .map(|i| {
                 let mut acc = 0.0f32;
-                for r in 0..4 {
-                    acc += host_partials[r][i];
+                for hp in host_partials.iter().take(4) {
+                    acc += hp[i];
                 }
                 acc
             })
             .collect();
 
         let mut d_partials: Vec<DevicePtr> = Vec::with_capacity(4);
-        for r in 0..4 {
+        for (r, hp) in host_partials.iter().enumerate().take(4) {
             cluster.device(r).bind().unwrap();
-            d_partials.push(upload_f32(cluster.device(r), &host_partials[r]));
+            d_partials.push(upload_f32(cluster.device(r), hp));
         }
 
         // F32 kernel: 1 element per thread (no half2 packing).
@@ -458,9 +458,9 @@ fn tp4_sum_f32_correctness_sweep_and_latency() {
 
         // Warm pass — first kernel launch on a freshly-loaded module pays a
         // one-time JIT cost. All 4 launches then all 4 syncs.
-        for r in 0..4 {
+        for (r, module) in modules.iter().enumerate().take(4) {
             cluster.device(r).bind().unwrap();
-            let kern: HipKernel<'_> = modules[r].kernel(TP4_SUM_F32_FN).unwrap();
+            let kern: HipKernel<'_> = module.kernel(TP4_SUM_F32_FN).unwrap();
             launch_sum_tp4_f32(&kern, cluster.device(r), cfg, &d_partials, r, n);
         }
         for r in 0..4 {
@@ -488,26 +488,25 @@ fn tp4_sum_f32_correctness_sweep_and_latency() {
 
         // Timed pass — all 4 launches issued before any sync.
         let t0 = Instant::now();
-        for r in 0..4 {
+        for (r, module) in modules.iter().enumerate().take(4) {
             cluster.device(r).bind().unwrap();
-            let kern: HipKernel<'_> = modules[r].kernel(TP4_SUM_F32_FN).unwrap();
+            let kern: HipKernel<'_> = module.kernel(TP4_SUM_F32_FN).unwrap();
             launch_sum_tp4_f32(&kern, cluster.device(r), cfg, &d_partials, r, n);
         }
         let mut per_rank_us: [f64; 4] = [0.0; 4];
-        for r in 0..4 {
+        for (r, us_slot) in per_rank_us.iter_mut().enumerate() {
             cluster.device(r).bind().unwrap();
             cluster.device(r).default_stream().synchronize().unwrap();
-            per_rank_us[r] = t0.elapsed().as_secs_f64() * 1e6;
+            *us_slot = t0.elapsed().as_secs_f64() * 1e6;
         }
 
         let mut max_abs_err = 0.0f32;
         let mut max_rel_err = 0.0f32;
-        for r in 0..4 {
+        for (r, &partial_ptr) in d_partials.iter().enumerate().take(4) {
             cluster.device(r).bind().unwrap();
-            let got = download_f32(cluster.device(r), d_partials[r], n);
-            for i in 0..n {
-                let e = reference_sum[i];
-                let abs = (got[i] - e).abs();
+            let got = download_f32(cluster.device(r), partial_ptr, n);
+            for (got_v, &e) in got.iter().zip(reference_sum.iter()).take(n) {
+                let abs = (got_v - e).abs();
                 let rel = abs / e.abs().max(1.0);
                 if abs > max_abs_err {
                     max_abs_err = abs;
@@ -545,12 +544,12 @@ fn tp4_sum_f32_correctness_sweep_and_latency() {
             cluster.device(r).bind().unwrap();
             <HipDevice as Device>::synchronize(cluster.device(r)).unwrap();
         }
-        for r in 0..4 {
+        for (r, &partial_ptr) in d_partials.iter().enumerate().take(4) {
             cluster.device(r).bind().unwrap();
             // SAFETY: pointer came from `dev.alloc(bytes)` above on the same
             // device; size matches the alloc.
             unsafe {
-                cluster.device(r).dealloc(d_partials[r], n * 4).ok();
+                cluster.device(r).dealloc(partial_ptr, n * 4).ok();
             }
         }
     }

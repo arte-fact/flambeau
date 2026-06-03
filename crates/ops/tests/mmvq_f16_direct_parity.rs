@@ -173,10 +173,10 @@ fn build_q4_0(n_rows: usize, n_blocks: usize) -> Vec<BlockQ4_0> {
     for r in 0..n_rows {
         for b in 0..n_blocks {
             let mut qs = [0u8; 16];
-            for i in 0..16 {
+            for (i, slot) in qs.iter_mut().enumerate() {
                 let lo = ((r * 11 + b * 7 + i) % 14) as u8;
                 let hi = ((r * 13 + b * 5 + i + 3) % 14) as u8;
-                qs[i] = (hi << 4) | (lo & 0x0F);
+                *slot = (hi << 4) | (lo & 0x0F);
             }
             let d = f16::from_f32(0.04);
             w.push(BlockQ4_0 { d: d.to_bits(), qs });
@@ -190,10 +190,10 @@ fn build_q4_1(n_rows: usize, n_blocks: usize) -> Vec<BlockQ4_1> {
     for r in 0..n_rows {
         for b in 0..n_blocks {
             let mut qs = [0u8; 16];
-            for i in 0..16 {
+            for (i, slot) in qs.iter_mut().enumerate() {
                 let lo = ((r * 11 + b * 7 + i) % 15) as u8;
                 let hi = ((r * 13 + b * 5 + i + 3) % 15) as u8;
-                qs[i] = (hi << 4) | (lo & 0x0F);
+                *slot = (hi << 4) | (lo & 0x0F);
             }
             let d = f16::from_f32(0.04);
             let m = f16::from_f32(-0.6);
@@ -212,13 +212,13 @@ fn build_q5_0(n_rows: usize, n_blocks: usize) -> Vec<BlockQ5_0> {
     for r in 0..n_rows {
         for b in 0..n_blocks {
             let mut qs = [0u8; 16];
-            for i in 0..16 {
+            for (i, slot) in qs.iter_mut().enumerate() {
                 let lo = ((r * 11 + b * 7 + i) % 14) as u8;
                 let hi = ((r * 13 + b * 5 + i + 3) % 14) as u8;
-                qs[i] = (hi << 4) | (lo & 0x0F);
+                *slot = (hi << 4) | (lo & 0x0F);
             }
             let mut qh = [0u8; 4];
-            for byte_idx in 0..4 {
+            for (byte_idx, slot) in qh.iter_mut().enumerate() {
                 let mut v: u8 = 0;
                 for bit_idx in 0..8 {
                     let global_bit = byte_idx * 8 + bit_idx;
@@ -226,7 +226,7 @@ fn build_q5_0(n_rows: usize, n_blocks: usize) -> Vec<BlockQ5_0> {
                         v |= 1 << bit_idx;
                     }
                 }
-                qh[byte_idx] = v;
+                *slot = v;
             }
             let d = f16::from_f32(0.04);
             w.push(BlockQ5_0 {
@@ -244,13 +244,13 @@ fn build_q5_1(n_rows: usize, n_blocks: usize) -> Vec<BlockQ5_1> {
     for r in 0..n_rows {
         for b in 0..n_blocks {
             let mut qs = [0u8; 16];
-            for i in 0..16 {
+            for (i, slot) in qs.iter_mut().enumerate() {
                 let lo = ((r * 11 + b * 7 + i) % 15) as u8;
                 let hi = ((r * 13 + b * 5 + i + 3) % 15) as u8;
-                qs[i] = (hi << 4) | (lo & 0x0F);
+                *slot = (hi << 4) | (lo & 0x0F);
             }
             let mut qh = [0u8; 4];
-            for byte_idx in 0..4 {
+            for (byte_idx, slot) in qh.iter_mut().enumerate() {
                 let mut v: u8 = 0;
                 for bit_idx in 0..8 {
                     let global_bit = byte_idx * 8 + bit_idx;
@@ -258,7 +258,7 @@ fn build_q5_1(n_rows: usize, n_blocks: usize) -> Vec<BlockQ5_1> {
                         v |= 1 << bit_idx;
                     }
                 }
-                qh[byte_idx] = v;
+                *slot = v;
             }
             let d = f16::from_f32(0.04);
             let m = f16::from_f32(-0.6);
@@ -278,14 +278,14 @@ fn build_q2_k(n_rows: usize, n_super: usize) -> Vec<BlockQ2K> {
     for r in 0..n_rows {
         for b in 0..n_super {
             let mut scales = [0u8; QK_K / 16];
-            for i in 0..(QK_K / 16) {
+            for (i, slot) in scales.iter_mut().enumerate() {
                 let sc = ((r * 11 + b * 7 + i) % 13) as u8;
                 let m = ((r * 5 + b * 3 + i + 1) % 11) as u8;
-                scales[i] = (m << 4) | (sc & 0x0F);
+                *slot = (m << 4) | (sc & 0x0F);
             }
             let mut qs = [0u8; QK_K / 4];
-            for i in 0..(QK_K / 4) {
-                qs[i] = ((r * 17 + b * 5 + i) % 255) as u8;
+            for (i, slot) in qs.iter_mut().enumerate() {
+                *slot = ((r * 17 + b * 5 + i) % 255) as u8;
             }
             let d = f16::from_f32(0.05);
             let dmin = f16::from_f32(0.012);
@@ -305,17 +305,17 @@ fn build_q3_k(n_rows: usize, n_super: usize) -> Vec<BlockQ3K> {
     for r in 0..n_rows {
         for b in 0..n_super {
             let mut hmask = [0u8; QK_K / 8];
-            for i in 0..(QK_K / 8) {
-                hmask[i] = ((r * 7 + b * 3 + i) % 255) as u8;
+            for (i, slot) in hmask.iter_mut().enumerate() {
+                *slot = ((r * 7 + b * 3 + i) % 255) as u8;
             }
             let mut qs = [0u8; QK_K / 4];
-            for i in 0..(QK_K / 4) {
-                qs[i] = ((r * 13 + b * 5 + i) % 255) as u8;
+            for (i, slot) in qs.iter_mut().enumerate() {
+                *slot = ((r * 13 + b * 5 + i) % 255) as u8;
             }
             // Packed 6-bit scales — any random 12 bytes are a valid encoding.
             let mut scales = [0u8; 12];
-            for i in 0..12 {
-                scales[i] = ((r * 19 + b * 11 + i) % 255) as u8;
+            for (i, slot) in scales.iter_mut().enumerate() {
+                *slot = ((r * 19 + b * 11 + i) % 255) as u8;
             }
             let d = f16::from_f32(0.04);
             w.push(BlockQ3K {
@@ -334,14 +334,14 @@ fn build_q4_k(n_rows: usize, n_super: usize) -> Vec<BlockQ4K> {
     for r in 0..n_rows {
         for b in 0..n_super {
             let mut scales = [0u8; K_SCALE_SIZE];
-            for i in 0..K_SCALE_SIZE {
-                scales[i] = ((r * 23 + b * 7 + i) % 255) as u8;
+            for (i, slot) in scales.iter_mut().enumerate() {
+                *slot = ((r * 23 + b * 7 + i) % 255) as u8;
             }
             let mut qs = [0u8; QK_K / 2];
-            for i in 0..(QK_K / 2) {
+            for (i, slot) in qs.iter_mut().enumerate() {
                 let lo = ((r * 11 + b * 7 + i) % 14) as u8;
                 let hi = ((r * 13 + b * 5 + i + 3) % 14) as u8;
-                qs[i] = (hi << 4) | (lo & 0x0F);
+                *slot = (hi << 4) | (lo & 0x0F);
             }
             let d = f16::from_f32(0.03);
             let dmin = f16::from_f32(0.008);
@@ -361,18 +361,18 @@ fn build_q5_k(n_rows: usize, n_super: usize) -> Vec<BlockQ5K> {
     for r in 0..n_rows {
         for b in 0..n_super {
             let mut scales = [0u8; K_SCALE_SIZE];
-            for i in 0..K_SCALE_SIZE {
-                scales[i] = ((r * 23 + b * 7 + i) % 255) as u8;
+            for (i, slot) in scales.iter_mut().enumerate() {
+                *slot = ((r * 23 + b * 7 + i) % 255) as u8;
             }
             let mut qh = [0u8; QK_K / 8];
-            for i in 0..(QK_K / 8) {
-                qh[i] = ((r * 5 + b * 3 + i) % 255) as u8;
+            for (i, slot) in qh.iter_mut().enumerate() {
+                *slot = ((r * 5 + b * 3 + i) % 255) as u8;
             }
             let mut qs = [0u8; QK_K / 2];
-            for i in 0..(QK_K / 2) {
+            for (i, slot) in qs.iter_mut().enumerate() {
                 let lo = ((r * 11 + b * 7 + i) % 14) as u8;
                 let hi = ((r * 13 + b * 5 + i + 3) % 14) as u8;
-                qs[i] = (hi << 4) | (lo & 0x0F);
+                *slot = (hi << 4) | (lo & 0x0F);
             }
             let d = f16::from_f32(0.03);
             let dmin = f16::from_f32(0.008);
@@ -393,18 +393,18 @@ fn build_q6_k(n_rows: usize, n_super: usize) -> Vec<BlockQ6K> {
     for r in 0..n_rows {
         for b in 0..n_super {
             let mut ql = [0u8; QK_K / 2];
-            for i in 0..(QK_K / 2) {
+            for (i, slot) in ql.iter_mut().enumerate() {
                 let lo = ((r * 11 + b * 7 + i) % 14) as u8;
                 let hi = ((r * 13 + b * 5 + i + 3) % 14) as u8;
-                ql[i] = (hi << 4) | (lo & 0x0F);
+                *slot = (hi << 4) | (lo & 0x0F);
             }
             let mut qh = [0u8; QK_K / 4];
-            for i in 0..(QK_K / 4) {
-                qh[i] = ((r * 7 + b * 3 + i) % 255) as u8;
+            for (i, slot) in qh.iter_mut().enumerate() {
+                *slot = ((r * 7 + b * 3 + i) % 255) as u8;
             }
             let mut scales = [0i8; QK_K / 16];
-            for i in 0..(QK_K / 16) {
-                scales[i] = (((r * 19 + b * 11 + i) % 64) as i32 - 32) as i8;
+            for (i, slot) in scales.iter_mut().enumerate() {
+                *slot = (((r * 19 + b * 11 + i) % 64) as i32 - 32) as i8;
             }
             let d = f16::from_f32(0.04);
             w.push(BlockQ6K {
@@ -424,7 +424,7 @@ fn build_q8_k(n_rows: usize, n_super: usize) -> Vec<BlockQ8K> {
         for b in 0..n_super {
             let mut qs = [0i8; QK_K];
             let mut sums16 = [0i16; QK_K / 16];
-            for grp in 0..(QK_K / 16) {
+            for (grp, sum_slot) in sums16.iter_mut().enumerate() {
                 let mut s: i32 = 0;
                 for j in 0..16 {
                     let i = grp * 16 + j;
@@ -432,7 +432,7 @@ fn build_q8_k(n_rows: usize, n_super: usize) -> Vec<BlockQ8K> {
                     qs[i] = v as i8;
                     s += v;
                 }
-                sums16[grp] = s as i16;
+                *sum_slot = s as i16;
             }
             w.push(BlockQ8K {
                 d: 0.03,
@@ -494,9 +494,9 @@ fn build_q8_0(n_rows: usize, n_blocks: usize) -> Vec<BlockQ8_0> {
     for r in 0..n_rows {
         for b in 0..n_blocks {
             let mut qs = [0i8; 32];
-            for i in 0..32 {
+            for (i, slot) in qs.iter_mut().enumerate() {
                 let v = (((r * 17 + b * 7 + i * 3) % 31) as i32) - 15;
-                qs[i] = v as i8;
+                *slot = v as i8;
             }
             let d = f16::from_f32(0.03);
             w.push(BlockQ8_0 { d: d.to_bits(), qs });
@@ -510,9 +510,9 @@ fn build_q8_1_act(n_blocks: usize) -> Vec<BlockQ8_1> {
     for b in 0..n_blocks {
         let mut qs = [0i8; 32];
         let mut sum_i32: i32 = 0;
-        for i in 0..32 {
+        for (i, slot) in qs.iter_mut().enumerate() {
             let v = (((b * 17 + i * 3) % 31) as i32) - 15;
-            qs[i] = v as i8;
+            *slot = v as i8;
             sum_i32 += v;
         }
         let d = f16::from_f32(0.03);

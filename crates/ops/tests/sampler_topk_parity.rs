@@ -13,7 +13,7 @@ use anyhow::Result;
 use flambeau_backend_hip::{device_count, HipDevice};
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_ops::hip::sampling::topk_softmax_f32;
-use flambeau_ops::OpsRegistry;
+use flambeau_ops::{OpCtx, OpsRegistry, SamplerTopkSoftmaxBuffers, SamplerTopkSoftmaxKnobs};
 
 fn dev_or_skip() -> Option<HipDevice> {
     if device_count().ok()? < 1 {
@@ -146,15 +146,10 @@ fn run_one(vocab: usize, k: usize, inv_temp: f32, seed: u64) -> Result<()> {
     let d_probs = alloc_zeroed(&dev, k * 4);
 
     topk_softmax_f32(
-        &reg,
-        dev.default_stream(),
-        d_logits,
-        d_ids,
-        d_probs,
-        vocab,
-        k,
-        inv_temp,
-    )?;
+            OpCtx { reg: &reg, stream: dev.default_stream() },
+            SamplerTopkSoftmaxBuffers { logits: d_logits, out_ids: d_ids, out_probs: d_probs },
+            SamplerTopkSoftmaxKnobs { vocab, k, inv_temp },
+        )?;
     dev.default_stream().synchronize()?;
 
     let gpu_ids = download_i32(&dev, d_ids, k);

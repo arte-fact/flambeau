@@ -186,10 +186,10 @@ fn mmvq_q4_0_at_gemma4_31b_attn_output_shape() {
 
     // CPU reference: dst[row] = sum_k (act_dq[k] * weight_dq[row*K + k]).
     let mut expected = vec![0.0_f32; N];
-    for row in 0..N {
+    for (row, slot) in expected.iter_mut().enumerate() {
         let row_off = row * K;
         let s: f32 = (0..K).map(|k| act_dq[k] * weight_f32[row_off + k]).sum();
-        expected[row] = s;
+        *slot = s;
     }
 
     // Upload.

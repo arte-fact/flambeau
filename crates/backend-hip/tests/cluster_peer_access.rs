@@ -51,9 +51,9 @@ fn multi_rank_matrix_diagonal_invariant() {
     let cluster = HipCluster::new(&device_ids).expect("HipCluster::new on multi-device rig");
     let m = cluster.peer_access_matrix();
     assert_eq!(m.len(), take);
-    for i in 0..take {
-        assert_eq!(m[i].len(), take, "row {i} must be {take}-wide");
-        assert!(m[i][i], "diagonal entry [{i}][{i}] must be true");
+    for (i, row) in m.iter().enumerate().take(take) {
+        assert_eq!(row.len(), take, "row {i} must be {take}-wide");
+        assert!(row[i], "diagonal entry [{i}][{i}] must be true");
     }
     println!("HipCluster::peer_access_matrix on {take}-device rig:");
     for (i, row) in m.iter().enumerate() {

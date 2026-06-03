@@ -111,9 +111,9 @@ pub struct AttnBuffers {
     pub out: DevicePtr,
 }
 
-/// Batched (single-launch over N slots) decode buffers. `k_cache_ptrs`
-/// + `v_cache_ptrs` + `n_tokens_kv_ptrs` are device-side `[n_slots]`
-/// arrays of per-slot KV-cache pointers + tail lengths.
+/// Batched (single-launch over N slots) decode buffers.
+/// `k_cache_ptrs` + `v_cache_ptrs` + `n_tokens_kv_ptrs` are device-side
+/// `[n_slots]` arrays of per-slot KV-cache pointers + tail lengths.
 #[derive(Copy, Clone, Debug)]
 pub struct AttnBatchedBuffers {
     pub q_batched: DevicePtr,

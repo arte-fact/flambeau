@@ -112,11 +112,16 @@ pub fn ar_sum_f32(
     Ok(())
 }
 
+/// Boxed callback used by `TpHooks::ar_sum_f32` /
+/// `HybridHooks::ar_sum_f32`. Args: `(rank, n_ranks, buf, n_elems,
+/// device, stream)` — `(rank, n_ranks)` go unused for the host-bounce
+/// path since the coordinator carries them.
+pub type ArCallback = Box<
+    dyn FnMut(usize, usize, DevicePtr, usize, &HipDevice, &HipStream) -> Result<()> + Send,
+>;
+
 /// Build the boxed callback that TpHooks / HybridHooks expect.
-pub fn make_ar_callback(
-    coord: Arc<ArCoordinator>,
-    rank: usize,
-) -> Box<dyn FnMut(usize, usize, DevicePtr, usize, &HipDevice, &HipStream) -> Result<()> + Send> {
+pub fn make_ar_callback(coord: Arc<ArCoordinator>, rank: usize) -> ArCallback {
     Box::new(move |_r, _nr, buf, n_elems, dev, st| ar_sum_f32(&coord, rank, buf, n_elems, dev, st))
 }
 
@@ -517,10 +522,7 @@ pub fn bar_ar_residual_rmsnorm_f16(
 
 /// Build the boxed callback that TpHooks / HybridHooks expect, with
 /// the BAR1 P2P backend.
-pub fn make_bar_ar_callback(
-    coord: Arc<BarArCoordinator>,
-    rank: usize,
-) -> Box<dyn FnMut(usize, usize, DevicePtr, usize, &HipDevice, &HipStream) -> Result<()> + Send> {
+pub fn make_bar_ar_callback(coord: Arc<BarArCoordinator>, rank: usize) -> ArCallback {
     Box::new(move |_r, _nr, buf, n_elems, dev, st| {
         bar_ar_sum_f32(&coord, rank, buf, n_elems, dev, st)
     })

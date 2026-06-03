@@ -2,6 +2,7 @@
 //! Covers the two V1 head_dim values:
 //! - head_dim=128, GQA-32/4 — Qwen3.5 family.
 //! - head_dim=256, GQA-16/2 — Qwen3.6 family.
+//!
 //! Sequence lengths cover early context (16) through long context
 //! (4096 — the usual decode sweet spot).
 

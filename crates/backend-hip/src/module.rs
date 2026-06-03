@@ -22,8 +22,8 @@ use std::sync::RwLock;
 use flambeau_core::{DeviceError, DeviceResult};
 
 use crate::sys::{
-    error_string, hipFuncGetAttribute, hipFunction_t, hipModuleGetFunction, hipModuleLaunchKernel,
-    hipModuleLoadData, hipModuleUnload, hipModule_t, HIP_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES,
+    error_string, hipFuncGetAttribute, HipFunctionT, hipModuleGetFunction, hipModuleLaunchKernel,
+    hipModuleLoadData, hipModuleUnload, HipModuleT, HIP_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES,
     HIP_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK, HIP_FUNC_ATTRIBUTE_NUM_REGS,
     HIP_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES, HIP_SUCCESS,
 };
@@ -46,7 +46,7 @@ fn check(code: i32, ctx: &'static str) -> DeviceResult<()> {
 
 /// A loaded HIP module (one `.hsaco` worth of kernels) tied to a device.
 pub struct HipModule {
-    raw: hipModule_t,
+    raw: HipModuleT,
     device_id: i32,
     /// Resolved kernel-function handles, keyed by entry-point symbol name.
     /// The cache is insert-only in practice: every launch site in
@@ -57,7 +57,7 @@ pub struct HipModule {
     /// `RUST-PERF-CORRECTIONS.md`]. V2 continuous batching will contend the
     /// read lock at most N (num-ranks) ways; a `Mutex` would be fine today
     /// but `RwLock` is forward-compatible for cheap.
-    kernel_cache: RwLock<HashMap<&'static str, hipFunction_t>>,
+    kernel_cache: RwLock<HashMap<&'static str, HipFunctionT>>,
 }
 
 impl std::fmt::Debug for HipModule {
@@ -77,7 +77,7 @@ impl std::fmt::Debug for HipModule {
     }
 }
 
-// SAFETY: `hipModule_t` is an opaque driver handle with no Rust-side aliasing.
+// SAFETY: `HipModuleT` is an opaque driver handle with no Rust-side aliasing.
 // HIP modules are immutable once loaded — kernel lookups on one module from
 // multiple threads are safe per the HIP runtime contract. `HipModule` owns its
 // handle and unloads on drop, so no cross-thread double-free risk.
@@ -91,7 +91,7 @@ impl HipModule {
     /// crate) onto `device_id`. Caller must have `HipDevice::bind()` in
     /// effect for the current thread.
     pub fn load(device_id: i32, image: &[u8]) -> DeviceResult<Self> {
-        let mut m: hipModule_t = ptr::null_mut();
+        let mut m: HipModuleT = ptr::null_mut();
         // SAFETY: `hipModuleLoadData` reads the ELF image pointed to by
         // `image.as_ptr()` for its full length (driver-internal copy) and
         // writes a module handle through the out-pointer. `image` is a live
@@ -166,13 +166,13 @@ impl HipModule {
 
     /// Raw driver resolution. Shared between `kernel` (cached) and
     /// `kernel_dynamic` (not cached).
-    fn resolve(&self, name: &str) -> DeviceResult<hipFunction_t> {
+    fn resolve(&self, name: &str) -> DeviceResult<HipFunctionT> {
         let cname = CString::new(name).map_err(|_nul| DeviceError::Backend {
             backend: BACKEND,
             code: -1,
             message: format!("kernel name contains NUL: {name:?}"),
         })?;
-        let mut f: hipFunction_t = ptr::null_mut();
+        let mut f: HipFunctionT = ptr::null_mut();
         // SAFETY: `self.raw` is a live module handle (owned, unloaded only on
         // drop). `cname` is a valid, NUL-terminated C string (constructed from
         // `CString::new` above). The driver writes the function handle through
@@ -202,7 +202,7 @@ impl Drop for HipModule {
 /// around as `None` in the hot path so `Debug`/error messages still work;
 /// callers using [`HipModule::kernel_dynamic`] populate it.
 pub struct HipKernel<'m> {
-    raw: hipFunction_t,
+    raw: HipFunctionT,
     pub name: &'static str,
     _module: PhantomData<&'m HipModule>,
 }
@@ -348,7 +348,7 @@ impl HipKernel<'_> {
     /// footprint, etc. Cheap in-process call; no kernel launch.
     pub fn attributes(&self) -> DeviceResult<FuncAttributes> {
         fn q(
-            raw: hipFunction_t,
+            raw: HipFunctionT,
             attr: std::os::raw::c_int,
             ctx: &'static str,
         ) -> DeviceResult<i32> {
@@ -426,7 +426,7 @@ impl HipKernel<'_> {
                 cfg.block.1,
                 cfg.block.2,
                 cfg.shared_bytes,
-                stream.raw_handle() as crate::sys::hipStream_t,
+                stream.raw_handle() as crate::sys::HipStreamT,
                 args.as_raw(),
                 ptr::null_mut(),
             )
@@ -480,7 +480,7 @@ impl HipKernel<'_> {
                 cfg.block.1,
                 cfg.block.2,
                 cfg.shared_bytes,
-                stream.raw_handle() as crate::sys::hipStream_t,
+                stream.raw_handle() as crate::sys::HipStreamT,
                 args_ptr,
                 ptr::null_mut(),
             )

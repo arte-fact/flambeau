@@ -46,6 +46,13 @@ pub struct KvAppendSlots {
     pub v: MemcpySlot,
 }
 
+/// # Safety
+/// `src.k_new` / `src.v_new` must each point to at least
+/// `n_new * n_heads * head_dim * 2` valid device bytes on the same
+/// device as `cache`. `device` and `stream` must be the device + stream
+/// that own `cache`'s storage; `slots` must be pre-allocated for the
+/// caller's `HipGraphExec::capture` scope (or freshly minted via
+/// `MemcpySlot::null` outside capture).
 pub unsafe fn kv_cache_append_hip_slot<L: CacheLayout>(
     cache: &mut KvCache<L, HipDevice>,
     device: &HipDevice,

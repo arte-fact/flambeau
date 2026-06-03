@@ -80,7 +80,7 @@ pub type DeviceResult<T> = std::result::Result<T, DeviceError>;
 /// A compute stream — ordered queue of GPU work. Launches issued on the same
 /// stream run in issue order; cross-stream ordering requires events.
 pub trait Stream: Send + Sync {
-    /// Backend-specific raw handle (hipStream_t, cudaStream_t, ...).
+    /// Backend-specific raw handle (HipStreamT, cudaStream_t, ...).
     /// Kernel-launch code in backend crates casts back to the concrete type.
     fn raw_handle(&self) -> usize;
 

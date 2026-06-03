@@ -446,17 +446,15 @@ impl BarP2pAllReduce {
                 ),
             });
         }
-        // Single-block kernel: one block per rank.
         let cfg = LaunchCfg::one_d(1, BLOCK_THREADS);
-        for r in 0..4 {
+        for (r, &stream) in streams.iter().enumerate() {
             // SAFETY: forwarded from public-method contract.
-            // **B5 fix** — canonical-order partials. See residual_tp2 / tp4.
             unsafe {
                 self.launch_fused_rmsnorm(
                     ArKind::ResidualRmsNormTp4,
                     r,
                     cfg,
-                    streams[r],
+                    stream,
                     buf.hidden[r],
                     buf.partial[0],
                     [buf.partial[1], buf.partial[2], buf.partial[3]],
@@ -498,15 +496,14 @@ impl BarP2pAllReduce {
             });
         }
         let cfg = LaunchCfg::one_d(1, BLOCK_THREADS);
-        for r in 0..4 {
+        for (r, &stream) in streams.iter().enumerate() {
             // SAFETY: forwarded from public-method contract.
-            // **B5 fix** — canonical-order partials. See residual_tp2 / tp4.
             unsafe {
                 self.launch_fused_rmsnorm_q8_1(
                     ArKind::ResidualRmsNormQ8_1Tp4,
                     r,
                     cfg,
-                    streams[r],
+                    stream,
                     buf.hidden[r],
                     buf.partial[0],
                     [buf.partial[1], buf.partial[2], buf.partial[3]],
@@ -541,15 +538,14 @@ impl BarP2pAllReduce {
             });
         }
         let cfg = LaunchCfg::one_d(1, BLOCK_THREADS);
-        for r in 0..2 {
+        for (r, &stream) in streams.iter().enumerate() {
             // SAFETY: forwarded from public-method contract.
-            // **B5 fix** — canonical-order partials. See residual_tp2.
             unsafe {
                 self.launch_fused_rmsnorm_q8_1(
                     ArKind::ResidualRmsNormQ8_1Tp2,
                     r,
                     cfg,
-                    streams[r],
+                    stream,
                     buf.hidden[r],
                     buf.partial[0],
                     [buf.partial[1], DevicePtr(0), DevicePtr(0)],
@@ -584,16 +580,14 @@ impl BarP2pAllReduce {
             });
         }
         let cfg = LaunchCfg::one_d(1, BLOCK_THREADS);
-        for r in 0..2 {
+        for (r, &stream) in streams.iter().enumerate() {
             // SAFETY: forwarded from public-method contract.
-            // **B5 fix** — canonical-order partials (partial[0] then partial[1])
-            // so both ranks compute the same FP32 sum order. See residual_tp2.
             unsafe {
                 self.launch_fused_rmsnorm(
                     ArKind::ResidualRmsNormTp2,
                     r,
                     cfg,
-                    streams[r],
+                    stream,
                     buf.hidden[r],
                     buf.partial[0],
                     [buf.partial[1], DevicePtr(0), DevicePtr(0)],
@@ -829,6 +823,11 @@ impl BarP2pAllReduce {
     /// `out_norm` receives `rmsnorm(hidden + Σ partials, rms_weight)`;
     /// `hidden` is also updated in-place. Same canonical-order /
     /// producer-sync contract as [`Self::residual_tp2_rank`].
+    /// # Safety
+    /// All device pointers in `buf` must point to BAR1-mapped regions
+    /// owned by the caller's rank for the duration of the kernel, with
+    /// the peer-rank's producer event recorded on the same stream
+    /// before this call (per `residual_tp2_rank`'s contract).
     pub unsafe fn residual_rmsnorm_tp2_rank(
         &self,
         rank: usize,

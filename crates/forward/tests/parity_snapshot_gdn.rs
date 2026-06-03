@@ -14,7 +14,13 @@ use flambeau_forward::ctx::{
     EmbeddingWeights, ForwardCtx, GdnDims, GdnWeights, LmHeadWeights,
 };
 use flambeau_forward::{ScratchPool, SingleDeviceForwardCtx};
+use flambeau_model_ops::Tensor;
 use flambeau_ops::OpsRegistry;
+
+fn upload_f32_tensor(allocs: &mut DeviceAllocs, host: &[f32]) -> Tensor<flambeau_model_ops::F32> {
+    let (ptr, _) = allocs.upload(host);
+    unsafe { Tensor::<flambeau_model_ops::F32>::from_raw(ptr, host.len()) }
+}
 
 const HIDDEN: usize = 256;
 const VOCAB: usize = 64;
@@ -81,10 +87,10 @@ fn parity_snapshot_gdn_single_token() {
         ssm_alpha: allocs.upload_q8_0(&det_signal(NUM_V_HEADS * HIDDEN, 203), NUM_V_HEADS, HIDDEN),
         ssm_beta: allocs.upload_q8_0(&det_signal(NUM_V_HEADS * HIDDEN, 204), NUM_V_HEADS, HIDDEN),
         ssm_out: allocs.upload_q8_0(&det_signal(HIDDEN * d_inner, 205), HIDDEN, d_inner),
-        ssm_dt_bias: allocs.upload_f32(&det_signal(NUM_V_HEADS, 206)),
-        ssm_a: allocs.upload_f32(&det_signal(NUM_V_HEADS, 207)),
-        ssm_conv1d: allocs.upload_f32(&det_signal(CONV_KERNEL * conv_channels, 208)),
-        ssm_norm_w: allocs.upload_f32(&vec![1.0_f32; HEAD_V_DIM]),
+        ssm_dt_bias: upload_f32_tensor(&mut allocs, &det_signal(NUM_V_HEADS, 206)),
+        ssm_a: upload_f32_tensor(&mut allocs, &det_signal(NUM_V_HEADS, 207)),
+        ssm_conv1d: upload_f32_tensor(&mut allocs, &det_signal(CONV_KERNEL * conv_channels, 208)),
+        ssm_norm_w: upload_f32_tensor(&mut allocs, &vec![1.0_f32; HEAD_V_DIM]),
         dims,
         rms_eps: RMS_EPS,
         rep_inner_layout: false,

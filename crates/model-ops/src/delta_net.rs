@@ -48,6 +48,14 @@ use flambeau_ops::Ops;
 use crate::driver_utils::RawAllocTracker;
 use crate::weight_handle::WeightHandle;
 
+/// Mid-layer AR hook for GDN drivers. Called once per layer at the
+/// `ssm_out` boundary so the topology executor can stitch the
+/// partial into a row-parallel AR + residual-add. The four args are
+/// `(partial_f32_ptr, n_elems, device, stream)` — same shape as the
+/// engine's `ar_sum_f32` hook.
+pub type GdnArPartialCallback<'a> =
+    &'a mut dyn FnMut(DevicePtr, usize, &HipDevice, &HipStream) -> Result<()>;
+
 /// Borrowed-by-value view over a caller-owned GDN decode scratch.
 #[derive(Copy, Clone)]
 pub struct DeltaNetLayerDecodeScratch {
@@ -622,9 +630,7 @@ impl DeltaNetLayer {
         ctx: BackendCtx<'_>,
         buf: GdnDecodeBuffers,
         scratch: DeltaNetLayerDecodeScratch,
-        ar_partial_callback: Option<
-            &mut dyn FnMut(DevicePtr, usize, &HipDevice, &HipStream) -> Result<()>,
-        >,
+        ar_partial_callback: Option<GdnArPartialCallback<'_>>,
     ) -> Result<()> {
         let BackendCtx { device, stream } = ctx;
         let GdnDecodeBuffers {
@@ -908,9 +914,7 @@ impl DeltaNetLayer {
         buf: GdnDecodeBatchedBuffers,
         scratch: DeltaNetLayerDecodeBatchedScratch,
         n_slots: usize,
-        ar_partial_callback: Option<
-            &mut dyn FnMut(DevicePtr, usize, &HipDevice, &HipStream) -> Result<()>,
-        >,
+        ar_partial_callback: Option<GdnArPartialCallback<'_>>,
     ) -> Result<()> {
         let BackendCtx { device, stream } = ctx;
         let GdnDecodeBatchedBuffers {
@@ -1351,9 +1355,7 @@ impl DeltaNetLayer {
         buf: GdnDecodeBuffers,
         scratch: DeltaNetLayerPrefillScratch,
         seq: GdnPrefillSeq<'_>,
-        ar_partial_callback: Option<
-            &mut dyn FnMut(DevicePtr, usize, &HipDevice, &HipStream) -> Result<()>,
-        >,
+        ar_partial_callback: Option<GdnArPartialCallback<'_>>,
     ) -> Result<()> {
         let BackendCtx { device, stream } = ctx;
         let GdnDecodeBuffers {

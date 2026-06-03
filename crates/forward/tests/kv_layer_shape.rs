@@ -170,9 +170,9 @@ fn scratch_config_for_qwen_dense_matches_handwritten() {
     let widths = cfg.per_layer_kv_widths.as_ref().unwrap();
     assert_eq!(widths.len(), 64);
     let expected_w = (4 / 2) * 256;
-    for li in 0..64 {
+    for (li, &width) in widths.iter().enumerate().take(64) {
         let is_full_attn = (li + 1) % 4 == 0;
-        assert_eq!(widths[li], if is_full_attn { expected_w } else { 0 });
+        assert_eq!(width, if is_full_attn { expected_w } else { 0 });
     }
 }
 
