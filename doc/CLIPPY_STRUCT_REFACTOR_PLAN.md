@@ -107,9 +107,10 @@ Next-session restart plan:
 | **P6 — Collective** | | | | |
 | P6 | 7 BarP2pAllReduce methods (residual_rmsnorm_tp{2,4}, _q8_1_tp{2,4}, _tp2_rank, postattn_residual_rmsnorm_f32_to_f16_tp{2,4}_rank) + 3 caller sites in forward/runtime/ar.rs | ☑ done | 7 | bar_p2p.rs (+5 aggregates: const-generic `ArResidualRmsNormArrayBuffers<N>`, `ArResidualRmsNormRankBuffers`, `ArPostAttnNormRankBuffersTp{2,4}`, `ArPostAttnNormShape`), re-exported from backend-hip/src/lib.rs |
 | **P7 — Mid-layer drivers** | | | | |
-| P7a | `delta_net.rs` (6 sites) | ☐ pending | ~6 | model-ops/src/delta_net.rs |
-| P7b | `moe_experts.rs` (2 sites) + `forward/src/loader/shard.rs::upload_*_sharded_quant` (2 sites) | ☐ pending | ~4 | model-ops + forward/loader |
-| P7c | `forward/src/loader/moe.rs` + `forward/src/loader/gdn_shard.rs` | ☐ pending | ~6 | forward/loader |
+| P7a | `DeltaNetLayer::new` (20-arg constructor) + 2 callers | ☑ done | 1 | `DeltaNetWeights` + `DeltaNetDims` (Copy aggregates in delta_net.rs), re-exported from model-ops lib |
+| P7b | 5 DeltaNetLayer forward_* drivers (decode, decode_with_ar_hook, decode_with_ar_hook_batched_slots, prefill, prefill_with_ar_hook) + 6 caller sites | ☑ done | 5 | `BackendCtx<'a>`, `GdnDecodeBuffers`, `GdnDecodeBatchedBuffers`, `GdnPrefillSeq<'a>` in delta_net.rs |
+| P7c | 6 model-ops/src/ops/attn_decode_batched.rs wrappers (kv_append + attn_decode + attn_prefill paged/batched) + 8 callers — thin pass-through using existing ops-level aggregates | ☑ done | 6 | dropped per-call Tensor::n_elems sanity checks; preserved shape-validation bail!s |
+| P7d | `moe_experts.rs` driver wrappers (decode + prefill) + `forward/loader/*` (shard, moe, gdn_shard) — remaining mid-layer | ☐ pending | ~8 | model-ops/src/moe_experts.rs + forward/loader/*.rs |
 | **P8 — Tail** | | | | |
 | P8 | `build.rs`, `tp_slice.rs`, `quantize_k.rs`, `ctx.rs`, `workers.rs::init_rank` | ☐ pending | ~12 | misc |
 
@@ -126,12 +127,12 @@ Next-session restart plan:
 
 ## Live state
 
-| Metric | At start | After P0 | After P1f | After P2a | After P2b | After P2c | After P2f1 | After P2f2 | After P2f3 | After P2f4 | After P2f5 | After P3a | After P3b | After P4 | After P5a | After P5b | After P6 |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| total warnings | 478 | 478 | 456 | 447 | 437 | 434 | 413 | 414 | 411 | 378 | 344 | 329 | 324 | 315 | 309 | 303 | 300 |
-| `too_many_arguments` | 315 | 315 | 291 | 282 | 272 | 269 | 234 | 230 | 224 | 191 | 157 | 147 | 142 | 134 | 128 | 122 | 115 |
-| errors | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
-| cumulative LOC delta | 0 | +232 | +10 | +12 | −136 | −162 | −46 | −93 | −157 | −509 | −774 | −815 | −825 | −868 | −918 | −952 | −915 |
+| Metric | At start | After P0 | After P1f | After P2a | After P2b | After P2c | After P2f1 | After P2f2 | After P2f3 | After P2f4 | After P2f5 | After P3a | After P3b | After P4 | After P5a | After P5b | After P6 | After P7a | After P7b | After P7c |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| total warnings | 478 | 478 | 456 | 447 | 437 | 434 | 413 | 414 | 411 | 378 | 344 | 329 | 324 | 315 | 309 | 303 | 300 | 299 | 294 | 288 |
+| `too_many_arguments` | 315 | 315 | 291 | 282 | 272 | 269 | 234 | 230 | 224 | 191 | 157 | 147 | 142 | 134 | 128 | 122 | 115 | 114 | 109 | 103 |
+| errors | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| cumulative LOC delta | 0 | +232 | +10 | +12 | −136 | −162 | −46 | −93 | −157 | −509 | −774 | −815 | −825 | −868 | −918 | −952 | −915 | −891 | −842 | −981 |
 
 LOC deltas per commit (insertions − deletions, from `git show --stat`):
 
@@ -158,6 +159,9 @@ LOC deltas per commit (insertions − deletions, from `git show --stat`):
 | P5a | `39de884` | 184 | 234 | −50 | 6 |
 | P5b | `04e4b1d` | 195 | 229 | −34 | 6 |
 | P6 | `fef8ba3` | 137 | 100 | +37 | 7 |
+| P7a | `7d90e7f` | 104 | 80 | +24 | 1 |
+| P7b | `1002447` | 152 | 103 | +49 | 5 |
+| P7c | `51827ed` | 200 | 339 | −139 | 6 |
 
 ## Non-goals
 
