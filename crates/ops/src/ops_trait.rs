@@ -358,34 +358,17 @@ pub trait Ops {
 
     fn attention_decode_q8_kv(
         &self,
-        q: DevicePtr,
-        k_cache: DevicePtr,
-        v_cache: DevicePtr,
-        out: DevicePtr,
-        n_heads_q: usize,
-        n_heads_kv: usize,
-        head_dim: usize,
-        n_tokens_kv: usize,
-        scale: f32,
-        window_size: i32,
+        buffers: crate::AttnBuffers,
+        shape: crate::AttnDecodeShape,
+        knobs: crate::AttnKnobs,
     ) -> Result<()>;
 
     fn attention_decode_q8_kv_splitk(
         &self,
-        q: DevicePtr,
-        k_cache: DevicePtr,
-        v_cache: DevicePtr,
-        out: DevicePtr,
-        partials_m: DevicePtr,
-        partials_s: DevicePtr,
-        partials_o: DevicePtr,
-        n_heads_q: usize,
-        n_heads_kv: usize,
-        head_dim: usize,
-        n_tokens_kv: usize,
-        chunk_size: usize,
-        scale: f32,
-        window_size: i32,
+        buffers: crate::AttnBuffers,
+        partials: crate::AttnSplitkPartials,
+        shape: crate::AttnSplitkShape,
+        knobs: crate::AttnKnobs,
     ) -> Result<()>;
 
     fn attention_prefill_q8_kv(

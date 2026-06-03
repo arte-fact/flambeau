@@ -63,16 +63,19 @@ pub fn attn_decode_q8_kv(
         );
     }
     ops.attention_decode_q8_kv(
-        q.ptr,
-        k_cache.ptr,
-        v_cache.ptr,
-        out.ptr,
-        n_heads_q,
-        n_heads_kv,
-        head_dim,
-        n_tokens_kv,
-        scale,
-        window_size,
+        flambeau_ops::AttnBuffers {
+            q: q.ptr,
+            k: k_cache.ptr,
+            v: v_cache.ptr,
+            out: out.ptr,
+        },
+        flambeau_ops::AttnDecodeShape {
+            n_heads_q,
+            n_heads_kv,
+            head_dim,
+            n_tokens_kv,
+        },
+        flambeau_ops::AttnKnobs { scale, window_size },
     )
 }
 

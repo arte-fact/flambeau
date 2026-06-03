@@ -53,7 +53,7 @@ below is the corrected one.
 | P1a | `attention_decode_f16` + `_slots` (graph-capture sibling) | ☑ done | 4 | trait, impl, wrapper, decode callers (model-ops + tests) |
 | P1b | `attention_decode_f16_batched` + `_paged` | ☑ done | 4 | trait, impl, wrapper, batched callers (model-ops + 2 tests) |
 | P1c | `attention_decode_f16_splitk` + `_splitk_h2` | ☑ done | 4 | trait, impl, wrapper, splitk callers (model-ops + swa_softcap_parity) |
-| P1d | `attention_decode_q8_kv` + `_splitk` (Q8 decode pair) | ☐ pending | 2 | trait, impl, wrapper, q8 decode callers |
+| P1d | `attention_decode_q8_kv` + `_splitk` (Q8 decode pair) | ☑ done | 4 | trait, impl, wrapper, q8 decode callers |
 | P1e | `attention_prefill_f16` + `_slots` | ☐ pending | 2 | trait, impl, wrapper, prefill callers, tests |
 | P1f | `attention_prefill_q8_kv` + `_f16_paged` | ☐ pending | 2 | trait, impl, wrapper, remaining prefill callers |
 | **P2 — Matmul family (~100 sites, sub-phased by sibling group)** | | | | |
@@ -96,10 +96,10 @@ below is the corrected one.
 
 | Metric | At start | After P0 | After P1a | After P1f | After P2f | After P3 | After P4 | After P5 | After P6 | After P7 | After P8 |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| total warnings | 478 | 478 | 475 | 471 | 467 | — | — | — | — | — | — |
-| `too_many_arguments` | 315 | 315 | 311 | 307 | 303 | — | — | — | — | — | — |
-| errors | 0 | 0 | 0 | 0 | 0 | — | — | — | — | — | — |
-| cumulative LOC delta | 0 | +232 | +276 | +313 | tbd | — | — | — | — | — | — |
+| total warnings | 478 | 478 | 475 | 471 | 467 | 463 | — | — | — | — | — |
+| `too_many_arguments` | 315 | 315 | 311 | 307 | 303 | 299 | — | — | — | — | — |
+| errors | 0 | 0 | 0 | 0 | 0 | 0 | — | — | — | — | — |
+| cumulative LOC delta | 0 | +232 | +276 | +313 | +242 | tbd | — | — | — | — | — |
 
 LOC deltas per commit (insertions − deletions, from `git show --stat`):
 
@@ -108,7 +108,8 @@ LOC deltas per commit (insertions − deletions, from `git show --stat`):
 | P0 | `8a0aXXX` | 232 | 0 | +232 | 0 (setup) |
 | P1a | `62f177e` | 284 | 240 | +44 | 4 |
 | P1b | `cf2f429` | 151 | 150 | +1 | 4 |
-| P1c | (pending) | tbd | tbd | tbd | 4 |
+| P1c | `60e2a81` | 121 | 192 | −71 | 4 |
+| P1d | (pending) | tbd | tbd | tbd | 4 |
 
 ## Non-goals
 

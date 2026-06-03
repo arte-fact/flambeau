@@ -781,19 +781,19 @@ pub fn splitk_chunk_size(n_tokens_kv: usize) -> usize {
 /// `k_cache` / `v_cache` hold `flambeau_block_q8_0` blocks laid out as
 /// `[n_tokens_kv, n_heads_kv, head_dim/32]` row-major.
 pub fn attention_decode_q8_kv(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    q: DevicePtr,
-    k_cache: DevicePtr,
-    v_cache: DevicePtr,
-    out: DevicePtr,
-    n_heads_q: usize,
-    n_heads_kv: usize,
-    head_dim: usize,
-    n_tokens_kv: usize,
-    scale: f32,
-    window_size: i32,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::AttnBuffers,
+    shape: crate::AttnDecodeShape,
+    knobs: crate::AttnKnobs,
 ) -> Result<()> {
+    let crate::AttnBuffers { q, k, v, out } = buffers;
+    let crate::AttnDecodeShape {
+        n_heads_q,
+        n_heads_kv,
+        head_dim,
+        n_tokens_kv,
+    } = shape;
+    let crate::AttnKnobs { scale, window_size } = knobs;
     // Kernel supports head_dim ∈ {64, 128, 256, 512}. block = head_dim/4
     // threads (16/32/64/128). At d=512 the block is 2 waves and the
     // sum-of-blocks reduction adds a tiny cross-wave LDS rendezvous
@@ -803,18 +803,16 @@ pub fn attention_decode_q8_kv(
         matches!(head_dim, 64 | 128 | 256 | 512),
         "attention_decode_q8_kv: head_dim {head_dim} not supported (expected 64, 128, 256, or 512)"
     );
-    let module = reg.expect_module("attention_decode_q8_kv")?;
+    let module = ctx.reg.expect_module("attention_decode_q8_kv")?;
     let kernel = module.kernel("flambeau_attention_decode_q8_kv")?;
 
     let n_heads_q_i = n_heads_q as i32;
     let n_heads_kv_i = n_heads_kv as i32;
     let head_dim_i = head_dim as i32;
     let n_tokens_i = n_tokens_kv as i32;
-    let scale_f = scale;
-    let window_i = window_size;
     let q_ptr: u64 = q.as_usize() as u64;
-    let k_ptr: u64 = k_cache.as_usize() as u64;
-    let v_ptr: u64 = v_cache.as_usize() as u64;
+    let k_ptr: u64 = k.as_usize() as u64;
+    let v_ptr: u64 = v.as_usize() as u64;
     let o_ptr: u64 = out.as_usize() as u64;
     let mut args = KernelArgs::new();
     args.push(&q_ptr);
@@ -825,12 +823,12 @@ pub fn attention_decode_q8_kv(
     args.push(&n_heads_kv_i);
     args.push(&head_dim_i);
     args.push(&n_tokens_i);
-    args.push(&scale_f);
-    args.push(&window_i);
+    args.push(&scale);
+    args.push(&window_size);
     // block.x = head_dim/4 (one thread per int32-
     // packed quad). For head_dim=256 that's 64 threads = 1 wavefront.
     let cfg = LaunchCfg::one_d(n_heads_q as u32, (head_dim / 4) as u32);
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
@@ -841,23 +839,26 @@ pub fn attention_decode_q8_kv(
 /// is the same shape as the single-pass F16 kernel and pays the same 7.78×
 /// occupancy penalty past 256 KV tokens).
 pub fn attention_decode_q8_kv_splitk(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    q: DevicePtr,
-    k_cache: DevicePtr,
-    v_cache: DevicePtr,
-    out: DevicePtr,
-    partials_m: DevicePtr,
-    partials_s: DevicePtr,
-    partials_o: DevicePtr,
-    n_heads_q: usize,
-    n_heads_kv: usize,
-    head_dim: usize,
-    n_tokens_kv: usize,
-    chunk_size: usize,
-    scale: f32,
-    window_size: i32,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::AttnBuffers,
+    partials: crate::AttnSplitkPartials,
+    shape: crate::AttnSplitkShape,
+    knobs: crate::AttnKnobs,
 ) -> Result<()> {
+    let crate::AttnBuffers { q, k, v, out } = buffers;
+    let crate::AttnSplitkPartials {
+        partials_m,
+        partials_s,
+        partials_o,
+    } = partials;
+    let crate::AttnSplitkShape {
+        n_heads_q,
+        n_heads_kv,
+        head_dim,
+        n_tokens_kv,
+        chunk_size,
+    } = shape;
+    let crate::AttnKnobs { scale, window_size } = knobs;
     // head_dim ∈ {64, 128, 256, 512}. d=512 enables Q8 on gemma4
     // global layers; the kernel adds a cross-wave LDS reduce for that
     // case (see attention_decode_q8_kv comments).
@@ -867,7 +868,7 @@ pub fn attention_decode_q8_kv_splitk(
     );
     assert!(chunk_size > 0);
 
-    let module = reg.expect_module("attention_decode_q8_kv_splitk")?;
+    let module = ctx.reg.expect_module("attention_decode_q8_kv_splitk")?;
     let k_chunk = module.kernel("flambeau_attention_decode_q8_kv_splitk_chunk")?;
     let k_combine = module.kernel("flambeau_attention_decode_q8_kv_splitk_combine")?;
 
@@ -879,14 +880,12 @@ pub fn attention_decode_q8_kv_splitk(
     let n_chunks_i = n_chunks as i32;
     let chunk_size_i = chunk_size as i32;
     let q_ptr: u64 = q.as_usize() as u64;
-    let k_ptr: u64 = k_cache.as_usize() as u64;
-    let v_ptr: u64 = v_cache.as_usize() as u64;
+    let k_ptr: u64 = k.as_usize() as u64;
+    let v_ptr: u64 = v.as_usize() as u64;
     let o_ptr: u64 = out.as_usize() as u64;
     let m_ptr: u64 = partials_m.as_usize() as u64;
     let s_ptr: u64 = partials_s.as_usize() as u64;
     let po_ptr: u64 = partials_o.as_usize() as u64;
-    let scale_f = scale;
-    let window_i = window_size;
 
     let mut a1 = KernelArgs::new();
     a1.push(&q_ptr);
@@ -901,8 +900,8 @@ pub fn attention_decode_q8_kv_splitk(
     a1.push(&n_tokens_i);
     a1.push(&n_chunks_i);
     a1.push(&chunk_size_i);
-    a1.push(&scale_f);
-    a1.push(&window_i);
+    a1.push(&scale);
+    a1.push(&window_size);
     // chunk pass uses block = head_dim/4 (one
     // thread per int32-packed quad). Combine pass still needs
     // head_dim threads (one per output element).
@@ -911,7 +910,7 @@ pub fn attention_decode_q8_kv_splitk(
         block: ((head_dim / 4) as u32, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { k_chunk.launch(stream, cfg1, a1)? };
+    unsafe { k_chunk.launch(ctx.stream, cfg1, a1)? };
 
     let mut a2 = KernelArgs::new();
     a2.push(&m_ptr);
@@ -926,7 +925,7 @@ pub fn attention_decode_q8_kv_splitk(
         block: (head_dim as u32, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { k_combine.launch(stream, cfg2, a2)? };
+    unsafe { k_combine.launch(ctx.stream, cfg2, a2)? };
 
     Ok(())
 }
