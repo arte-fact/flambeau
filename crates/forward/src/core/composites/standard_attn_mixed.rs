@@ -631,16 +631,16 @@ pub fn standard_attn_mixed_local<H: TopologyHooks>(
         // `fused_residual_already_done` so the model's `residual_add`
         // skips re-doing the add. Mirrors `standard_attn`'s post-AR
         // gemma4 path at n = K + N.
-        use flambeau_ops::Ops;
         let resid_in_ptr = input.ptr;
         let new_resid_ptr = state.pool.next_residual_slot();
         ops.rmsnorm_f32_to_f16_add_residual(
-            proj_f32.ptr,
-            post_norm.ptr,
-            resid_in_ptr,
-            new_resid_ptr,
-            n,
-            hidden,
+            flambeau_ops::NormResidualBuffers {
+                input: proj_f32.ptr,
+                weight: post_norm.ptr,
+                resid_in: resid_in_ptr,
+                resid_out: new_resid_ptr,
+            },
+            flambeau_ops::NormShape { m: n, k: hidden },
             weights.rms_eps,
         )?;
         state.pool.fused_residual_already_done = true;

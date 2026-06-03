@@ -352,25 +352,12 @@ pub trait Ops {
 
     // -- norm (RMSNorm + L2-norm + Q8_1 quantize) --
 
-    fn rmsnorm_f16(
-        &self,
-        x: DevicePtr,
-        weight: DevicePtr,
-        y: DevicePtr,
-        m: usize,
-        k: usize,
-        eps: f32,
-    ) -> Result<()>;
+    fn rmsnorm_f16(&self, buf: crate::NormBuffers, shape: crate::NormShape, eps: f32) -> Result<()>;
 
     fn rmsnorm_f16_add_residual(
         &self,
-        x_in: DevicePtr,
-        delta: DevicePtr,
-        weight: DevicePtr,
-        mid: DevicePtr,
-        mid_norm: DevicePtr,
-        m: usize,
-        k: usize,
+        buf: crate::NormFusedAddBuffers,
+        shape: crate::NormShape,
         eps: f32,
     ) -> Result<()>;
 
@@ -388,37 +375,13 @@ pub trait Ops {
         eps: f32,
     ) -> Result<()>;
 
-    fn rmsnorm_quant_q8_1(
-        &self,
-        x: DevicePtr,
-        weight: DevicePtr,
-        y_q8_1: DevicePtr,
-        m: usize,
-        k: usize,
-        eps: f32,
-    ) -> Result<()>;
+    fn rmsnorm_quant_q8_1(&self, buf: crate::NormBuffers, shape: crate::NormShape, eps: f32) -> Result<()>;
 
-    fn rmsnorm_f32(
-        &self,
-        x: DevicePtr,
-        weight: DevicePtr,
-        y: DevicePtr,
-        m: usize,
-        k: usize,
-        eps: f32,
-    ) -> Result<()>;
+    fn rmsnorm_f32(&self, buf: crate::NormBuffers, shape: crate::NormShape, eps: f32) -> Result<()>;
 
     /// F32-in / F16-out fused RMSNorm. Replaces `cast_f32_to_f16 →
     /// rmsnorm_f16` for the gemma4 post-attn / post-ffn norm site.
-    fn rmsnorm_f32_to_f16(
-        &self,
-        x_f32: DevicePtr,
-        weight_f16: DevicePtr,
-        y_f16: DevicePtr,
-        m: usize,
-        k: usize,
-        eps: f32,
-    ) -> Result<()>;
+    fn rmsnorm_f32_to_f16(&self, buf: crate::NormBuffers, shape: crate::NormShape, eps: f32) -> Result<()>;
 
     /// Fused rmsnorm_f32_to_f16 + residual add. Writes
     /// `resid_out = resid_in + rmsnorm(x * weight)`. `resid_out` may
@@ -426,12 +389,8 @@ pub trait Ops {
     /// `rmsnorm_f32_to_f16`.
     fn rmsnorm_f32_to_f16_add_residual(
         &self,
-        x_f32: DevicePtr,
-        weight_f16: DevicePtr,
-        resid_in_f16: DevicePtr,
-        resid_out_f16: DevicePtr,
-        m: usize,
-        k: usize,
+        buf: crate::NormResidualBuffers,
+        shape: crate::NormShape,
         eps: f32,
     ) -> Result<()>;
 
@@ -440,12 +399,8 @@ pub trait Ops {
     /// safety predicate allows skipping the F32 AR widening).
     fn rmsnorm_f16_to_f16_add_residual(
         &self,
-        x_f16: DevicePtr,
-        weight_f16: DevicePtr,
-        resid_in_f16: DevicePtr,
-        resid_out_f16: DevicePtr,
-        m: usize,
-        k: usize,
+        buf: crate::NormResidualBuffers,
+        shape: crate::NormShape,
         eps: f32,
     ) -> Result<()>;
 

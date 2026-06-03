@@ -38,7 +38,18 @@ pub fn rmsnorm_f16(
             need
         );
     }
-    ops.rmsnorm_f16(input.ptr, weight.ptr, output.ptr, n_rows, hidden, eps)
+    ops.rmsnorm_f16(
+        flambeau_ops::NormBuffers {
+            input: input.ptr,
+            weight: weight.ptr,
+            output: output.ptr,
+        },
+        flambeau_ops::NormShape {
+            m: n_rows,
+            k: hidden,
+        },
+        eps,
+    )
 }
 
 /// Fused F32-in / F16-out RMSNorm. Saves one launch + one HBM pass at
@@ -74,7 +85,18 @@ pub fn rmsnorm_f32_to_f16(
             need
         );
     }
-    ops.rmsnorm_f32_to_f16(input.ptr, weight.ptr, output.ptr, n_rows, hidden, eps)
+    ops.rmsnorm_f32_to_f16(
+        flambeau_ops::NormBuffers {
+            input: input.ptr,
+            weight: weight.ptr,
+            output: output.ptr,
+        },
+        flambeau_ops::NormShape {
+            m: n_rows,
+            k: hidden,
+        },
+        eps,
+    )
 }
 
 /// F32 variant — for the MoE F32 cascade and gemma4's F32-output
@@ -110,7 +132,18 @@ pub fn rmsnorm_f32(
             need
         );
     }
-    ops.rmsnorm_f32(input.ptr, weight.ptr, output.ptr, n_rows, hidden, eps)
+    ops.rmsnorm_f32(
+        flambeau_ops::NormBuffers {
+            input: input.ptr,
+            weight: weight.ptr,
+            output: output.ptr,
+        },
+        flambeau_ops::NormShape {
+            m: n_rows,
+            k: hidden,
+        },
+        eps,
+    )
 }
 
 /// Fused rmsnorm + F16→Q8_1 quantise. Saves an HBM round-trip vs
@@ -145,7 +178,18 @@ pub fn rmsnorm_quant_q8_1(
     if output.n_elems == 0 {
         bail!("rmsnorm_quant_q8_1: output tensor unallocated");
     }
-    ops.rmsnorm_quant_q8_1(input.ptr, weight.ptr, output.ptr, n_rows, hidden, eps)
+    ops.rmsnorm_quant_q8_1(
+        flambeau_ops::NormBuffers {
+            input: input.ptr,
+            weight: weight.ptr,
+            output: output.ptr,
+        },
+        flambeau_ops::NormShape {
+            m: n_rows,
+            k: hidden,
+        },
+        eps,
+    )
 }
 
 /// CPU reference (F16 inputs, F32 accumulation).

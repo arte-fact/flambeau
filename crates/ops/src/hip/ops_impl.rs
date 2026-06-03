@@ -27,6 +27,14 @@ impl<'a> HipOps<'a> {
     pub fn new(reg: &'a OpsRegistry, stream: &'a HipStream) -> Self {
         Self { reg, stream }
     }
+
+    #[inline]
+    pub fn ctx(&self) -> crate::OpCtx<'a> {
+        crate::OpCtx {
+            reg: self.reg,
+            stream: self.stream,
+        }
+    }
 }
 
 impl<'a> Ops for HipOps<'a> {
@@ -634,39 +642,20 @@ impl<'a> Ops for HipOps<'a> {
 
     fn rmsnorm_f16(
         &self,
-        x: DevicePtr,
-        weight: DevicePtr,
-        y: DevicePtr,
-        m: usize,
-        k: usize,
+        buf: crate::NormBuffers,
+        shape: crate::NormShape,
         eps: f32,
     ) -> Result<()> {
-        super::norm::rmsnorm_f16(self.reg, self.stream, x, weight, y, m, k, eps)
+        super::norm::rmsnorm_f16(self.ctx(), buf, shape, eps)
     }
 
     fn rmsnorm_f16_add_residual(
         &self,
-        x_in: DevicePtr,
-        delta: DevicePtr,
-        weight: DevicePtr,
-        mid: DevicePtr,
-        mid_norm: DevicePtr,
-        m: usize,
-        k: usize,
+        buf: crate::NormFusedAddBuffers,
+        shape: crate::NormShape,
         eps: f32,
     ) -> Result<()> {
-        super::norm::rmsnorm_f16_add_residual(
-            self.reg,
-            self.stream,
-            x_in,
-            delta,
-            weight,
-            mid,
-            mid_norm,
-            m,
-            k,
-            eps,
-        )
+        super::norm::rmsnorm_f16_add_residual(self.ctx(), buf, shape, eps)
     }
 
     fn v_unit_norm_per_head_f16(
@@ -690,84 +679,47 @@ impl<'a> Ops for HipOps<'a> {
 
     fn rmsnorm_quant_q8_1(
         &self,
-        x: DevicePtr,
-        weight: DevicePtr,
-        y_q8_1: DevicePtr,
-        m: usize,
-        k: usize,
+        buf: crate::NormBuffers,
+        shape: crate::NormShape,
         eps: f32,
     ) -> Result<()> {
-        super::norm::rmsnorm_quant_q8_1(self.reg, self.stream, x, weight, y_q8_1, m, k, eps)
+        super::norm::rmsnorm_quant_q8_1(self.ctx(), buf, shape, eps)
     }
 
     fn rmsnorm_f32(
         &self,
-        x: DevicePtr,
-        weight: DevicePtr,
-        y: DevicePtr,
-        m: usize,
-        k: usize,
+        buf: crate::NormBuffers,
+        shape: crate::NormShape,
         eps: f32,
     ) -> Result<()> {
-        super::norm::rmsnorm_f32(self.reg, self.stream, x, weight, y, m, k, eps)
+        super::norm::rmsnorm_f32(self.ctx(), buf, shape, eps)
     }
 
     fn rmsnorm_f32_to_f16(
         &self,
-        x_f32: DevicePtr,
-        weight_f16: DevicePtr,
-        y_f16: DevicePtr,
-        m: usize,
-        k: usize,
+        buf: crate::NormBuffers,
+        shape: crate::NormShape,
         eps: f32,
     ) -> Result<()> {
-        super::norm::rmsnorm_f32_to_f16(self.reg, self.stream, x_f32, weight_f16, y_f16, m, k, eps)
+        super::norm::rmsnorm_f32_to_f16(self.ctx(), buf, shape, eps)
     }
 
     fn rmsnorm_f32_to_f16_add_residual(
         &self,
-        x_f32: DevicePtr,
-        weight_f16: DevicePtr,
-        resid_in_f16: DevicePtr,
-        resid_out_f16: DevicePtr,
-        m: usize,
-        k: usize,
+        buf: crate::NormResidualBuffers,
+        shape: crate::NormShape,
         eps: f32,
     ) -> Result<()> {
-        super::norm::rmsnorm_f32_to_f16_add_residual(
-            self.reg,
-            self.stream,
-            x_f32,
-            weight_f16,
-            resid_in_f16,
-            resid_out_f16,
-            m,
-            k,
-            eps,
-        )
+        super::norm::rmsnorm_f32_to_f16_add_residual(self.ctx(), buf, shape, eps)
     }
 
     fn rmsnorm_f16_to_f16_add_residual(
         &self,
-        x_f16: DevicePtr,
-        weight_f16: DevicePtr,
-        resid_in_f16: DevicePtr,
-        resid_out_f16: DevicePtr,
-        m: usize,
-        k: usize,
+        buf: crate::NormResidualBuffers,
+        shape: crate::NormShape,
         eps: f32,
     ) -> Result<()> {
-        super::norm::rmsnorm_f16_to_f16_add_residual(
-            self.reg,
-            self.stream,
-            x_f16,
-            weight_f16,
-            resid_in_f16,
-            resid_out_f16,
-            m,
-            k,
-            eps,
-        )
+        super::norm::rmsnorm_f16_to_f16_add_residual(self.ctx(), buf, shape, eps)
     }
 
     fn l2_norm_f32(

@@ -168,12 +168,16 @@ impl PerLayerEmbedBlock {
         let _ = proj_out_f16;
         let _ = normed_f16;
         ops.rmsnorm_f32_to_f16_add_residual(
-            proj_out_f32,
-            self.weights.post_norm_f16,
-            pe_in,
-            x_out,
-            n_tokens,
-            self.hidden,
+            flambeau_ops::NormResidualBuffers {
+                input: proj_out_f32,
+                weight: self.weights.post_norm_f16,
+                resid_in: pe_in,
+                resid_out: x_out,
+            },
+            flambeau_ops::NormShape {
+                m: n_tokens,
+                k: self.hidden,
+            },
             self.rms_norm_eps,
         )
         .context("per_layer_embd fused post_norm + residual")?;

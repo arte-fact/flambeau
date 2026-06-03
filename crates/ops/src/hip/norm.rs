@@ -15,37 +15,28 @@ use flambeau_backend_hip::{HipStream, KernelArgs, LaunchCfg};
 use flambeau_core::DevicePtr;
 
 use super::OpsRegistry;
+use crate::sig::{NormBuffers, NormFusedAddBuffers, NormResidualBuffers, NormShape, OpCtx};
 
 /// `y[i] = (x[i] / sqrt(mean(x*x) + eps)) * weight[i]`. Row-wise over `m`
 /// rows of `k` elements each. All tensors F16, row-major, contiguous.
-pub fn rmsnorm_f16(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    x: DevicePtr,
-    weight: DevicePtr,
-    y: DevicePtr,
-    m: usize,
-    k: usize,
-    eps: f32,
-) -> Result<()> {
-    let module = reg.expect_module("rmsnorm_f16")?;
+pub fn rmsnorm_f16(ctx: OpCtx<'_>, buf: NormBuffers, shape: NormShape, eps: f32) -> Result<()> {
+    let module = ctx.reg.expect_module("rmsnorm_f16")?;
     let kernel = module.kernel("flambeau_rmsnorm_f16")?;
 
-    let m_i = m as i32;
-    let k_i = k as i32;
-    let eps_f = eps;
-    let x_ptr: u64 = x.as_usize() as u64;
-    let w_ptr: u64 = weight.as_usize() as u64;
-    let y_ptr: u64 = y.as_usize() as u64;
+    let m_i = shape.m as i32;
+    let k_i = shape.k as i32;
+    let x_ptr: u64 = buf.input.as_usize() as u64;
+    let w_ptr: u64 = buf.weight.as_usize() as u64;
+    let y_ptr: u64 = buf.output.as_usize() as u64;
     let mut args = KernelArgs::new();
     args.push(&x_ptr);
     args.push(&w_ptr);
     args.push(&y_ptr);
     args.push(&m_i);
     args.push(&k_i);
-    args.push(&eps_f);
-    let cfg = LaunchCfg::one_d(m as u32, 256);
-    unsafe { kernel.launch(stream, cfg, args)? };
+    args.push(&eps);
+    let cfg = LaunchCfg::one_d(shape.m as u32, 256);
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
@@ -87,32 +78,25 @@ pub fn v_unit_norm_per_head_f16(
     Ok(())
 }
 
-/// 3.a.1 — fused `mid = x_in + delta; mid_norm = rmsnorm(mid) * weight`.
-/// Replaces `add_f16` + `rmsnorm_f16` pair at the attention-residual epilogue.
-/// Both `mid` and `mid_norm` are needed downstream.
+/// Fused `mid = x_in + delta; mid_norm = rmsnorm(mid) * weight`. Replaces
+/// `add_f16` + `rmsnorm_f16` pair at the attention-residual epilogue. Both
+/// `mid` and `mid_norm` are needed downstream.
 pub fn rmsnorm_f16_add_residual(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    x_in: DevicePtr,
-    delta: DevicePtr,
-    weight: DevicePtr,
-    mid: DevicePtr,
-    mid_norm: DevicePtr,
-    m: usize,
-    k: usize,
+    ctx: OpCtx<'_>,
+    buf: NormFusedAddBuffers,
+    shape: NormShape,
     eps: f32,
 ) -> Result<()> {
-    let module = reg.expect_module("rmsnorm_f16_add_residual")?;
+    let module = ctx.reg.expect_module("rmsnorm_f16_add_residual")?;
     let kernel = module.kernel("flambeau_rmsnorm_f16_add_residual")?;
 
-    let m_i = m as i32;
-    let k_i = k as i32;
-    let eps_f = eps;
-    let x_ptr: u64 = x_in.as_usize() as u64;
-    let d_ptr: u64 = delta.as_usize() as u64;
-    let w_ptr: u64 = weight.as_usize() as u64;
-    let m_ptr: u64 = mid.as_usize() as u64;
-    let n_ptr: u64 = mid_norm.as_usize() as u64;
+    let m_i = shape.m as i32;
+    let k_i = shape.k as i32;
+    let x_ptr: u64 = buf.x_in.as_usize() as u64;
+    let d_ptr: u64 = buf.delta.as_usize() as u64;
+    let w_ptr: u64 = buf.weight.as_usize() as u64;
+    let m_ptr: u64 = buf.mid.as_usize() as u64;
+    let n_ptr: u64 = buf.mid_norm.as_usize() as u64;
     let mut args = KernelArgs::new();
     args.push(&x_ptr);
     args.push(&d_ptr);
@@ -121,67 +105,30 @@ pub fn rmsnorm_f16_add_residual(
     args.push(&n_ptr);
     args.push(&m_i);
     args.push(&k_i);
-    args.push(&eps_f);
-    let cfg = LaunchCfg::one_d(m as u32, 256);
-    unsafe { kernel.launch(stream, cfg, args)? };
+    args.push(&eps);
+    let cfg = LaunchCfg::one_d(shape.m as u32, 256);
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
 /// Fused RMSNorm + Q8_1-quantize. Saves the round-trip to HBM between
 /// norm-out and the next matmul's activation-quantize step (candle D1).
 /// Output is `m * (k / 32)` `flambeau_block_q8_1` blocks, layout matching
-/// `flambeau_quant::BlockQ8_1`.
+/// `flambeau_quant::BlockQ8_1`. `buf.output` is the Q8_1 destination.
 pub fn rmsnorm_quant_q8_1(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    x: DevicePtr,
-    weight: DevicePtr,
-    y_q8_1: DevicePtr,
-    m: usize,
-    k: usize,
+    ctx: OpCtx<'_>,
+    buf: NormBuffers,
+    shape: NormShape,
     eps: f32,
 ) -> Result<()> {
-    let module = reg.expect_module("rmsnorm_q8_1_fused")?;
+    let module = ctx.reg.expect_module("rmsnorm_q8_1_fused")?;
     let kernel = module.kernel("flambeau_rmsnorm_q8_1_fused")?;
 
-    let m_i = m as i32;
-    let k_i = k as i32;
-    let eps_f = eps;
-    let x_ptr: u64 = x.as_usize() as u64;
-    let w_ptr: u64 = weight.as_usize() as u64;
-    let y_ptr: u64 = y_q8_1.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&x_ptr);
-    args.push(&w_ptr);
-    args.push(&y_ptr);
-    args.push(&m_i);
-    args.push(&k_i);
-    args.push(&eps_f);
-    let cfg = LaunchCfg::one_d(m as u32, 256);
-    unsafe { kernel.launch(stream, cfg, args)? };
-    Ok(())
-}
-
-/// F32 per-row RMSNorm — F32 weight, F32 input, F32 output. Same math as
-/// [`rmsnorm_f16`] but keeps precision in F32 across the GDN ssm_norm step
-/// (applied per-head on the F32 state-step output).
-pub fn rmsnorm_f32(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    x: DevicePtr,
-    weight: DevicePtr,
-    y: DevicePtr,
-    m: usize,
-    k: usize,
-    eps: f32,
-) -> Result<()> {
-    let module = reg.expect_module("rmsnorm_f32")?;
-    let kernel = module.kernel("flambeau_rmsnorm_f32")?;
-    let m_i = m as i32;
-    let k_i = k as i32;
-    let x_ptr: u64 = x.as_usize() as u64;
-    let w_ptr: u64 = weight.as_usize() as u64;
-    let y_ptr: u64 = y.as_usize() as u64;
+    let m_i = shape.m as i32;
+    let k_i = shape.k as i32;
+    let x_ptr: u64 = buf.input.as_usize() as u64;
+    let w_ptr: u64 = buf.weight.as_usize() as u64;
+    let y_ptr: u64 = buf.output.as_usize() as u64;
     let mut args = KernelArgs::new();
     args.push(&x_ptr);
     args.push(&w_ptr);
@@ -189,8 +136,31 @@ pub fn rmsnorm_f32(
     args.push(&m_i);
     args.push(&k_i);
     args.push(&eps);
-    let cfg = LaunchCfg::one_d(m as u32, 256);
-    unsafe { kernel.launch(stream, cfg, args)? };
+    let cfg = LaunchCfg::one_d(shape.m as u32, 256);
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
+    Ok(())
+}
+
+/// F32 per-row RMSNorm — F32 weight, F32 input, F32 output. Same math as
+/// [`rmsnorm_f16`] but keeps precision in F32 across the GDN ssm_norm step
+/// (applied per-head on the F32 state-step output).
+pub fn rmsnorm_f32(ctx: OpCtx<'_>, buf: NormBuffers, shape: NormShape, eps: f32) -> Result<()> {
+    let module = ctx.reg.expect_module("rmsnorm_f32")?;
+    let kernel = module.kernel("flambeau_rmsnorm_f32")?;
+    let m_i = shape.m as i32;
+    let k_i = shape.k as i32;
+    let x_ptr: u64 = buf.input.as_usize() as u64;
+    let w_ptr: u64 = buf.weight.as_usize() as u64;
+    let y_ptr: u64 = buf.output.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&x_ptr);
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&m_i);
+    args.push(&k_i);
+    args.push(&eps);
+    let cfg = LaunchCfg::one_d(shape.m as u32, 256);
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
@@ -199,22 +169,18 @@ pub fn rmsnorm_f32(
 /// site (caller still owns AR + residual_add). Reads F32 input, F16
 /// weight, writes F16 output in one pass.
 pub fn rmsnorm_f32_to_f16(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    x: DevicePtr,
-    weight: DevicePtr,
-    y: DevicePtr,
-    m: usize,
-    k: usize,
+    ctx: OpCtx<'_>,
+    buf: NormBuffers,
+    shape: NormShape,
     eps: f32,
 ) -> Result<()> {
-    let module = reg.expect_module("rmsnorm_f32_to_f16")?;
+    let module = ctx.reg.expect_module("rmsnorm_f32_to_f16")?;
     let kernel = module.kernel("flambeau_rmsnorm_f32_to_f16")?;
-    let m_i = m as i32;
-    let k_i = k as i32;
-    let x_ptr: u64 = x.as_usize() as u64;
-    let w_ptr: u64 = weight.as_usize() as u64;
-    let y_ptr: u64 = y.as_usize() as u64;
+    let m_i = shape.m as i32;
+    let k_i = shape.k as i32;
+    let x_ptr: u64 = buf.input.as_usize() as u64;
+    let w_ptr: u64 = buf.weight.as_usize() as u64;
+    let y_ptr: u64 = buf.output.as_usize() as u64;
     let mut args = KernelArgs::new();
     args.push(&x_ptr);
     args.push(&w_ptr);
@@ -222,8 +188,8 @@ pub fn rmsnorm_f32_to_f16(
     args.push(&m_i);
     args.push(&k_i);
     args.push(&eps);
-    let cfg = LaunchCfg::one_d(m as u32, 256);
-    unsafe { kernel.launch(stream, cfg, args)? };
+    let cfg = LaunchCfg::one_d(shape.m as u32, 256);
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
@@ -233,24 +199,19 @@ pub fn rmsnorm_f32_to_f16(
 /// may alias `resid_in` for in-place. Same launch shape as
 /// `rmsnorm_f32_to_f16`.
 pub fn rmsnorm_f32_to_f16_add_residual(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    x: DevicePtr,
-    weight: DevicePtr,
-    resid_in: DevicePtr,
-    resid_out: DevicePtr,
-    m: usize,
-    k: usize,
+    ctx: OpCtx<'_>,
+    buf: NormResidualBuffers,
+    shape: NormShape,
     eps: f32,
 ) -> Result<()> {
-    let module = reg.expect_module("rmsnorm_f32_to_f16")?;
+    let module = ctx.reg.expect_module("rmsnorm_f32_to_f16")?;
     let kernel = module.kernel("flambeau_rmsnorm_f32_to_f16_add_residual")?;
-    let m_i = m as i32;
-    let k_i = k as i32;
-    let x_ptr: u64 = x.as_usize() as u64;
-    let w_ptr: u64 = weight.as_usize() as u64;
-    let r_in_ptr: u64 = resid_in.as_usize() as u64;
-    let r_out_ptr: u64 = resid_out.as_usize() as u64;
+    let m_i = shape.m as i32;
+    let k_i = shape.k as i32;
+    let x_ptr: u64 = buf.input.as_usize() as u64;
+    let w_ptr: u64 = buf.weight.as_usize() as u64;
+    let r_in_ptr: u64 = buf.resid_in.as_usize() as u64;
+    let r_out_ptr: u64 = buf.resid_out.as_usize() as u64;
     let mut args = KernelArgs::new();
     args.push(&x_ptr);
     args.push(&w_ptr);
@@ -259,8 +220,8 @@ pub fn rmsnorm_f32_to_f16_add_residual(
     args.push(&m_i);
     args.push(&k_i);
     args.push(&eps);
-    let cfg = LaunchCfg::one_d(m as u32, 256);
-    unsafe { kernel.launch(stream, cfg, args)? };
+    let cfg = LaunchCfg::one_d(shape.m as u32, 256);
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
@@ -269,24 +230,19 @@ pub fn rmsnorm_f32_to_f16_add_residual(
 /// F16 weight, adds to `resid_in`, writes `resid_out`. `resid_out`
 /// may alias `resid_in` for in-place. Same launch shape.
 pub fn rmsnorm_f16_to_f16_add_residual(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    x: DevicePtr,
-    weight: DevicePtr,
-    resid_in: DevicePtr,
-    resid_out: DevicePtr,
-    m: usize,
-    k: usize,
+    ctx: OpCtx<'_>,
+    buf: NormResidualBuffers,
+    shape: NormShape,
     eps: f32,
 ) -> Result<()> {
-    let module = reg.expect_module("rmsnorm_f32_to_f16")?;
+    let module = ctx.reg.expect_module("rmsnorm_f32_to_f16")?;
     let kernel = module.kernel("flambeau_rmsnorm_f16_to_f16_add_residual")?;
-    let m_i = m as i32;
-    let k_i = k as i32;
-    let x_ptr: u64 = x.as_usize() as u64;
-    let w_ptr: u64 = weight.as_usize() as u64;
-    let r_in_ptr: u64 = resid_in.as_usize() as u64;
-    let r_out_ptr: u64 = resid_out.as_usize() as u64;
+    let m_i = shape.m as i32;
+    let k_i = shape.k as i32;
+    let x_ptr: u64 = buf.input.as_usize() as u64;
+    let w_ptr: u64 = buf.weight.as_usize() as u64;
+    let r_in_ptr: u64 = buf.resid_in.as_usize() as u64;
+    let r_out_ptr: u64 = buf.resid_out.as_usize() as u64;
     let mut args = KernelArgs::new();
     args.push(&x_ptr);
     args.push(&w_ptr);
@@ -295,8 +251,8 @@ pub fn rmsnorm_f16_to_f16_add_residual(
     args.push(&m_i);
     args.push(&k_i);
     args.push(&eps);
-    let cfg = LaunchCfg::one_d(m as u32, 256);
-    unsafe { kernel.launch(stream, cfg, args)? };
+    let cfg = LaunchCfg::one_d(shape.m as u32, 256);
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 

@@ -308,8 +308,24 @@ pub struct NormBuffers {
 }
 
 #[derive(Copy, Clone, Debug)]
-pub struct NormResidual {
-    pub residual_in: DevicePtr,
-    pub residual_out: DevicePtr,
-    pub residual_scale: f32,
+pub struct NormResidualBuffers {
+    pub input: DevicePtr,
+    pub weight: DevicePtr,
+    pub resid_in: DevicePtr,
+    pub resid_out: DevicePtr,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct NormFusedAddBuffers {
+    pub x_in: DevicePtr,
+    pub delta: DevicePtr,
+    pub weight: DevicePtr,
+    pub mid: DevicePtr,
+    pub mid_norm: DevicePtr,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct NormShape {
+    pub m: usize,
+    pub k: usize,
 }

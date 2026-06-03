@@ -603,11 +603,12 @@ impl DeltaNetLayer {
 
         // 1. fused rmsnorm + Q8_1.
         ops.rmsnorm_quant_q8_1(
-            x_in,
-            self.attn_norm_w,
-            scratch.x_q8_1,
-            1,
-            hidden,
+            flambeau_ops::NormBuffers {
+                input: x_in,
+                weight: self.attn_norm_w,
+                output: scratch.x_q8_1,
+            },
+            flambeau_ops::NormShape { m: 1, k: hidden },
             self.rms_norm_eps,
         )
         .context("gdn attn_norm + quant")?;
@@ -772,11 +773,15 @@ impl DeltaNetLayer {
 
         // 12. ssm_norm per-head on the state-step output.
         ops.rmsnorm_f32(
-            scratch.state_out,
-            self.ssm_norm_w,
-            scratch.out_normed,
-            num_v_heads,
-            head_v_dim,
+            flambeau_ops::NormBuffers {
+                input: scratch.state_out,
+                weight: self.ssm_norm_w,
+                output: scratch.out_normed,
+            },
+            flambeau_ops::NormShape {
+                m: num_v_heads,
+                k: head_v_dim,
+            },
             self.rms_norm_eps,
         )
         .context("ssm_norm (rmsnorm_f32)")?;
@@ -920,11 +925,12 @@ impl DeltaNetLayer {
             let x_in_i = x_in_base.offset_bytes(i * x_row_f16_bytes);
             let x_q8_1_i = scratch.x_q8_1.offset_bytes(i * x_q8_1_row_bytes);
             ops.rmsnorm_quant_q8_1(
-                x_in_i,
-                self.attn_norm_w,
-                x_q8_1_i,
-                1,
-                hidden,
+                flambeau_ops::NormBuffers {
+                    input: x_in_i,
+                    weight: self.attn_norm_w,
+                    output: x_q8_1_i,
+                },
+                flambeau_ops::NormShape { m: 1, k: hidden },
                 self.rms_norm_eps,
             )
             .context("gdn batched: attn_norm + quant")?;
@@ -1121,11 +1127,15 @@ impl DeltaNetLayer {
             let gated_f32_i = scratch.gated_f32.offset_bytes(i * gated_f32_row_bytes);
 
             ops.rmsnorm_f32(
-                state_out_i,
-                self.ssm_norm_w,
-                out_normed_i,
-                num_v_heads,
-                head_v_dim,
+                flambeau_ops::NormBuffers {
+                    input: state_out_i,
+                    weight: self.ssm_norm_w,
+                    output: out_normed_i,
+                },
+                flambeau_ops::NormShape {
+                    m: num_v_heads,
+                    k: head_v_dim,
+                },
                 self.rms_norm_eps,
             )
             .context("gdn batched: ssm_norm (rmsnorm_f32)")?;
@@ -1271,11 +1281,15 @@ impl DeltaNetLayer {
         // 1. rmsnorm(x_in) → F16 scratch, then quantise to BOTH Q8_1
         // layouts (std + DS4) so qmatmul can dispatch MMQ at L≥128.
         ops.rmsnorm_f16(
-            x_in,
-            self.attn_norm_w,
-            scratch.x_norm_f16,
-            n_tokens,
-            hidden,
+            flambeau_ops::NormBuffers {
+                input: x_in,
+                weight: self.attn_norm_w,
+                output: scratch.x_norm_f16,
+            },
+            flambeau_ops::NormShape {
+                m: n_tokens,
+                k: hidden,
+            },
             self.rms_norm_eps,
         )
         .context("gdn prefill attn_norm")?;
@@ -1453,11 +1467,15 @@ impl DeltaNetLayer {
 
         // 12. ssm_norm per-head over L × num_v_heads rows.
         ops.rmsnorm_f32(
-            scratch.state_out,
-            self.ssm_norm_w,
-            scratch.out_normed,
-            n_tokens * num_v_heads,
-            head_v_dim,
+            flambeau_ops::NormBuffers {
+                input: scratch.state_out,
+                weight: self.ssm_norm_w,
+                output: scratch.out_normed,
+            },
+            flambeau_ops::NormShape {
+                m: n_tokens * num_v_heads,
+                k: head_v_dim,
+            },
             self.rms_norm_eps,
         )
         .context("gdn prefill ssm_norm (rmsnorm_f32)")?;

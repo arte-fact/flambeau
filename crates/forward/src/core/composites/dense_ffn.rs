@@ -205,12 +205,13 @@ pub fn dense_ffn_local<H: TopologyHooks>(
         let new_resid_ptr = state.pool.next_residual_slot();
         use flambeau_ops::Ops;
         ops.rmsnorm_f32_to_f16_add_residual(
-            down_f32.ptr,
-            post_norm.ptr,
-            resid_in_ptr,
-            new_resid_ptr,
-            n,
-            hidden,
+            flambeau_ops::NormResidualBuffers {
+                input: down_f32.ptr,
+                weight: post_norm.ptr,
+                resid_in: resid_in_ptr,
+                resid_out: new_resid_ptr,
+            },
+            flambeau_ops::NormShape { m: n, k: hidden },
             weights.rms_eps,
         )?;
         state.pool.fused_residual_already_done = true;
