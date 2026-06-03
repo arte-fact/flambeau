@@ -207,6 +207,7 @@ fn run_parity(
         head_dim,
         n_slots,
         scale,
+        /* window_size = */ 0,
     )?;
     stream.synchronize()?;
 

@@ -201,8 +201,8 @@ fn mmvq_q4_1_wave64_identical_slots() -> Result<()> {
     let mut max_abs = 0.0f32;
     let mut first_diff: Option<(usize, f32, f32)> = None;
     for i in 0..n_rows {
-        let a = h_dst[0 * n_rows + i];
-        let b = h_dst[1 * n_rows + i];
+        let a = h_dst[i];
+        let b = h_dst[n_rows + i];
         if a.to_bits() != b.to_bits() {
             n_diff += 1;
             let d = (a - b).abs();

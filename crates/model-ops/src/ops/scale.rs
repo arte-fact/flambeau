@@ -44,7 +44,7 @@ mod tests {
     #[test]
     fn scale_f16_matches_cpu_reference() {
         const N: usize = 256;
-        const SCALE: f32 = 1.4142135; // sqrt(2), like the embed scale at n_embd=2.
+        const SCALE: f32 = std::f32::consts::SQRT_2;
         let device = test_device();
         device.bind().expect("device bind");
         let stream = device.default_stream();

@@ -133,6 +133,7 @@ fn attention_prefill_slot_update_parity() -> Result<()> {
         N_K_FINAL,
         Q_OFF_FINAL,
         scale,
+        0,
     )?;
     stream.synchronize().unwrap();
     let y_ref = readback_f16(&dev, &stream, out_ref_dev, N_Q * N_HEADS_Q * HEAD_DIM);
@@ -156,6 +157,7 @@ fn attention_prefill_slot_update_parity() -> Result<()> {
             N_K_INIT,
             Q_OFF_INIT,
             scale,
+            0,
             Some(slot_n_k),
             Some(slot_q_off),
         )
@@ -208,6 +210,7 @@ fn attention_prefill_slot_update_parity() -> Result<()> {
         N_K_INIT,
         Q_OFF_INIT,
         scale,
+        0,
     )?;
     stream.synchronize().unwrap();
     let y_init_ref = readback_f16(&dev, &stream, out_init_ref_dev, N_Q * N_HEADS_Q * HEAD_DIM);

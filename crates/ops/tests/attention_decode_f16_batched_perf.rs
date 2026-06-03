@@ -153,6 +153,7 @@ fn ab_perf_qwen36_27b_tp2_local() -> Result<()> {
                     head_dim,
                     kv_len,
                     scale,
+                    /* window_size = */ 0,
                     None,
                 )
                 .unwrap();
@@ -163,7 +164,7 @@ fn ab_perf_qwen36_27b_tp2_local() -> Result<()> {
         let batched_us = time_us(&dev, iters, || {
             attention_decode_f16_batched(
                 &reg, stream, d_q, d_k_ptrs, d_v_ptrs, d_out, d_n_kv, n_heads_q, n_heads_kv,
-                head_dim, n_slots, scale,
+                head_dim, n_slots, scale, /* window_size = */ 0,
             )
             .unwrap();
         });
