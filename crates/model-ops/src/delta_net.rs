@@ -292,60 +292,75 @@ pub struct DeltaNetLayer {
     pub rep_inner_layout: bool,
 }
 
+/// All weight pointers for one GDN block. Construction parameter bundle
+/// for [`DeltaNetLayer::new`].
+#[derive(Copy, Clone)]
+pub struct DeltaNetWeights {
+    pub attn_qkv: WeightHandle,
+    pub attn_gate: WeightHandle,
+    pub ssm_alpha: WeightHandle,
+    pub ssm_beta: WeightHandle,
+    pub ssm_out: WeightHandle,
+    pub ssm_dt_bias: DevicePtr,
+    pub ssm_a: DevicePtr,
+    pub ssm_conv1d: DevicePtr,
+    pub ssm_norm_w: DevicePtr,
+    pub attn_norm_w: DevicePtr,
+}
+
+/// All dimension scalars for one GDN block.
+#[derive(Copy, Clone, Debug)]
+pub struct DeltaNetDims {
+    pub hidden: usize,
+    pub d_inner: usize,
+    pub num_v_heads: usize,
+    pub num_k_heads: usize,
+    pub head_k_dim: usize,
+    pub head_v_dim: usize,
+    pub conv_channels: usize,
+    pub conv_kernel: usize,
+}
+
 impl DeltaNetLayer {
     pub fn new(
-        attn_qkv: WeightHandle,
-        attn_gate: WeightHandle,
-        ssm_alpha: WeightHandle,
-        ssm_beta: WeightHandle,
-        ssm_out: WeightHandle,
-        ssm_dt_bias: DevicePtr,
-        ssm_a: DevicePtr,
-        ssm_conv1d: DevicePtr,
-        ssm_norm_w: DevicePtr,
-        attn_norm_w: DevicePtr,
-        hidden: usize,
-        d_inner: usize,
-        num_v_heads: usize,
-        num_k_heads: usize,
-        head_k_dim: usize,
-        head_v_dim: usize,
-        conv_channels: usize,
-        conv_kernel: usize,
+        weights: DeltaNetWeights,
+        dims: DeltaNetDims,
         rms_norm_eps: f32,
         rep_inner_layout: bool,
     ) -> Result<Self> {
-        if head_k_dim != 128 || head_v_dim != 128 {
+        if dims.head_k_dim != 128 || dims.head_v_dim != 128 {
             bail!(
-                "DeltaNetLayer: gdn_state_step kernel only instantiated at S_v=128 (head_k_dim={head_k_dim}, head_v_dim={head_v_dim})"
+                "DeltaNetLayer: gdn_state_step kernel only instantiated at S_v=128 (head_k_dim={}, head_v_dim={})",
+                dims.head_k_dim,
+                dims.head_v_dim
             );
         }
-        if num_v_heads * head_v_dim != d_inner {
+        if dims.num_v_heads * dims.head_v_dim != dims.d_inner {
             bail!(
                 "DeltaNetLayer: num_v_heads * head_v_dim ({}) != d_inner ({})",
-                num_v_heads * head_v_dim,
-                d_inner
+                dims.num_v_heads * dims.head_v_dim,
+                dims.d_inner
             );
         }
         Ok(Self {
-            attn_qkv,
-            attn_gate,
-            ssm_alpha,
-            ssm_beta,
-            ssm_out,
-            ssm_dt_bias,
-            ssm_a,
-            ssm_conv1d,
-            ssm_norm_w,
-            attn_norm_w,
-            hidden,
-            d_inner,
-            num_v_heads,
-            num_k_heads,
-            head_k_dim,
-            head_v_dim,
-            conv_channels,
-            conv_kernel,
+            attn_qkv: weights.attn_qkv,
+            attn_gate: weights.attn_gate,
+            ssm_alpha: weights.ssm_alpha,
+            ssm_beta: weights.ssm_beta,
+            ssm_out: weights.ssm_out,
+            ssm_dt_bias: weights.ssm_dt_bias,
+            ssm_a: weights.ssm_a,
+            ssm_conv1d: weights.ssm_conv1d,
+            ssm_norm_w: weights.ssm_norm_w,
+            attn_norm_w: weights.attn_norm_w,
+            hidden: dims.hidden,
+            d_inner: dims.d_inner,
+            num_v_heads: dims.num_v_heads,
+            num_k_heads: dims.num_k_heads,
+            head_k_dim: dims.head_k_dim,
+            head_v_dim: dims.head_v_dim,
+            conv_channels: dims.conv_channels,
+            conv_kernel: dims.conv_kernel,
             rms_norm_eps,
             rep_inner_layout,
         })
