@@ -476,38 +476,26 @@ pub trait Ops {
 
     fn rope_f16(
         &self,
-        x: DevicePtr,
-        positions: DevicePtr,
+        buf: crate::RopeBuffers,
+        shape: crate::RopeShape,
         theta_base: f32,
-        n_tokens: usize,
-        n_heads: usize,
-        head_dim: usize,
     ) -> Result<()>;
 
     fn rope_neox_partial_f16(
         &self,
-        x: DevicePtr,
-        positions: DevicePtr,
+        buf: crate::RopeBuffers,
+        shape: crate::RopePartialShape,
         theta_base: f32,
-        n_tokens: usize,
-        n_heads: usize,
-        head_dim: usize,
-        rotated_dims: usize,
     ) -> Result<()>;
 
     /// Fused per-head rmsnorm + partial NeoX RoPE, F16 in-place. See
     /// `hip::pe::rmsnorm_rope_neox_partial_f16` for the math.
     fn rmsnorm_rope_neox_partial_f16(
         &self,
-        x: DevicePtr,
-        norm_w: DevicePtr,
-        positions: DevicePtr,
+        buf: crate::RopeFusedBuffers,
+        shape: crate::RopePartialShape,
         theta_base: f32,
         eps: f32,
-        n_tokens: usize,
-        n_heads: usize,
-        head_dim: usize,
-        rotated_dims: usize,
     ) -> Result<()>;
 
     // -- cast (dtype conversion) --

@@ -817,73 +817,30 @@ impl<'a> Ops for HipOps<'a> {
 
     fn rope_f16(
         &self,
-        x: DevicePtr,
-        positions: DevicePtr,
+        buf: crate::RopeBuffers,
+        shape: crate::RopeShape,
         theta_base: f32,
-        n_tokens: usize,
-        n_heads: usize,
-        head_dim: usize,
     ) -> Result<()> {
-        super::pe::rope_f16(
-            self.reg,
-            self.stream,
-            x,
-            positions,
-            theta_base,
-            n_tokens,
-            n_heads,
-            head_dim,
-        )
+        super::pe::rope_f16(self.ctx(), buf, shape, theta_base)
     }
 
     fn rope_neox_partial_f16(
         &self,
-        x: DevicePtr,
-        positions: DevicePtr,
+        buf: crate::RopeBuffers,
+        shape: crate::RopePartialShape,
         theta_base: f32,
-        n_tokens: usize,
-        n_heads: usize,
-        head_dim: usize,
-        rotated_dims: usize,
     ) -> Result<()> {
-        super::pe::rope_neox_partial_f16(
-            self.reg,
-            self.stream,
-            x,
-            positions,
-            theta_base,
-            n_tokens,
-            n_heads,
-            head_dim,
-            rotated_dims,
-        )
+        super::pe::rope_neox_partial_f16(self.ctx(), buf, shape, theta_base)
     }
 
     fn rmsnorm_rope_neox_partial_f16(
         &self,
-        x: DevicePtr,
-        norm_w: DevicePtr,
-        positions: DevicePtr,
+        buf: crate::RopeFusedBuffers,
+        shape: crate::RopePartialShape,
         theta_base: f32,
         eps: f32,
-        n_tokens: usize,
-        n_heads: usize,
-        head_dim: usize,
-        rotated_dims: usize,
     ) -> Result<()> {
-        super::pe::rmsnorm_rope_neox_partial_f16(
-            self.reg,
-            self.stream,
-            x,
-            norm_w,
-            positions,
-            theta_base,
-            eps,
-            n_tokens,
-            n_heads,
-            head_dim,
-            rotated_dims,
-        )
+        super::pe::rmsnorm_rope_neox_partial_f16(self.ctx(), buf, shape, theta_base, eps)
     }
 
     // -- cast --

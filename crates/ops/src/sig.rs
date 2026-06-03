@@ -329,3 +329,33 @@ pub struct NormShape {
     pub m: usize,
     pub k: usize,
 }
+
+// --- rope / positional-encoding family -------------------------------------
+
+#[derive(Copy, Clone, Debug)]
+pub struct RopeBuffers {
+    pub x: DevicePtr,
+    pub positions: DevicePtr,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct RopeFusedBuffers {
+    pub x: DevicePtr,
+    pub norm_w: DevicePtr,
+    pub positions: DevicePtr,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct RopeShape {
+    pub n_tokens: usize,
+    pub n_heads: usize,
+    pub head_dim: usize,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct RopePartialShape {
+    pub n_tokens: usize,
+    pub n_heads: usize,
+    pub head_dim: usize,
+    pub rotated_dims: usize,
+}

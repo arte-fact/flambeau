@@ -331,15 +331,19 @@ pub fn standard_attn_local<H: TopologyHooks>(
     use flambeau_ops::Ops;
     if let Some(q_norm_w) = weights.attn_q_norm.as_ref() {
         ops.rmsnorm_rope_neox_partial_f16(
-            state.pool.q_f16,
-            q_norm_w.ptr,
-            state.pool.position_i32,
+            flambeau_ops::RopeFusedBuffers {
+                x: state.pool.q_f16,
+                norm_w: q_norm_w.ptr,
+                positions: state.pool.position_i32,
+            },
+            flambeau_ops::RopePartialShape {
+                n_tokens: n,
+                n_heads: weights.n_heads,
+                head_dim: weights.head_dim,
+                rotated_dims: weights.rotated_dims,
+            },
             weights.rope_theta,
             weights.rms_eps,
-            n,
-            weights.n_heads,
-            weights.head_dim,
-            weights.rotated_dims,
         )?;
     } else {
         flambeau_model_ops::rope_neox_partial_f16(
@@ -355,15 +359,19 @@ pub fn standard_attn_local<H: TopologyHooks>(
     }
     if let Some(k_norm_w) = weights.attn_k_norm.as_ref() {
         ops.rmsnorm_rope_neox_partial_f16(
-            state.pool.k_f16,
-            k_norm_w.ptr,
-            state.pool.position_i32,
+            flambeau_ops::RopeFusedBuffers {
+                x: state.pool.k_f16,
+                norm_w: k_norm_w.ptr,
+                positions: state.pool.position_i32,
+            },
+            flambeau_ops::RopePartialShape {
+                n_tokens: n,
+                n_heads: weights.n_kv_heads,
+                head_dim: weights.head_dim,
+                rotated_dims: weights.rotated_dims,
+            },
             weights.rope_theta,
             weights.rms_eps,
-            n,
-            weights.n_kv_heads,
-            weights.head_dim,
-            weights.rotated_dims,
         )?;
     } else {
         flambeau_model_ops::rope_neox_partial_f16(

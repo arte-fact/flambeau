@@ -37,12 +37,16 @@ pub fn rope_f16(
         );
     }
     ops.rope_f16(
-        x.ptr,
-        positions.ptr,
+        flambeau_ops::RopeBuffers {
+            x: x.ptr,
+            positions: positions.ptr,
+        },
+        flambeau_ops::RopeShape {
+            n_tokens,
+            n_heads,
+            head_dim,
+        },
         theta_base,
-        n_tokens,
-        n_heads,
-        head_dim,
     )
 }
 
@@ -78,13 +82,17 @@ pub fn rope_neox_partial_f16(
         );
     }
     ops.rope_neox_partial_f16(
-        x.ptr,
-        positions.ptr,
+        flambeau_ops::RopeBuffers {
+            x: x.ptr,
+            positions: positions.ptr,
+        },
+        flambeau_ops::RopePartialShape {
+            n_tokens,
+            n_heads,
+            head_dim,
+            rotated_dims,
+        },
         theta_base,
-        n_tokens,
-        n_heads,
-        head_dim,
-        rotated_dims,
     )
 }
 

@@ -40,6 +40,7 @@ pub use sig::{
     MmvqGateUpBuffers, MmvqGateUpShape, MmvqShape, MoeMmvqBuffers, MoeMmvqGateUpBuffers,
     MoeMmqTile8DownBuffers, MoeMmqTile8GateUpBuffers, MoeMmvqGateUpSortedBuffers, MoeMmvqShape,
     MoeMmvqSortedBuffers, NormBuffers, NormFusedAddBuffers, NormResidualBuffers, NormShape, OpCtx,
+    RopeBuffers, RopeFusedBuffers, RopePartialShape, RopeShape,
 };
 
 #[cfg(feature = "hip")]

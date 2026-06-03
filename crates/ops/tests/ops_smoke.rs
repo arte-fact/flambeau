@@ -166,14 +166,20 @@ fn rope_f16_runs() -> Result<()> {
     let d_x = upload(&dev, &x);
     let d_p = upload(&dev, &positions);
     pe::rope_f16(
-        &reg,
-        dev.default_stream(),
-        d_x,
-        d_p,
+        flambeau_ops::OpCtx {
+            reg: &reg,
+            stream: dev.default_stream(),
+        },
+        flambeau_ops::RopeBuffers {
+            x: d_x,
+            positions: d_p,
+        },
+        flambeau_ops::RopeShape {
+            n_tokens,
+            n_heads,
+            head_dim,
+        },
         10000.0,
-        n_tokens,
-        n_heads,
-        head_dim,
     )?;
     dev.default_stream().synchronize()?;
     unsafe {
