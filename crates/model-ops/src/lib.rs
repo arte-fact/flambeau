@@ -32,9 +32,10 @@ pub use delta_net::{
 };
 pub use driver_utils::RawAllocTracker;
 pub use moe_experts::{
-    Activation as MoeActivation, MoeExperts, MoeExpertsDecodeScratch, MoeExpertsPrefillScratch,
-    MoeExpertsScratchDims, OwnedMoeExpertsDecodeScratch, OwnedMoeExpertsPrefillScratch,
-    RouterInput, RouterNormalize, RouterPolicy,
+    Activation as MoeActivation, MoeExperts, MoeExpertsDecodeScratch, MoeExpertsDims,
+    MoeExpertsPrefillBuffers, MoeExpertsPrefillScratch, MoeExpertsScratchDims, MoeExpertsWeights,
+    OwnedMoeExpertsDecodeScratch, OwnedMoeExpertsPrefillScratch, RouterInput, RouterNormalize,
+    RouterPolicy,
 };
 pub use shared_expert::{
     OwnedSharedExpertDecodeScratch, OwnedSharedExpertPrefillScratch, SharedExpert,

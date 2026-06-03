@@ -133,30 +133,34 @@ pub fn moe_ffn_local<H: TopologyHooks>(
     let down_dt = weights.experts_down[0].dtype;
     let router_dt = weights.router.dtype;
     let block = MoeExperts::new(
-        WeightHandle {
-            ptr: weights.router.ptr,
-            dtype: router_dt,
-            dims: [n_experts, hidden],
+        flambeau_model_ops::MoeExpertsWeights {
+            ffn_gate_inp: WeightHandle {
+                ptr: weights.router.ptr,
+                dtype: router_dt,
+                dims: [n_experts, hidden],
+            },
+            ffn_gate_exps: WeightHandle {
+                ptr: weights.experts_gate[0].ptr,
+                dtype: gate_dt,
+                dims: [n_experts * m, hidden],
+            },
+            ffn_up_exps: WeightHandle {
+                ptr: weights.experts_up[0].ptr,
+                dtype: up_dt,
+                dims: [n_experts * m, hidden],
+            },
+            ffn_down_exps: WeightHandle {
+                ptr: weights.experts_down[0].ptr,
+                dtype: down_dt,
+                dims: [n_experts * hidden, m],
+            },
         },
-        WeightHandle {
-            ptr: weights.experts_gate[0].ptr,
-            dtype: gate_dt,
-            dims: [n_experts * m, hidden],
+        flambeau_model_ops::MoeExpertsDims {
+            hidden,
+            intermediate: m,
+            n_experts,
+            top_k: k_top,
         },
-        WeightHandle {
-            ptr: weights.experts_up[0].ptr,
-            dtype: up_dt,
-            dims: [n_experts * m, hidden],
-        },
-        WeightHandle {
-            ptr: weights.experts_down[0].ptr,
-            dtype: down_dt,
-            dims: [n_experts * hidden, m],
-        },
-        hidden,
-        m,
-        n_experts,
-        k_top,
     )?
     .with_router_policy(RouterPolicy::default())
     .with_activation(match weights.activation {
@@ -414,30 +418,34 @@ fn moe_ffn_loop<H: TopologyHooks>(
     let down_dt = weights.experts_down[0].dtype;
     let router_dt = weights.router.dtype;
     let block = MoeExperts::new(
-        WeightHandle {
-            ptr: weights.router.ptr,
-            dtype: router_dt,
-            dims: [n_experts, hidden],
+        flambeau_model_ops::MoeExpertsWeights {
+            ffn_gate_inp: WeightHandle {
+                ptr: weights.router.ptr,
+                dtype: router_dt,
+                dims: [n_experts, hidden],
+            },
+            ffn_gate_exps: WeightHandle {
+                ptr: weights.experts_gate[0].ptr,
+                dtype: gate_dt,
+                dims: [n_experts * m, hidden],
+            },
+            ffn_up_exps: WeightHandle {
+                ptr: weights.experts_up[0].ptr,
+                dtype: up_dt,
+                dims: [n_experts * m, hidden],
+            },
+            ffn_down_exps: WeightHandle {
+                ptr: weights.experts_down[0].ptr,
+                dtype: down_dt,
+                dims: [n_experts * hidden, m],
+            },
         },
-        WeightHandle {
-            ptr: weights.experts_gate[0].ptr,
-            dtype: gate_dt,
-            dims: [n_experts * m, hidden],
+        flambeau_model_ops::MoeExpertsDims {
+            hidden,
+            intermediate: m,
+            n_experts,
+            top_k: k_top,
         },
-        WeightHandle {
-            ptr: weights.experts_up[0].ptr,
-            dtype: up_dt,
-            dims: [n_experts * m, hidden],
-        },
-        WeightHandle {
-            ptr: weights.experts_down[0].ptr,
-            dtype: down_dt,
-            dims: [n_experts * hidden, m],
-        },
-        hidden,
-        m,
-        n_experts,
-        k_top,
     )?
     .with_router_policy(RouterPolicy::default())
     .with_activation(match weights.activation {
@@ -687,30 +695,34 @@ fn gemma4_moe_cascade_batched<H: TopologyHooks>(
     let down_dt = weights.experts_down[0].dtype;
     let router_dt = weights.router.dtype;
     let block = MoeExperts::new(
-        WeightHandle {
-            ptr: weights.router.ptr,
-            dtype: router_dt,
-            dims: [n_experts, hidden],
+        flambeau_model_ops::MoeExpertsWeights {
+            ffn_gate_inp: WeightHandle {
+                ptr: weights.router.ptr,
+                dtype: router_dt,
+                dims: [n_experts, hidden],
+            },
+            ffn_gate_exps: WeightHandle {
+                ptr: weights.experts_gate[0].ptr,
+                dtype: gate_dt,
+                dims: [n_experts * m_routed, hidden],
+            },
+            ffn_up_exps: WeightHandle {
+                ptr: weights.experts_up[0].ptr,
+                dtype: up_dt,
+                dims: [n_experts * m_routed, hidden],
+            },
+            ffn_down_exps: WeightHandle {
+                ptr: weights.experts_down[0].ptr,
+                dtype: down_dt,
+                dims: [n_experts * hidden, m_routed],
+            },
         },
-        WeightHandle {
-            ptr: weights.experts_gate[0].ptr,
-            dtype: gate_dt,
-            dims: [n_experts * m_routed, hidden],
+        flambeau_model_ops::MoeExpertsDims {
+            hidden,
+            intermediate: m_routed,
+            n_experts,
+            top_k: k_top,
         },
-        WeightHandle {
-            ptr: weights.experts_up[0].ptr,
-            dtype: up_dt,
-            dims: [n_experts * m_routed, hidden],
-        },
-        WeightHandle {
-            ptr: weights.experts_down[0].ptr,
-            dtype: down_dt,
-            dims: [n_experts * hidden, m_routed],
-        },
-        hidden,
-        m_routed,
-        n_experts,
-        k_top,
     )?
     .with_router_policy(RouterPolicy::default())
     .with_activation(match weights.activation {
@@ -932,30 +944,34 @@ fn gemma4_moe_cascade_one_token<H: TopologyHooks>(
     let down_dt = weights.experts_down[0].dtype;
     let router_dt = weights.router.dtype;
     let block = MoeExperts::new(
-        WeightHandle {
-            ptr: weights.router.ptr,
-            dtype: router_dt,
-            dims: [n_experts, hidden],
+        flambeau_model_ops::MoeExpertsWeights {
+            ffn_gate_inp: WeightHandle {
+                ptr: weights.router.ptr,
+                dtype: router_dt,
+                dims: [n_experts, hidden],
+            },
+            ffn_gate_exps: WeightHandle {
+                ptr: weights.experts_gate[0].ptr,
+                dtype: gate_dt,
+                dims: [n_experts * m_routed, hidden],
+            },
+            ffn_up_exps: WeightHandle {
+                ptr: weights.experts_up[0].ptr,
+                dtype: up_dt,
+                dims: [n_experts * m_routed, hidden],
+            },
+            ffn_down_exps: WeightHandle {
+                ptr: weights.experts_down[0].ptr,
+                dtype: down_dt,
+                dims: [n_experts * hidden, m_routed],
+            },
         },
-        WeightHandle {
-            ptr: weights.experts_gate[0].ptr,
-            dtype: gate_dt,
-            dims: [n_experts * m_routed, hidden],
+        flambeau_model_ops::MoeExpertsDims {
+            hidden,
+            intermediate: m_routed,
+            n_experts,
+            top_k: k_top,
         },
-        WeightHandle {
-            ptr: weights.experts_up[0].ptr,
-            dtype: up_dt,
-            dims: [n_experts * m_routed, hidden],
-        },
-        WeightHandle {
-            ptr: weights.experts_down[0].ptr,
-            dtype: down_dt,
-            dims: [n_experts * hidden, m_routed],
-        },
-        hidden,
-        m_routed,
-        n_experts,
-        k_top,
     )?
     .with_router_policy(RouterPolicy::default())
     .with_activation(match weights.activation {

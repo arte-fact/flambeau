@@ -258,23 +258,41 @@ pub struct MoeExperts {
     pub tile8_min_tokens: Option<usize>,
 }
 
+/// Construction-time weight handles for [`MoeExperts::new`].
+#[derive(Copy, Clone)]
+pub struct MoeExpertsWeights {
+    pub ffn_gate_inp: WeightHandle,
+    pub ffn_gate_exps: WeightHandle,
+    pub ffn_up_exps: WeightHandle,
+    pub ffn_down_exps: WeightHandle,
+}
+
+/// Construction-time dimension scalars for [`MoeExperts::new`].
+#[derive(Copy, Clone, Debug)]
+pub struct MoeExpertsDims {
+    pub hidden: usize,
+    pub intermediate: usize,
+    pub n_experts: usize,
+    pub top_k: usize,
+}
+
+/// Prefill I/O pointers consumed by [`MoeExperts::forward_prefill`].
+#[derive(Copy, Clone, Debug)]
+pub struct MoeExpertsPrefillBuffers {
+    pub x_norm: DevicePtr,
+    pub residual: DevicePtr,
+    pub extra_residual: Option<DevicePtr>,
+    pub out: DevicePtr,
+}
+
 impl MoeExperts {
-    pub fn new(
-        ffn_gate_inp: WeightHandle,
-        ffn_gate_exps: WeightHandle,
-        ffn_up_exps: WeightHandle,
-        ffn_down_exps: WeightHandle,
-        hidden: usize,
-        intermediate: usize,
-        n_experts: usize,
-        top_k: usize,
-    ) -> Result<Self> {
-        if ffn_gate_inp.dims != [n_experts, hidden] {
+    pub fn new(weights: MoeExpertsWeights, dims: MoeExpertsDims) -> Result<Self> {
+        if weights.ffn_gate_inp.dims != [dims.n_experts, dims.hidden] {
             bail!(
                 "ffn_gate_inp dims {:?} != [{}, {}]",
-                ffn_gate_inp.dims,
-                n_experts,
-                hidden
+                weights.ffn_gate_inp.dims,
+                dims.n_experts,
+                dims.hidden
             );
         }
         // Indexed expert weights flatten the outer-most `n_experts`
@@ -283,14 +301,14 @@ impl MoeExperts {
         // hidden]` slab. Skip the strict dim assert here — loaders
         // already normalise this.
         Ok(Self {
-            ffn_gate_inp,
-            ffn_gate_exps,
-            ffn_up_exps,
-            ffn_down_exps,
-            hidden,
-            intermediate,
-            n_experts,
-            top_k,
+            ffn_gate_inp: weights.ffn_gate_inp,
+            ffn_gate_exps: weights.ffn_gate_exps,
+            ffn_up_exps: weights.ffn_up_exps,
+            ffn_down_exps: weights.ffn_down_exps,
+            hidden: dims.hidden,
+            intermediate: dims.intermediate,
+            n_experts: dims.n_experts,
+            top_k: dims.top_k,
             router_policy: RouterPolicy::default(),
             activation: Activation::default(),
             tile8_min_tokens: None,
@@ -1176,16 +1194,20 @@ impl MoeExperts {
     pub fn forward_prefill<O: Ops>(
         &self,
         ops: &O,
-        x_norm: DevicePtr,
-        residual: DevicePtr,
-        extra_residual: Option<DevicePtr>,
-        out: DevicePtr,
+        buffers: MoeExpertsPrefillBuffers,
         prompt_len: usize,
         scratch: MoeExpertsPrefillScratch,
     ) -> Result<()> {
-        self.prefill_compute_expert_outs(ops, x_norm, prompt_len, scratch)?;
+        self.prefill_compute_expert_outs(ops, buffers.x_norm, prompt_len, scratch)?;
         // 7. Weighted sum + residual (+ optional shared-expert delta).
-        self.combine_prefill(ops, scratch, residual, extra_residual, out, prompt_len)
+        self.combine_prefill(
+            ops,
+            scratch,
+            buffers.residual,
+            buffers.extra_residual,
+            buffers.out,
+            prompt_len,
+        )
     }
 
     /// Per-rank routed-experts prefill (TP). Same kernel sequence as
