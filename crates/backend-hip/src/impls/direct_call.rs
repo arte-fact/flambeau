@@ -170,13 +170,13 @@ pub const DIRECT_CALL_KERNELS_GFX906: &[DirectCallKernel] = &[
 /// forward-path code — a bench sweep (or PMC refresh) is the only caller.
 /// They stay registered here so:
 /// 1. The `dispatch_toml_roundtrip` test does not need to special-case
-///   TOML rows for bench baselines.
+///    TOML rows for bench baselines.
 /// 2. Future simplifier passes have a single source of truth for
-///   "this kernel is not dead — it's a reference baseline" and don't
-///   propose deletion. (Sessions 1 and 2 of the simplification pass both
-///   initially flagged these as orphans; this catalog closes that loop.)
-///   Matches the "Single-row reference MMVQ kernels for the K-quants are
-///   kept in-tree for cert cross-checks" note in `dispatch/hip/gfx906.toml`.
+///    "this kernel is not dead — it's a reference baseline" and don't
+///    propose deletion. (Sessions 1 and 2 of the simplification pass both
+///    initially flagged these as orphans; this catalog closes that loop.)
+///    Matches the "Single-row reference MMVQ kernels for the K-quants are
+///    kept in-tree for cert cross-checks" note in `dispatch/hip/gfx906.toml`.
 pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
     // long-context attention baseline — pre-split-K reference.
     DirectCallKernel {

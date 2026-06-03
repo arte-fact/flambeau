@@ -8,22 +8,21 @@
 //! `delta_net.rs` precision).
 //!
 //! Decode pipeline (single token):
-//!  1. fused rmsnorm(x_in) + Q8_1 quant
-//!    2+3. `attn_qkv` + `attn_gate` (fused mmvq_q8_0 / mmvq_q4_0_gate_up
-//!       when both same dtype, else separate mmvq per branch)
-//!    4+5. `ssm_alpha` + `ssm_beta` (fused mmvq_q8_0 if both Q8_0, else
-//!       separate)
-//!  6. assemble conv input + causal conv1d + shift conv history
-//!  7. silu(conv_out)
-//!  8. slice silu_out into Q|K|V (pointer arithmetic, no kernel)
-//!  9. l2_norm Q + l2_norm K (per-head)
-//! 10. scale Q by 1 / sqrt(head_k_dim)
-//! 11. fused gdn_state_step_alphabeta
-//! 12. ssm_norm (rmsnorm_f32 on state_out)
-//!   13+14. fused swiglu(z, out_normed) → Q8_1 (or unfused pair if
-//!        d_inner is not a multiple of 32)
-//! 15. ssm_out projection (mmvq)
-//! 16. cast F32 → F16 → delta_out
+//! - fused rmsnorm(x_in) + Q8_1 quant
+//! - `attn_qkv` + `attn_gate` (fused mmvq_q8_0 / mmvq_q4_0_gate_up when
+//!   both same dtype, else separate mmvq per branch)
+//! - `ssm_alpha` + `ssm_beta` (fused mmvq_q8_0 if both Q8_0, else separate)
+//! - assemble conv input + causal conv1d + shift conv history
+//! - silu(conv_out)
+//! - slice silu_out into Q|K|V (pointer arithmetic, no kernel)
+//! - l2_norm Q + l2_norm K (per-head)
+//! - scale Q by 1 / sqrt(head_k_dim)
+//! - fused gdn_state_step_alphabeta
+//! - ssm_norm (rmsnorm_f32 on state_out)
+//! - fused swiglu(z, out_normed) → Q8_1 (or unfused pair if d_inner is
+//!   not a multiple of 32)
+//! - ssm_out projection (mmvq)
+//! - cast F32 → F16 → delta_out
 //!
 //! Prefill differs in shape, not pipeline:
 //!  * `qmatmul` (auto-dispatching MMVQ/MMQ) replaces `mmvq` for the

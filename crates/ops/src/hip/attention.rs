@@ -583,15 +583,17 @@ pub fn kv_append_f16_batched_slots(
 /// (16 heads × 1 block = 27 % of 60 CUs at head_dim=256).
 /// Two passes:
 /// 1. `flambeau_attention_decode_f16_splitk_chunk` — grid
-///   `(n_heads_q, n_chunks)`, each block owns one (q_head, chunk) pair
-///   and emits `(m_c, s_c, o_c[head_dim])` into `partials_*` scratch.
+///    `(n_heads_q, n_chunks)`, each block owns one (q_head, chunk) pair
+///    and emits `(m_c, s_c, o_c[head_dim])` into `partials_*` scratch.
 /// 2. `flambeau_attention_decode_f16_splitk_combine` — grid
-///   `(n_heads_q,)`, merges the `n_chunks` partials per head into the
-///   final output using online-softmax rescaling.
-///   Scratch sizing (caller-provided, f32):
+///    `(n_heads_q,)`, merges the `n_chunks` partials per head into the
+///    final output using online-softmax rescaling.
+///
+/// Scratch sizing (caller-provided, f32):
 /// * `partials_m` / `partials_s`: `n_heads_q * n_chunks` floats each
 /// * `partials_o`: `n_heads_q * n_chunks * head_dim` floats
-///   Measured (Qwen3.6 shape, head_dim=256, 16/2, MI50):
+///
+/// Measured (Qwen3.6 shape, head_dim=256, 16/2, MI50):
 /// * n_tokens=2048: single-pass 2647 µs → split-K 340 µs = **7.78×**
 /// * n_tokens=4096: single-pass 5210 µs → split-K 662 µs = **7.87×**
 #[allow(clippy::too_many_arguments)]

@@ -202,7 +202,8 @@ impl ToolCallFormat {
 /// Choose a parser format, honouring (in precedence order):
 /// 1. An explicit `request_override` — `Some("hermes" | "qwen3_coder")`.
 /// 2. `"auto"` or `None` — fall back to the architecture default.
-///   Architecture defaults are deliberately conservative:
+///
+/// Architecture defaults are deliberately conservative:
 /// - `qwen35moe` (our V1 model arch) defaults to **`Hermes`**.
 ///   **Caveat**: the specific Qwen3.6 GGUF on the V1 rig (Unsloth's
 ///   `UD-Q8_K_XL` build) ships a **Coder-XML** chat template — see

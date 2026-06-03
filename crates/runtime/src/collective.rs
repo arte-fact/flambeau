@@ -3,9 +3,9 @@
 //! thread that uses a barrier + shared buffers to fan data through the
 //! collective. It has two jobs:
 //! 1. Exercise the `Mesh<N>` trait surface for end gate without
-//!   requiring physical GPUs.
+//!    requiring physical GPUs.
 //! 2. Serve as the correctness oracle against which RCCL / NCCL impls are
-//!   certed in `bench sweep`.
+//!    certed in `bench sweep`.
 
 use std::sync::{Arc, Barrier, Mutex};
 
