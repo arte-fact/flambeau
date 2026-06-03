@@ -97,8 +97,8 @@ Next-session restart plan:
   produced `ctx.ctx.reg` on the 6 `_0`-quant variants because the
   second Python pass re-ran on already-migrated bodies).
 | **P3 — Norm fused** | | | | |
-| P3a | `rmsnorm_*_add_residual` family (3-4 fns) | ☐ pending | ~5 | `ops_trait.rs`, `hip/norm.rs` + callers |
-| P3b | `rmsnorm_rope_neox_partial_f16` + `rope_neox_partial_f16` | ☐ pending | ~5 | `ops_trait.rs`, `hip/norm.rs`, `hip/pe.rs` + callers |
+| P3a | 7 rmsnorm wrappers + 4 caller sites (rmsnorm.rs leaf + delta_net + 3 forward composites) | ☑ done | 10 | `ops_trait.rs`, `hip/norm.rs`, `hip/ops_impl.rs`, sig.rs (+`NormResidualBuffers`/`NormFusedAddBuffers`/`NormShape`), 5 callers. Also added `HipOps::ctx()` helper. |
+| P3b | 3 rope wrappers (`rope_f16`, `rope_neox_partial_f16`, `rmsnorm_rope_neox_partial_f16`) + 6 caller sites | ☑ done | 5 | sig.rs (+`RopeBuffers`/`RopeFusedBuffers`/`RopeShape`/`RopePartialShape`), trait, impl, hip/pe.rs, 6 callers. |
 | **P4 — KV-append (5 fns)** | | | | |
 | P4a | `kv_append_f16_paged_*` (prefill + slots) | ☐ pending | 2 | `ops_trait.rs`, `hip/attention.rs` (where these live) + callers |
 | P4b | `kv_append_f16_batched_slots` + `kv_append_v_unit_norm_f16` | ☐ pending | 2 | same |
@@ -127,12 +127,12 @@ Next-session restart plan:
 
 ## Live state
 
-| Metric | At start | After P0 | After P1f | After P2a | After P2b | After P2c | After P2f1 | After P2f2 | After P2f3 | After P2f4 | After P2f5 |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| total warnings | 478 | 478 | 456 | 447 | 437 | 434 | 413 | 414 | 411 | 378 | 344 |
-| `too_many_arguments` | 315 | 315 | 291 | 282 | 272 | 269 | 234 | 230 | 224 | 191 | 157 |
-| errors | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
-| cumulative LOC delta | 0 | +232 | +10 | +12 | −136 | −162 | −46 | −93 | −157 | −509 | −774 |
+| Metric | At start | After P0 | After P1f | After P2a | After P2b | After P2c | After P2f1 | After P2f2 | After P2f3 | After P2f4 | After P2f5 | After P3a | After P3b |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| total warnings | 478 | 478 | 456 | 447 | 437 | 434 | 413 | 414 | 411 | 378 | 344 | 329 | 324 |
+| `too_many_arguments` | 315 | 315 | 291 | 282 | 272 | 269 | 234 | 230 | 224 | 191 | 157 | 147 | 142 |
+| errors | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| cumulative LOC delta | 0 | +232 | +10 | +12 | −136 | −162 | −46 | −93 | −157 | −509 | −774 | −815 | −825 |
 
 LOC deltas per commit (insertions − deletions, from `git show --stat`):
 
@@ -153,6 +153,8 @@ LOC deltas per commit (insertions − deletions, from `git show --stat`):
 | P2f3 | `bd95e29` | 101 | 165 | −64 | 6 |
 | P2f4 | `9c269ff` | 382 | 734 | −352 | 33 |
 | P2f5 | `5e99a56` | 339 | 604 | −265 | 34 |
+| P3a | `f4eca1b` | 285 | 326 | −41 | 10 |
+| P3b | `8681de0` | 183 | 193 | −10 | 5 |
 
 ## Non-goals
 
