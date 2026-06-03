@@ -26,6 +26,34 @@ use flambeau_ops::Ops;
 use flambeau_quant::GgmlDType;
 use half::f16;
 
+/// Inputs for [`crate::ctx::ForwardCtx::per_layer_embd_apply`].
+#[derive(Copy, Clone, Debug)]
+pub struct PerLayerApplySpec {
+    pub table_dev: DevicePtr,
+    pub layer_idx: usize,
+    pub pe: usize,
+    pub n_tokens: usize,
+    pub n_tokens_total: usize,
+    pub rms_eps: f32,
+}
+
+/// Inputs for [`crate::ctx::ForwardCtx::per_layer_embd_build_table`].
+pub struct PerLayerBuildTableSpec<'a> {
+    pub main_embd_host_f16: &'a [f16],
+    pub main_embd_scratch_dev: DevicePtr,
+    pub tok_embd_rows_raw: &'a [u8],
+    pub tok_embd_dtype: GgmlDType,
+    pub tok_embd_row_bytes: usize,
+    pub model_proj_f16_dev: DevicePtr,
+    pub proj_matmul_f32_dev: DevicePtr,
+    pub proj_norm_raw: &'a [u8],
+    pub table_dev: DevicePtr,
+    pub pe: usize,
+    pub n_layer: usize,
+    pub hidden: usize,
+    pub rms_eps: f32,
+}
+
 /// Per-layer weights for the side-channel apply. All F32 on disk;
 /// `post_norm_f16` gets cast to F16 at upload time to match
 /// `rmsnorm_f16`'s contract.

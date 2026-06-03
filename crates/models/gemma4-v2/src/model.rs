@@ -56,19 +56,21 @@ pub fn forward<C: ForwardCtx>(
         }
         let main_embd_host = build_main_embd_host_f16(globals, tokens)?;
         ctx.per_layer_embd_build_table(
-            &main_embd_host,
-            globals.main_embd_scratch_dev,
-            &tok_rows_buf,
-            globals.tok_embd_dtype,
-            globals.tok_embd_row_bytes,
-            globals.model_proj_f16_dev,
-            globals.proj_matmul_f32_dev,
-            &globals.proj_norm_raw,
-            globals.table_dev,
-            globals.pe,
-            model.config.num_layers,
-            model.config.hidden,
-            model.config.rms_eps,
+            flambeau_forward::per_layer_embd::PerLayerBuildTableSpec {
+                main_embd_host_f16: &main_embd_host,
+                main_embd_scratch_dev: globals.main_embd_scratch_dev,
+                tok_embd_rows_raw: &tok_rows_buf,
+                tok_embd_dtype: globals.tok_embd_dtype,
+                tok_embd_row_bytes: globals.tok_embd_row_bytes,
+                model_proj_f16_dev: globals.model_proj_f16_dev,
+                proj_matmul_f32_dev: globals.proj_matmul_f32_dev,
+                proj_norm_raw: &globals.proj_norm_raw,
+                table_dev: globals.table_dev,
+                pe: globals.pe,
+                n_layer: model.config.num_layers,
+                hidden: model.config.hidden,
+                rms_eps: model.config.rms_eps,
+            },
         )?;
     }
 
@@ -114,12 +116,14 @@ pub fn forward<C: ForwardCtx>(
             ctx.per_layer_embd_apply(
                 &mut resid,
                 pe_w,
-                globals.table_dev,
-                li,
-                globals.pe,
-                n,
-                n,
-                model.config.rms_eps,
+                flambeau_forward::per_layer_embd::PerLayerApplySpec {
+                    table_dev: globals.table_dev,
+                    layer_idx: li,
+                    pe: globals.pe,
+                    n_tokens: n,
+                    n_tokens_total: n,
+                    rms_eps: model.config.rms_eps,
+                },
             )?;
         }
 
@@ -178,19 +182,21 @@ pub fn forward_mixed<C: ForwardCtx>(
         }
         let main_embd_host = build_main_embd_host_f16(globals, tokens)?;
         ctx.per_layer_embd_build_table(
-            &main_embd_host,
-            globals.main_embd_scratch_dev,
-            &tok_rows_buf,
-            globals.tok_embd_dtype,
-            globals.tok_embd_row_bytes,
-            globals.model_proj_f16_dev,
-            globals.proj_matmul_f32_dev,
-            &globals.proj_norm_raw,
-            globals.table_dev,
-            globals.pe,
-            model.config.num_layers,
-            model.config.hidden,
-            model.config.rms_eps,
+            flambeau_forward::per_layer_embd::PerLayerBuildTableSpec {
+                main_embd_host_f16: &main_embd_host,
+                main_embd_scratch_dev: globals.main_embd_scratch_dev,
+                tok_embd_rows_raw: &tok_rows_buf,
+                tok_embd_dtype: globals.tok_embd_dtype,
+                tok_embd_row_bytes: globals.tok_embd_row_bytes,
+                model_proj_f16_dev: globals.model_proj_f16_dev,
+                proj_matmul_f32_dev: globals.proj_matmul_f32_dev,
+                proj_norm_raw: &globals.proj_norm_raw,
+                table_dev: globals.table_dev,
+                pe: globals.pe,
+                n_layer: model.config.num_layers,
+                hidden: model.config.hidden,
+                rms_eps: model.config.rms_eps,
+            },
         )?;
     }
 
@@ -200,8 +206,13 @@ pub fn forward_mixed<C: ForwardCtx>(
             .as_ref()
             .expect("attn weights missing for owned layer (PP slice mismatch)");
 
-        let delta =
-            ctx.standard_attn_mixed(&resid, attn_w, li, positions, slot_ids, prefill_rows, None)?;
+        let delta = ctx.standard_attn_mixed(
+            &resid,
+            attn_w,
+            li,
+            flambeau_forward::core::MixedBatch { positions, slot_ids, prefill_rows },
+            None,
+        )?;
         if let Some(d) = delta {
             resid = ctx.residual_add(resid, d, n)?;
         }
@@ -228,12 +239,14 @@ pub fn forward_mixed<C: ForwardCtx>(
             ctx.per_layer_embd_apply(
                 &mut resid,
                 pe_w,
-                globals.table_dev,
-                li,
-                globals.pe,
-                n,
-                n,
-                model.config.rms_eps,
+                flambeau_forward::per_layer_embd::PerLayerApplySpec {
+                    table_dev: globals.table_dev,
+                    layer_idx: li,
+                    pe: globals.pe,
+                    n_tokens: n,
+                    n_tokens_total: n,
+                    rms_eps: model.config.rms_eps,
+                },
             )?;
         }
 

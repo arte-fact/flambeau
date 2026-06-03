@@ -833,9 +833,7 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
         input: &Tensor<F16>,
         weights: &AttnWeights,
         layer_idx: usize,
-        positions: &[usize],
-        slot_ids: &[usize],
-        prefill_rows: usize,
+        batch: crate::core::MixedBatch<'_>,
         next_norm: Option<&Tensor<F16>>,
     ) -> Result<Option<Tensor<F16>>> {
         composites::standard_attn_mixed_local(
@@ -844,7 +842,7 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
             input,
             weights,
             layer_idx,
-            crate::core::MixedBatch { positions, slot_ids, prefill_rows },
+            batch,
             next_norm,
         )
     }
@@ -854,8 +852,7 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
         input: &Tensor<F16>,
         weights: &crate::ctx::GdnWeights,
         layer_idx: usize,
-        slot_ids: &[usize],
-        prefill_rows: usize,
+        batch: crate::core::GdnMixedBatch<'_>,
         next_norm: Option<&Tensor<F16>>,
     ) -> Result<Option<Tensor<F16>>> {
         composites::gdn_layer_mixed_local(
@@ -864,7 +861,7 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
             input,
             weights,
             layer_idx,
-            crate::core::GdnMixedBatch { slot_ids, prefill_rows },
+            batch,
             next_norm,
         )
     }
@@ -926,13 +923,16 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
         &mut self,
         resid: &mut Tensor<F16>,
         weights: &crate::per_layer_embd::PerLayerEmbedLayerWeights,
-        table_dev: flambeau_core::DevicePtr,
-        layer_idx: usize,
-        pe: usize,
-        n_tokens: usize,
-        n_tokens_total: usize,
-        rms_eps: f32,
+        spec: crate::per_layer_embd::PerLayerApplySpec,
     ) -> Result<()> {
+        let crate::per_layer_embd::PerLayerApplySpec {
+            table_dev,
+            layer_idx,
+            pe,
+            n_tokens,
+            n_tokens_total,
+            rms_eps,
+        } = spec;
         let hidden = self.core.hidden();
         let pool = &self.core.pool;
         let scratch = crate::per_layer_embd::PerLayerEmbedDecodeScratch {
@@ -952,20 +952,23 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
 
     fn per_layer_embd_build_table(
         &mut self,
-        main_embd_host_f16: &[half::f16],
-        main_embd_scratch_dev: flambeau_core::DevicePtr,
-        tok_embd_rows_raw: &[u8],
-        tok_embd_dtype: flambeau_quant::GgmlDType,
-        tok_embd_row_bytes: usize,
-        model_proj_f16_dev: flambeau_core::DevicePtr,
-        proj_matmul_f32_dev: flambeau_core::DevicePtr,
-        proj_norm_raw: &[u8],
-        table_dev: flambeau_core::DevicePtr,
-        pe: usize,
-        n_layer: usize,
-        hidden: usize,
-        rms_eps: f32,
+        spec: crate::per_layer_embd::PerLayerBuildTableSpec<'_>,
     ) -> Result<()> {
+        let crate::per_layer_embd::PerLayerBuildTableSpec {
+            main_embd_host_f16,
+            main_embd_scratch_dev,
+            tok_embd_rows_raw,
+            tok_embd_dtype,
+            tok_embd_row_bytes,
+            model_proj_f16_dev,
+            proj_matmul_f32_dev,
+            proj_norm_raw,
+            table_dev,
+            pe,
+            n_layer,
+            hidden,
+            rms_eps,
+        } = spec;
         use flambeau_core::Stream;
         if main_embd_host_f16.len() < hidden {
             anyhow::bail!(

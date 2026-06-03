@@ -91,9 +91,11 @@ pub fn forward_mixed<C: ForwardCtx>(
                     &resid,
                     w,
                     li,
-                    positions,
-                    slot_ids,
-                    prefill_rows,
+                    flambeau_forward::core::MixedBatch {
+                        positions,
+                        slot_ids,
+                        prefill_rows,
+                    },
                     next_norm_after_attn,
                 )?
             }
@@ -105,8 +107,7 @@ pub fn forward_mixed<C: ForwardCtx>(
                     &resid,
                     w,
                     li,
-                    slot_ids,
-                    prefill_rows,
+                    flambeau_forward::core::GdnMixedBatch { slot_ids, prefill_rows },
                     next_norm_after_attn,
                 )?
             }

@@ -87,12 +87,10 @@ pub trait ForwardCtx {
         input: &Tensor<F16>,
         weights: &AttnWeights,
         layer_idx: usize,
-        positions: &[usize],
-        slot_ids: &[usize],
-        prefill_rows: usize,
+        batch: crate::core::MixedBatch<'_>,
         next_norm: Option<&Tensor<F16>>,
     ) -> Result<Option<Tensor<F16>>> {
-        let _ = (input, weights, layer_idx, positions, slot_ids, prefill_rows, next_norm);
+        let _ = (input, weights, layer_idx, batch, next_norm);
         anyhow::bail!("standard_attn_mixed: not implemented on this ctx")
     }
 
@@ -120,11 +118,10 @@ pub trait ForwardCtx {
         input: &Tensor<F16>,
         weights: &GdnWeights,
         layer_idx: usize,
-        slot_ids: &[usize],
-        prefill_rows: usize,
+        batch: crate::core::GdnMixedBatch<'_>,
         next_norm: Option<&Tensor<F16>>,
     ) -> Result<Option<Tensor<F16>>> {
-        let _ = (input, weights, layer_idx, slot_ids, prefill_rows, next_norm);
+        let _ = (input, weights, layer_idx, batch, next_norm);
         anyhow::bail!("gdn_layer_mixed: not implemented on this ctx")
     }
 
@@ -159,23 +156,9 @@ pub trait ForwardCtx {
         &mut self,
         resid: &mut Tensor<F16>,
         weights: &crate::per_layer_embd::PerLayerEmbedLayerWeights,
-        table_dev: DevicePtr,
-        layer_idx: usize,
-        pe: usize,
-        n_tokens: usize,
-        n_tokens_total: usize,
-        rms_eps: f32,
+        spec: crate::per_layer_embd::PerLayerApplySpec,
     ) -> Result<()> {
-        let _ = (
-            resid,
-            weights,
-            table_dev,
-            layer_idx,
-            pe,
-            n_tokens,
-            n_tokens_total,
-            rms_eps,
-        );
+        let _ = (resid, weights, spec);
         anyhow::bail!("per_layer_embd_apply not implemented for this ctx")
     }
 
@@ -197,35 +180,9 @@ pub trait ForwardCtx {
     /// `[n_layer, n_tokens, pe]` table HtoD-uploaded to `table_dev`.
     fn per_layer_embd_build_table(
         &mut self,
-        main_embd_host_f16: &[half::f16],
-        main_embd_scratch_dev: DevicePtr,
-        tok_embd_rows_raw: &[u8],
-        tok_embd_dtype: flambeau_quant::GgmlDType,
-        tok_embd_row_bytes: usize,
-        model_proj_f16_dev: DevicePtr,
-        proj_matmul_f32_dev: DevicePtr,
-        proj_norm_raw: &[u8],
-        table_dev: DevicePtr,
-        pe: usize,
-        n_layer: usize,
-        hidden: usize,
-        rms_eps: f32,
+        spec: crate::per_layer_embd::PerLayerBuildTableSpec<'_>,
     ) -> Result<()> {
-        let _ = (
-            main_embd_host_f16,
-            main_embd_scratch_dev,
-            tok_embd_rows_raw,
-            tok_embd_dtype,
-            tok_embd_row_bytes,
-            model_proj_f16_dev,
-            proj_matmul_f32_dev,
-            proj_norm_raw,
-            table_dev,
-            pe,
-            n_layer,
-            hidden,
-            rms_eps,
-        );
+        let _ = spec;
         anyhow::bail!("per_layer_embd_build_table not implemented for this ctx")
     }
 
