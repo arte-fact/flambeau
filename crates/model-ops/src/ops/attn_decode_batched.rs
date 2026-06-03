@@ -149,20 +149,23 @@ pub fn attn_prefill_f16_paged(
         );
     }
     ops.attention_prefill_f16_paged(
-        q.ptr,
-        k_pool,
-        v_pool,
-        block_table,
-        out.ptr,
-        n_q_tokens,
-        n_heads_q,
-        n_heads_kv,
-        head_dim,
-        n_k_tokens,
-        q_offset,
-        page_size,
-        scale,
-        window_size,
+        flambeau_ops::AttnPagedPrefillBuffers {
+            q: q.ptr,
+            k_pool,
+            v_pool,
+            block_table,
+            out: out.ptr,
+        },
+        flambeau_ops::AttnPrefillPagedShape {
+            n_q_tokens,
+            n_heads_q,
+            n_heads_kv,
+            head_dim,
+            n_k_tokens,
+            q_offset,
+            page_size,
+        },
+        flambeau_ops::AttnKnobs { scale, window_size },
     )
 }
 

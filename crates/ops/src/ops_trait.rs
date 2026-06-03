@@ -262,20 +262,9 @@ pub trait Ops {
     /// `page_size` must be a power of two.
     fn attention_prefill_f16_paged(
         &self,
-        q: DevicePtr,
-        k_pool: DevicePtr,
-        v_pool: DevicePtr,
-        block_table: DevicePtr,
-        out: DevicePtr,
-        n_q_tokens: usize,
-        n_heads_q: usize,
-        n_heads_kv: usize,
-        head_dim: usize,
-        n_k_tokens: usize,
-        q_offset: usize,
-        page_size: usize,
-        scale: f32,
-        window_size: i32,
+        buffers: crate::AttnPagedPrefillBuffers,
+        shape: crate::AttnPrefillPagedShape,
+        knobs: crate::AttnKnobs,
     ) -> Result<()>;
 
     /// PagedAttention prefill K + V append. Writes L K + V rows for
@@ -373,18 +362,9 @@ pub trait Ops {
 
     fn attention_prefill_q8_kv(
         &self,
-        q: DevicePtr,
-        k_cache: DevicePtr,
-        v_cache: DevicePtr,
-        out: DevicePtr,
-        n_q_tokens: usize,
-        n_heads_q: usize,
-        n_heads_kv: usize,
-        head_dim: usize,
-        n_k_tokens: usize,
-        q_offset: usize,
-        scale: f32,
-        window_size: i32,
+        buffers: crate::AttnBuffers,
+        shape: crate::AttnPrefillShape,
+        knobs: crate::AttnKnobs,
     ) -> Result<()>;
 
     fn attention_prefill_f16(

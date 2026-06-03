@@ -370,23 +370,28 @@ pub fn kv_append_f16_paged_slots(
 /// Mirrors `attention_decode_f16_paged`'s safety contract for K/V
 /// pool sizes and block-table extent.
 pub fn attention_prefill_f16_paged(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    q: DevicePtr,
-    k_pool: DevicePtr,
-    v_pool: DevicePtr,
-    block_table: DevicePtr,
-    out: DevicePtr,
-    n_q_tokens: usize,
-    n_heads_q: usize,
-    n_heads_kv: usize,
-    head_dim: usize,
-    n_k_tokens: usize,
-    q_offset: usize,
-    page_size: usize,
-    scale: f32,
-    window_size: i32,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::AttnPagedPrefillBuffers,
+    shape: crate::AttnPrefillPagedShape,
+    knobs: crate::AttnKnobs,
 ) -> Result<()> {
+    let crate::AttnPagedPrefillBuffers {
+        q,
+        k_pool,
+        v_pool,
+        block_table,
+        out,
+    } = buffers;
+    let crate::AttnPrefillPagedShape {
+        n_q_tokens,
+        n_heads_q,
+        n_heads_kv,
+        head_dim,
+        n_k_tokens,
+        q_offset,
+        page_size,
+    } = shape;
+    let crate::AttnKnobs { scale, window_size } = knobs;
     assert!(
         head_dim == 64 || head_dim == 128 || head_dim == 256 || head_dim == 512,
         "attention_prefill_f16_paged: head_dim {head_dim} not supported (expected 64, 128, 256, or 512)"
@@ -395,7 +400,7 @@ pub fn attention_prefill_f16_paged(
         page_size > 0 && page_size.is_power_of_two(),
         "attention_prefill_f16_paged: page_size {page_size} must be a positive power of two"
     );
-    let module = reg.expect_module("attention_prefill_f16_paged")?;
+    let module = ctx.reg.expect_module("attention_prefill_f16_paged")?;
     let kernel = module.kernel("flambeau_attention_prefill_f16_paged")?;
 
     let n_q_i = n_q_tokens as i32;
@@ -430,7 +435,7 @@ pub fn attention_prefill_f16_paged(
         block: (head_dim as u32, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
@@ -941,21 +946,21 @@ pub fn attention_decode_q8_kv_splitk(
 ///   prefill driver — replaces the per-token Q8 prefill fallback with
 ///   one launch per layer per ubatch chunk.
 pub fn attention_prefill_q8_kv(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    q: DevicePtr,
-    k_cache: DevicePtr,
-    v_cache: DevicePtr,
-    out: DevicePtr,
-    n_q_tokens: usize,
-    n_heads_q: usize,
-    n_heads_kv: usize,
-    head_dim: usize,
-    n_k_tokens: usize,
-    q_offset: usize,
-    scale: f32,
-    window_size: i32,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::AttnBuffers,
+    shape: crate::AttnPrefillShape,
+    knobs: crate::AttnKnobs,
 ) -> Result<()> {
+    let crate::AttnBuffers { q, k, v, out } = buffers;
+    let crate::AttnPrefillShape {
+        n_q_tokens,
+        n_heads_q,
+        n_heads_kv,
+        head_dim,
+        n_k_tokens,
+        q_offset,
+    } = shape;
+    let crate::AttnKnobs { scale, window_size } = knobs;
     // head_dim ∈ {64, 128, 256, 512}. d=512 routes through the oracle
     // single-pass kernel (no flash_tile template at d=512); d≤256 goes
     // flash_tile when n_q_tokens ≥ 4.
@@ -969,11 +974,9 @@ pub fn attention_prefill_q8_kv(
     let n_heads_kv_i = n_heads_kv as i32;
     let n_k_i = n_k_tokens as i32;
     let q_off_i = q_offset as i32;
-    let scale_f = scale;
-    let window_i = window_size;
     let q_ptr: u64 = q.as_usize() as u64;
-    let k_ptr: u64 = k_cache.as_usize() as u64;
-    let v_ptr: u64 = v_cache.as_usize() as u64;
+    let k_ptr: u64 = k.as_usize() as u64;
+    let v_ptr: u64 = v.as_usize() as u64;
     let o_ptr: u64 = out.as_usize() as u64;
 
     if n_q_tokens >= 4 && head_dim != 512 {
@@ -983,7 +986,7 @@ pub fn attention_prefill_q8_kv(
         // would push LDS tile size to 32 KB at BC=16); falls back to
         // the oracle single-pass kernel below, which now handles
         // d=512 via cross-wave LDS reduction.
-        let module = reg.expect_module("attention_prefill_flash_tile_q8_kv")?;
+        let module = ctx.reg.expect_module("attention_prefill_flash_tile_q8_kv")?;
         let entry = match head_dim {
             64 => "flambeau_attention_prefill_flash_tile_d64_q8_kv",
             128 => "flambeau_attention_prefill_flash_tile_d128_q8_kv",
@@ -1001,8 +1004,8 @@ pub fn attention_prefill_q8_kv(
         args.push(&n_heads_kv_i);
         args.push(&n_k_i);
         args.push(&q_off_i);
-        args.push(&scale_f);
-        args.push(&window_i);
+        args.push(&scale);
+        args.push(&window_size);
         let br: u32 = if head_dim == 256 { 8 } else { 4 };
         const WARP: u32 = 64;
         let cfg = LaunchCfg {
@@ -1010,12 +1013,12 @@ pub fn attention_prefill_q8_kv(
             block: (WARP, br, 1),
             shared_bytes: 0,
         };
-        unsafe { kernel.launch(stream, cfg, args)? };
+        unsafe { kernel.launch(ctx.stream, cfg, args)? };
         return Ok(());
     }
 
     // Oracle path for n_q < 4 (very short prompts / edge shapes).
-    let module = reg.expect_module("attention_prefill_q8_kv")?;
+    let module = ctx.reg.expect_module("attention_prefill_q8_kv")?;
     let kernel = module.kernel("flambeau_attention_prefill_q8_kv")?;
     let head_dim_i = head_dim as i32;
     let mut args = KernelArgs::new();
@@ -1029,14 +1032,14 @@ pub fn attention_prefill_q8_kv(
     args.push(&head_dim_i);
     args.push(&n_k_i);
     args.push(&q_off_i);
-    args.push(&scale_f);
-    args.push(&window_i);
+    args.push(&scale);
+    args.push(&window_size);
     let cfg = LaunchCfg {
         grid: (n_q_tokens as u32, n_heads_q as u32, 1),
         block: ((head_dim / 4) as u32, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 

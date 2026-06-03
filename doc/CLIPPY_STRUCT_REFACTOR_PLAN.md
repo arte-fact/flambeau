@@ -55,7 +55,7 @@ below is the corrected one.
 | P1c | `attention_decode_f16_splitk` + `_splitk_h2` | ☑ done | 4 | trait, impl, wrapper, splitk callers (model-ops + swa_softcap_parity) |
 | P1d | `attention_decode_q8_kv` + `_splitk` (Q8 decode pair) | ☑ done | 4 | trait, impl, wrapper, q8 decode callers |
 | P1e | `attention_prefill_f16` + `_slots` | ☑ done | 4 | trait, impl, wrapper, prefill callers (model-ops + 2 tests) |
-| P1f | `attention_prefill_q8_kv` + `_f16_paged` | ☐ pending | 2 | trait, impl, wrapper, remaining prefill callers |
+| P1f | `attention_prefill_q8_kv` + `_f16_paged` | ☑ done | 4 | trait, impl, wrapper, remaining prefill callers (2 model-ops files) |
 | **P2 — Matmul family (~100 sites, sub-phased by sibling group)** | | | | |
 | P2a | mmvq single-weight (Q4_0/Q5_K/Q8_0 t128 + warpcoop64) | ☐ pending | ~15 | trait, impl, wrapper, qmatmul callers |
 | P2b | mmvq gate-up fused (Q4_0/Q4_1/Q5_K/Q8_0/Q4_0_t128) | ☐ pending | ~15 | same |
@@ -94,12 +94,12 @@ below is the corrected one.
 
 ## Live state
 
-| Metric | At start | After P0 | After P1a | After P1f | After P2f | After P3 | After P4 | After P5 | After P6 | After P7 | After P8 |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| total warnings | 478 | 478 | 475 | 471 | 467 | 463 | 460 | — | — | — | — |
-| `too_many_arguments` | 315 | 315 | 311 | 307 | 303 | 299 | 295 | — | — | — | — |
-| errors | 0 | 0 | 0 | 0 | 0 | 0 | 0 | — | — | — | — |
-| cumulative LOC delta | 0 | +232 | +276 | +313 | +242 | +203 | tbd | — | — | — | — |
+| Metric | At start | After P0 | After P1a | After P1b | After P1c | After P1d | After P1e | After P1f | After P2 | After … |
+|---|---|---|---|---|---|---|---|---|---|---|
+| total warnings | 478 | 478 | 475 | 471 | 467 | 463 | 460 | 456 | — | — |
+| `too_many_arguments` | 315 | 315 | 311 | 307 | 303 | 299 | 295 | 291 | — | — |
+| errors | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | — | — |
+| cumulative LOC delta | 0 | +232 | +276 | +313 | +242 | +203 | +56 | tbd | — | — |
 
 LOC deltas per commit (insertions − deletions, from `git show --stat`):
 
@@ -110,7 +110,8 @@ LOC deltas per commit (insertions − deletions, from `git show --stat`):
 | P1b | `cf2f429` | 151 | 150 | +1 | 4 |
 | P1c | `60e2a81` | 121 | 192 | −71 | 4 |
 | P1d | `1cc57f8` | 112 | 151 | −39 | 4 |
-| P1e | (pending) | tbd | tbd | tbd | 4 |
+| P1e | `56af554` | 116 | 263 | −147 | 4 |
+| P1f | (pending) | tbd | tbd | tbd | 4 |
 
 ## Non-goals
 

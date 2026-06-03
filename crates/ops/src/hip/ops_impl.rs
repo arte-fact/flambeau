@@ -441,38 +441,18 @@ impl<'a> Ops for HipOps<'a> {
 
     fn attention_prefill_f16_paged(
         &self,
-        q: DevicePtr,
-        k_pool: DevicePtr,
-        v_pool: DevicePtr,
-        block_table: DevicePtr,
-        out: DevicePtr,
-        n_q_tokens: usize,
-        n_heads_q: usize,
-        n_heads_kv: usize,
-        head_dim: usize,
-        n_k_tokens: usize,
-        q_offset: usize,
-        page_size: usize,
-        scale: f32,
-        window_size: i32,
+        buffers: crate::AttnPagedPrefillBuffers,
+        shape: crate::AttnPrefillPagedShape,
+        knobs: crate::AttnKnobs,
     ) -> Result<()> {
         super::attention::attention_prefill_f16_paged(
-            self.reg,
-            self.stream,
-            q,
-            k_pool,
-            v_pool,
-            block_table,
-            out,
-            n_q_tokens,
-            n_heads_q,
-            n_heads_kv,
-            head_dim,
-            n_k_tokens,
-            q_offset,
-            page_size,
-            scale,
-            window_size,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
+            shape,
+            knobs,
         )
     }
 
@@ -652,34 +632,18 @@ impl<'a> Ops for HipOps<'a> {
 
     fn attention_prefill_q8_kv(
         &self,
-        q: DevicePtr,
-        k_cache: DevicePtr,
-        v_cache: DevicePtr,
-        out: DevicePtr,
-        n_q_tokens: usize,
-        n_heads_q: usize,
-        n_heads_kv: usize,
-        head_dim: usize,
-        n_k_tokens: usize,
-        q_offset: usize,
-        scale: f32,
-        window_size: i32,
+        buffers: crate::AttnBuffers,
+        shape: crate::AttnPrefillShape,
+        knobs: crate::AttnKnobs,
     ) -> Result<()> {
         super::attention::attention_prefill_q8_kv(
-            self.reg,
-            self.stream,
-            q,
-            k_cache,
-            v_cache,
-            out,
-            n_q_tokens,
-            n_heads_q,
-            n_heads_kv,
-            head_dim,
-            n_k_tokens,
-            q_offset,
-            scale,
-            window_size,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
+            shape,
+            knobs,
         )
     }
 
