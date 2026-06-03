@@ -20,16 +20,18 @@ pub fn attn_prefill_f16(
     k_cache: &Tensor<F16>,
     v_cache: &Tensor<F16>,
     out: &mut Tensor<F16>,
-    n_q_tokens: usize,
-    n_heads_q: usize,
-    n_heads_kv: usize,
-    head_dim: usize,
-    n_k_tokens: usize,
-    q_offset: usize,
-    scale: f32,
-    window_size: i32,
+    shape: flambeau_ops::AttnPrefillShape,
+    knobs: flambeau_ops::AttnKnobs,
     ops: &HipOps<'_>,
 ) -> Result<()> {
+    let flambeau_ops::AttnPrefillShape {
+        n_q_tokens,
+        n_heads_q,
+        n_heads_kv,
+        head_dim,
+        n_k_tokens,
+        q_offset,
+    } = shape;
     if !matches!(head_dim, 64 | 128 | 256 | 512) {
         bail!("attn_prefill_f16: head_dim {head_dim} not in {{64, 128, 256, 512}}");
     }
@@ -80,15 +82,8 @@ pub fn attn_prefill_f16(
             v: v_cache.ptr,
             out: out.ptr,
         },
-        flambeau_ops::AttnPrefillShape {
-            n_q_tokens,
-            n_heads_q,
-            n_heads_kv,
-            head_dim,
-            n_k_tokens,
-            q_offset,
-        },
-        flambeau_ops::AttnKnobs { scale, window_size },
+        shape,
+        knobs,
     )
 }
 
@@ -97,15 +92,18 @@ fn cpu_attn_prefill(
     q: &[f32],
     k_cache: &[f32],
     v_cache: &[f32],
-    n_q_tokens: usize,
-    n_heads_q: usize,
-    n_heads_kv: usize,
-    head_dim: usize,
-    n_k_tokens: usize,
-    q_offset: usize,
-    scale: f32,
-    window_size: i32,
+    shape: flambeau_ops::AttnPrefillShape,
+    knobs: flambeau_ops::AttnKnobs,
 ) -> Vec<f32> {
+    let flambeau_ops::AttnPrefillShape {
+        n_q_tokens,
+        n_heads_q,
+        n_heads_kv,
+        head_dim,
+        n_k_tokens,
+        q_offset,
+    } = shape;
+    let flambeau_ops::AttnKnobs { scale, window_size } = knobs;
     let group = n_heads_q / n_heads_kv;
     let mut out = vec![0.0_f32; n_q_tokens * n_heads_q * head_dim];
     for q_token in 0..n_q_tokens {
@@ -190,18 +188,21 @@ mod tests {
         let k_kernel_f32: Vec<f32> = k_host_f16.iter().map(|v| v.to_f32()).collect();
         let v_kernel_f32: Vec<f32> = v_host_f16.iter().map(|v| v.to_f32()).collect();
 
-        let expected_f32 = cpu_attn_prefill(
-            &q_kernel_f32,
-            &k_kernel_f32,
-            &v_kernel_f32,
+        let shape = flambeau_ops::AttnPrefillShape {
             n_q_tokens,
             n_heads_q,
             n_heads_kv,
             head_dim,
             n_k_tokens,
             q_offset,
-            scale,
-            window_size,
+        };
+        let knobs = flambeau_ops::AttnKnobs { scale, window_size };
+        let expected_f32 = cpu_attn_prefill(
+            &q_kernel_f32,
+            &k_kernel_f32,
+            &v_kernel_f32,
+            shape,
+            knobs,
         );
 
         let (q_t, q_ptr) = upload::<F16, f16>(&device, &q_host_f16, q_n);
@@ -209,22 +210,8 @@ mod tests {
         let (v_t, v_ptr) = upload::<F16, f16>(&device, &v_host_f16, cache_n);
         let (mut out_t, out_ptr) = alloc::<F16>(&device, q_n);
 
-        attn_prefill_f16(
-            &q_t,
-            &k_t,
-            &v_t,
-            &mut out_t,
-            n_q_tokens,
-            n_heads_q,
-            n_heads_kv,
-            head_dim,
-            n_k_tokens,
-            q_offset,
-            scale,
-            window_size,
-            &ops,
-        )
-        .expect("attn_prefill_f16");
+        attn_prefill_f16(&q_t, &k_t, &v_t, &mut out_t, shape, knobs, &ops)
+            .expect("attn_prefill_f16");
 
         let got: Vec<f16> = download::<F16, f16>(&device, &out_t);
         assert_close_f16(&got, &expected_f32, 5e-3, 1e-2);

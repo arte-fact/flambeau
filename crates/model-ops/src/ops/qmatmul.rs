@@ -123,10 +123,10 @@ pub fn mmvq_q4_0_gate_up_t128_decode(
     act_q8_1: &Tensor<Q8_1>,
     gate_out: &mut Tensor<F32>,
     up_out: &mut Tensor<F32>,
-    k: usize,
-    n: usize,
+    shape: flambeau_ops::MmvqShape,
     ops: &HipOps<'_>,
 ) -> Result<()> {
+    let flambeau_ops::MmvqShape { n_rows: n, k } = shape;
     if gate_out.n_elems < n || up_out.n_elems < n {
         bail!(
             "mmvq_q4_0_gate_up_t128_decode: outputs too small (gate={}, up={}, need {n})",
@@ -155,10 +155,10 @@ pub fn mmvq_q4_0_kv_decode_f16(
     act_q8_1: &Tensor<Q8_1>,
     k_out: &mut Tensor<F16>,
     v_out: &mut Tensor<F16>,
-    k: usize,
-    n: usize,
+    shape: flambeau_ops::MmvqShape,
     ops: &HipOps<'_>,
 ) -> Result<()> {
+    let flambeau_ops::MmvqShape { n_rows: n, k } = shape;
     if k_out.n_elems < n || v_out.n_elems < n {
         bail!(
             "mmvq_q4_0_kv_decode_f16: outputs too small (k_out={}, v_out={}, need {n})",

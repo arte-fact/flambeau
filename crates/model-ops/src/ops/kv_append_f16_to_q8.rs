@@ -27,12 +27,10 @@ pub fn kv_append_f16_to_q8(
     v_src: &Tensor<F16>,
     k_cache: &mut Tensor<Q8_0>,
     v_cache: &mut Tensor<Q8_0>,
-    n_tokens: usize,
-    kv_width: usize,
-    write_pos: usize,
-    max_seq_len: usize,
+    spec: crate::ops::kv_append::KvAppendSpec,
     ops: &HipOps<'_>,
 ) -> Result<()> {
+    let crate::ops::kv_append::KvAppendSpec { n_tokens, kv_width, write_pos, max_seq_len } = spec;
     if n_tokens == 0 {
         return Ok(());
     }
@@ -129,10 +127,12 @@ mod tests {
             &v_src_t,
             &mut k_cache_t,
             &mut v_cache_t,
-            N_TOKENS,
-            KV_WIDTH,
-            WRITE_POS,
-            MAX_SEQ_LEN,
+            crate::ops::kv_append::KvAppendSpec {
+                n_tokens: N_TOKENS,
+                kv_width: KV_WIDTH,
+                write_pos: WRITE_POS,
+                max_seq_len: MAX_SEQ_LEN,
+            },
             &ops,
         )
         .expect("kv_append_f16_to_q8");

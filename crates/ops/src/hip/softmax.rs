@@ -9,10 +9,8 @@
 )]
 
 use anyhow::Result;
-use flambeau_backend_hip::{HipStream, KernelArgs, LaunchCfg};
-use flambeau_core::DevicePtr;
+use flambeau_backend_hip::{KernelArgs, LaunchCfg};
 
-use super::OpsRegistry;
 
 /// Row-wise softmax with fused `scale` and optional F16 additive `mask`.
 /// Shape: `scores[m, k]`, `mask[m, k]` (F16, `-inf` in excluded positions)

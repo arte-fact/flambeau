@@ -16,10 +16,8 @@
 )]
 
 use anyhow::{bail, Result};
-use flambeau_backend_hip::{HipStream, KernelArgs, LaunchCfg};
-use flambeau_core::DevicePtr;
+use flambeau_backend_hip::{KernelArgs, LaunchCfg};
 
-use super::OpsRegistry;
 
 /// Caller-visible upper bound on `K`. Must match `SAMPLER_K_OUT_MAX` in
 /// `kernels-hip/src/kernels/sampler_topk_softmax_f32.cu`. Bumped from

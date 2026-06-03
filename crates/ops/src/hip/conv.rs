@@ -11,10 +11,8 @@
 )]
 
 use anyhow::Result;
-use flambeau_backend_hip::{HipStream, KernelArgs, LaunchCfg};
-use flambeau_core::DevicePtr;
+use flambeau_backend_hip::{KernelArgs, LaunchCfg};
 
-use super::OpsRegistry;
 
 /// Depthwise causal conv1d. `conv_input[n_total, conv_channels]` is the
 /// caller-prepared concat of `conv_kernel - 1` history tokens and `n_new`

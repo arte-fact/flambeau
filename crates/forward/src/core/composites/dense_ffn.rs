@@ -84,8 +84,7 @@ pub fn dense_ffn_local<H: TopologyHooks>(
             &norm_q8_1,
             &mut gate_f32,
             &mut up_f32,
-            hidden,
-            m,
+            flambeau_ops::MmvqShape { n_rows: m, k: hidden },
             &ops,
         )?;
     } else {

@@ -14,16 +14,18 @@ pub fn attn_prefill_q8_kv(
     k_cache: &Tensor<Q8_0>,
     v_cache: &Tensor<Q8_0>,
     out: &mut Tensor<F16>,
-    n_q_tokens: usize,
-    n_heads_q: usize,
-    n_heads_kv: usize,
-    head_dim: usize,
-    n_k_tokens: usize,
-    q_offset: usize,
-    scale: f32,
-    window_size: i32,
+    shape: flambeau_ops::AttnPrefillShape,
+    knobs: flambeau_ops::AttnKnobs,
     ops: &HipOps<'_>,
 ) -> Result<()> {
+    let flambeau_ops::AttnPrefillShape {
+        n_q_tokens,
+        n_heads_q,
+        n_heads_kv,
+        head_dim,
+        n_k_tokens,
+        q_offset,
+    } = shape;
     if !matches!(head_dim, 64 | 128 | 256 | 512) {
         bail!(
             "attn_prefill_q8_kv: head_dim {head_dim} not in {{64, 128, 256, 512}}"
@@ -73,14 +75,7 @@ pub fn attn_prefill_q8_kv(
             v: v_cache.ptr,
             out: out.ptr,
         },
-        flambeau_ops::AttnPrefillShape {
-            n_q_tokens,
-            n_heads_q,
-            n_heads_kv,
-            head_dim,
-            n_k_tokens,
-            q_offset,
-        },
-        flambeau_ops::AttnKnobs { scale, window_size },
+        shape,
+        knobs,
     )
 }

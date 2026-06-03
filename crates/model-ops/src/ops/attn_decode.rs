@@ -16,14 +16,11 @@ pub fn attn_decode_f16(
     k_cache: &Tensor<F16>,
     v_cache: &Tensor<F16>,
     out: &mut Tensor<F16>,
-    n_heads_q: usize,
-    n_heads_kv: usize,
-    head_dim: usize,
-    n_tokens_kv: usize,
-    scale: f32,
-    window_size: i32,
+    shape: flambeau_ops::AttnDecodeShape,
+    knobs: flambeau_ops::AttnKnobs,
     ops: &HipOps<'_>,
 ) -> Result<()> {
+    let flambeau_ops::AttnDecodeShape { n_heads_q, n_heads_kv, head_dim, n_tokens_kv } = shape;
     if !matches!(head_dim, 64 | 128 | 256 | 512) {
         bail!("attn_decode_f16: head_dim {head_dim} not in {{64, 128, 256, 512}}");
     }
@@ -38,28 +35,16 @@ pub fn attn_decode_f16(
     let q_need = n_heads_q * head_dim;
     let cache_need = n_tokens_kv * n_heads_kv * head_dim;
     if q.n_elems < q_need {
-        bail!(
-            "attn_decode_f16: q has {} F16 elems, need >= {q_need}",
-            q.n_elems
-        );
+        bail!("attn_decode_f16: q has {} F16 elems, need >= {q_need}", q.n_elems);
     }
     if k_cache.n_elems < cache_need {
-        bail!(
-            "attn_decode_f16: k_cache has {} F16 elems, need >= {cache_need}",
-            k_cache.n_elems
-        );
+        bail!("attn_decode_f16: k_cache has {} F16 elems, need >= {cache_need}", k_cache.n_elems);
     }
     if v_cache.n_elems < cache_need {
-        bail!(
-            "attn_decode_f16: v_cache has {} F16 elems, need >= {cache_need}",
-            v_cache.n_elems
-        );
+        bail!("attn_decode_f16: v_cache has {} F16 elems, need >= {cache_need}", v_cache.n_elems);
     }
     if out.n_elems < q_need {
-        bail!(
-            "attn_decode_f16: out has {} F16 elems, need >= {q_need}",
-            out.n_elems
-        );
+        bail!("attn_decode_f16: out has {} F16 elems, need >= {q_need}", out.n_elems);
     }
     ops.attention_decode_f16(
         flambeau_ops::AttnBuffers {
@@ -68,13 +53,8 @@ pub fn attn_decode_f16(
             v: v_cache.ptr,
             out: out.ptr,
         },
-        flambeau_ops::AttnDecodeShape {
-            n_heads_q,
-            n_heads_kv,
-            head_dim,
-            n_tokens_kv,
-        },
-        flambeau_ops::AttnKnobs { scale, window_size },
+        shape,
+        knobs,
     )
 }
 
@@ -83,13 +63,11 @@ fn cpu_attn_decode(
     q: &[f32],       // [n_heads_q, head_dim]
     k_cache: &[f32], // [n_tokens, n_heads_kv, head_dim]
     v_cache: &[f32], // [n_tokens, n_heads_kv, head_dim]
-    n_heads_q: usize,
-    n_heads_kv: usize,
-    head_dim: usize,
-    n_tokens: usize,
-    scale: f32,
-    window_size: i32,
+    shape: flambeau_ops::AttnDecodeShape,
+    knobs: flambeau_ops::AttnKnobs,
 ) -> Vec<f32> {
+    let flambeau_ops::AttnDecodeShape { n_heads_q, n_heads_kv, head_dim, n_tokens_kv: n_tokens } = shape;
+    let flambeau_ops::AttnKnobs { scale, window_size } = knobs;
     let group = n_heads_q / n_heads_kv;
     let mut out = vec![0.0_f32; n_heads_q * head_dim];
     for q_head in 0..n_heads_q {
@@ -172,37 +150,22 @@ mod tests {
         let k_kernel_f32: Vec<f32> = k_host_f16.iter().map(|v| v.to_f32()).collect();
         let v_kernel_f32: Vec<f32> = v_host_f16.iter().map(|v| v.to_f32()).collect();
 
-        let expected_f32 = cpu_attn_decode(
-            &q_kernel_f32,
-            &k_kernel_f32,
-            &v_kernel_f32,
+        let shape = flambeau_ops::AttnDecodeShape {
             n_heads_q,
             n_heads_kv,
             head_dim,
-            n_tokens,
-            scale,
-            window_size,
-        );
+            n_tokens_kv: n_tokens,
+        };
+        let knobs = flambeau_ops::AttnKnobs { scale, window_size };
+        let expected_f32 = cpu_attn_decode(&q_kernel_f32, &k_kernel_f32, &v_kernel_f32, shape, knobs);
 
         let (q_t, q_ptr) = upload::<F16, f16>(&device, &q_host_f16, q_n);
         let (k_t, k_ptr) = upload::<F16, f16>(&device, &k_host_f16, cache_n);
         let (v_t, v_ptr) = upload::<F16, f16>(&device, &v_host_f16, cache_n);
         let (mut out_t, out_ptr) = alloc::<F16>(&device, q_n);
 
-        attn_decode_f16(
-            &q_t,
-            &k_t,
-            &v_t,
-            &mut out_t,
-            n_heads_q,
-            n_heads_kv,
-            head_dim,
-            n_tokens,
-            scale,
-            window_size,
-            &ops,
-        )
-        .expect("attn_decode_f16");
+        attn_decode_f16(&q_t, &k_t, &v_t, &mut out_t, shape, knobs, &ops)
+            .expect("attn_decode_f16");
 
         let got: Vec<f16> = download::<F16, f16>(&device, &out_t);
         // Bound scales with n_tokens; 5e-3 covers n_tokens ≤ 64.

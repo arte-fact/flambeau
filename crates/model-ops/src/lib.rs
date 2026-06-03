@@ -58,7 +58,7 @@ pub use ops::gated_attn::{sigmoid_mul_f16, split_q_gate_f16};
 pub use ops::attn_decode_q8_kv::attn_decode_q8_kv;
 pub use ops::attn_decode_q8_kv_splitk::attn_decode_q8_kv_splitk;
 pub use ops::attn_prefill_q8_kv::attn_prefill_q8_kv;
-pub use ops::kv_append::kv_append_f16;
+pub use ops::kv_append::{kv_append_f16, KvAppendSpec};
 pub use ops::kv_append_f16_to_q8::kv_append_f16_to_q8;
 pub use ops::moe_router::topk_f32 as moe_router_topk_f32;
 pub use ops::qmatmul::{

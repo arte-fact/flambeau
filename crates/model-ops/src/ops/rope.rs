@@ -56,12 +56,10 @@ pub fn rope_neox_partial_f16(
     x: &mut Tensor<F16>,
     positions: &Tensor<I32>,
     theta_base: f32,
-    n_tokens: usize,
-    n_heads: usize,
-    head_dim: usize,
-    rotated_dims: usize,
+    shape: flambeau_ops::RopePartialShape,
     ops: &HipOps<'_>,
 ) -> Result<()> {
+    let flambeau_ops::RopePartialShape { n_tokens, n_heads, head_dim, rotated_dims } = shape;
     if rotated_dims % 2 != 0 {
         bail!("rope_neox_partial_f16: rotated_dims ({rotated_dims}) must be even");
     }
@@ -86,12 +84,7 @@ pub fn rope_neox_partial_f16(
             x: x.ptr,
             positions: positions.ptr,
         },
-        flambeau_ops::RopePartialShape {
-            n_tokens,
-            n_heads,
-            head_dim,
-            rotated_dims,
-        },
+        shape,
         theta_base,
     )
 }
@@ -246,10 +239,12 @@ mod tests {
             &mut x_t,
             &pos_t,
             THETA,
-            N_TOKENS,
-            N_HEADS,
-            HEAD_DIM,
-            ROTATED_DIMS,
+            flambeau_ops::RopePartialShape {
+                n_tokens: N_TOKENS,
+                n_heads: N_HEADS,
+                head_dim: HEAD_DIM,
+                rotated_dims: ROTATED_DIMS,
+            },
             &ops,
         )
         .expect("rope_neox_partial_f16");

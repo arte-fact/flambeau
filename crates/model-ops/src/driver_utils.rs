@@ -167,17 +167,30 @@ pub fn row_bytes_for_dtype(dtype: GgmlDType, hidden: usize) -> Result<usize> {
 /// gather kernel that bypasses the host round-trip is a future
 /// optimisation candidate but has not been measured to be on any
 /// hot-path bottleneck.
+/// Device-side `token_embd` matrix (`[vocab, hidden]` in `dtype`).
+#[derive(Copy, Clone, Debug)]
+pub struct TokenEmbdSrc {
+    pub ptr: DevicePtr,
+    pub dtype: GgmlDType,
+    pub bytes: usize,
+    pub vocab: usize,
+    pub hidden: usize,
+}
+
 pub fn embed_token_host(
     device: &HipDevice,
     stream: &HipStream,
-    token_embd_ptr: DevicePtr,
-    token_embd_dtype: GgmlDType,
-    token_embd_bytes: usize,
-    vocab: usize,
-    hidden: usize,
+    src: TokenEmbdSrc,
     token_id: u32,
     out_f16_dev: DevicePtr,
 ) -> Result<()> {
+    let TokenEmbdSrc {
+        ptr: token_embd_ptr,
+        dtype: token_embd_dtype,
+        bytes: token_embd_bytes,
+        vocab,
+        hidden,
+    } = src;
     if (token_id as usize) >= vocab {
         bail!("token_id {token_id} >= vocab {vocab}");
     }

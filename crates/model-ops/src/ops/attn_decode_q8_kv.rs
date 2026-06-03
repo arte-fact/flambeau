@@ -17,14 +17,11 @@ pub fn attn_decode_q8_kv(
     k_cache: &Tensor<Q8_0>,
     v_cache: &Tensor<Q8_0>,
     out: &mut Tensor<F16>,
-    n_heads_q: usize,
-    n_heads_kv: usize,
-    head_dim: usize,
-    n_tokens_kv: usize,
-    scale: f32,
-    window_size: i32,
+    shape: flambeau_ops::AttnDecodeShape,
+    knobs: flambeau_ops::AttnKnobs,
     ops: &HipOps<'_>,
 ) -> Result<()> {
+    let flambeau_ops::AttnDecodeShape { n_heads_q, n_heads_kv, head_dim, n_tokens_kv } = shape;
     if !matches!(head_dim, 64 | 128 | 256 | 512) {
         bail!("attn_decode_q8_kv: head_dim {head_dim} not in {{64, 128, 256, 512}}");
     }
@@ -69,13 +66,8 @@ pub fn attn_decode_q8_kv(
             v: v_cache.ptr,
             out: out.ptr,
         },
-        flambeau_ops::AttnDecodeShape {
-            n_heads_q,
-            n_heads_kv,
-            head_dim,
-            n_tokens_kv,
-        },
-        flambeau_ops::AttnKnobs { scale, window_size },
+        shape,
+        knobs,
     )
 }
 
@@ -143,26 +135,31 @@ mod tests {
             &v_src_t,
             &mut k_cache_f16,
             &mut v_cache_f16,
-            N_TOKENS_KV,
-            KV_WIDTH,
-            0,
-            MAX_SEQ_LEN,
+            crate::ops::kv_append::KvAppendSpec {
+                n_tokens: N_TOKENS_KV,
+                kv_width: KV_WIDTH,
+                write_pos: 0,
+                max_seq_len: MAX_SEQ_LEN,
+            },
             &device,
             stream,
         )
         .expect("kv_append_f16");
         let (mut out_f16, out_f16_ptr) = alloc::<F16>(&device, N_HEADS_Q * HEAD_DIM);
+        let dec_shape = flambeau_ops::AttnDecodeShape {
+            n_heads_q: N_HEADS_Q,
+            n_heads_kv: N_HEADS_KV,
+            head_dim: HEAD_DIM,
+            n_tokens_kv: N_TOKENS_KV,
+        };
+        let dec_knobs = flambeau_ops::AttnKnobs { scale: SCALE, window_size: 0 };
         attn_decode_f16(
             &q_t,
             &k_cache_f16,
             &v_cache_f16,
             &mut out_f16,
-            N_HEADS_Q,
-            N_HEADS_KV,
-            HEAD_DIM,
-            N_TOKENS_KV,
-            SCALE,
-            0,
+            dec_shape,
+            dec_knobs,
             &ops,
         )
         .expect("attn_decode_f16");
@@ -180,10 +177,12 @@ mod tests {
             &v_src_t,
             &mut k_cache_q8,
             &mut v_cache_q8,
-            N_TOKENS_KV,
-            KV_WIDTH,
-            0,
-            MAX_SEQ_LEN,
+            crate::ops::kv_append::KvAppendSpec {
+                n_tokens: N_TOKENS_KV,
+                kv_width: KV_WIDTH,
+                write_pos: 0,
+                max_seq_len: MAX_SEQ_LEN,
+            },
             &ops,
         )
         .expect("kv_append_f16_to_q8");
@@ -193,12 +192,8 @@ mod tests {
             &k_cache_q8,
             &v_cache_q8,
             &mut out_q8,
-            N_HEADS_Q,
-            N_HEADS_KV,
-            HEAD_DIM,
-            N_TOKENS_KV,
-            SCALE,
-            0,
+            dec_shape,
+            dec_knobs,
             &ops,
         )
         .expect("attn_decode_q8_kv");

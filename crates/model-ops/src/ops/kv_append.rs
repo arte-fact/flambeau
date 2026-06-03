@@ -10,19 +10,26 @@ use crate::dtype::F16;
 use crate::error::Result;
 use crate::tensor::Tensor;
 
+/// Placement of an append into the per-layer cache.
+#[derive(Copy, Clone, Debug)]
+pub struct KvAppendSpec {
+    pub n_tokens: usize,
+    pub kv_width: usize,
+    pub write_pos: usize,
+    pub max_seq_len: usize,
+}
+
 /// Two stream-ordered DtoD memcpys (K and V) into per-layer caches.
 pub fn kv_append_f16(
     k_src: &Tensor<F16>,
     v_src: &Tensor<F16>,
     k_cache: &mut Tensor<F16>,
     v_cache: &mut Tensor<F16>,
-    n_tokens: usize,
-    kv_width: usize,
-    write_pos: usize,
-    max_seq_len: usize,
+    spec: KvAppendSpec,
     device: &HipDevice,
     stream: &HipStream,
 ) -> Result<()> {
+    let KvAppendSpec { n_tokens, kv_width, write_pos, max_seq_len } = spec;
     if n_tokens == 0 {
         return Ok(());
     }
@@ -120,10 +127,12 @@ mod tests {
             &v_src_t,
             &mut k_cache_t,
             &mut v_cache_t,
-            N_TOKENS,
-            KV_WIDTH,
-            WRITE_POS,
-            MAX_SEQ_LEN,
+            KvAppendSpec {
+                n_tokens: N_TOKENS,
+                kv_width: KV_WIDTH,
+                write_pos: WRITE_POS,
+                max_seq_len: MAX_SEQ_LEN,
+            },
             &device,
             stream,
         )

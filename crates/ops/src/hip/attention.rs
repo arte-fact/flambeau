@@ -11,10 +11,8 @@
 )]
 
 use anyhow::Result;
-use flambeau_backend_hip::{HipStream, KernelArgs, LaunchCfg};
-use flambeau_core::DevicePtr;
+use flambeau_backend_hip::{KernelArgs, LaunchCfg};
 
-use super::OpsRegistry;
 
 /// Decode attention, F16 KV. One Q row per call (`n_tokens_q = 1` by
 /// construction — this is the hot-path for token generation). Kernel does

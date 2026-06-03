@@ -21,15 +21,17 @@ pub fn attn_decode_f16_splitk(
     partials_m: &mut Tensor<F32>,
     partials_s: &mut Tensor<F32>,
     partials_o: &mut Tensor<F32>,
-    n_heads_q: usize,
-    n_heads_kv: usize,
-    head_dim: usize,
-    n_tokens_kv: usize,
-    chunk_size: usize,
-    scale: f32,
-    window_size: i32,
+    shape: flambeau_ops::AttnSplitkShape,
+    knobs: flambeau_ops::AttnKnobs,
     ops: &HipOps<'_>,
 ) -> Result<()> {
+    let flambeau_ops::AttnSplitkShape {
+        n_heads_q,
+        n_heads_kv,
+        head_dim,
+        n_tokens_kv,
+        chunk_size,
+    } = shape;
     if !matches!(head_dim, 64 | 128 | 256 | 512) {
         bail!("attn_decode_f16_splitk: head_dim {head_dim} not in {{64, 128, 256, 512}}");
     }
@@ -104,14 +106,8 @@ pub fn attn_decode_f16_splitk(
             partials_s: partials_s.ptr,
             partials_o: partials_o.ptr,
         },
-        flambeau_ops::AttnSplitkShape {
-            n_heads_q,
-            n_heads_kv,
-            head_dim,
-            n_tokens_kv,
-            chunk_size,
-        },
-        flambeau_ops::AttnKnobs { scale, window_size },
+        shape,
+        knobs,
     )
 }
 
@@ -228,8 +224,15 @@ mod attn_microbench {
                 attn_decode_f16_splitk(
                     &q_t, &k_t, &v_t, &mut out_t,
                     &mut pm_t, &mut ps_t, &mut po_t,
-                    N_HEADS_Q, N_HEADS_KV, head_dim,
-                    N_TOKENS_KV, chunk_size, scale, 0, &ops,
+                    flambeau_ops::AttnSplitkShape {
+                        n_heads_q: N_HEADS_Q,
+                        n_heads_kv: N_HEADS_KV,
+                        head_dim,
+                        n_tokens_kv: N_TOKENS_KV,
+                        chunk_size,
+                    },
+                    flambeau_ops::AttnKnobs { scale, window_size: 0 },
+                    &ops,
                 )
                 .unwrap();
             }
@@ -240,8 +243,15 @@ mod attn_microbench {
                 attn_decode_f16_splitk(
                     &q_t, &k_t, &v_t, &mut out_t,
                     &mut pm_t, &mut ps_t, &mut po_t,
-                    N_HEADS_Q, N_HEADS_KV, head_dim,
-                    N_TOKENS_KV, chunk_size, scale, 0, &ops,
+                    flambeau_ops::AttnSplitkShape {
+                        n_heads_q: N_HEADS_Q,
+                        n_heads_kv: N_HEADS_KV,
+                        head_dim,
+                        n_tokens_kv: N_TOKENS_KV,
+                        chunk_size,
+                    },
+                    flambeau_ops::AttnKnobs { scale, window_size: 0 },
+                    &ops,
                 )
                 .unwrap();
             }

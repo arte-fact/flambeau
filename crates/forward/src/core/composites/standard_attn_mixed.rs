@@ -320,10 +320,12 @@ pub fn standard_attn_mixed_local<H: TopologyHooks>(
             &mut q_f16_rope,
             &pos_tensor,
             weights.rope_theta,
-            n,
-            weights.n_heads,
-            weights.head_dim,
-            weights.rotated_dims,
+            flambeau_ops::RopePartialShape {
+                n_tokens: n,
+                n_heads: weights.n_heads,
+                head_dim: weights.head_dim,
+                rotated_dims: weights.rotated_dims,
+            },
             &ops,
         )?;
     }
@@ -349,10 +351,12 @@ pub fn standard_attn_mixed_local<H: TopologyHooks>(
             &mut k_f16_rope,
             &pos_tensor,
             weights.rope_theta,
-            n,
-            weights.n_kv_heads,
-            weights.head_dim,
-            weights.rotated_dims,
+            flambeau_ops::RopePartialShape {
+                n_tokens: n,
+                n_heads: weights.n_kv_heads,
+                head_dim: weights.head_dim,
+                rotated_dims: weights.rotated_dims,
+            },
             &ops,
         )?;
     }
@@ -410,10 +414,12 @@ pub fn standard_attn_mixed_local<H: TopologyHooks>(
             &v_pref_src,
             &mut k_cache,
             &mut v_cache,
-            k,
-            kv_width,
-            pos0,
-            max_seq_len,
+            flambeau_model_ops::KvAppendSpec {
+                n_tokens: k,
+                kv_width,
+                write_pos: pos0,
+                max_seq_len,
+            },
             state.device,
             state.stream,
         )?;
@@ -425,14 +431,15 @@ pub fn standard_attn_mixed_local<H: TopologyHooks>(
             &k_cache,
             &v_cache,
             &mut out_pref,
-            k,
-            weights.n_heads,
-            weights.n_kv_heads,
-            weights.head_dim,
-            n_k_tokens,
-            pos0,
-            scale,
-            weights.window_size,
+            flambeau_ops::AttnPrefillShape {
+                n_q_tokens: k,
+                n_heads_q: weights.n_heads,
+                n_heads_kv: weights.n_kv_heads,
+                head_dim: weights.head_dim,
+                n_k_tokens,
+                q_offset: pos0,
+            },
+            flambeau_ops::AttnKnobs { scale, window_size: weights.window_size },
             &ops,
         )?;
     }
