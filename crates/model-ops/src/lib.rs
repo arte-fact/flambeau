@@ -24,8 +24,9 @@ pub use error::{Error, Result};
 pub use tensor::Tensor;
 
 pub use delta_net::{
-    DeltaNetDims, DeltaNetLayer, DeltaNetLayerDecodeBatchedScratch, DeltaNetLayerDecodeScratch,
-    DeltaNetLayerPrefillScratch, DeltaNetScratchDims, DeltaNetWeights,
+    BackendCtx, DeltaNetDims, DeltaNetLayer, DeltaNetLayerDecodeBatchedScratch,
+    DeltaNetLayerDecodeScratch, DeltaNetLayerPrefillScratch, DeltaNetScratchDims, DeltaNetWeights,
+    GdnDecodeBatchedBuffers, GdnDecodeBuffers, GdnPrefillSeq,
     OwnedDeltaNetLayerDecodeBatchedScratch, OwnedDeltaNetLayerDecodeScratch,
     OwnedDeltaNetLayerPrefillScratch,
 };

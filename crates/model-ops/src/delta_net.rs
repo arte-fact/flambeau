@@ -321,6 +321,45 @@ pub struct DeltaNetDims {
     pub conv_kernel: usize,
 }
 
+/// Per-call HIP context (device + stream) shared by every GDN driver
+/// method. Lifetime-borrowed; not Copy because `&HipDevice` references
+/// the cluster-owned device handle.
+#[derive(Copy, Clone)]
+pub struct BackendCtx<'a> {
+    pub device: &'a HipDevice,
+    pub stream: &'a HipStream,
+}
+
+/// Single-slot decode I/O pointers consumed by
+/// [`DeltaNetLayer::forward_decode`] and `_with_ar_hook`.
+#[derive(Copy, Clone, Debug)]
+pub struct GdnDecodeBuffers {
+    pub x_in: DevicePtr,
+    pub delta_out: DevicePtr,
+    pub state: DevicePtr,
+    pub conv_history: DevicePtr,
+}
+
+/// Batched-slots decode I/O pointers consumed by
+/// [`DeltaNetLayer::forward_decode_with_ar_hook_batched_slots`]. The
+/// `*_ptrs_dev` fields are `[n_slots] u64` device arrays.
+#[derive(Copy, Clone, Debug)]
+pub struct GdnDecodeBatchedBuffers {
+    pub x_in_base: DevicePtr,
+    pub delta_out_base: DevicePtr,
+    pub state_in_ptrs_dev: DevicePtr,
+    pub state_out_ptrs_dev: DevicePtr,
+    pub conv_history_ptrs_dev: DevicePtr,
+}
+
+/// Prefill-only sequence handle: token count + optional state event
+/// the state-step kernel waits on before reading `state`.
+#[derive(Copy, Clone)]
+pub struct GdnPrefillSeq<'a> {
+    pub n_tokens: usize,
+    pub state_event: Option<&'a HipEvent>,
+}
+
 impl DeltaNetLayer {
     pub fn new(
         weights: DeltaNetWeights,
@@ -565,25 +604,11 @@ impl DeltaNetLayer {
     pub fn forward_decode<O: Ops>(
         &self,
         ops: &O,
-        device: &HipDevice,
-        stream: &HipStream,
-        x_in: DevicePtr,
-        delta_out: DevicePtr,
-        state: DevicePtr,
-        conv_history: DevicePtr,
+        ctx: BackendCtx<'_>,
+        buf: GdnDecodeBuffers,
         scratch: DeltaNetLayerDecodeScratch,
     ) -> Result<()> {
-        self.forward_decode_with_ar_hook(
-            ops,
-            device,
-            stream,
-            x_in,
-            delta_out,
-            state,
-            conv_history,
-            scratch,
-            None,
-        )
+        self.forward_decode_with_ar_hook(ops, ctx, buf, scratch, None)
     }
 
     /// Like `forward_decode`, but with an AR hook fired on the
@@ -594,17 +619,20 @@ impl DeltaNetLayer {
     pub fn forward_decode_with_ar_hook<O: Ops>(
         &self,
         ops: &O,
-        device: &HipDevice,
-        stream: &HipStream,
-        x_in: DevicePtr,
-        delta_out: DevicePtr,
-        state: DevicePtr,
-        conv_history: DevicePtr,
+        ctx: BackendCtx<'_>,
+        buf: GdnDecodeBuffers,
         scratch: DeltaNetLayerDecodeScratch,
         ar_partial_callback: Option<
             &mut dyn FnMut(DevicePtr, usize, &HipDevice, &HipStream) -> Result<()>,
         >,
     ) -> Result<()> {
+        let BackendCtx { device, stream } = ctx;
+        let GdnDecodeBuffers {
+            x_in,
+            delta_out,
+            state,
+            conv_history,
+        } = buf;
         let hidden = self.hidden;
         let d_inner = self.d_inner;
         let num_v_heads = self.num_v_heads;
@@ -867,19 +895,22 @@ impl DeltaNetLayer {
     pub fn forward_decode_with_ar_hook_batched_slots<O: Ops>(
         &self,
         ops: &O,
-        device: &HipDevice,
-        stream: &HipStream,
-        x_in_base: DevicePtr,
-        delta_out_base: DevicePtr,
-        state_in_ptrs_dev: DevicePtr,
-        state_out_ptrs_dev: DevicePtr,
-        conv_history_ptrs_dev: DevicePtr,
+        ctx: BackendCtx<'_>,
+        buf: GdnDecodeBatchedBuffers,
         scratch: DeltaNetLayerDecodeBatchedScratch,
         n_slots: usize,
         ar_partial_callback: Option<
             &mut dyn FnMut(DevicePtr, usize, &HipDevice, &HipStream) -> Result<()>,
         >,
     ) -> Result<()> {
+        let BackendCtx { device, stream } = ctx;
+        let GdnDecodeBatchedBuffers {
+            x_in_base,
+            delta_out_base,
+            state_in_ptrs_dev,
+            state_out_ptrs_dev,
+            conv_history_ptrs_dev,
+        } = buf;
         if n_slots == 0 {
             bail!("DeltaNetLayer::forward_decode_with_ar_hook_batched_slots: n_slots = 0");
         }
@@ -1228,29 +1259,12 @@ impl DeltaNetLayer {
     pub fn forward_prefill<O: Ops>(
         &self,
         ops: &O,
-        device: &HipDevice,
-        stream: &HipStream,
-        x_in: DevicePtr,
-        delta_out: DevicePtr,
-        state: DevicePtr,
-        conv_history: DevicePtr,
+        ctx: BackendCtx<'_>,
+        buf: GdnDecodeBuffers,
         scratch: DeltaNetLayerPrefillScratch,
-        n_tokens: usize,
-        state_event: Option<&HipEvent>,
+        seq: GdnPrefillSeq<'_>,
     ) -> Result<()> {
-        self.forward_prefill_with_ar_hook(
-            ops,
-            device,
-            stream,
-            x_in,
-            delta_out,
-            state,
-            conv_history,
-            scratch,
-            n_tokens,
-            state_event,
-            None,
-        )
+        self.forward_prefill_with_ar_hook(ops, ctx, buf, scratch, seq, None)
     }
 
     /// Like `forward_prefill` but with an AR hook on the `ssm_out_f32`
@@ -1259,19 +1273,25 @@ impl DeltaNetLayer {
     pub fn forward_prefill_with_ar_hook<O: Ops>(
         &self,
         ops: &O,
-        device: &HipDevice,
-        stream: &HipStream,
-        x_in: DevicePtr,
-        delta_out: DevicePtr,
-        state: DevicePtr,
-        conv_history: DevicePtr,
+        ctx: BackendCtx<'_>,
+        buf: GdnDecodeBuffers,
         scratch: DeltaNetLayerPrefillScratch,
-        n_tokens: usize,
-        state_event: Option<&HipEvent>,
+        seq: GdnPrefillSeq<'_>,
         ar_partial_callback: Option<
             &mut dyn FnMut(DevicePtr, usize, &HipDevice, &HipStream) -> Result<()>,
         >,
     ) -> Result<()> {
+        let BackendCtx { device, stream } = ctx;
+        let GdnDecodeBuffers {
+            x_in,
+            delta_out,
+            state,
+            conv_history,
+        } = buf;
+        let GdnPrefillSeq {
+            n_tokens,
+            state_event,
+        } = seq;
         if n_tokens == 0 {
             bail!("DeltaNetLayer::forward_prefill called with n_tokens = 0");
         }

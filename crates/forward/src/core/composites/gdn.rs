@@ -126,15 +126,21 @@ pub fn gdn_layer_local<H: TopologyHooks>(
             };
         block.forward_prefill_with_ar_hook(
             &ops,
-            state.device,
-            state.stream,
-            input.ptr,
-            delta_ptr,
-            state_ptr,
-            hist_ptr,
+            flambeau_model_ops::BackendCtx {
+                device: state.device,
+                stream: state.stream,
+            },
+            flambeau_model_ops::GdnDecodeBuffers {
+                x_in: input.ptr,
+                delta_out: delta_ptr,
+                state: state_ptr,
+                conv_history: hist_ptr,
+            },
             prefill_scratch,
-            n_tokens,
-            None,
+            flambeau_model_ops::GdnPrefillSeq {
+                n_tokens,
+                state_event: None,
+            },
             Some(&mut ar_cb),
         )?;
     } else {
@@ -153,12 +159,16 @@ pub fn gdn_layer_local<H: TopologyHooks>(
                 .offset_bytes(slot * hist_bytes_per_slot);
             block.forward_decode_with_ar_hook(
                 &ops,
-                state.device,
-                state.stream,
-                input.ptr,
-                delta_ptr,
-                state_i,
-                hist_i,
+                flambeau_model_ops::BackendCtx {
+                    device: state.device,
+                    stream: state.stream,
+                },
+                flambeau_model_ops::GdnDecodeBuffers {
+                    x_in: input.ptr,
+                    delta_out: delta_ptr,
+                    state: state_i,
+                    conv_history: hist_i,
+                },
                 scratch,
                 None,
             )?;
@@ -226,13 +236,17 @@ pub fn gdn_layer_local<H: TopologyHooks>(
             flambeau_core::Stream::synchronize(state.stream)?;
             block.forward_decode_with_ar_hook_batched_slots(
                 &ops,
-                state.device,
-                state.stream,
-                input.ptr,
-                delta_ptr,
-                slot_state_ptrs,
-                slot_state_ptrs,
-                slot_hist_ptrs,
+                flambeau_model_ops::BackendCtx {
+                    device: state.device,
+                    stream: state.stream,
+                },
+                flambeau_model_ops::GdnDecodeBatchedBuffers {
+                    x_in_base: input.ptr,
+                    delta_out_base: delta_ptr,
+                    state_in_ptrs_dev: slot_state_ptrs,
+                    state_out_ptrs_dev: slot_state_ptrs,
+                    conv_history_ptrs_dev: slot_hist_ptrs,
+                },
                 batched_view,
                 n_tokens,
                 Some(&mut ar_cb),
@@ -248,12 +262,16 @@ pub fn gdn_layer_local<H: TopologyHooks>(
                     .offset_bytes(slot * hist_bytes_per_slot);
                 block.forward_decode_with_ar_hook(
                     &ops,
-                    state.device,
-                    state.stream,
-                    in_i,
-                    out_i,
-                    state_i,
-                    hist_i,
+                    flambeau_model_ops::BackendCtx {
+                        device: state.device,
+                        stream: state.stream,
+                    },
+                    flambeau_model_ops::GdnDecodeBuffers {
+                        x_in: in_i,
+                        delta_out: out_i,
+                        state: state_i,
+                        conv_history: hist_i,
+                    },
                     scratch,
                     Some(&mut ar_cb),
                 )?;
