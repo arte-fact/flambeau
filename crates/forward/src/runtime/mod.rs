@@ -152,11 +152,11 @@ impl<A: Arch> Session<A> {
         params: orchestrate::LaunchParams,
     ) -> Result<Self> {
         let orchestrate::LaunchParams {
-            ctx_cap,
+            ctx_cap: _,
             prefill_ubatch,
             max_slots,
-            paged_kv_pages,
-            kv_layout,
+            paged_kv_pages: _,
+            kv_layout: _,
         } = params;
         if prefill_ubatch == 0 {
             anyhow::bail!("Session::new: prefill_ubatch must be > 0");

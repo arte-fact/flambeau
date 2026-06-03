@@ -15,7 +15,7 @@ use flambeau_core::Device;
 use flambeau_ops::OpsRegistry;
 use flambeau_quant::GgufFile;
 
-use crate::core::{KvLayout, ScratchPool};
+use crate::core::ScratchPool;
 use crate::engine::{
     HybridForwardCtx, PpForwardCtx, SingleDeviceForwardCtx, TpForwardCtx, TpHooks,
 };

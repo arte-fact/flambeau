@@ -24,7 +24,7 @@ pub fn attn_prefill_q8_kv(
         n_heads_kv,
         head_dim,
         n_k_tokens,
-        q_offset,
+        q_offset: _,
     } = shape;
     if !matches!(head_dim, 64 | 128 | 256 | 512) {
         bail!(

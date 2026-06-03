@@ -7,7 +7,7 @@
 use anyhow::bail;
 use flambeau_ops::{HipOps, Ops};
 
-use crate::dtype::{F16, F32, Q8_0};
+use crate::dtype::{F16, Q8_0};
 use crate::error::Result;
 use crate::tensor::Tensor;
 

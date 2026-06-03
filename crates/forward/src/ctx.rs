@@ -4,7 +4,6 @@
 //! handoff). See `core/` for the shared composite engine.
 
 use anyhow::Result;
-use flambeau_core::DevicePtr;
 use flambeau_model_ops::{Tensor, F16, F32};
 
 /// One impl per topology; the model is `<C: ForwardCtx>` generic.
