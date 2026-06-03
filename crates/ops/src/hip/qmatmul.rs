@@ -117,9 +117,8 @@ pub fn qmatmul(
         let _ = act_q8_1_mmq;
         return Ok(());
     }
-    if (dtype_weight == QDtype::Q5_1 && m < 32)
-        || (dtype_weight == QDtype::Q4_0 && m < 32)
-        || (dtype_weight == QDtype::Q5_0 && m < 32)
+    if m < 32
+        && matches!(dtype_weight, QDtype::Q4_0 | QDtype::Q5_0 | QDtype::Q5_1)
     {
         // K1 — Q4_0 at m ∈ {2, 3, 4}: single-launch batched MMVQ with
         // compile-time N specialization. Each N has its own kernel

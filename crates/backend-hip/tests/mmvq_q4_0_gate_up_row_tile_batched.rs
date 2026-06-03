@@ -285,7 +285,7 @@ fn parity_n2_k2304_8x8() {
     if !maybe_skip() {
         return;
     }
-    let outs = run_both(8, 8, 2304, 2, 0xC0FFEE_BEEF);
+    let outs = run_both(8, 8, 2304, 2, 0x00C0_FFEE_BEEF);
     assert_bit_equal_or_close("n2 k2304 g8 u8 gate", &outs.k5_gate, &outs.rt_gate, 2304);
     assert_bit_equal_or_close("n2 k2304 g8 u8 up", &outs.k5_up, &outs.rt_up, 2304);
 }
@@ -335,7 +335,7 @@ fn parity_n4_asym_gdn_shape() {
     // n_rows_gate > n_rows_up: rows in [2048, 4096) have do_up=false
     // and must not dereference up_w pointers (which only have 2048
     // valid rows).
-    let outs = run_both(4096, 2048, 2048, 4, 0x35B_A3B_F1);
+    let outs = run_both(4096, 2048, 2048, 4, 0x35BA_3BF1);
     assert_bit_equal_or_close(
         "n4 gdn-asym g4096 u2048 gate",
         &outs.k5_gate,

@@ -3061,16 +3061,17 @@ fn run_tile8_down_shape(
     Ok(max_rel_err_with_floor(&got, &reference, k_dim))
 }
 
-fn tile8_gate_up_cases(wk: Tile8Wk) -> Vec<(usize, usize, usize, usize)> {
-    // (n_tokens, top_k, n_rows, k_dim). Pick k_dim divisible by the dtype's
-    // super-block size so the harness assert holds.
-    let k = if wk.block_elems() == 256 { 768 } else { 768 };
+fn tile8_gate_up_cases(_wk: Tile8Wk) -> Vec<(usize, usize, usize, usize)> {
+    // (n_tokens, top_k, n_rows, k_dim). 768 = LCM of all super-block sizes
+    // (32 for Q*_0/Q*_1, 256 for K-quants), so the harness assert holds
+    // for every wk dtype.
+    let k = 768;
     vec![(1, 4, 256, k), (8, 4, 256, k)]
 }
 
-fn tile8_down_cases(wk: Tile8Wk) -> Vec<(usize, usize, usize)> {
-    // (n_tokens=n_pairs, n_rows, k_dim).
-    let k = if wk.block_elems() == 256 { 768 } else { 768 };
+fn tile8_down_cases(_wk: Tile8Wk) -> Vec<(usize, usize, usize)> {
+    // (n_tokens=n_pairs, n_rows, k_dim). See tile8_gate_up_cases for k=768.
+    let k = 768;
     vec![(128, 2048, k), (256, 2048, k), (128, 128, k)]
 }
 

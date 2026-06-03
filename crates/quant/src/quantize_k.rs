@@ -138,9 +138,7 @@ fn make_qkx2_quants(
                 cur_error += weights[i] * diff;
             }
             if cur_error < best_error {
-                for i in 0..n {
-                    out_l[i] = aux_l[i];
-                }
+                out_l[..n].copy_from_slice(&aux_l[..n]);
                 best_error = cur_error;
                 scale = this_scale;
                 min = this_min;
@@ -307,7 +305,7 @@ fn pack_block_q4_k(xi: &[f32], out: &mut [u8]) {
         }
         let dm = dmin_f16.to_f32() * m as f32;
         for ii in 0..32 {
-            let l = nearest_int((xi[32 * j + ii] + dm) / d).max(0).min(15);
+            let l = nearest_int((xi[32 * j + ii] + dm) / d).clamp(0, 15);
             local_l[32 * j + ii] = l as u8;
         }
     }
@@ -370,7 +368,7 @@ fn pack_block_q3_k(xi: &[f32], out: &mut [u8]) {
     let d_f16 = if max_scale != 0.0 {
         let iscale = -32.0 / max_scale;
         for j in 0..QK_K / 16 {
-            let l = nearest_int(iscale * scales[j]).max(-32).min(31) + 32;
+            let l = nearest_int(iscale * scales[j]).clamp(-32, 31) + 32;
             let l = l as u8;
             if j < 8 {
                 block_scales[j] = l & 0xF;
@@ -398,7 +396,7 @@ fn pack_block_q3_k(xi: &[f32], out: &mut [u8]) {
             continue;
         }
         for ii in 0..16 {
-            let l = nearest_int(xi[16 * j + ii] / d).max(-4).min(3);
+            let l = nearest_int(xi[16 * j + ii] / d).clamp(-4, 3);
             local_l[16 * j + ii] = (l + 4) as i8;
         }
     }
@@ -513,7 +511,7 @@ fn pack_block_q2_k(xi: &[f32], out: &mut [u8]) {
         }
         let dm = dmin_f16.to_f32() * (block_scales[j] >> 4) as f32;
         for ii in 0..16 {
-            let l = nearest_int((xi[16 * j + ii] + dm) / d).max(0).min(3);
+            let l = nearest_int((xi[16 * j + ii] + dm) / d).clamp(0, 3);
             local_l[16 * j + ii] = l as u8;
         }
     }

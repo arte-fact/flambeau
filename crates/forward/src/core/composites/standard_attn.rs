@@ -402,7 +402,7 @@ pub fn standard_attn_local<H: TopologyHooks>(
         .softmax_scale
         .unwrap_or_else(|| (weights.head_dim as f32).sqrt().recip());
 
-    if prefill_shape && state.pool.paged_kv_caches.is_some() {
+    if let Some(paged_caches) = state.pool.paged_kv_caches.as_ref().filter(|_| prefill_shape) {
         // Paged prefill / single-slot path. Pre-acquire all pages
         // spanned by `[start_position, start_position + n)`, patch
         // the slot's row of the block table, write L tokens via the
@@ -423,7 +423,7 @@ pub fn standard_attn_local<H: TopologyHooks>(
                 weights.window_size
             );
         }
-        let paged_cache = state.pool.paged_kv_caches.as_ref().unwrap()[kv_local_idx];
+        let paged_cache = paged_caches[kv_local_idx];
         let page_size = paged_cache.page_size;
         let mpps = paged_cache.max_pages_per_slot;
         let slot = primary_slot;
@@ -1209,12 +1209,11 @@ pub fn standard_attn_local<H: TopologyHooks>(
     // F32→F16 cast + AR + residual-add into 1 launch (residual_tp2)
     // instead of 4 (qmatmul + cast + ar_sum + add). Returns None so the
     // model skips its own residual_add.
-    if n == 1
-        && weights.post_attn_norm.is_none()
-        && next_norm.is_some()
-        && hooks.supports_ar_residual_rmsnorm_f16()
+    if let Some(next_w) = next_norm
+        .filter(|_| n == 1
+            && weights.post_attn_norm.is_none()
+            && hooks.supports_ar_residual_rmsnorm_f16())
     {
-        let next_w = next_norm.unwrap();
         let mut partial_f16 = unsafe { Tensor::<F16>::from_raw(state.pool.delta, n * hidden) };
         if f16_fast {
             weights.attn_output.qmatmul_decode_to_f16(

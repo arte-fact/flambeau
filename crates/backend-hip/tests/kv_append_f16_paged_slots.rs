@@ -146,7 +146,7 @@ fn run_case(
     args.push(&bwpos_ptr);
     args.push(&n_slots_i);
     args.push(&kv_width_i);
-    let block_threads: u32 = (kv_width as u32).min(128).max(1);
+    let block_threads: u32 = (kv_width as u32).clamp(1, 128);
     let cfg = LaunchCfg {
         grid: (n_slots as u32, 1, 1),
         block: (block_threads, 1, 1),

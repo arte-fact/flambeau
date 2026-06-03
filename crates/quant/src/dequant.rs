@@ -364,8 +364,6 @@ fn dequant_iq2_xs(raw: &[u8], out: &mut [f32]) {
                 let q = u16::from_le_bytes([raw[qbase + 2 * l], raw[qbase + 2 * l + 1]]);
                 let grid = IQ2XS_GRID[(q & 511) as usize].to_le_bytes();
                 let signs = KSIGNS_IQ2XS[((q >> 9) & 127) as usize];
-                let dl = if l < 2 { db_lo } else { db_lo }; // both halves of first sub-block use db_lo
-                let _ = dl;
                 for j in 0..8 {
                     let s = if signs & (1 << j) != 0 {
                         -1.0f32

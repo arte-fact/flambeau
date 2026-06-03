@@ -557,9 +557,7 @@ fn run_completion_scheduler_pp_blocking(
             if !relax_stop_mask {
                 for &sid in stop_ids {
                     if (sid as usize) < logits.len() {
-                        if always_stop_ids.contains(&sid) {
-                            logits[sid as usize] = f32::NEG_INFINITY;
-                        } else if force_mask {
+                        if force_mask || always_stop_ids.contains(&sid) {
                             logits[sid as usize] = f32::NEG_INFINITY;
                         } else {
                             logits[sid as usize] -= STOP_BIAS;

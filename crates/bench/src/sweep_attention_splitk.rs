@@ -31,9 +31,7 @@ const SHAPES: &[(usize, usize, usize)] = &[
 ];
 
 fn pick_chunk(n_tokens: usize) -> usize {
-    if n_tokens <= 128 {
-        128
-    } else if n_tokens <= 1024 {
+    if n_tokens <= 1024 {
         128
     } else if n_tokens <= 2048 {
         256

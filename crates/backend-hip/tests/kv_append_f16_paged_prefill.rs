@@ -156,7 +156,7 @@ fn run_case(
     args.push(&kv_width_i);
     args.push(&start_pos_i);
     args.push(&page_size_i);
-    let block_threads: u32 = (kv_width as u32).min(128).max(1);
+    let block_threads: u32 = (kv_width as u32).clamp(1, 128);
     let cfg = LaunchCfg {
         grid: (n_tokens as u32, 1, 1),
         block: (block_threads, 1, 1),

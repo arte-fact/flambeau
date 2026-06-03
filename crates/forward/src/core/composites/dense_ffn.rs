@@ -162,12 +162,11 @@ pub fn dense_ffn_local<H: TopologyHooks>(
         )?;
     }
     // Fused AR + residual fast path when post_ffn_norm is None.
-    if n == 1
-        && weights.post_ffn_norm.is_none()
-        && next_norm.is_some()
-        && hooks.supports_ar_residual_rmsnorm_f16()
+    if let Some(next_w) = next_norm
+        .filter(|_| n == 1
+            && weights.post_ffn_norm.is_none()
+            && hooks.supports_ar_residual_rmsnorm_f16())
     {
-        let next_w = next_norm.unwrap();
         let mut partial_f16 = unsafe { Tensor::<F16>::from_raw(state.pool.delta, n * hidden) };
         if f16_fast {
             weights.ffn_down.qmatmul_decode_to_f16(

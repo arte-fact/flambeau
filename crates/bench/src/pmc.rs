@@ -207,7 +207,7 @@ fn aggregate_pmc(rows: &[CounterRow], kernel_name: &str) -> Result<PmcSnapshot> 
     let valu_busy = mean("VALUBusy");
     // gfx906 VGPR occupancy ceiling: min(10, 256/VGPR). Same derivation as
     // `FuncAttributes::gfx906_waves_per_simd`.
-    let waves_per_simd = if vgpr == 0 { 10 } else { (256 / vgpr).min(10) };
+    let waves_per_simd = 256u32.checked_div(vgpr).map_or(10, |w| w.min(10));
 
     Ok(PmcSnapshot {
         vgpr_count: Some(vgpr),

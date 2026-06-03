@@ -259,7 +259,7 @@ fn parity_n2_k512_small() {
     if !maybe_skip() {
         return;
     }
-    let outs = run_both(8, 512, 2, 0xC0FFEE_BEEF);
+    let outs = run_both(8, 512, 2, 0x00C0_FFEE_BEEF);
     assert_close("n2 k512 n_rows=8", &outs.baseline, &outs.row_tile, 512);
 }
 
