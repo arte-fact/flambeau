@@ -110,7 +110,9 @@ Next-session restart plan:
 | P7a | `DeltaNetLayer::new` (20-arg constructor) + 2 callers | ☑ done | 1 | `DeltaNetWeights` + `DeltaNetDims` (Copy aggregates in delta_net.rs), re-exported from model-ops lib |
 | P7b | 5 DeltaNetLayer forward_* drivers (decode, decode_with_ar_hook, decode_with_ar_hook_batched_slots, prefill, prefill_with_ar_hook) + 6 caller sites | ☑ done | 5 | `BackendCtx<'a>`, `GdnDecodeBuffers`, `GdnDecodeBatchedBuffers`, `GdnPrefillSeq<'a>` in delta_net.rs |
 | P7c | 6 model-ops/src/ops/attn_decode_batched.rs wrappers (kv_append + attn_decode + attn_prefill paged/batched) + 8 callers — thin pass-through using existing ops-level aggregates | ☑ done | 6 | dropped per-call Tensor::n_elems sanity checks; preserved shape-validation bail!s |
-| P7d | `moe_experts.rs` driver wrappers (decode + prefill) + `forward/loader/*` (shard, moe, gdn_shard) — remaining mid-layer | ☐ pending | ~8 | model-ops/src/moe_experts.rs + forward/loader/*.rs |
+| P7d | MoeExperts::new (20-arg constructor) + forward_prefill (8 args) + 4 callers in moe_ffn.rs | ☑ done | 2 | `MoeExpertsWeights` / `MoeExpertsDims` / `MoeExpertsPrefillBuffers` (model-ops aggregates) |
+| P7e | 5 forward/loader sharded-upload fns (col/row + 3 GDN fused) + 12 callers across forward + 2 model loader crates | ☑ done | 5 | `ShardSpec` + `GdnHeadDims` + `GdnShardCtx` aggregates in forward/loader |
+| P7f | qmatmul umbrella dispatcher: trait + impl + free fn + QuantWeight::qmatmul + ~30 call sites across 11 files (model-ops drivers, forward composites, ops parity tests) | ☑ done | 3 | `QmatmulBuffers` (4-ptr aggregate with `act_q8_1_mmq` slot for MMQ-DS4 layout) in sig.rs |
 | **P8 — Tail** | | | | |
 | P8 | `build.rs`, `tp_slice.rs`, `quantize_k.rs`, `ctx.rs`, `workers.rs::init_rank` | ☐ pending | ~12 | misc |
 
@@ -127,12 +129,12 @@ Next-session restart plan:
 
 ## Live state
 
-| Metric | At start | After P0 | After P1f | After P2a | After P2b | After P2c | After P2f1 | After P2f2 | After P2f3 | After P2f4 | After P2f5 | After P3a | After P3b | After P4 | After P5a | After P5b | After P6 | After P7a | After P7b | After P7c |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| total warnings | 478 | 478 | 456 | 447 | 437 | 434 | 413 | 414 | 411 | 378 | 344 | 329 | 324 | 315 | 309 | 303 | 300 | 299 | 294 | 288 |
-| `too_many_arguments` | 315 | 315 | 291 | 282 | 272 | 269 | 234 | 230 | 224 | 191 | 157 | 147 | 142 | 134 | 128 | 122 | 115 | 114 | 109 | 103 |
-| errors | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
-| cumulative LOC delta | 0 | +232 | +10 | +12 | −136 | −162 | −46 | −93 | −157 | −509 | −774 | −815 | −825 | −868 | −918 | −952 | −915 | −891 | −842 | −981 |
+| Metric | At start | After P2f5 | After P3a | After P3b | After P4 | After P5a | After P5b | After P6 | After P7a | After P7b | After P7c | After P7d | After P7e | After P7f |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| total warnings | 478 | 344 | 329 | 324 | 315 | 309 | 303 | 300 | 299 | 294 | 288 | 286 | 281 | 266 |
+| `too_many_arguments` | 315 | 157 | 147 | 142 | 134 | 128 | 122 | 115 | 114 | 109 | 103 | 101 | 96 | 93 |
+| errors | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| cumulative LOC delta | 0 | −774 | −815 | −825 | −868 | −918 | −952 | −915 | −891 | −842 | −981 | −942 | −876 | −809 |
 
 LOC deltas per commit (insertions − deletions, from `git show --stat`):
 
@@ -162,6 +164,9 @@ LOC deltas per commit (insertions − deletions, from `git show --stat`):
 | P7a | `7d90e7f` | 104 | 80 | +24 | 1 |
 | P7b | `1002447` | 152 | 103 | +49 | 5 |
 | P7c | `51827ed` | 200 | 339 | −139 | 6 |
+| P7d | `a479a06` | 158 | 119 | +39 | 2 |
+| P7e | `35c4432` | 179 | 113 | +66 | 5 |
+| P7f | `27be185` | 375 | 308 | +67 | 3 |
 
 ## Non-goals
 
