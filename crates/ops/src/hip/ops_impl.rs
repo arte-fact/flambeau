@@ -1640,23 +1640,15 @@ impl<'a> Ops for HipOps<'a> {
 
     fn indexed_moe_mmq_q4_k_down_tile8(
         &self,
-        w: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        sorted_pair_idx_padded: DevicePtr,
-        padded_offsets: DevicePtr,
-        dst: DevicePtr,
+        buffers: crate::MoeMmqTile8DownBuffers,
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_q4_k_down_tile8(
-            self.reg,
-            self.stream,
-            w,
-            y,
-            expert_ids,
-            sorted_pair_idx_padded,
-            padded_offsets,
-            dst,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
             shape,
         )
     }
@@ -1678,23 +1670,15 @@ impl<'a> Ops for HipOps<'a> {
 
     fn indexed_moe_mmq_q3_k_down_tile8(
         &self,
-        w: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        sorted_pair_idx_padded: DevicePtr,
-        padded_offsets: DevicePtr,
-        dst: DevicePtr,
+        buffers: crate::MoeMmqTile8DownBuffers,
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_q3_k_down_tile8(
-            self.reg,
-            self.stream,
-            w,
-            y,
-            expert_ids,
-            sorted_pair_idx_padded,
-            padded_offsets,
-            dst,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
             shape,
         )
     }
@@ -1746,46 +1730,30 @@ impl<'a> Ops for HipOps<'a> {
 
     fn indexed_moe_mmq_q4_0_down_tile8(
         &self,
-        w: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        sorted_pair_idx_padded: DevicePtr,
-        padded_offsets: DevicePtr,
-        dst: DevicePtr,
+        buffers: crate::MoeMmqTile8DownBuffers,
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_q4_0_down_tile8(
-            self.reg,
-            self.stream,
-            w,
-            y,
-            expert_ids,
-            sorted_pair_idx_padded,
-            padded_offsets,
-            dst,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
             shape,
         )
     }
 
     fn indexed_moe_mmq_q4_1_down_tile8(
         &self,
-        w: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        sorted_pair_idx_padded: DevicePtr,
-        padded_offsets: DevicePtr,
-        dst: DevicePtr,
+        buffers: crate::MoeMmqTile8DownBuffers,
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_q4_1_down_tile8(
-            self.reg,
-            self.stream,
-            w,
-            y,
-            expert_ids,
-            sorted_pair_idx_padded,
-            padded_offsets,
-            dst,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
             shape,
         )
     }
@@ -1807,23 +1775,15 @@ impl<'a> Ops for HipOps<'a> {
 
     fn indexed_moe_mmq_q8_0_down_tile8(
         &self,
-        w: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        sorted_pair_idx_padded: DevicePtr,
-        padded_offsets: DevicePtr,
-        dst: DevicePtr,
+        buffers: crate::MoeMmqTile8DownBuffers,
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_q8_0_down_tile8(
-            self.reg,
-            self.stream,
-            w,
-            y,
-            expert_ids,
-            sorted_pair_idx_padded,
-            padded_offsets,
-            dst,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
             shape,
         )
     }
@@ -1847,23 +1807,15 @@ impl<'a> Ops for HipOps<'a> {
     }
     fn indexed_moe_mmq_iq4_xs_down_tile8(
         &self,
-        w: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        sorted_pair_idx_padded: DevicePtr,
-        padded_offsets: DevicePtr,
-        dst: DevicePtr,
+        buffers: crate::MoeMmqTile8DownBuffers,
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_iq4_xs_down_tile8(
-            self.reg,
-            self.stream,
-            w,
-            y,
-            expert_ids,
-            sorted_pair_idx_padded,
-            padded_offsets,
-            dst,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
             shape,
         )
     }
@@ -1884,23 +1836,15 @@ impl<'a> Ops for HipOps<'a> {
     }
     fn indexed_moe_mmq_iq4_nl_down_tile8(
         &self,
-        w: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        sorted_pair_idx_padded: DevicePtr,
-        padded_offsets: DevicePtr,
-        dst: DevicePtr,
+        buffers: crate::MoeMmqTile8DownBuffers,
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_iq4_nl_down_tile8(
-            self.reg,
-            self.stream,
-            w,
-            y,
-            expert_ids,
-            sorted_pair_idx_padded,
-            padded_offsets,
-            dst,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
             shape,
         )
     }
@@ -1921,23 +1865,15 @@ impl<'a> Ops for HipOps<'a> {
     }
     fn indexed_moe_mmq_iq3_xxs_down_tile8(
         &self,
-        w: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        sorted_pair_idx_padded: DevicePtr,
-        padded_offsets: DevicePtr,
-        dst: DevicePtr,
+        buffers: crate::MoeMmqTile8DownBuffers,
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_iq3_xxs_down_tile8(
-            self.reg,
-            self.stream,
-            w,
-            y,
-            expert_ids,
-            sorted_pair_idx_padded,
-            padded_offsets,
-            dst,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
             shape,
         )
     }
@@ -1958,23 +1894,15 @@ impl<'a> Ops for HipOps<'a> {
     }
     fn indexed_moe_mmq_iq3_s_down_tile8(
         &self,
-        w: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        sorted_pair_idx_padded: DevicePtr,
-        padded_offsets: DevicePtr,
-        dst: DevicePtr,
+        buffers: crate::MoeMmqTile8DownBuffers,
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_iq3_s_down_tile8(
-            self.reg,
-            self.stream,
-            w,
-            y,
-            expert_ids,
-            sorted_pair_idx_padded,
-            padded_offsets,
-            dst,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
             shape,
         )
     }
@@ -1995,23 +1923,15 @@ impl<'a> Ops for HipOps<'a> {
     }
     fn indexed_moe_mmq_iq2_xxs_down_tile8(
         &self,
-        w: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        sorted_pair_idx_padded: DevicePtr,
-        padded_offsets: DevicePtr,
-        dst: DevicePtr,
+        buffers: crate::MoeMmqTile8DownBuffers,
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_iq2_xxs_down_tile8(
-            self.reg,
-            self.stream,
-            w,
-            y,
-            expert_ids,
-            sorted_pair_idx_padded,
-            padded_offsets,
-            dst,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
             shape,
         )
     }
@@ -2032,23 +1952,15 @@ impl<'a> Ops for HipOps<'a> {
     }
     fn indexed_moe_mmq_iq2_xs_down_tile8(
         &self,
-        w: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        sorted_pair_idx_padded: DevicePtr,
-        padded_offsets: DevicePtr,
-        dst: DevicePtr,
+        buffers: crate::MoeMmqTile8DownBuffers,
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_iq2_xs_down_tile8(
-            self.reg,
-            self.stream,
-            w,
-            y,
-            expert_ids,
-            sorted_pair_idx_padded,
-            padded_offsets,
-            dst,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
             shape,
         )
     }
@@ -2069,23 +1981,15 @@ impl<'a> Ops for HipOps<'a> {
     }
     fn indexed_moe_mmq_iq2_s_down_tile8(
         &self,
-        w: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        sorted_pair_idx_padded: DevicePtr,
-        padded_offsets: DevicePtr,
-        dst: DevicePtr,
+        buffers: crate::MoeMmqTile8DownBuffers,
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_iq2_s_down_tile8(
-            self.reg,
-            self.stream,
-            w,
-            y,
-            expert_ids,
-            sorted_pair_idx_padded,
-            padded_offsets,
-            dst,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
             shape,
         )
     }
@@ -2106,23 +2010,15 @@ impl<'a> Ops for HipOps<'a> {
     }
     fn indexed_moe_mmq_iq1_s_down_tile8(
         &self,
-        w: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        sorted_pair_idx_padded: DevicePtr,
-        padded_offsets: DevicePtr,
-        dst: DevicePtr,
+        buffers: crate::MoeMmqTile8DownBuffers,
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_iq1_s_down_tile8(
-            self.reg,
-            self.stream,
-            w,
-            y,
-            expert_ids,
-            sorted_pair_idx_padded,
-            padded_offsets,
-            dst,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
             shape,
         )
     }
@@ -2143,23 +2039,15 @@ impl<'a> Ops for HipOps<'a> {
     }
     fn indexed_moe_mmq_iq1_m_down_tile8(
         &self,
-        w: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        sorted_pair_idx_padded: DevicePtr,
-        padded_offsets: DevicePtr,
-        dst: DevicePtr,
+        buffers: crate::MoeMmqTile8DownBuffers,
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_iq1_m_down_tile8(
-            self.reg,
-            self.stream,
-            w,
-            y,
-            expert_ids,
-            sorted_pair_idx_padded,
-            padded_offsets,
-            dst,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
             shape,
         )
     }
@@ -2216,46 +2104,30 @@ impl<'a> Ops for HipOps<'a> {
 
     fn indexed_moe_mmq_q5_k_down_tile8(
         &self,
-        w: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        sorted_pair_idx_padded: DevicePtr,
-        padded_offsets: DevicePtr,
-        dst: DevicePtr,
+        buffers: crate::MoeMmqTile8DownBuffers,
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_q5_k_down_tile8(
-            self.reg,
-            self.stream,
-            w,
-            y,
-            expert_ids,
-            sorted_pair_idx_padded,
-            padded_offsets,
-            dst,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
             shape,
         )
     }
 
     fn indexed_moe_mmq_q6_k_down_tile8(
         &self,
-        w: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        sorted_pair_idx_padded: DevicePtr,
-        padded_offsets: DevicePtr,
-        dst: DevicePtr,
+        buffers: crate::MoeMmqTile8DownBuffers,
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_q6_k_down_tile8(
-            self.reg,
-            self.stream,
-            w,
-            y,
-            expert_ids,
-            sorted_pair_idx_padded,
-            padded_offsets,
-            dst,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
             shape,
         )
     }

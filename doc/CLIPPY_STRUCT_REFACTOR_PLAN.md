@@ -66,7 +66,7 @@ below is the corrected one.
 | P2f2 | indexed_moe_mmvq gate-up (2 fns: `q4_0_gate_up`, `q8_0_gate_up`) | ☑ done | 4 | trait (2 methods), impl (2 methods), hip/moe.rs (2 free fns), 3 caller sites in moe_experts.rs |
 | P2f3 | `indexed_moe_mmvq_q4_k_gate_up` + `_gate_up_sorted` + `_r2_sorted` | ☑ done | 6 | trait (3), impl (3), hip/moe.rs (3 free fns + new `MoeMmvqGateUpSortedBuffers` aggregate in sig.rs), 2 callers in moe_experts.rs |
 | P2f4 | MMQ tile8 gate-up — actually 18 free fns + 15 trait + 15 impl (Q4_0/Q4_1/Q5_0/Q5_1/Q8_0/Q4_K/Q3_K/Q5_K and 9 IQ variants), all share `MoeMmqTile8GateUpBuffers` + existing `MoeShape` | ☑ done | 33 | sig.rs (new `MoeMmqTile8GateUpBuffers` + `MoeMmqTile8DownBuffers`), trait, impl, hip/moe.rs, 15 caller sites in moe_experts.rs |
-| P2f5 | MMQ tile8 down (11 fns — same as P2f4) | ☐ pending | ~25 | same |
+| P2f5 | MMQ tile8 down — 18 free fns + 16 trait + 16 impl (Q4_0/Q4_1/Q5_0/Q5_1/Q8_0/Q4_K/Q3_K/Q5_K/Q6_K + 9 IQ variants), all share `MoeMmqTile8DownBuffers` + `MoeShape` | ☑ done | 34 | trait, impl, hip/moe.rs, 16 caller sites in moe_experts.rs |
 
 ### P2f attempt-and-revert notes (for next session)
 
@@ -127,12 +127,12 @@ Next-session restart plan:
 
 ## Live state
 
-| Metric | At start | After P0 | After P1f | After P2a | After P2b | After P2c | After P2d | After P2e | After P2f | After … |
-|---|---|---|---|---|---|---|---|---|---|---|
-| total warnings | 478 | 478 | 456 | 447 | 437 | 434 | 413 | 414 | 411 | 378 |
-| `too_many_arguments` | 315 | 315 | 291 | 282 | 272 | 269 | 234 | 230 | 224 | 191 |
-| errors | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
-| cumulative LOC delta | 0 | +232 | +10 | +12 | −136 | −162 | −46 | −93 | −157 | tbd |
+| Metric | At start | After P0 | After P1f | After P2a | After P2b | After P2c | After P2f1 | After P2f2 | After P2f3 | After P2f4 | After P2f5 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| total warnings | 478 | 478 | 456 | 447 | 437 | 434 | 413 | 414 | 411 | 378 | 344 |
+| `too_many_arguments` | 315 | 315 | 291 | 282 | 272 | 269 | 234 | 230 | 224 | 191 | 157 |
+| errors | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| cumulative LOC delta | 0 | +232 | +10 | +12 | −136 | −162 | −46 | −93 | −157 | −509 | tbd |
 
 LOC deltas per commit (insertions − deletions, from `git show --stat`):
 
@@ -151,7 +151,8 @@ LOC deltas per commit (insertions − deletions, from `git show --stat`):
 | P2f1 | `8c0aa99` | 941 | 825 | +116 | 35 |
 | P2f2 | `b46878f` | 82 | 129 | −47 | 4 |
 | P2f3 | `bd95e29` | 101 | 165 | −64 | 6 |
-| P2f4 | (pending) | tbd | tbd | tbd | 33 |
+| P2f4 | `9c269ff` | 382 | 734 | −352 | 33 |
+| P2f5 | (pending) | tbd | tbd | tbd | 34 |
 
 ## Non-goals
 

@@ -1699,177 +1699,209 @@ impl MoeExperts {
         match down_dt {
             QDtype::Q4_K => ops
                 .indexed_moe_mmq_q4_k_down_tile8(
-                    self.ffn_down_exps.ptr,
-                    scratch.activated_q8_1,
-                    scratch.expert_ids,
-                    scratch.sort_sorted_pair_idx_padded,
-                    scratch.sort_padded_offsets,
-                    scratch.down_f32,
+                    flambeau_ops::MoeMmqTile8DownBuffers {
+                        weights: self.ffn_down_exps.ptr,
+                        act: scratch.activated_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        sorted_pair_idx_padded: scratch.sort_sorted_pair_idx_padded,
+                        padded_offsets: scratch.sort_padded_offsets,
+                        dst: scratch.down_f32,
+                    },
                     down_shape_tile8_kk,
                 )
                 .context("prefill indexed_moe down q4_k tile8")?,
             QDtype::Q3_K => ops
                 .indexed_moe_mmq_q3_k_down_tile8(
-                    self.ffn_down_exps.ptr,
-                    scratch.activated_q8_1,
-                    scratch.expert_ids,
-                    scratch.sort_sorted_pair_idx_padded,
-                    scratch.sort_padded_offsets,
-                    scratch.down_f32,
+                    flambeau_ops::MoeMmqTile8DownBuffers {
+                        weights: self.ffn_down_exps.ptr,
+                        act: scratch.activated_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        sorted_pair_idx_padded: scratch.sort_sorted_pair_idx_padded,
+                        padded_offsets: scratch.sort_padded_offsets,
+                        dst: scratch.down_f32,
+                    },
                     down_shape_tile8_kk,
                 )
                 .context("prefill indexed_moe down q3_k tile8")?,
             QDtype::Q5_K => ops
                 .indexed_moe_mmq_q5_k_down_tile8(
-                    self.ffn_down_exps.ptr,
-                    scratch.activated_q8_1,
-                    scratch.expert_ids,
-                    scratch.sort_sorted_pair_idx_padded,
-                    scratch.sort_padded_offsets,
-                    scratch.down_f32,
+                    flambeau_ops::MoeMmqTile8DownBuffers {
+                        weights: self.ffn_down_exps.ptr,
+                        act: scratch.activated_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        sorted_pair_idx_padded: scratch.sort_sorted_pair_idx_padded,
+                        padded_offsets: scratch.sort_padded_offsets,
+                        dst: scratch.down_f32,
+                    },
                     down_shape_tile8_kk,
                 )
                 .context("prefill indexed_moe down q5_k tile8")?,
             QDtype::Q6_K => ops
                 .indexed_moe_mmq_q6_k_down_tile8(
-                    self.ffn_down_exps.ptr,
-                    scratch.activated_q8_1,
-                    scratch.expert_ids,
-                    scratch.sort_sorted_pair_idx_padded,
-                    scratch.sort_padded_offsets,
-                    scratch.down_f32,
+                    flambeau_ops::MoeMmqTile8DownBuffers {
+                        weights: self.ffn_down_exps.ptr,
+                        act: scratch.activated_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        sorted_pair_idx_padded: scratch.sort_sorted_pair_idx_padded,
+                        padded_offsets: scratch.sort_padded_offsets,
+                        dst: scratch.down_f32,
+                    },
                     down_shape_tile8_kk,
                 )
                 .context("prefill indexed_moe down q6_k tile8")?,
             QDtype::Q4_0 => ops
                 .indexed_moe_mmq_q4_0_down_tile8(
-                    self.ffn_down_exps.ptr,
-                    scratch.activated_q8_1,
-                    scratch.expert_ids,
-                    scratch.sort_sorted_pair_idx_padded,
-                    scratch.sort_padded_offsets,
-                    scratch.down_f32,
+                    flambeau_ops::MoeMmqTile8DownBuffers {
+                        weights: self.ffn_down_exps.ptr,
+                        act: scratch.activated_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        sorted_pair_idx_padded: scratch.sort_sorted_pair_idx_padded,
+                        padded_offsets: scratch.sort_padded_offsets,
+                        dst: scratch.down_f32,
+                    },
                     down_shape_tile8_32,
                 )
                 .context("prefill indexed_moe down q4_0 tile8")?,
             QDtype::Q8_0 => ops
                 .indexed_moe_mmq_q8_0_down_tile8(
-                    self.ffn_down_exps.ptr,
-                    scratch.activated_q8_1,
-                    scratch.expert_ids,
-                    scratch.sort_sorted_pair_idx_padded,
-                    scratch.sort_padded_offsets,
-                    scratch.down_f32,
+                    flambeau_ops::MoeMmqTile8DownBuffers {
+                        weights: self.ffn_down_exps.ptr,
+                        act: scratch.activated_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        sorted_pair_idx_padded: scratch.sort_sorted_pair_idx_padded,
+                        padded_offsets: scratch.sort_padded_offsets,
+                        dst: scratch.down_f32,
+                    },
                     down_shape_tile8_32,
                 )
                 .context("prefill indexed_moe down q8_0 tile8")?,
             QDtype::Q4_1 => ops
                 .indexed_moe_mmq_q4_1_down_tile8(
-                    self.ffn_down_exps.ptr,
-                    scratch.activated_q8_1,
-                    scratch.expert_ids,
-                    scratch.sort_sorted_pair_idx_padded,
-                    scratch.sort_padded_offsets,
-                    scratch.down_f32,
+                    flambeau_ops::MoeMmqTile8DownBuffers {
+                        weights: self.ffn_down_exps.ptr,
+                        act: scratch.activated_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        sorted_pair_idx_padded: scratch.sort_sorted_pair_idx_padded,
+                        padded_offsets: scratch.sort_padded_offsets,
+                        dst: scratch.down_f32,
+                    },
                     down_shape_tile8_32,
                 )
                 .context("prefill indexed_moe down q4_1 tile8")?,
             QDtype::IQ4_NL => ops
                 .indexed_moe_mmq_iq4_nl_down_tile8(
-                    self.ffn_down_exps.ptr,
-                    scratch.activated_q8_1,
-                    scratch.expert_ids,
-                    scratch.sort_sorted_pair_idx_padded,
-                    scratch.sort_padded_offsets,
-                    scratch.down_f32,
+                    flambeau_ops::MoeMmqTile8DownBuffers {
+                        weights: self.ffn_down_exps.ptr,
+                        act: scratch.activated_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        sorted_pair_idx_padded: scratch.sort_sorted_pair_idx_padded,
+                        padded_offsets: scratch.sort_padded_offsets,
+                        dst: scratch.down_f32,
+                    },
                     down_shape_tile8_32,
                 )
                 .context("prefill indexed_moe down iq4_nl tile8")?,
             QDtype::IQ4_XS => ops
                 .indexed_moe_mmq_iq4_xs_down_tile8(
-                    self.ffn_down_exps.ptr,
-                    scratch.activated_q8_1,
-                    scratch.expert_ids,
-                    scratch.sort_sorted_pair_idx_padded,
-                    scratch.sort_padded_offsets,
-                    scratch.down_f32,
+                    flambeau_ops::MoeMmqTile8DownBuffers {
+                        weights: self.ffn_down_exps.ptr,
+                        act: scratch.activated_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        sorted_pair_idx_padded: scratch.sort_sorted_pair_idx_padded,
+                        padded_offsets: scratch.sort_padded_offsets,
+                        dst: scratch.down_f32,
+                    },
                     down_shape_tile8_kk,
                 )
                 .context("prefill indexed_moe down iq4_xs tile8")?,
             QDtype::IQ3_XXS => ops
                 .indexed_moe_mmq_iq3_xxs_down_tile8(
-                    self.ffn_down_exps.ptr,
-                    scratch.activated_q8_1,
-                    scratch.expert_ids,
-                    scratch.sort_sorted_pair_idx_padded,
-                    scratch.sort_padded_offsets,
-                    scratch.down_f32,
+                    flambeau_ops::MoeMmqTile8DownBuffers {
+                        weights: self.ffn_down_exps.ptr,
+                        act: scratch.activated_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        sorted_pair_idx_padded: scratch.sort_sorted_pair_idx_padded,
+                        padded_offsets: scratch.sort_padded_offsets,
+                        dst: scratch.down_f32,
+                    },
                     down_shape_tile8_kk,
                 )
                 .context("prefill indexed_moe down iq3_xxs tile8")?,
             QDtype::IQ3_S => ops
                 .indexed_moe_mmq_iq3_s_down_tile8(
-                    self.ffn_down_exps.ptr,
-                    scratch.activated_q8_1,
-                    scratch.expert_ids,
-                    scratch.sort_sorted_pair_idx_padded,
-                    scratch.sort_padded_offsets,
-                    scratch.down_f32,
+                    flambeau_ops::MoeMmqTile8DownBuffers {
+                        weights: self.ffn_down_exps.ptr,
+                        act: scratch.activated_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        sorted_pair_idx_padded: scratch.sort_sorted_pair_idx_padded,
+                        padded_offsets: scratch.sort_padded_offsets,
+                        dst: scratch.down_f32,
+                    },
                     down_shape_tile8_kk,
                 )
                 .context("prefill indexed_moe down iq3_s tile8")?,
             QDtype::IQ2_XXS => ops
                 .indexed_moe_mmq_iq2_xxs_down_tile8(
-                    self.ffn_down_exps.ptr,
-                    scratch.activated_q8_1,
-                    scratch.expert_ids,
-                    scratch.sort_sorted_pair_idx_padded,
-                    scratch.sort_padded_offsets,
-                    scratch.down_f32,
+                    flambeau_ops::MoeMmqTile8DownBuffers {
+                        weights: self.ffn_down_exps.ptr,
+                        act: scratch.activated_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        sorted_pair_idx_padded: scratch.sort_sorted_pair_idx_padded,
+                        padded_offsets: scratch.sort_padded_offsets,
+                        dst: scratch.down_f32,
+                    },
                     down_shape_tile8_kk,
                 )
                 .context("prefill indexed_moe down iq2_xxs tile8")?,
             QDtype::IQ2_XS => ops
                 .indexed_moe_mmq_iq2_xs_down_tile8(
-                    self.ffn_down_exps.ptr,
-                    scratch.activated_q8_1,
-                    scratch.expert_ids,
-                    scratch.sort_sorted_pair_idx_padded,
-                    scratch.sort_padded_offsets,
-                    scratch.down_f32,
+                    flambeau_ops::MoeMmqTile8DownBuffers {
+                        weights: self.ffn_down_exps.ptr,
+                        act: scratch.activated_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        sorted_pair_idx_padded: scratch.sort_sorted_pair_idx_padded,
+                        padded_offsets: scratch.sort_padded_offsets,
+                        dst: scratch.down_f32,
+                    },
                     down_shape_tile8_kk,
                 )
                 .context("prefill indexed_moe down iq2_xs tile8")?,
             QDtype::IQ2_S => ops
                 .indexed_moe_mmq_iq2_s_down_tile8(
-                    self.ffn_down_exps.ptr,
-                    scratch.activated_q8_1,
-                    scratch.expert_ids,
-                    scratch.sort_sorted_pair_idx_padded,
-                    scratch.sort_padded_offsets,
-                    scratch.down_f32,
+                    flambeau_ops::MoeMmqTile8DownBuffers {
+                        weights: self.ffn_down_exps.ptr,
+                        act: scratch.activated_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        sorted_pair_idx_padded: scratch.sort_sorted_pair_idx_padded,
+                        padded_offsets: scratch.sort_padded_offsets,
+                        dst: scratch.down_f32,
+                    },
                     down_shape_tile8_kk,
                 )
                 .context("prefill indexed_moe down iq2_s tile8")?,
             QDtype::IQ1_S => ops
                 .indexed_moe_mmq_iq1_s_down_tile8(
-                    self.ffn_down_exps.ptr,
-                    scratch.activated_q8_1,
-                    scratch.expert_ids,
-                    scratch.sort_sorted_pair_idx_padded,
-                    scratch.sort_padded_offsets,
-                    scratch.down_f32,
+                    flambeau_ops::MoeMmqTile8DownBuffers {
+                        weights: self.ffn_down_exps.ptr,
+                        act: scratch.activated_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        sorted_pair_idx_padded: scratch.sort_sorted_pair_idx_padded,
+                        padded_offsets: scratch.sort_padded_offsets,
+                        dst: scratch.down_f32,
+                    },
                     down_shape_tile8_kk,
                 )
                 .context("prefill indexed_moe down iq1_s tile8")?,
             QDtype::IQ1_M => ops
                 .indexed_moe_mmq_iq1_m_down_tile8(
-                    self.ffn_down_exps.ptr,
-                    scratch.activated_q8_1,
-                    scratch.expert_ids,
-                    scratch.sort_sorted_pair_idx_padded,
-                    scratch.sort_padded_offsets,
-                    scratch.down_f32,
+                    flambeau_ops::MoeMmqTile8DownBuffers {
+                        weights: self.ffn_down_exps.ptr,
+                        act: scratch.activated_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        sorted_pair_idx_padded: scratch.sort_sorted_pair_idx_padded,
+                        padded_offsets: scratch.sort_padded_offsets,
+                        dst: scratch.down_f32,
+                    },
                     down_shape_tile8_kk,
                 )
                 .context("prefill indexed_moe down iq1_m tile8")?,
