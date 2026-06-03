@@ -1048,14 +1048,17 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
             .context("per_layer_embd build: dense_gemv_f16_f16")?;
         } else {
             flambeau_ops::hip::router::dense_gemv_f16_f16_batched(
-                self.core.reg,
-                stream,
-                model_proj_f16_dev,
-                main_embd_scratch_dev,
-                proj_matmul_f32_dev,
-                per_token,
-                hidden,
-                n_tokens,
+                flambeau_ops::OpCtx { reg: self.core.reg, stream },
+                flambeau_ops::DenseGemvBatchedBuffers {
+                    w: model_proj_f16_dev,
+                    x: main_embd_scratch_dev,
+                    y: proj_matmul_f32_dev,
+                },
+                flambeau_ops::DenseGemvBatchedShape {
+                    n_rows: per_token,
+                    k: hidden,
+                    n_tokens,
+                },
             )
             .context("per_layer_embd build: dense_gemv_f16_f16_batched")?;
         }

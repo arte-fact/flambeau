@@ -19,15 +19,13 @@ use super::OpsRegistry;
 /// or `DevicePtr::NULL` for no mask. Output `out[m, k]` F16.
 /// Launch: one block per row, 256 threads/row (two-pass online softmax).
 pub fn softmax_masked_f16(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    scores: DevicePtr,
-    mask: DevicePtr,
-    out: DevicePtr,
-    m: usize,
-    k: usize,
-    scale: f32,
+    ctx: crate::OpCtx<'_>,
+    bufs: crate::SoftmaxMaskedBuffers,
+    knobs: crate::SoftmaxMaskedKnobs,
 ) -> Result<()> {
+    let crate::OpCtx { reg, stream } = ctx;
+    let crate::SoftmaxMaskedBuffers { scores, mask, out } = bufs;
+    let crate::SoftmaxMaskedKnobs { m, k, scale } = knobs;
     let module = reg.expect_module("softmax_masked_f16")?;
     let kernel = module.kernel("flambeau_softmax_masked_f16")?;
 

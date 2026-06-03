@@ -700,3 +700,105 @@ pub struct MoeMmqQ4KShape {
     pub top_k: usize,
     pub n_buckets: usize,
 }
+
+// ---------------------------------------------------------------------------
+// Per-file small launcher aggregates (Q3d).
+// ---------------------------------------------------------------------------
+
+/// Buffers for `attention::split_q_gate_f16` — interleaved (Q, gate)
+/// projection split into two contiguous F16 tensors.
+#[derive(Copy, Clone, Debug)]
+pub struct SplitQGateBuffers {
+    pub fused_qg: DevicePtr,
+    pub q_out: DevicePtr,
+    pub gate_out: DevicePtr,
+}
+
+/// Shape for `attention::split_q_gate_f16`.
+#[derive(Copy, Clone, Debug)]
+pub struct SplitQGateShape {
+    pub n_tokens: usize,
+    pub n_heads: usize,
+    pub head_dim: usize,
+}
+
+/// Buffers for `conv::causal_conv1d_f32`.
+#[derive(Copy, Clone, Debug)]
+pub struct ConvCausal1dBuffers {
+    pub conv_input: DevicePtr,
+    pub weight: DevicePtr,
+    pub y: DevicePtr,
+}
+
+/// Shape for `conv::causal_conv1d_f32`.
+#[derive(Copy, Clone, Debug)]
+pub struct ConvCausal1dShape {
+    pub n_new: usize,
+    pub conv_channels: usize,
+    pub conv_kernel: usize,
+}
+
+/// Buffers for `moe::topk_f32` (router top-K).
+#[derive(Copy, Clone, Debug)]
+pub struct TopkBuffers {
+    pub logits: DevicePtr,
+    pub idx: DevicePtr,
+    pub weights: DevicePtr,
+}
+
+/// Shape for `moe::topk_f32`.
+#[derive(Copy, Clone, Debug)]
+pub struct TopkShape {
+    pub n_tokens: usize,
+    pub n_experts: usize,
+    pub k: usize,
+}
+
+/// Buffers shared by both `router::dense_gemv_{f16,f32}_f16_batched`.
+#[derive(Copy, Clone, Debug)]
+pub struct DenseGemvBatchedBuffers {
+    pub w: DevicePtr,
+    pub x: DevicePtr,
+    pub y: DevicePtr,
+}
+
+/// Shape shared by both `router::dense_gemv_{f16,f32}_f16_batched`.
+#[derive(Copy, Clone, Debug)]
+pub struct DenseGemvBatchedShape {
+    pub n_rows: usize,
+    pub k: usize,
+    pub n_tokens: usize,
+}
+
+/// Buffers for `sampling::topk_softmax_f32` (sampler — distinct from
+/// `moe::topk_f32`'s router).
+#[derive(Copy, Clone, Debug)]
+pub struct SamplerTopkSoftmaxBuffers {
+    pub logits: DevicePtr,
+    pub out_ids: DevicePtr,
+    pub out_probs: DevicePtr,
+}
+
+/// Shape + temperature inverse for `sampling::topk_softmax_f32`.
+#[derive(Copy, Clone, Debug)]
+pub struct SamplerTopkSoftmaxKnobs {
+    pub vocab: usize,
+    pub k: usize,
+    pub inv_temp: f32,
+}
+
+/// Buffers for `softmax::softmax_masked_f16`.
+#[derive(Copy, Clone, Debug)]
+pub struct SoftmaxMaskedBuffers {
+    pub scores: DevicePtr,
+    pub mask: DevicePtr,
+    pub out: DevicePtr,
+}
+
+/// Shape + scale for `softmax::softmax_masked_f16`.
+#[derive(Copy, Clone, Debug)]
+pub struct SoftmaxMaskedKnobs {
+    pub m: usize,
+    pub k: usize,
+    pub scale: f32,
+}

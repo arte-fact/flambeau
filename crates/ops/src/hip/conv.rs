@@ -22,15 +22,13 @@ use super::OpsRegistry;
 /// `y[n_new, conv_channels]` F32. Each channel runs independently.
 /// Launch: `(ceil(conv_channels/256), n_new)` blocks × 256 threads.
 pub fn causal_conv1d_f32(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    conv_input: DevicePtr,
-    weight: DevicePtr,
-    y: DevicePtr,
-    n_new: usize,
-    conv_channels: usize,
-    conv_kernel: usize,
+    ctx: crate::OpCtx<'_>,
+    bufs: crate::ConvCausal1dBuffers,
+    shape: crate::ConvCausal1dShape,
 ) -> Result<()> {
+    let crate::OpCtx { reg, stream } = ctx;
+    let crate::ConvCausal1dBuffers { conv_input, weight, y } = bufs;
+    let crate::ConvCausal1dShape { n_new, conv_channels, conv_kernel } = shape;
     let module = reg.expect_module("causal_conv1d_f32")?;
     let kernel = module.kernel("flambeau_causal_conv1d_f32")?;
     let n_new_i = n_new as i32;

@@ -54,15 +54,13 @@ pub struct MoeShape {
 /// Shapes: `logits[n_tokens, n_experts]` F32 in; `idx[n_tokens, k]` i32 out;
 /// `weights[n_tokens, k]` F32 out.
 pub fn topk_f32(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    logits: DevicePtr,
-    idx: DevicePtr,
-    weights: DevicePtr,
-    n_tokens: usize,
-    n_experts: usize,
-    k: usize,
+    ctx: crate::OpCtx<'_>,
+    bufs: crate::TopkBuffers,
+    shape: crate::TopkShape,
 ) -> Result<()> {
+    let crate::OpCtx { reg, stream } = ctx;
+    let crate::TopkBuffers { logits, idx, weights } = bufs;
+    let crate::TopkShape { n_tokens, n_experts, k } = shape;
     // Kernel's compile-time ceiling — must match `#define TOPK_MAX_EXPERTS`
     // in `kernels-hip/src/kernels/topk_softmax.cu`. Pre-this was
     // hardcoded at 128 on both sides, silently dropping experts 128..255 on

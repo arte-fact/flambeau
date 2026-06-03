@@ -487,14 +487,9 @@ impl<'a> Ops for HipOps<'a> {
         head_dim: usize,
     ) -> Result<()> {
         super::attention::split_q_gate_f16(
-            self.reg,
-            self.stream,
-            fused_qg,
-            q_out,
-            gate_out,
-            n_tokens,
-            n_heads,
-            head_dim,
+            self.ctx(),
+            crate::SplitQGateBuffers { fused_qg, q_out, gate_out },
+            crate::SplitQGateShape { n_tokens, n_heads, head_dim },
         )
     }
 
@@ -735,14 +730,9 @@ impl<'a> Ops for HipOps<'a> {
         inv_temp: f32,
     ) -> Result<()> {
         super::sampling::topk_softmax_f32(
-            self.reg,
-            self.stream,
-            logits,
-            out_ids,
-            out_probs,
-            vocab,
-            k,
-            inv_temp,
+            self.ctx(),
+            crate::SamplerTopkSoftmaxBuffers { logits, out_ids, out_probs },
+            crate::SamplerTopkSoftmaxKnobs { vocab, k, inv_temp },
         )
     }
 
@@ -853,14 +843,9 @@ impl<'a> Ops for HipOps<'a> {
         n_tokens: usize,
     ) -> Result<()> {
         super::router::dense_gemv_f16_f16_batched(
-            self.reg,
-            self.stream,
-            w,
-            x,
-            y,
-            n_rows,
-            k,
-            n_tokens,
+            self.ctx(),
+            crate::DenseGemvBatchedBuffers { w, x, y },
+            crate::DenseGemvBatchedShape { n_rows, k, n_tokens },
         )
     }
 
@@ -874,14 +859,9 @@ impl<'a> Ops for HipOps<'a> {
         n_tokens: usize,
     ) -> Result<()> {
         super::router::dense_gemv_f32_f16_batched(
-            self.reg,
-            self.stream,
-            w,
-            x,
-            y,
-            n_rows,
-            k,
-            n_tokens,
+            self.ctx(),
+            crate::DenseGemvBatchedBuffers { w, x, y },
+            crate::DenseGemvBatchedShape { n_rows, k, n_tokens },
         )
     }
 
@@ -896,7 +876,11 @@ impl<'a> Ops for HipOps<'a> {
         k: usize,
         scale: f32,
     ) -> Result<()> {
-        super::softmax::softmax_masked_f16(self.reg, self.stream, scores, mask, out, m, k, scale)
+        super::softmax::softmax_masked_f16(
+            self.ctx(),
+            crate::SoftmaxMaskedBuffers { scores, mask, out },
+            crate::SoftmaxMaskedKnobs { m, k, scale },
+        )
     }
 
     // -- conv --
@@ -911,14 +895,9 @@ impl<'a> Ops for HipOps<'a> {
         conv_kernel: usize,
     ) -> Result<()> {
         super::conv::causal_conv1d_f32(
-            self.reg,
-            self.stream,
-            conv_input,
-            weight,
-            y,
-            n_new,
-            conv_channels,
-            conv_kernel,
+            self.ctx(),
+            crate::ConvCausal1dBuffers { conv_input, weight, y },
+            crate::ConvCausal1dShape { n_new, conv_channels, conv_kernel },
         )
     }
 
@@ -934,14 +913,9 @@ impl<'a> Ops for HipOps<'a> {
         k: usize,
     ) -> Result<()> {
         super::moe::topk_f32(
-            self.reg,
-            self.stream,
-            logits,
-            idx,
-            weights,
-            n_tokens,
-            n_experts,
-            k,
+            self.ctx(),
+            crate::TopkBuffers { logits, idx, weights },
+            crate::TopkShape { n_tokens, n_experts, k },
         )
     }
 

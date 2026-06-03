@@ -1029,15 +1029,13 @@ pub fn attention_prefill_q8_kv(
 /// attention kernel; gate is held for a silu-multiply after attention.
 /// Launch: `(n_tokens, n_heads, ceil(head_dim/128))` × 128 threads.
 pub fn split_q_gate_f16(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    fused_qg: DevicePtr,
-    q_out: DevicePtr,
-    gate_out: DevicePtr,
-    n_tokens: usize,
-    n_heads: usize,
-    head_dim: usize,
+    ctx: crate::OpCtx<'_>,
+    bufs: crate::SplitQGateBuffers,
+    shape: crate::SplitQGateShape,
 ) -> Result<()> {
+    let crate::OpCtx { reg, stream } = ctx;
+    let crate::SplitQGateBuffers { fused_qg, q_out, gate_out } = bufs;
+    let crate::SplitQGateShape { n_tokens, n_heads, head_dim } = shape;
     let module = reg.expect_module("split_q_gate_f16")?;
     let kernel = module.kernel("flambeau_split_q_gate_f16")?;
 

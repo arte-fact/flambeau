@@ -95,15 +95,13 @@ pub fn apply_penalties_f32(
 /// - `k <= 0` or `k > SAMPLER_K_OUT_MAX`.
 /// - kernel-launch dispatch failure.
 pub fn topk_softmax_f32(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    logits: DevicePtr,
-    out_ids: DevicePtr,
-    out_probs: DevicePtr,
-    vocab: usize,
-    k: usize,
-    inv_temp: f32,
+    ctx: crate::OpCtx<'_>,
+    bufs: crate::SamplerTopkSoftmaxBuffers,
+    knobs: crate::SamplerTopkSoftmaxKnobs,
 ) -> Result<()> {
+    let crate::OpCtx { reg, stream } = ctx;
+    let crate::SamplerTopkSoftmaxBuffers { logits, out_ids, out_probs } = bufs;
+    let crate::SamplerTopkSoftmaxKnobs { vocab, k, inv_temp } = knobs;
     if k == 0 {
         bail!("sampler::topk_softmax_f32: k must be >= 1");
     }

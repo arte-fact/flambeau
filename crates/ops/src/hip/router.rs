@@ -82,15 +82,13 @@ pub fn dense_gemv_f16_f16(
 
 /// F16-weight variant of [`dense_gemv_f32_f16_batched`].
 pub fn dense_gemv_f16_f16_batched(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    w: DevicePtr,
-    x: DevicePtr,
-    y: DevicePtr,
-    n_rows: usize,
-    k: usize,
-    n_tokens: usize,
+    ctx: crate::OpCtx<'_>,
+    bufs: crate::DenseGemvBatchedBuffers,
+    shape: crate::DenseGemvBatchedShape,
 ) -> Result<()> {
+    let crate::OpCtx { reg, stream } = ctx;
+    let crate::DenseGemvBatchedBuffers { w, x, y } = bufs;
+    let crate::DenseGemvBatchedShape { n_rows, k, n_tokens } = shape;
     let module = reg.expect_module("dense_gemv_f16_f16_batched")?;
     let kernel = module.kernel("flambeau_dense_gemv_f16_f16_batched")?;
     let n_rows_i = n_rows as i32;
@@ -123,15 +121,13 @@ pub fn dense_gemv_f16_f16_batched(
 /// into a single kernel launch — saves ~L µs launch overhead per call at
 /// the cost of a 2D grid.
 pub fn dense_gemv_f32_f16_batched(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    w: DevicePtr,
-    x: DevicePtr,
-    y: DevicePtr,
-    n_rows: usize,
-    k: usize,
-    n_tokens: usize,
+    ctx: crate::OpCtx<'_>,
+    bufs: crate::DenseGemvBatchedBuffers,
+    shape: crate::DenseGemvBatchedShape,
 ) -> Result<()> {
+    let crate::OpCtx { reg, stream } = ctx;
+    let crate::DenseGemvBatchedBuffers { w, x, y } = bufs;
+    let crate::DenseGemvBatchedShape { n_rows, k, n_tokens } = shape;
     let module = reg.expect_module("dense_gemv_f32_f16_batched")?;
     let kernel = module.kernel("flambeau_dense_gemv_f32_f16_batched")?;
     let n_rows_i = n_rows as i32;

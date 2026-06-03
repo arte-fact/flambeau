@@ -52,6 +52,12 @@ pub use sig::{
     PenaltyBuffers, PenaltyKnobs,
     MoeMmqQ4KGateUpTurboBuffers, MoeMmqQ4KDownTurboBuffers,
     MoeMmqQ4KBuffers, MoeMmqQ4KShape,
+    SplitQGateBuffers, SplitQGateShape,
+    ConvCausal1dBuffers, ConvCausal1dShape,
+    TopkBuffers, TopkShape,
+    DenseGemvBatchedBuffers, DenseGemvBatchedShape,
+    SamplerTopkSoftmaxBuffers, SamplerTopkSoftmaxKnobs,
+    SoftmaxMaskedBuffers, SoftmaxMaskedKnobs,
 };
 
 #[cfg(feature = "hip")]
