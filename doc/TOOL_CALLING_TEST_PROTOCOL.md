@@ -343,13 +343,141 @@ Each of these maps to one of the slice fixes:
 - Empty `tool_calls[]` but prose says "calling X" + `<|im_sep_user|>`
   injection → T4 (qwen3.6 template + EOS-marker set).
 
-## Out of scope
+## Deep testing
 
-- **Streaming SSE tool-call deltas.** Separate protocol; gate by a
-  follow-up streaming-aware harness if needed (vLLM #31871 shape).
-  Today the test only exercises non-streaming `/v1/chat/completions`.
-- **Anthropic `/v1/messages` tool round-trip.** Cover after the OpenAI
-  path is green; the format adapter on `/v1/messages` is thin enough
-  that fixing the underlying parser fixes both.
-- **`tool_choice={"type":"function","function":{"name":"X"}}`** (force
-  one named tool). Add as S7 if a downstream client needs it.
+S1–S6 are the happy-path smoke gate — one model, one turn, one
+realistic prompt each. They confirm the wire works; they do **not**
+exercise the parser's failure modes, the streaming path, multi-turn
+agent loops, concurrency, or the Anthropic surface. Deep testing adds
+four layers on top, ordered cheapest-first. A fix slice (T2–T5) is
+"done" only when the layers it touches are green, not just S1–S6.
+
+### Layer A — Parser unit fuzz (no server, fast, runs in CI)
+
+The parsers are streaming state machines; the highest-value cheap tests
+live in `crates/server/src/tool_call_parser/*.rs` `#[cfg(test)]` and
+need no GPU.
+
+- **Chunk-decomposition invariance.** For every fixture's raw model
+  text, assert `coalesce(push(whole))` == `coalesce(Σ push(char))` ==
+  `coalesce(Σ push(random_split))`. The char-by-char test exists for a
+  few cases; make it a property test over the captured `response.*.raw`
+  bytes of every T1 fixture. A parser that's correct one-shot but wrong
+  when a marker straddles a chunk boundary is the classic streaming
+  bug.
+- **Adversarial bodies** (per format, table-driven):
+  - escaped quotes inside string args (`{"path":"a\"b"}`),
+  - unicode + emoji in args, multi-byte UTF-8 straddling a chunk,
+  - nested objects/arrays to depth ≥ 4,
+  - empty args `{}`, missing-`}` truncation at EOF,
+  - a tool marker appearing **inside** a JSON string value (must NOT
+    re-trigger the state machine),
+  - prose that merely *mentions* `<|tool_call>` / `<|tool_code|>` /
+    `<tool_call>` without a body (must stay text, no fabricated call),
+  - two calls back-to-back, and a call interleaved with `<channel>`
+    reasoning.
+- **arguments-is-a-string invariant** (llama.cpp #20198): every parser,
+  every fixture → `tc.function.arguments` is a `String` and
+  `json.loads` of it succeeds. One shared assertion, run over all
+  formats.
+- **Verbatim-leak guarantee**: any input the parser can't structure
+  must reappear in `TextDelta`s byte-for-byte (no silent drop). Assert
+  `concat(text_deltas) ⊇ unparseable_input` for the gemma4 `tool_code`
+  / `<|call:>` degraded shapes.
+
+### Layer B — Format matrix (server, per arch)
+
+S1–S6 run one format per model (whatever `detect_format_from_template`
+picks). Deep testing pins **every** format the dispatcher can select
+and the agent-prose shapes seen live:
+
+| Format | Trigger | Models |
+|---|---|---|
+| gemma4 native | OpenAI `tools` array | gemma4-26B, gemma4-31B |
+| gemma4 `tool_code` | prose convention, no tools array | gemma4-31B (T3) |
+| gemma4 degraded `<\|call:>` | observed on 31B S1 | gemma4-31B (diagnose) |
+| hermes JSON | qwen35moe default | qwen3.6-27B, -35B |
+| qwen3_coder XML | Unsloth UD GGUF / explicit override | qwen3.6 UD builds |
+
+For each (model, format) run S1/S2/S3 with `tool_call_format` forced
+explicitly (don't rely on auto-detect) and assert the same pass
+criteria. This catches a parser that's correct on the auto-detected
+format but wrong when a client overrides it.
+
+### Layer C — Streaming parity (server)
+
+The non-streaming and SSE paths share the parser but assemble
+`tool_calls` differently. They MUST agree.
+
+- Run S1/S2/S4 with `"stream": true`, reassemble `tool_calls` from the
+  SSE `delta.tool_calls[]` fragments, and assert the assembled result
+  is **identical** to the non-streaming response for the same
+  (prompt, seed). This is the vLLM #31871 / #21544 failure class —
+  raw text leaking in streaming mode where non-streaming is clean.
+- Assert first-token TTFT isn't regressed by the parser's
+  buffer-before-emit hold (a parser that buffers the whole tool call
+  before emitting any delta is correct but delays nothing user-visible;
+  confirm text *before* a tool call still streams promptly).
+
+### Layer D — Agentic + surface coverage (server)
+
+- **Multi-turn loop** (S3 extended to ≥ 3 round-trips): call → result
+  → call → result → final answer. Assert each turn's `finish_reason`
+  and that the model stops calling once it has enough info. This is the
+  real agent workload; a parser that's fine for one call can desync on
+  turn 3 if assistant-message echo of a prior `tool_calls[]` isn't
+  rendered back correctly by the chat template.
+- **`tool_choice` matrix**: `"auto"` (S1), `"none"` (S5), `"required"`
+  (must emit ≥ 1 call even for a chatty prompt), and named
+  `{"type":"function","function":{"name":"X"}}` (must call exactly X).
+  S7 in the harness.
+- **Anthropic `/v1/messages`**: S1 + S3 round-trip through the
+  Anthropic adapter; assert `stop_reason == "tool_use"` and a
+  `tool_use` content block with parseable `input`. The parser is
+  shared, so this mostly tests the adapter, but the `tool_choice:none`
+  / forbids-tools path is Anthropic-specific (T2.5).
+- **Concurrency**: N=4 simultaneous tool-calling requests on distinct
+  slots; assert each response's `tool_calls` matches its own prompt
+  (no cross-slot bleed — the same class as the batched-decode slot-swap
+  bug in repo memory).
+- **Scale**: a tools array with ≥ 16 tools and a deeply-nested
+  parameter schema; assert the model still routes correctly and the
+  rendered prompt doesn't blow the context (chat-template tool
+  rendering cost).
+
+### Harness changes
+
+- `scenarios.py`: add S7 (`tool_choice` matrix), S8 (multi-turn loop),
+  S9 (forced-named). `--format hermes|qwen3_coder|gemma4|auto` to drive
+  Layer B. `--stream` to drive Layer C. `--anthropic` to hit
+  `/v1/messages`. `--concurrency N` for Layer D.
+- `assertions.py`: add the streaming-reassembly equality check and the
+  multi-turn finish-reason chain.
+- Parser fuzz lives in Rust (`#[cfg(test)]`), seeded from the T1
+  fixtures' raw bytes — `cargo test -p flambeau-server` is the CI gate;
+  the Python harness is the live gate.
+- Every layer writes/reads the same `fixtures/<model>_<scenario>.json`
+  shape so regressions diff cleanly.
+
+### What "broken" looks like in fixtures (today, on `main`)
+
+Predicted shape based on upstream issues (see `TOOL_CALLING_FIX_PLAN.md`):
+
+- **gemma4 S1**: `tool_calls` is None; `content` contains literal
+  `<|tool_call>call:get_current_weather{...}<tool_call|>` plus
+  channel marker leak `<channel|>thought`. `finish_reason == "stop"`.
+- **gemma4 S6**: `content` starts with `vie vie vie ...` noise or
+  `<channel|>thought\n` before the actual answer.
+- **qwen3.6 S1**: `tool_calls == []` (empty list); `content` claims
+  "I'll call get_current_weather" but no call gets parsed.
+
+(T1 capture updated these to reality — see `TOOL_CALLING_FIX_PLAN.md`
+§T1: qwen3.6 actually passes S1–S4/S6; gemma4-31B emits the degraded
+`<|call:>` + `tool_code` shapes; the channel leak is gemma4-26B.)
+
+## Out of scope (this protocol)
+
+- **Cross-process / persisted fixtures.** Fixtures are process-local
+  regression oracles, refreshed per fix slice; not a golden corpus.
+- **Throughput under tool-calling load.** Covered by the perf matrix,
+  not here — this protocol is correctness only.

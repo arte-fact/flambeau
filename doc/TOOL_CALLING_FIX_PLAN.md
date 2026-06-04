@@ -352,7 +352,47 @@ Extend `/tmp/long_test.sh` (or a new `/tmp/tool_test.sh`) with:
 
 Run on all 4 models, pp2tp2 / hip:0,2,1,3 / `--ctx-cap 4096`.
 
-This is the green gate before merge to main.
+This is the happy-path green gate (S1–S6). It is **necessary but not
+sufficient** for merge — T6 is the real bar.
+
+### T6 — Deep / adversarial testing
+
+Goal: the failure modes S1–S6 don't reach — streaming parity, parser
+fuzz, the full format matrix, multi-turn agent loops, concurrency, and
+the Anthropic surface.
+
+Spec lives in `TOOL_CALLING_TEST_PROTOCOL.md` §"Deep testing" (Layers
+A–D). Each fix slice (T2–T4) is only "done" when the layers it touches
+are green:
+
+- **Layer A — parser unit fuzz** (`cargo test -p flambeau-server`, no
+  GPU): chunk-decomposition invariance over every fixture's raw bytes,
+  adversarial bodies (escaped quotes, unicode straddling a chunk,
+  nested depth ≥ 4, markers inside string values, mention-without-body,
+  back-to-back calls), the `arguments`-is-a-string invariant
+  (llama.cpp #20198), and the verbatim-leak guarantee for the
+  gemma4 `tool_code` / `<|call:>` degraded shapes. **This is the CI
+  gate** — cheap, deterministic, catches the streaming-boundary bugs
+  the happy path can't.
+- **Layer B — format matrix**: force every dispatcher-selectable
+  format (gemma4 native / `tool_code` / degraded `<|call:>`, hermes,
+  qwen3_coder) explicitly per model — don't trust auto-detect.
+- **Layer C — streaming parity**: SSE `delta.tool_calls[]` reassembled
+  must equal the non-streaming result for the same (prompt, seed) —
+  the vLLM #31871 / #21544 failure class.
+- **Layer D — agentic surface**: ≥ 3-turn loop, full `tool_choice`
+  matrix (auto / none / required / named), Anthropic `/v1/messages`
+  round-trip, N=4 concurrency (no cross-slot bleed), and a ≥ 16-tool
+  scale case.
+
+Harness deltas: `scenarios.py` gains S7 (`tool_choice` matrix), S8
+(multi-turn), S9 (forced-named) + `--format` / `--stream` /
+`--anthropic` / `--concurrency` flags; `assertions.py` gains the
+streaming-reassembly equality + multi-turn finish-reason chain; the
+Rust parser fuzz seeds from the T1 fixtures' raw bytes.
+
+**Merge gate**: Layer A green in CI; Layers B–D green live on the 4
+models / pp2tp2 / hip:0,2,1,3.
 
 ## Architectural-rule check (project root CLAUDE.md)
 
