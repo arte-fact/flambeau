@@ -33,6 +33,7 @@ fn session_qwen35_9b_q3_k_s_sd_finite_logits() {
             max_slots: 1,
             paged_kv_pages: None,
             kv_layout: flambeau_forward::KvLayout::F16Contig,
+            deterministic_ar: false,
         },
     )
     .expect("Session<Qwen35V2> SD");

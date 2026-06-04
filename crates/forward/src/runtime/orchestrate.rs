@@ -79,7 +79,11 @@ fn launch_tp<A: Arch>(
 ) -> Result<Vec<WorkerHandle<A>>> {
     let n = devices.len();
     let ar = Arc::new(ArCoordinator::new(n));
-    let bar = try_build_bar_ar(devices);
+    let bar = if params.deterministic_ar {
+        None
+    } else {
+        try_build_bar_ar(devices)
+    };
     let mut handles = Vec::with_capacity(n);
     for (rank, &dev) in devices.iter().enumerate() {
         let role = WorkerRole::Tp {
@@ -106,6 +110,13 @@ pub struct LaunchParams {
     pub max_slots: usize,
     pub paged_kv_pages: Option<usize>,
     pub kv_layout: crate::core::KvLayout,
+    /// Route TP/Hybrid AllReduce through the host-bounce coordinator
+    /// (DtoH → CPU sum → HtoD) instead of BAR1 P2P. The BAR1 aperture
+    /// read is non-coherent on gfx906 (see
+    /// `doc/DETERMINISM_INVESTIGATION.md`), so BAR1 AR is not bit-
+    /// reproducible at temp=0; host-bounce is. Costs the DtoH/HtoD
+    /// bytes BAR1 avoids — opt-in via the server `--deterministic` flag.
+    pub deterministic_ar: bool,
 }
 
 /// Shared runtime configuration for the topology launchers.
@@ -258,7 +269,11 @@ fn launch_hybrid<A: Arch>(
     for (stage_idx, ranks) in stages.iter().enumerate() {
         let tp_size = ranks.len();
         let ar = Arc::new(ArCoordinator::new(tp_size));
-        let bar = try_build_bar_ar(ranks);
+        let bar = if params.deterministic_ar {
+            None
+        } else {
+            try_build_bar_ar(ranks)
+        };
         let (layer_start, layer_end) = if !split.is_empty() {
             let s = layer_cursor;
             let count = split[stage_idx];

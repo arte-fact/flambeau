@@ -33,6 +33,7 @@ fn parity_dump_v2() {
                 max_slots: 1,
                 paged_kv_pages: None,
                 kv_layout: flambeau_forward::KvLayout::F16Contig,
+                deterministic_ar: false,
             },
         )
         .expect("Session SD");

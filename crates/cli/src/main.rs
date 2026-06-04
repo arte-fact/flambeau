@@ -216,6 +216,19 @@ enum Cmd {
         /// saving on decode; quality cert required per model).
         #[arg(long = "kv", env = "FLAMBEAU_KV", default_value = "f16")]
         kv: String,
+        /// Route TP/Hybrid AllReduce through the host-bounce path for
+        /// bit-reproducible greedy (temp=0) output. The BAR1 P2P AR is
+        /// non-coherent on gfx906 (see doc/DETERMINISM_INVESTIGATION.md);
+        /// this trades decode throughput for determinism.
+        #[arg(
+            long = "deterministic",
+            env = "FLAMBEAU_DETERMINISTIC",
+            value_parser = parse_bool_loose,
+            num_args = 0..=1,
+            default_value = "false",
+            default_missing_value = "true",
+        )]
+        deterministic: bool,
         /// Default system prompt prepended to chat-template requests
         /// when none is provided in the request.
         #[arg(long = "default-system", env = "FLAMBEAU_DEFAULT_SYSTEM")]
@@ -325,6 +338,7 @@ fn main() -> Result<()> {
             prefix_cache,
             prefix_cache_max_gb,
             kv,
+            deterministic,
             default_system,
             embedding_max_tokens,
         } => serve_cmd(ServeArgs {
@@ -349,6 +363,7 @@ fn main() -> Result<()> {
             prefix_cache,
             prefix_cache_max_gb,
             kv,
+            deterministic,
             default_system,
             embedding_max_tokens,
         })?,
@@ -384,6 +399,7 @@ struct ServeArgs {
     prefix_cache: bool,
     prefix_cache_max_gb: f64,
     kv: String,
+    deterministic: bool,
     default_system: Option<String>,
     embedding_max_tokens: usize,
 }
@@ -428,6 +444,7 @@ fn serve_cmd(args: ServeArgs) -> Result<()> {
         prefix_cache,
         prefix_cache_max_gb,
         kv,
+        deterministic,
         default_system,
         embedding_max_tokens,
     } = args;
@@ -535,6 +552,7 @@ fn serve_cmd(args: ServeArgs) -> Result<()> {
         prefix_cache,
         prefix_cache_max_gb,
         kv,
+        deterministic,
         default_system,
         embedding_max_tokens,
     };

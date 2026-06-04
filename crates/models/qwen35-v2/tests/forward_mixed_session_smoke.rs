@@ -52,6 +52,7 @@ fn session_forward_mixed_smoke() {
             max_slots,
             paged_kv_pages: None,
             kv_layout: flambeau_forward::KvLayout::F16Contig,
+            deterministic_ar: false,
         },
     )
     .expect("Session<Qwen35V2>::new");

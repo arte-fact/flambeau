@@ -349,6 +349,7 @@ fn init_rank<A: Arch>(
         max_slots,
         paged_kv_pages,
         kv_layout,
+        deterministic_ar: _,
     } = params;
     let device = HipDevice::new(device_id).context("HipDevice::new")?;
     device.bind().context("device.bind")?;
