@@ -9,7 +9,7 @@
         "content": "What's the weather in Paris right now?"
       },
       {
-        "content": null,
+        "content": "\n",
         "refusal": null,
         "role": "assistant",
         "annotations": null,
@@ -67,14 +67,14 @@
     "max_tokens": 128
   },
   "response": {
-    "id": "chatcmpl-1780572397",
+    "id": "chatcmpl-1780583282",
     "choices": [
       {
         "finish_reason": "stop",
         "index": 0,
         "logprobs": null,
         "message": {
-          "content": "The current weather in Paris is 18\u00b0C with overcast skies.",
+          "content": "thought:\n}The current weather in Paris is 18\u00b0C with overcast skies.",
           "refusal": null,
           "role": "assistant",
           "annotations": null,
@@ -84,15 +84,15 @@
         }
       }
     ],
-    "created": 1780572397,
+    "created": 1780583283,
     "model": "gemma-4-26B-A4B-it-Q8_0",
     "object": "chat.completion",
     "service_tier": null,
     "system_fingerprint": null,
     "usage": {
-      "completion_tokens": 16,
+      "completion_tokens": 19,
       "prompt_tokens": 195,
-      "total_tokens": 211,
+      "total_tokens": 214,
       "completion_tokens_details": null,
       "prompt_tokens_details": null
     }
@@ -106,7 +106,7 @@
     {
       "name": "content non-empty",
       "pass": true,
-      "detail": "len=57"
+      "detail": "len=67"
     },
     {
       "name": "content mentions Paris",

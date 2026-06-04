@@ -62,7 +62,7 @@
     "max_tokens": 256
   },
   "response": {
-    "id": "chatcmpl-1780572395",
+    "id": "chatcmpl-1780583280",
     "choices": [
       {
         "finish_reason": "tool_calls",
@@ -79,7 +79,7 @@
             {
               "id": "call_0",
               "function": {
-                "arguments": "{\"query\":\"ROCm 7.2 latest news release updates\"}",
+                "arguments": "{\"query\":\"ROCm 7.2 latest news release details\"}",
                 "name": "search_web"
               },
               "type": "function"
@@ -88,15 +88,15 @@
         }
       }
     ],
-    "created": 1780572396,
+    "created": 1780583281,
     "model": "gemma-4-26B-A4B-it-Q8_0",
     "object": "chat.completion",
     "service_tier": null,
     "system_fingerprint": null,
     "usage": {
-      "completion_tokens": 26,
+      "completion_tokens": 29,
       "prompt_tokens": 182,
-      "total_tokens": 208,
+      "total_tokens": 211,
       "completion_tokens_details": null,
       "prompt_tokens_details": null
     }
@@ -125,7 +125,7 @@
     {
       "name": "arguments.query mentions ROCm or 7.2",
       "pass": true,
-      "detail": "query='ROCm 7.2 latest news release updates'"
+      "detail": "query='ROCm 7.2 latest news release details'"
     }
   ],
   "verdict": "pass"

@@ -177,50 +177,87 @@ impl Gemma4ToolCallParser {
         prompt.trim_end().ends_with(CHANNEL_CLOSE)
     }
 
-    /// Strip the gemma4 `thought\n<channel|>` echo prefix once, if
-    /// present, then clear the guard so it never fires again on the
-    /// same parser. Tolerates streaming: if not enough bytes have
-    /// landed to disambiguate, leaves the buffer untouched and returns
-    /// false; the next `push()` retries. Once enough bytes are
-    /// available, accepts any of:
-    /// - `<channel|>...` — bare close, drop just the close.
-    /// - `thought\n<channel|>...` — full echo, drop both.
-    /// - anything else — clear the guard, the model is going straight
-    ///   to a reply without echoing.
+    /// Strip the gemma4 forced-thought echo prefix once, then disarm.
+    ///
+    /// The chat template ends the generation prompt with
+    /// `<|channel>thought\n<channel|>`. gemma4 then frequently echoes a
+    /// corrupted form of that tail before the real reply. Observed live
+    /// on gemma4-26B: `thought\n…`, `thought**\n…`, `thought>\n…`,
+    /// `thought\n<channel|>…`, and bare `<channel|>…`. The `**` / `>`
+    /// are the model's garbled attempt at re-emitting `<channel|>`.
+    ///
+    /// Rule: when the buffer starts with `thought`, the inter-text up to
+    /// the first newline is treated as a garbled close ONLY if it
+    /// contains no alphanumerics — so a real word (`thoughts`,
+    /// `thought experiments`) is preserved. The whole
+    /// `thought<junk>\n` run is dropped; anything after the newline is
+    /// the reply. A bare `<channel|>` echo is dropped too. Streaming:
+    /// wait while the buffer is still a strict prefix of an echo form.
     fn try_consume_echo_prefix(&mut self, is_finish: bool) {
         if !self.pending_thought_echo {
             return;
         }
-        const ECHO_FULL: &str = "thought\n<channel|>";
-        if self.buf.starts_with(ECHO_FULL) {
-            self.buf.drain(..ECHO_FULL.len());
-            self.pending_thought_echo = false;
-            return;
-        }
+        const THOUGHT: &str = "thought";
+        // Bare `<channel|>` close echo.
         if self.buf.starts_with(CHANNEL_CLOSE) {
             self.buf.drain(..CHANNEL_CLOSE.len());
             self.pending_thought_echo = false;
             return;
         }
-        // Streaming guard: while more bytes might still land that
-        // complete the echo, wait. At EOF (`is_finish`) we have to
-        // make a call.
-        let is_strict_prefix = !self.buf.is_empty()
-            && (ECHO_FULL.starts_with(self.buf.as_str())
-                || CHANNEL_CLOSE.starts_with(self.buf.as_str()));
-        if is_strict_prefix && !is_finish {
+        // Still buffering toward a recognizable echo opener — wait.
+        if !is_finish
+            && !self.buf.is_empty()
+            && (CHANNEL_CLOSE.starts_with(self.buf.as_str())
+                || THOUGHT.starts_with(self.buf.as_str()))
+        {
             return;
         }
-        if is_strict_prefix && is_finish {
-            // The model emitted a truncated echo prefix and then
-            // stopped (e.g. just `thought`). Drop it — it was meant to
-            // be reasoning, not content.
-            self.buf.clear();
-            self.pending_thought_echo = false;
+        if self.buf.starts_with(THOUGHT) {
+            // Marker characters a garbled `<channel|>` collapses to.
+            // A real word (`thought-provoking`, `thoughts`) continues
+            // with an alphanumeric or word-punctuation char instead.
+            const MARKER_JUNK: &[char] = &['<', '>', '|', '*'];
+            let rest = &self.buf[THOUGHT.len()..];
+            match rest.chars().next() {
+                None => {
+                    // Bare `thought` — wait for more, or drop at EOF.
+                    if is_finish {
+                        self.buf.clear();
+                        self.pending_thought_echo = false;
+                    }
+                }
+                Some('\n') => {
+                    // `thought\n…` — strip `thought` + the newline.
+                    self.buf.drain(..THOUGHT.len() + 1);
+                    self.pending_thought_echo = false;
+                }
+                Some(c) if MARKER_JUNK.contains(&c) => {
+                    // `thought**\n…` / `thought>\n…` — garbled close.
+                    match rest.find('\n') {
+                        Some(nl) if rest[..nl].chars().all(|c| MARKER_JUNK.contains(&c)) => {
+                            self.buf.drain(..THOUGHT.len() + nl + 1);
+                            self.pending_thought_echo = false;
+                        }
+                        Some(_) => {
+                            // Junk run contains non-marker bytes — not a
+                            // clean echo; keep it as content.
+                            self.pending_thought_echo = false;
+                        }
+                        None if is_finish => {
+                            self.buf.clear();
+                            self.pending_thought_echo = false;
+                        }
+                        None => { /* wait for the newline */ }
+                    }
+                }
+                Some(_) => {
+                    // Real word/sentence starting `thought…` — keep.
+                    self.pending_thought_echo = false;
+                }
+            }
             return;
         }
-        // Any other content: the model isn't echoing. Disarm so the
-        // first byte lands in `content` (or starts a tool call).
+        // Not an echo opener — disarm and let the reply flow.
         self.pending_thought_echo = false;
     }
 
@@ -792,6 +829,12 @@ impl ToolCallParser for Gemma4ToolCallParser {
         }
         self.buf.push_str(chunk);
         self.try_consume_echo_prefix(/*is_finish=*/ false);
+        if self.pending_thought_echo {
+            // Still resolving the forced-thought echo prefix; hold the
+            // buffer rather than letting drain() emit a partial echo
+            // (`thought`) as text. finish() forces a decision at EOF.
+            return Vec::new();
+        }
         let mut out = Vec::new();
         self.drain(&mut out, /*is_finish=*/ false);
         out
@@ -1135,6 +1178,71 @@ mod tests {
             })
             .collect();
         assert_eq!(text, "The answer is 42.");
+    }
+
+    fn echo_text(input: &str) -> String {
+        let mut p = Gemma4ToolCallParser::with_pending_channel_close();
+        let mut events = p.push(input);
+        events.extend(p.finish());
+        ParserEvent::coalesce(events)
+            .iter()
+            .filter_map(|e| match e {
+                ParserEvent::TextDelta(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn with_pending_channel_close_garbled_close_variants() {
+        // Live gemma4-26B shapes: `thought` + a garbled `<channel|>`
+        // (`**`, `>`, bare) + newline, then the reply.
+        assert_eq!(
+            echo_text("thought\nThe three primary colors are red."),
+            "The three primary colors are red."
+        );
+        assert_eq!(
+            echo_text("thought**\nThe boiling point is 100C."),
+            "The boiling point is 100C."
+        );
+        assert_eq!(echo_text("thought>\nHola."), "Hola.");
+        assert_eq!(
+            echo_text("thought\n<channel|>The answer is Paris."),
+            "The answer is Paris."
+        );
+    }
+
+    #[test]
+    fn with_pending_channel_close_real_thought_word_preserved() {
+        // A genuine reply that merely starts with `thought…` must NOT be
+        // stripped — divergence at the first alphanumeric after `thought`.
+        assert_eq!(
+            echo_text("thoughts are mental processes."),
+            "thoughts are mental processes."
+        );
+        assert_eq!(
+            echo_text("thought experiments are useful."),
+            "thought experiments are useful."
+        );
+    }
+
+    #[test]
+    fn with_pending_channel_close_garbled_streaming_char_by_char() {
+        let input = "thought**\nThe boiling point is 100C.";
+        let mut p = Gemma4ToolCallParser::with_pending_channel_close();
+        let mut out: Vec<ParserEvent> = Vec::new();
+        for ch in input.chars() {
+            out.extend(p.push(&ch.to_string()));
+        }
+        out.extend(p.finish());
+        let text: String = ParserEvent::coalesce(out)
+            .iter()
+            .filter_map(|e| match e {
+                ParserEvent::TextDelta(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "The boiling point is 100C.");
     }
 
     #[test]
