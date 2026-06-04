@@ -62,32 +62,41 @@
     "max_tokens": 256
   },
   "response": {
-    "id": "chatcmpl-1780558094",
+    "id": "chatcmpl-1780572395",
     "choices": [
       {
-        "finish_reason": "stop",
+        "finish_reason": "tool_calls",
         "index": 0,
         "logprobs": null,
         "message": {
-          "content": "Find me the latest news about ROCm 7.2.",
+          "content": null,
           "refusal": null,
           "role": "assistant",
           "annotations": null,
           "audio": null,
           "function_call": null,
-          "tool_calls": null
+          "tool_calls": [
+            {
+              "id": "call_0",
+              "function": {
+                "arguments": "{\"query\":\"ROCm 7.2 latest news release updates\"}",
+                "name": "search_web"
+              },
+              "type": "function"
+            }
+          ]
         }
       }
     ],
-    "created": 1780558096,
+    "created": 1780572396,
     "model": "gemma-4-26B-A4B-it-Q8_0",
     "object": "chat.completion",
     "service_tier": null,
     "system_fingerprint": null,
     "usage": {
-      "completion_tokens": 52,
+      "completion_tokens": 26,
       "prompt_tokens": 182,
-      "total_tokens": 234,
+      "total_tokens": 208,
       "completion_tokens_details": null,
       "prompt_tokens_details": null
     }
@@ -95,14 +104,29 @@
   "checks": [
     {
       "name": "finish_reason=tool_calls",
-      "pass": false,
-      "detail": "got 'stop'"
+      "pass": true,
+      "detail": "got 'tool_calls'"
     },
     {
       "name": "exactly one tool_call",
-      "pass": false,
-      "detail": "len=0"
+      "pass": true,
+      "detail": "len=1"
+    },
+    {
+      "name": "routed to search_web",
+      "pass": true,
+      "detail": "name='search_web'"
+    },
+    {
+      "name": "arguments parses",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "arguments.query mentions ROCm or 7.2",
+      "pass": true,
+      "detail": "query='ROCm 7.2 latest news release updates'"
     }
   ],
-  "verdict": "fail"
+  "verdict": "pass"
 }

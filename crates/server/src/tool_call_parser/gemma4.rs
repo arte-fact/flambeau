@@ -28,6 +28,25 @@
 //! between them surfaces as [`ParserEvent::ThinkDelta`] and is dropped
 //! from the assistant `content` field.
 //!
+//! Alternate `tool_code` block (agent-prose convention):
+//!
+//! ```text
+//! <|tool_code|>NAME
+//! {"arg":"value"}
+//! </tool_code>
+//! ```
+//!
+//! `<|tool_code|>` is **not** a trained gemma special token — the model
+//! emits it as plain text when a coding agent describes its tools in the
+//! prompt using the Gemini-CLI "tool_code" convention instead of the
+//! native `tools` array (which renders the `<|tool_call>` form above).
+//! The first line after the open is the function name; the remainder is
+//! a JSON arguments object. We recognize this shape so flambeau is a
+//! drop-in for those agents — strictly additive: the native
+//! `<|tool_call>` path is unchanged, and a block we can't structure
+//! (no name tag, no JSON object) is surfaced verbatim rather than
+//! silently dropped.
+//!
 //! The parser is streaming + deterministic across chunk boundaries: the
 //! same byte stream pushed in any chunk decomposition produces the same
 //! event sequence after [`ParserEvent::coalesce`]. The buffer-before-emit
@@ -54,16 +73,25 @@ enum State {
     InArgs,
     /// Saw the matching `}`, awaiting `<tool_call|>` close.
     AwaitingClose,
+    /// Saw `<|tool_code|>`, buffering until `</tool_code>`.
+    InToolCode,
 }
 
 /// Tags watched while in [`State::Text`]. Order doesn't matter; the
 /// parser picks the earliest match.
-const TEXT_OPEN_TAGS: &[&str] = &["<|tool_call>", "<|channel>", CHANNEL_CLOSE];
+const TEXT_OPEN_TAGS: &[&str] = &[
+    "<|tool_call>",
+    "<|channel>",
+    CHANNEL_CLOSE,
+    TOOL_CODE_OPEN,
+];
 
 const CALL_PREFIX: &str = "call:";
 const STRING_QUOTE: &str = "<|\"|>";
 const TOOL_CALL_CLOSE: &str = "<tool_call|>";
 const CHANNEL_CLOSE: &str = "<channel|>";
+const TOOL_CODE_OPEN: &str = "<|tool_code|>";
+const TOOL_CODE_CLOSE: &str = "</tool_code>";
 
 pub struct Gemma4ToolCallParser {
     state: State,
@@ -204,6 +232,7 @@ impl Gemma4ToolCallParser {
                 State::InCallHeader => self.step_in_call_header(out),
                 State::InArgs => self.step_in_args(out),
                 State::AwaitingClose => self.step_awaiting_close(out),
+                State::InToolCode => self.step_in_tool_code(out, is_finish),
             };
             if !progress {
                 return;
@@ -224,6 +253,7 @@ impl Gemma4ToolCallParser {
             self.state = match tag {
                 "<|tool_call>" => State::InCallHeader,
                 "<|channel>" => State::InChannel,
+                t if t == TOOL_CODE_OPEN => State::InToolCode,
                 // The chat template ends with `<|channel>thought\n<channel|>`,
                 // so the model's first emitted token is often a stuttered
                 // `<channel|>`. With no preceding `<|channel>` open, we're
@@ -436,6 +466,53 @@ impl Gemma4ToolCallParser {
         // Could be a prefix; hold.
         false
     }
+
+    fn step_in_tool_code(&mut self, out: &mut Vec<ParserEvent>, is_finish: bool) -> bool {
+        if let Some(pos) = self.buf.find(TOOL_CODE_CLOSE) {
+            let block = self.buf[..pos].to_owned();
+            self.buf.drain(..pos + TOOL_CODE_CLOSE.len());
+            self.state = State::Text;
+            self.emit_tool_code_block(out, &block, /*include_close=*/ true);
+            return true;
+        }
+        // No close marker yet. Hold for more input unless this is EOF, in
+        // which case parse what we have (the model may have stopped before
+        // the close, or the close was dropped).
+        if is_finish {
+            let block = std::mem::take(&mut self.buf);
+            self.state = State::Text;
+            self.emit_tool_code_block(out, &block, /*include_close=*/ false);
+            return true;
+        }
+        false
+    }
+
+    /// Turn a buffered `<|tool_code|>` block body into a tool call, or
+    /// surface it verbatim if it can't be structured. `include_close`
+    /// controls whether a leaked block re-appends `</tool_code>` (only
+    /// when the close was actually present in the stream).
+    fn emit_tool_code_block(&mut self, out: &mut Vec<ParserEvent>, block: &str, include_close: bool) {
+        if let Some((name, args)) = parse_tool_code_block(block) {
+            out.push(ParserEvent::ToolCallOpen {
+                index: self.next_index,
+                name,
+            });
+            out.push(ParserEvent::ToolCallArgumentsDelta {
+                index: self.next_index,
+                arguments: args,
+            });
+            out.push(ParserEvent::ToolCallClose {
+                index: self.next_index,
+            });
+            self.next_index += 1;
+            return;
+        }
+        let mut leak = format!("{TOOL_CODE_OPEN}{block}");
+        if include_close {
+            leak.push_str(TOOL_CODE_CLOSE);
+        }
+        emit_text(out, &leak);
+    }
 }
 
 /// Parse a gemma4 args-body (everything between the outer `{` and
@@ -620,6 +697,55 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// Parse a `<|tool_code|>` block body into `(name, json_arguments)`.
+///
+/// Accepts the Gemini-CLI agent-prose convention:
+/// ```text
+/// NAME
+/// {"arg":"value"}
+/// ```
+/// The first identifier-shaped token is the function name; the first
+/// JSON object after it is the arguments. Tolerates stuttered open
+/// markers and a ```` ```tool_code ```` markdown fence the model may
+/// have re-emitted inside the block. Returns `None` when there's no
+/// identifier name or no parseable JSON object — the caller then
+/// surfaces the block verbatim rather than fabricating a call.
+fn parse_tool_code_block(block: &str) -> Option<(String, String)> {
+    let mut s = block.trim();
+    // Strip stuttered open markers + markdown fences the model repeats.
+    loop {
+        let trimmed = s.trim_start();
+        let next = trimmed
+            .strip_prefix(TOOL_CODE_OPEN)
+            .or_else(|| trimmed.strip_prefix("```tool_code"))
+            .or_else(|| trimmed.strip_prefix("```"));
+        match next {
+            Some(rest) => s = rest,
+            None => break,
+        }
+    }
+    let s = s.trim();
+    let brace = s.find('{')?;
+    let name = first_identifier(&s[..brace])?;
+    // Read the first JSON value, ignoring any trailing bytes (a closing
+    // fence, stray whitespace, the model continuing past the object).
+    let mut stream = serde_json::Deserializer::from_str(&s[brace..]).into_iter::<Value>();
+    match stream.next() {
+        Some(Ok(v @ Value::Object(_))) => Some((name, serde_json::to_string(&v).ok()?)),
+        _ => None,
+    }
+}
+
+/// First `[A-Za-z0-9_]+` run in `s`, or `None` if there is none.
+fn first_identifier(s: &str) -> Option<String> {
+    let id: String = s
+        .chars()
+        .skip_while(|c| !(c.is_ascii_alphanumeric() || *c == '_'))
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
+    (!id.is_empty()).then_some(id)
+}
+
 fn emit_text(out: &mut Vec<ParserEvent>, s: &str) {
     if !s.is_empty() {
         out.push(ParserEvent::TextDelta(s.to_owned()));
@@ -703,8 +829,9 @@ impl ToolCallParser for Gemma4ToolCallParser {
                 self.next_index += 1;
                 self.state = State::Text;
             }
-            State::InChannel | State::Text => {
-                // Already drained on is_finish=true above.
+            State::InChannel | State::Text | State::InToolCode => {
+                // Already drained on is_finish=true above (InToolCode's
+                // EOF leak/parse is handled inside step_in_tool_code).
             }
         }
         out
@@ -720,6 +847,90 @@ mod tests {
         let mut out = p.push(input);
         out.extend(p.finish());
         ParserEvent::coalesce(out)
+    }
+
+    fn tool_call_of(events: &[ParserEvent]) -> Option<(String, String)> {
+        let name = events.iter().find_map(|e| match e {
+            ParserEvent::ToolCallOpen { name, .. } => Some(name.clone()),
+            _ => None,
+        })?;
+        let args = events.iter().find_map(|e| match e {
+            ParserEvent::ToolCallArgumentsDelta { arguments, .. } => Some(arguments.clone()),
+            _ => None,
+        })?;
+        Some((name, args))
+    }
+
+    fn text_of(events: &[ParserEvent]) -> String {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                ParserEvent::TextDelta(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn tool_code_block_json_body() {
+        // The shape a Gemini-CLI-style agent provokes from gemma.
+        let events = collect("<|tool_code|>bash\n{\"command\": \"ls -R\"}\n</tool_code>");
+        let (name, args) = tool_call_of(&events).expect("tool call");
+        assert_eq!(name, "bash");
+        assert_eq!(args, r#"{"command":"ls -R"}"#);
+        assert!(text_of(&events).is_empty(), "no text leak");
+    }
+
+    #[test]
+    fn tool_code_block_stuttered_open() {
+        // Models often double the open marker, with a leading space.
+        let events = collect(" <|tool_code|> <|tool_code|>bash\n{\"command\": \"ls -R\"}\n</tool_code>");
+        let (name, args) = tool_call_of(&events).expect("tool call");
+        assert_eq!(name, "bash");
+        assert_eq!(args, r#"{"command":"ls -R"}"#);
+    }
+
+    #[test]
+    fn tool_code_named_tool() {
+        let events =
+            collect("<|tool_code|>run_shell_command\n{\"command\":\"ls\"}\n</tool_code>");
+        let (name, args) = tool_call_of(&events).expect("tool call");
+        assert_eq!(name, "run_shell_command");
+        assert_eq!(args, r#"{"command":"ls"}"#);
+    }
+
+    #[test]
+    fn tool_code_no_close_at_eof_still_parses() {
+        // Model stopped before emitting </tool_code>; finish() should
+        // still lift the call from what it has.
+        let events = collect("<|tool_code|>bash\n{\"command\":\"ls\"}");
+        let (name, _) = tool_call_of(&events).expect("tool call");
+        assert_eq!(name, "bash");
+    }
+
+    #[test]
+    fn tool_code_unparseable_leaks_verbatim() {
+        // No JSON object → can't structure → surface verbatim, no fake
+        // tool call.
+        let events = collect("<|tool_code|>python\nprint('hi')\n</tool_code>");
+        assert!(tool_call_of(&events).is_none());
+        assert!(
+            text_of(&events).contains("print('hi')"),
+            "block should surface: {events:#?}"
+        );
+    }
+
+    #[test]
+    fn tool_code_streaming_char_by_char() {
+        let input = "<|tool_code|>bash\n{\"command\":\"ls -R\"}\n</tool_code>";
+        let one_shot = collect(input);
+        let mut p = Gemma4ToolCallParser::new();
+        let mut out: Vec<ParserEvent> = Vec::new();
+        for ch in input.chars() {
+            out.extend(p.push(&ch.to_string()));
+        }
+        out.extend(p.finish());
+        assert_eq!(ParserEvent::coalesce(out), one_shot);
     }
 
     #[test]

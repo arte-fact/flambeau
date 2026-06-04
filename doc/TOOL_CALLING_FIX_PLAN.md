@@ -150,31 +150,27 @@ Harness at `scripts/tool_test/{run.py, scenarios.py, assertions.py}`;
    format. Compare T3 work against gemma4-26B-A4B fixture (which DOES
    produce native format — parser path is OK there).
 
-2. **gemma4-26B-A4B MoE — channel-leak in non-tool-call turns**
-   (PARTIALLY FIXED in T2). The chat template ends the prompt with
-   `<|channel>thought\n<channel|>` (a closed empty thought block) when
-   `add_generation_prompt=true` and reasoning is disabled. The model
-   often *echoes* `thought\n<channel|>` (or just `<channel|>`) as the
-   first decoded bytes, leaking `thought\n` into `content`. T2 ships
-   `Gemma4ToolCallParser::with_pending_channel_close()` plus a
-   `prompt_ends_with_channel_close()` detector; the dispatcher
-   (`dispatcher_with_prompt`) inspects the rendered prompt and
-   primes the parser to drop the leading echo. Net on gemma4-26B:
-   - S1, S4, S5, S6: PASS (echo cleanly absorbed; tool calls land
-     intact; plain chat free of channel markers).
-   - S2: still fails sometimes — model decides not to call any tool
-     for the "Find me the latest news" prompt and repeats the user
-     query back verbatim. Not a parser bug; it's a chat-template
-     issue (the tools section may be confusing the model). Defer to
-     a follow-up template slice.
-   - S3 (round-trip): still fails on a finish-reason=length cut-off
-     because the model produces ~200 tokens of inline narrative
-     (`thought\nThe user is asking...\nNow I should formulate a
-     response...\nResponse: "The current weather in Paris..."`)
-     before reaching the final answer, exceeding max_tokens=128.
-     This is gemma4's *inline reasoning* pattern — distinct from the
-     `<|channel>`-marker leak — and isn't reachable from the echo
-     guard. Same follow-up template work as S2.
+2. **gemma4-26B-A4B MoE — channel-leak echo** (FIXED in T2). The chat
+   template ends the prompt with `<|channel>thought\n<channel|>` (a
+   closed empty thought block) when `add_generation_prompt=true` and
+   reasoning is disabled. The model often *echoes* `thought\n<channel|>`
+   (or just `<channel|>`) as the first decoded bytes, leaking
+   `thought\n` into `content`. T2 ships:
+   - `Gemma4ToolCallParser::with_pending_channel_close()` — primes the
+     parser with `pending_thought_echo=true`.
+   - `try_consume_echo_prefix(is_finish)` — drops the leading echo
+     once, accepting `thought\n<channel|>` (full echo), `<channel|>`
+     (bare close), or any other byte (disarm, pass through). At
+     `is_finish`, also drops a truncated prefix like just `thought`.
+   - `Gemma4ToolCallParser::prompt_ends_with_channel_close(&str)` —
+     cheap byte-suffix check; dispatcher calls it once per request.
+   - `dispatcher_with_prompt(...)` — inspects the rendered prompt and
+     picks the primed constructor when the tail is `<channel|>`. Non-
+     gemma4 formats ignore the hint (qwen3.x prompts never end in
+     `<channel|>`).
+   Result on gemma4-26B: **6/6 scenarios PASS** (was 4/6 pre-T2).
+   Same wiring covers any future gemma4-* GGUF whose template uses
+   the same forced-empty-thought prefix.
 
 3. **All 4 models — `tool_choice="none"` was ignored** (FIXED in T2.5).
    `req.tool_choice` was parsed but never read in either
@@ -249,31 +245,68 @@ and a side-by-side diff doc, same shape as `qwen35moe_tools/`.
 
 **No kernel work.**
 
-### T3 — Gemma4 parser fixture parity
+### T3 — Gemma4 `tool_code` block parser — COMPLETE
 
-Goal: lift the existing `Gemma4ToolCallParser` (823 LOC) to
-bit-equal correctness against the captured T1 fixture.
+Goal: lift the agent-prose `tool_code` block shape into `tool_calls[]`.
 
-Inspect what `gemma4.rs` currently parses vs. what the live capture
-shows. Hypothesis (from llama-cpp-python #2227): the parser is
-matching a documented spec but the model emits a slightly different
-byte stream (probably `<|"|>` quoting vs raw quote handling). The
-fixture-driven test will surface the exact divergence.
+**What prompted it.** A real coding agent driving gemma-4-31B produced
+a broken call:
 
-**Sub-slices**:
-- T3a: build a `cargo run -p bench -- tool-call-cert --arch gemma4`
-  that replays the fixture through the parser and emits a structured
-  diff (`expected_tool_calls` vs `got_tool_calls`).
-- T3b: fix whatever the diff surfaces (likely: `<|"|>` string-quote
-  state machine, `,` separator inside `{...}`, multi-arg ordering,
-  or the closing `<tool_call|>` boundary scan).
-- T3c: lock the parity test in
-  `crates/server/src/tool_call_parser/gemma4.rs` `#[cfg(test)]` so
-  future template changes can't silently regress.
+```text
+<|tool_code|> <|tool_code|>bash
+{ "command": "ls -R" }
+</tool_code>
+```
 
-**Hard rule from llama.cpp #20198**: emit `arguments` as a JSON string,
-not a JSON object — keep our existing serialisation if it already
-matches OpenAI; verify in the parity diff.
+`tool_calls: None`; the whole thing leaked into `content`.
+
+**Diagnosis (confirmed live).**
+- `<|tool_code|>` is **not** a gemma special token. The only tool
+  tokens are IDs 46–51 (`<|tool_call>`, `<tool_call|>`,
+  `<|tool_response>`, …). The model emits `<|tool_code|>` as plain
+  text — echoing the *agent's own* Gemini-CLI "tool_code" convention.
+- With the OpenAI `tools` array (native template renders `<|tool_call>`
+  instructions) gemma-4-31B emits the correct native form and the
+  existing parser lifts it. Reproduced live:
+  `run_shell_command{command:"ls -R"}` → clean `tool_calls[]`.
+- The failure only happens when the agent describes tools in **prose**
+  with the `tool_code` convention and bypasses the tools array. This
+  matches llama.cpp's posture (it keys its PEG parser off the
+  *template*, not the output; PR #21326), so llama.cpp hits the same
+  leak — abetlen/llama-cpp-python #2227.
+
+**Fix (strictly additive to `Gemma4ToolCallParser`).**
+- New `State::InToolCode` + `TOOL_CODE_OPEN`/`TOOL_CODE_CLOSE` consts;
+  `<|tool_code|>` joins `TEXT_OPEN_TAGS`.
+- `step_in_tool_code` buffers to `</tool_code>` (or EOF), then
+  `parse_tool_code_block` extracts `(name, json_args)`: first
+  identifier-shaped line = function name, first JSON object =
+  arguments. Tolerates a stuttered open marker, a leading space, and a
+  ```` ```tool_code ```` markdown fence.
+- A block with no identifier name or no JSON object is surfaced
+  **verbatim** (`emit_tool_code_block(..., include_close)`), never a
+  fabricated call — so `print('hi')`-style Python `tool_code` bodies
+  fall through to `content` instead of mis-parsing.
+- `arguments` stays a JSON **string** (llama.cpp #20198 contract,
+  already enforced framework-wide).
+
+**Native path unchanged.** Different marker, different state; the
+`<|tool_call>` happy-path tests + gemma4-26B 6/6 sweep are untouched.
+
+**Verified.**
+- 6 new unit tests (json body, stuttered open, named tool, no-close
+  EOF, unparseable-leaks-verbatim, char-by-char streaming parity);
+  full gemma4 parser suite 21/21, server parser suite 56/56.
+- Live on gemma-4-31B-Q8_0 pp2tp2/hip:0,2,1,3: the exact failing
+  agent request now returns
+  `tool_calls:[{name:bash, arguments:{"command":"ls -R"}}]`,
+  `finish_reason=tool_calls`, with the model's reasoning preamble in
+  `content`.
+- Live regression: gemma-4-26B-A4B native sweep still 6/6.
+
+This makes flambeau **more permissive than llama.cpp** for
+Gemini-CLI/opencode-style agents, at the cost of one heuristic the
+template-driven design otherwise avoids — an explicit, tested choice.
 
 ### T4 — Qwen3.6 parser regression hunt
 
