@@ -101,28 +101,61 @@ layer deeper: there the fix was a producer-side `producer_done_event`;
 here even full producer drain is not enough, because the missing
 ordering is a consumer-side *acquire*, not a producer-side *release*.
 
-## Fix directions (NOT implemented — cert-gated kernel work, user's call)
+## Attempted fix #1 — reader-side coherent load (NULL, 2026-06-04)
 
-1. **Reader-side acquire + producer-side release fence** (the real
-   fix). `sum_tp{2,4}_f32_rank` needs a `__threadfence_system()`
-   acquire before/around the peer-pointer reads, paired with a
-   system-scope release after the producer writes its partial. This
-   keeps the fast event path (no host `Stream::synchronize`, no decode
-   perf regression) while making the BAR1 read coherent. Kernel change
-   in `kernels-hip` + correctness sweep + a **determinism regression
-   test** (md5 of greedy decode ×20 must collapse to one hash on a
-   known near-tie prompt). Multi-session, cert-gated per CLAUDE.md
-   rules 2 + "ask before destructive actions".
+Hypothesis: the reader's L2 holds a stale line for the BAR1-mapped peer
+address (the partial buffers are reused every layer), so a coherent
+(glc) load on the consumer would fix it. Implemented by marking every
+peer pointer in the AR kernels (`p2p_allreduce_residual*.cu`,
+`p2p_allreduce_residual_rmsnorm*.cu`) `volatile` — staging F16/__half2
+reads through a width-matched integer load + bit-cast helper
+(`p2p_coherent_load.cuh`) since HIP's `__half2` can't copy-construct
+from a volatile lvalue. `volatile` global loads emit the `glc` bit on
+gfx906.
 
-2. **Pin accumulation order** in `sum_tp4_f32_rank` (tp4 path only —
-   tp2 is already commutative). Cheap, complementary to (1); does
-   nothing on its own for the tp2/pp2tp2 cases measured here.
+Result — **NULL**. No measurable change:
+
+| Config | Without fix | With reader-glc |
+|--------|-------------|-----------------|
+| pp2tp2, event path | (random) | **8 distinct / 20** |
+| pp2tp2, host-sync | 10 distinct / 20 | **6 distinct / 20** |
+
+Reader-glc combined with host-sync (full producer drain to HBM) is
+still 6 distinct / 20 — indistinguishable from host-sync alone. The
+change was reverted (it adds a glc/L2-bypass cost for zero benefit).
+
+**What the null tells us:** the bug is *not* reader-side L2 staleness,
+and *not* producer-kernel-completion ordering — it survives both a
+reader acquire *and* a full producer `Stream::synchronize`. The only
+remaining gap is a **producer-side L2→HBM writeback**: `synchronize`
+guarantees the producer *kernel finished*, but on gfx906 the partial
+can still sit in the *producer's* L2 unwritten-back, while a peer reads
+the producer's *HBM* through the BAR1 aperture and gets stale bytes. No
+reader-side fence can close that.
+
+## Fix directions (refined; NOT implemented — cert-gated, user's call)
+
+1. **Producer-side system-scope release** (the real fix, per the null
+   above). Each kernel that produces an AR partial (attention output
+   proj, MoE/FFN down proj, …) must `__threadfence_system()` after its
+   final store *or* the AR path must insert an explicit L2 writeback
+   (`__builtin_amdgcn_s_dcache_wb` / `buffer_wbinvl2`-equivalent, a
+   tiny per-rank launch) between producer and the peer reads. This is
+   the invasive part — it touches every producer feeding an AR, or adds
+   a flush op to the AR coordinator — which is why it is multi-session,
+   cert-gated kernel work (CLAUDE.md rule 2 + "ask before destructive
+   actions"). A reader-side acquire alone is proven insufficient.
+
+2. **Pin accumulation order** in `sum_tp4_f32_rank` (tp4 only — tp2 is
+   commutative). Complementary; not sufficient alone for the cases here.
 
 3. **Host-sync everywhere** (`EVENT_PATH_MAX_ELEMS = 0`) is **NOT a
-   fix** — this investigation shows it leaves the output multi-modal
-   random. It also costs the decode-decoupling lever the event path
-   exists for. Do not ship it as a correctness toggle; it does not
-   restore determinism.
+   fix** — it leaves the output multi-modal random and costs the
+   decode-decoupling lever. Do not ship it as a correctness toggle.
+
+The acceptance gate for any fix: the near-tie prompt (`"Spell cat"` on
+gemma-4-26B-A4B-Q8_0) decoded ×20 at temp=0 must collapse to a single
+md5. Confident prompts already pass with the bug present.
 
 ## A note on the determinism regression test
 
