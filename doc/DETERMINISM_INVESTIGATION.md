@@ -241,6 +241,21 @@ coherent (`c-a-t (cat)…`). Without the flag the same prompt gave 6–10
 distinct hashes. Commit `c06b189`. Off by default — it trades the
 DtoH/HtoD decode-throughput cost for determinism; enable per deployment.
 
+**Throughput cost (measured 2026-06-04).** Same GGUF / GPUs / driver /
+prompt (~3020-char, pp ≥ 512), tg = 128, streaming decode-rate isolation
+(inter-token interval, excludes TTFT), 5-run median:
+
+| AR path | decode tps | TTFT |
+|---------|-----------|------|
+| default (BAR1 P2P) | **40.72** (40.10–41.17) | ~1.19 s |
+| `--deterministic` (host-bounce) | **30.57** (28.66–31.25) | ~1.84 s |
+
+≈ **−25 % decode throughput** (BAR1 is 1.33×) and ~**+0.65 s TTFT**
+(prefill ARs also route host-bounce). The cost is the DtoH→CPU-sum→HtoD
+bytes per AR call that BAR1 P2P exists to avoid — which is exactly why
+fix direction #2 (a real producer L2→DRAM writeback keeping the on-device
+BAR1 path) is the long-term win if determinism is needed without the hit.
+
 ## Fix directions (post-diagnostic)
 
 1. **Host-bounce AR for the affected path (guaranteed-correct fallback —
