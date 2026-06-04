@@ -245,16 +245,33 @@ DtoH/HtoD decode-throughput cost for determinism; enable per deployment.
 prompt (~3020-char, pp ≥ 512), tg = 128, streaming decode-rate isolation
 (inter-token interval, excludes TTFT), 5-run median:
 
+**gemma-4-26B-A4B-Q8_0** (pp2tp2 `hip:0,2,1,3`, `--kv q8`):
+
 | AR path | decode tps | TTFT |
 |---------|-----------|------|
 | default (BAR1 P2P) | **40.72** (40.10–41.17) | ~1.19 s |
 | `--deterministic` (host-bounce) | **30.57** (28.66–31.25) | ~1.84 s |
 
-≈ **−25 % decode throughput** (BAR1 is 1.33×) and ~**+0.65 s TTFT**
-(prefill ARs also route host-bounce). The cost is the DtoH→CPU-sum→HtoD
-bytes per AR call that BAR1 P2P exists to avoid — which is exactly why
-fix direction #2 (a real producer L2→DRAM writeback keeping the on-device
-BAR1 path) is the long-term win if determinism is needed without the hit.
+≈ **−25 % decode** (BAR1 1.33×), ~+0.65 s TTFT.
+
+**Qwen3.6-27B-Q8_0** (same pp2tp2 / `--kv q8` / prompt / tg):
+
+| AR path | decode tps | TTFT |
+|---------|-----------|------|
+| default (BAR1 P2P) | **27.17** (25.99–27.60) | ~6.7 s |
+| `--deterministic` (host-bounce) | **16.82** (14.38–18.00) | ~7.9 s |
+
+≈ **−38 % decode** (BAR1 1.62×), ~+1.2 s TTFT. The cost is steeper than
+gemma4-26B-A4B: the dense 27B issues more full-attention AR calls per
+token, so the fixed per-AR DtoH→CPU-sum→HtoD overhead eats a larger
+fraction of its (lower) baseline.
+
+The cost is the host-bounce bytes per AR call that BAR1 P2P exists to
+avoid — which is exactly why fix direction #2 (a real producer L2→DRAM
+writeback keeping the on-device BAR1 path) is the long-term win if
+determinism is needed without the hit. The penalty scales with AR-calls-
+per-token × hidden, so it is model/topology-dependent (−25 % to −38 %
+measured here).
 
 ## Fix directions (post-diagnostic)
 
