@@ -174,7 +174,82 @@ If the partials are bit-identical but the post-AR result differs → it is
 genuinely the AR. This converts blind kernel-patching into a localized
 fix and should precede any further AR or producer kernel change.
 
-## Fix directions (superseded by the re-opened diagnosis above)
+## Partial-checksum diagnostic — DECISIVE (2026-06-04)
+
+Instrumented the AR entry points to DtoH-copy and FNV-hash the local
+partial *before* the AR sum (`AR-CHK`) and the result *after* (`AR-OUT`),
+per-rank-sequenced. The DtoH is stream-ordered after the producer, so it
+reads the true produced value. Ran the terse prompt twice on pure tp2
+(`hip:0,2`, unambiguous 2-thread rank labels), `max_tokens=1`.
+
+gemma4-26B-A4B's decode AR runs entirely through `bar_ar_sum_f32`
+(`sum_tp2_f32_rank`), 292864-byte (73216-F32) payload — the host-sync
+path (`n > EVENT_PATH_MAX_ELEMS`).
+
+**Result at the very first AR call (#0), both ranks:**
+
+| | rank0 | rank1 |
+|---|---|---|
+| INPUT partial (DtoH) | `b27c232b…` **run1 == run2** | `7d3db574…` **run1 == run2** |
+| OUTPUT (DtoH, post-sum) | `208cc4e8` (run1) vs `90620e0d` (run2) — **DIFF** | `90620e0d` (run1) vs `3daeb3de` (run2) — **DIFF** |
+
+Two airtight conclusions:
+
+1. **The producer is exonerated.** Both input partials are *bit-
+   identical* across runs at the first AR — partial production
+   (the sharded matmuls) is deterministic. This kills the "non-
+   deterministic partial production" hypothesis from the re-opened
+   diagnosis above.
+
+2. **The AR is confirmed as the source.** Identical inputs → different
+   outputs run-to-run. And within a *single* run the two ranks
+   **disagree on the sum**: rank0=`208cc4e8`, rank1=`90620e0d`.
+   `sum_tp2_f32_rank` computes `p0+p1` on rank0 and `p1+p0` on rank1 —
+   commutative, so they *must* be bit-identical. Two ranks getting
+   different results from identical operands is **direct proof the BAR1
+   cross-device peer read is incoherent**: at least one rank's BAR1 view
+   of the peer's partial ≠ the peer's true partial (which DtoH reads
+   correctly).
+
+This **reinstates the AR** as the culprit and explains why attempts #1
+and #2 were null — they were measured by output-text determinism but
+targeted the wrong sub-mechanism. The mechanism is now precise: the
+producer's partial is correct in its own L2/DRAM (its own DtoH reads it
+fine, deterministically), but a **peer reading that partial through the
+BAR1 PCIe aperture observes a stale/incoherent value** — and neither a
+reader-side `glc` load (#1) nor a producer re-store + `__threadfence_
+system()` (#2) made that aperture read coherent on gfx906. The likely
+physical cause: the producer's write is resident in its L2 (which its
+own DtoH and same-device reads see) but the BAR1 aperture maps DRAM, and
+the L2→DRAM writeback that a peer needs is not produced by
+`threadfence_system` on this silicon.
+
+## Fix directions (post-diagnostic)
+
+1. **Host-bounce AR for the affected path (guaranteed-correct fallback,
+   recommended to try first).** The diagnostic *proves* DtoH reads the
+   true partial deterministically. The existing host-bounce coordinator
+   `ArCoordinator::ar_sum_f32` (DtoH → CPU sum in fixed rank order →
+   HtoD) sidesteps the BAR1 aperture entirely and is therefore
+   deterministic by construction. Route gemma4's TP AR (or all TP AR
+   when a determinism mode is requested) through it instead of
+   `BarArCoordinator`. Cost: the DtoH/HtoD bytes BAR1 was introduced to
+   avoid — a real decode-throughput hit, so gate it (per-arch or a
+   `--deterministic` flag), don't make it unconditional.
+
+2. **Make the BAR1 aperture read coherent (proper fix, research-grade).**
+   Force the producer's partial out of L2 to DRAM with a primitive that
+   actually does an L2→DRAM writeback on gfx906 (candidates: a
+   write-through / streaming store on the *producer* so the partial
+   never caches in L2; an explicit `buffer_wbinvl2` via inline asm;
+   uncacheable mapping of the partial pool). `__threadfence_system()`
+   was insufficient (#2). Needs hardware-doc spelunking + the sweep
+   harness; multi-session.
+
+The acceptance gate is unchanged: near-tie prompt (`"Spell cat"`) decoded
+×20 at temp=0 collapsing to a single md5.
+
+## Earlier fix directions (superseded)
 
 1. **Producer-side system-scope release** (the real fix, per the null
    above). Each kernel that produces an AR partial (attention output
