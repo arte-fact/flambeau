@@ -486,3 +486,167 @@ mod tests {
         let _ = p.finish();
     }
 }
+
+/// Deep testing — Layer A parser fuzz (see `doc/TOOL_CALLING_TEST_
+/// PROTOCOL.md`). Cross-format invariants that hold for every parser,
+/// no GPU. This is the CI gate that catches streaming-boundary +
+/// adversarial-body bugs the live happy-path sweep can't reach.
+#[cfg(test)]
+mod fuzz {
+    use super::*;
+
+    /// Build a parser for `fmt`, feed `input`, return the coalesced
+    /// event stream.
+    fn run_events(fmt: &str, input: &str) -> Vec<ParserEvent> {
+        let mut p = dispatcher(Some(fmt), ToolCallFormat::Hermes).unwrap();
+        let mut out = p.push(input);
+        out.extend(p.finish());
+        ParserEvent::coalesce(out)
+    }
+
+    /// Same, but split into `(content, tool_calls)` like the response
+    /// builder does.
+    fn run_split(fmt: &str, input: &str) -> (String, Vec<crate::api::ToolCall>) {
+        split_events(run_events(fmt, input))
+    }
+
+    /// Feed `input` one UTF-8 char at a time.
+    fn run_events_streamed(fmt: &str, input: &str) -> Vec<ParserEvent> {
+        let mut p = dispatcher(Some(fmt), ToolCallFormat::Hermes).unwrap();
+        let mut out: Vec<ParserEvent> = Vec::new();
+        for ch in input.chars() {
+            out.extend(p.push(&ch.to_string()));
+        }
+        out.extend(p.finish());
+        ParserEvent::coalesce(out)
+    }
+
+    /// One representative valid tool call per format.
+    const CASES: &[(&str, &str)] = &[
+        ("hermes", "<tool_call>\n{\"name\":\"get_weather\",\"arguments\":{\"location\":\"Paris\"}}\n</tool_call>"),
+        ("qwen3_coder", "<tool_call><function=get_weather><parameter=location>Paris</parameter></function></tool_call>"),
+        ("gemma4", "<|tool_call>call:get_weather{location:<|\"|>Paris<|\"|>}<tool_call|>"),
+        ("gemma4", "<|tool_code|>get_weather\n{\"location\":\"Paris\"}\n</tool_code>"),
+    ];
+
+    #[test]
+    fn chunk_decomposition_invariance() {
+        // One-shot and char-by-char must produce the same coalesced
+        // events — a marker straddling a chunk boundary must not change
+        // the parse. The classic streaming bug.
+        for (fmt, input) in CASES {
+            let one = run_events(fmt, input);
+            let streamed = run_events_streamed(fmt, input);
+            assert_eq!(one, streamed, "fmt={fmt} input={input:?}");
+        }
+    }
+
+    #[test]
+    fn arguments_is_always_a_json_string() {
+        // llama.cpp #20198: `arguments` must be a JSON-encoded STRING
+        // that itself parses as JSON — never an object on the wire.
+        for (fmt, input) in CASES {
+            let (_c, calls) = run_split(fmt, input);
+            assert_eq!(calls.len(), 1, "fmt={fmt}");
+            let args = &calls[0].function.arguments;
+            let v: serde_json::Value =
+                serde_json::from_str(args).unwrap_or_else(|e| panic!("fmt={fmt} args={args:?}: {e}"));
+            assert!(v.is_object(), "fmt={fmt} args not an object: {args:?}");
+        }
+    }
+
+    #[test]
+    fn marker_mention_without_body_stays_text() {
+        // Prose that merely names a tool marker must NOT fabricate a
+        // call. (gemma4 `<|call:` partial / `<|tool_code|` mention etc.)
+        let probes = [
+            ("hermes", "I would use <tool_call> but there's no body here."),
+            ("qwen3_coder", "The <function= syntax is how Qwen describes tools."),
+            ("gemma4", "Use the <|tool_code|> convention, like </tool_code>, sparingly."),
+        ];
+        for (fmt, input) in probes {
+            let (_c, calls) = run_split(fmt, input);
+            assert!(calls.is_empty(), "fmt={fmt} fabricated a call from: {input:?}");
+        }
+    }
+
+    #[test]
+    fn unparseable_tool_code_leaks_verbatim() {
+        // A gemma4 tool_code block we can't structure (Python body, no
+        // JSON object) must reappear in content, never be dropped.
+        let input = "<|tool_code|>python\nprint(default_api.run(x=1))\n</tool_code>";
+        let (content, calls) = run_split("gemma4", input);
+        assert!(calls.is_empty());
+        assert!(content.contains("print(default_api.run(x=1))"), "content={content:?}");
+    }
+
+    #[test]
+    fn escaped_quotes_and_unicode_in_args() {
+        // Hermes/Coder JSON args with escaped quotes + multibyte UTF-8.
+        let (_c, calls) = run_split(
+            "hermes",
+            "<tool_call>\n{\"name\":\"f\",\"arguments\":{\"q\":\"a\\\"b — café 🦀\"}}\n</tool_call>",
+        );
+        assert_eq!(calls.len(), 1);
+        let v: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(v["q"], "a\"b — café 🦀");
+    }
+
+    #[test]
+    fn unicode_multibyte_streamed_byte_split() {
+        // Multibyte char split across pushes must not corrupt — feed
+        // one BYTE at a time (parsers buffer until a char boundary).
+        let input = "<tool_call>\n{\"name\":\"f\",\"arguments\":{\"q\":\"café 🦀\"}}\n</tool_call>";
+        let mut p = dispatcher(Some("hermes"), ToolCallFormat::Hermes).unwrap();
+        let mut out: Vec<ParserEvent> = Vec::new();
+        // Accumulate bytes and flush only complete UTF-8 prefixes — the
+        // HTTP layer never hands a parser an invalid &str, so we mirror
+        // that by pushing the longest valid prefix as bytes arrive.
+        let bytes = input.as_bytes();
+        let mut start = 0;
+        for end in 1..=bytes.len() {
+            if let Ok(s) = std::str::from_utf8(&bytes[start..end]) {
+                out.extend(p.push(s));
+                start = end;
+            }
+        }
+        out.extend(p.finish());
+        let (_c, calls) = split_events(ParserEvent::coalesce(out));
+        assert_eq!(calls.len(), 1);
+        let v: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(v["q"], "café 🦀");
+    }
+
+    #[test]
+    fn back_to_back_calls_distinct_indices() {
+        // Two hermes calls in one turn → two tool_calls, ordered.
+        let (_c, calls) = run_split(
+            "hermes",
+            "<tool_call>\n{\"name\":\"a\",\"arguments\":{}}\n</tool_call><tool_call>\n{\"name\":\"b\",\"arguments\":{}}\n</tool_call>",
+        );
+        let names: Vec<&str> = calls.iter().map(|c| c.function.name.as_str()).collect();
+        assert_eq!(names, ["a", "b"]);
+    }
+
+    #[test]
+    fn marker_inside_string_value_does_not_retrigger() {
+        // A `</tool_call>` (gemma `<tool_call|>`) appearing inside a
+        // string ARGUMENT must not prematurely close the call.
+        let (_c, calls) = run_split(
+            "hermes",
+            "<tool_call>\n{\"name\":\"echo\",\"arguments\":{\"text\":\"</tool_call> is a marker\"}}\n</tool_call>",
+        );
+        assert_eq!(calls.len(), 1, "calls={calls:?}");
+        let v: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(v["text"], "</tool_call> is a marker");
+    }
+
+    #[test]
+    fn pure_prose_no_calls_any_format() {
+        for fmt in ["hermes", "qwen3_coder", "gemma4"] {
+            let (content, calls) = run_split(fmt, "The capital of France is Paris.");
+            assert!(calls.is_empty(), "fmt={fmt}");
+            assert_eq!(content, "The capital of France is Paris.", "fmt={fmt}");
+        }
+    }
+}
