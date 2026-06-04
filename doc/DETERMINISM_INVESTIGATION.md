@@ -9,152 +9,151 @@ prompt, same `temperature=0`, different output run-to-run.
 ## TL;DR
 
 The forward pass is **not bit-deterministic under TP**. The
-non-determinism originates in the **BAR1 P2P TP AllReduce**
-(`crates/forward/src/runtime/ar.rs`), not the weights, the sampler, or
-the tokenizer. At `temperature=0` the sampler is pure argmax with no
-RNG, so the only way two greedy runs diverge is the logits themselves
-differing — and they do, because the AllReduce sums partials in a
-non-deterministic way and/or reads peer partials before they are
-visible across the BAR1 aperture.
+non-determinism originates in the **BAR1 P2P TP AllReduce read path**
+(`crates/forward/src/runtime/ar.rs` → `sum_tp{2,4}_f32_rank`), not the
+weights, the sampler, the tokenizer, the PP stage boundary, or any
+per-request slot state. At `temperature=0` the sampler is pure argmax
+with no RNG, so the only way two greedy runs diverge is the logits
+themselves differing — and they do, because the AllReduce produces
+ULP-jittered sums run-to-run.
 
 On **confident** tokens the flip is invisible (argmax margin >> AR
 noise). On **near-tied** tokens — exactly the regime gemma-4-26B-A4B
-spends time in once it starts a list/structured reply — the noise
+spends time in once it starts a terse/open-ended reply — the noise
 flips the argmax, and one wrong token cascades into full scaffolding
-spray.
+spray (e.g. `c-a-t (cat) 运动控制系统…`).
 
-Two distinct bugs were isolated:
+**There is one bug, not two.** An earlier 6-sample run made it look
+like forcing the host-sync AR path produced a clean period-2
+alternation (suggesting a second, request-parity bug). Re-running at 20
+samples showed that "period-2" was a small-sample illusion: the
+host-sync path is still **multi-modal random** (6–10 distinct outputs
+per 20 runs). Host-sync fixes the *producer* half of the ordering but
+the non-determinism survives, which localizes the bug to the
+**consumer / reader side** of the BAR1 transfer.
 
-- **Bug A — event-path BAR1 visibility race.** The small-`n` event
-  ordering path (`ar_publish_with_events`, used when
-  `n_elems ≤ EVENT_PATH_MAX_ELEMS = 65_536`, i.e. *every decode step*)
-  lets a rank read a peer's `partial` via BAR1 before that peer's
-  write is guaranteed visible across the aperture. `record`/
-  `stream_wait` orders the *kernel completion*, not the *cross-device
-  memory write becoming visible to the reader*. Forcing the host-sync
-  path (`ar_publish_with_host_sync`, full `Stream::synchronize`)
-  removed the fully-random behaviour.
+## Experiment matrix (all gemma-4-26B-A4B-Q8_0, temp=0, seed=0)
 
-- **Bug B — period-2 parity alternation.** With the host-sync path
-  forced, output stopped being fully random but became **period-2
-  alternating**: odd runs clean, even runs sprayed (two stable
-  hashes). A second, lower-frequency non-determinism remains —
-  request-parity-dependent, consistent with inflight-slot round-robin
-  or mixed-batch state leaking between back-to-back requests. Not
-  isolated this session (the `--inflight-slots 1` boot kept failing on
-  sandbox GPU contention).
+| Topology | AR path | Prompt | Result |
+|----------|---------|--------|--------|
+| pp-only (no TP AR) | n/a | terse | deterministic + clean (EXP8b, ×6) |
+| tp2 (hip:0,2) | host-sync | confident¹ | **20/20 identical, clean** (`9cc96483`) |
+| tp2 (hip:0,2) | host-sync | terse² (near-tie) | **6 distinct / 20 — random** |
+| pp2tp2 (hip:0,2,1,3) | host-sync | confident¹ | **20/20 identical, clean** (`9cc96483`) |
+| pp2tp2 (hip:0,2,1,3) | host-sync | terse² (near-tie) | **10 distinct / 20 — random** |
+| pp2tp2 | event-path (default) | terse | fully random (original symptom) |
 
-## Experiment table
+¹ "confident" = `"Spell the word cat letter by letter, then count to
+five."` → `C-A-T. 1, 2, 3, 4, 5.`
+² "terse" = `"Spell cat"` → near-tied continuation after `c-a-t (cat)`.
 
-| Exp | Path | Config | Result |
-|-----|------|--------|--------|
-| EXP1/2 | `/v1/completions` | pp2tp2, confident prompt | deterministic ×N |
-| EXP5/6 | `/v1/chat` temp=0 | pp2tp2, structured reply | **non-deterministic** (fully random) |
-| EXP7 | `/v1/chat` temp=0 | pp2tp2, confident prompt | deterministic (margin hides it) |
-| EXP8b | `/v1/chat` temp=0 | **pp-only (no TP AR)** | **deterministic + clean ×6** |
-| EXP9 | `/v1/chat` temp=0 | pp2tp2 + **host-sync AR** (`EVENT_PATH_MAX_ELEMS=0`) | random → **period-2 alternating** (clean `a4fe4a4b` vs sprayed `a9045126`) |
-| EXP10 | `/v1/chat` temp=0 | pp2tp2 host-sync + `--inflight-slots 1` | **inconclusive** — server boot failed (sandbox GPU contention) |
+"host-sync" = the diagnostic binary with `EVENT_PATH_MAX_ELEMS = 0`,
+which forces every AR (including decode-shape) through
+`ar_publish_with_host_sync` (`Stream::synchronize` before publish).
 
-The decisive contrast is **EXP8b vs EXP5/6**: identical model, prompt,
-sampler, KV layout; the *only* difference is whether the TP AllReduce
-runs. pp-only is clean and reproducible; pp2tp2 is neither.
+### What the matrix proves
 
-EXP9 is the decomposition: switching the AR producer-ordering from the
-event path to the host-sync path collapsed the entropy from "fully
-random" to "two states" — that delta is Bug A; the residual two states
-are Bug B.
+- **Source = TP AllReduce.** pp-only (no TP AR) is deterministic and
+  clean. Any TP topology (tp2 *or* pp2tp2) is non-deterministic on
+  near-tie prompts.
+- **Not PP-boundary, not slot state, not mixed-batch.** The bug
+  reproduces on a single pure-TP2 cluster with one stage and
+  `--inflight-slots 2`. `claim_slot_blocking` hands sequential requests
+  slot 0 every time, and `reset_for_next_request` only resets GDN state
+  (a no-op for gemma4, which has no recurrent layers) — yet identical
+  back-to-back prompts still diverge. The state that differs is on the
+  device, inside the AR, not in any Rust-side per-request structure.
+- **Producer ordering is insufficient.** Host-sync drains each rank's
+  producer stream before the barrier, so all partials are committed to
+  HBM before any peer reads them. The output is still random → the race
+  is on the **reader** side: the consumer kernel reads peer partials
+  across the BAR1 aperture without an acquire fence and can observe
+  stale / not-yet-coherent peer data even after the producer drained.
+- **Invisible on confident tokens.** Both topologies are 20/20
+  identical and coherent on the confident prompt — the ULP jitter never
+  crosses an argmax margin there. The bug only ever surfaces as a token
+  flip on near-ties; gemma4-MoE hits near-ties constantly on
+  open-ended/list replies (flatter logits than dense 31B-Q4_0, which
+  rounds out spikes and runs hotter margins — same canary pattern as
+  `feedback_gemma4_attn_output_proj_f16_saturate` /
+  `feedback_gemma4_moe_f16_overflow`).
 
-## Why this manifests as garbage, not just non-reproducibility
+## Root cause
 
-`temperature=0` → greedy argmax → no RNG. Float-sum non-associativity
-in the AllReduce (`sum_tp2_f32_rank` accumulation order across BAR1
-reads is not pinned) produces logit deltas at the ULP scale. That is
-harmless until two top candidates are within that delta. gemma-4-26B-
-A4B (small active params, MoE routing) produces flatter logit
-distributions on structured/list tokens than the dense 31B, so it hits
-the near-tie regime constantly. Q4_0 31B "works" partly because it
-rounds out the spikes and runs hotter margins; Q8_0 26B-A4B preserves
-them. This matches the existing memory note pattern
-(`feedback_gemma4_attn_output_proj_f16_saturate`,
-`feedback_gemma4_moe_f16_overflow`): gemma4-MoE is the canary for
-numeric-margin bugs that the dense path survives.
+`bar_ar_sum_f32` → `sum_tp{2,4}_f32_rank` reads peer `partial` buffers
+through the BAR1 PCIe aperture. Neither the producer nor the consumer
+issues a system-scope (`__threadfence_system()`) fence around those
+cross-device reads. On gfx906 BAR1 P2P, "the producer kernel
+completed" / "the producer stream drained" does not imply "the
+consumer's view of peer HBM is coherent" — the reader can pull stale or
+partially-updated bytes from its own L2 / the aperture. The result is
+ULP-scale jitter in the summed partials, run-to-run.
 
-## Root cause (Bug A, well-supported)
+Note: 2-operand float addition is *commutative* (`p0+p1 == p1+p0`), so
+for the tp2 path the per-rank accumulation order is **not** the source
+— ruling out "unpinned reduce order" for tp2. The jitter is in the
+*operands themselves* being read non-coherently, not the order they are
+summed.
 
-`ar_publish_with_events` (ar.rs:173):
+This is the same bug class as `feedback_bar_p2p_sum_write_target`
+("peer BAR1 reads aren't ordered against the peer's writes"), but one
+layer deeper: there the fix was a producer-side `producer_done_event`;
+here even full producer drain is not enough, because the missing
+ordering is a consumer-side *acquire*, not a producer-side *release*.
 
-```
-record event on own stream
-publish partial ptr to shared slab
-host barrier
-stream_wait on each peer event
-launch sum_tp{2,4}_f32_rank (reads peer partials via BAR1)
-```
+## Fix directions (NOT implemented — cert-gated kernel work, user's call)
 
-`HipEvent::record` + `stream_wait` enforce that the *producer kernel
-has completed* before the consumer kernel launches. They do **not**
-enforce that the producer's writes to its `partial` buffer are
-*visible to a peer reading them across the BAR1 PCIe aperture*. On
-gfx906 BAR1 P2P, kernel-complete and cross-device-write-visible are
-not the same barrier — there is no system-scope release fence between
-them on this path. The host-sync path happens to work because
-`Stream::synchronize` + the subsequent host barrier inserts enough
-ordering (and a full device drain) that the writes have landed.
+1. **Reader-side acquire + producer-side release fence** (the real
+   fix). `sum_tp{2,4}_f32_rank` needs a `__threadfence_system()`
+   acquire before/around the peer-pointer reads, paired with a
+   system-scope release after the producer writes its partial. This
+   keeps the fast event path (no host `Stream::synchronize`, no decode
+   perf regression) while making the BAR1 read coherent. Kernel change
+   in `kernels-hip` + correctness sweep + a **determinism regression
+   test** (md5 of greedy decode ×20 must collapse to one hash on a
+   known near-tie prompt). Multi-session, cert-gated per CLAUDE.md
+   rules 2 + "ask before destructive actions".
 
-This is consistent with the existing AR memory notes:
-`feedback_bar_p2p_sum_write_target` (callers must synchronize every
-rank's stream before AR because "peer BAR1 reads aren't ordered
-against the peer's Phase-1 writes otherwise") documents the **same
-class of bug** on the write-target side — qwen3-moe handled it with a
-`producer_done_event`, the gemma4 TP path did not. The event here is
-present but insufficient: it orders execution, not memory visibility.
+2. **Pin accumulation order** in `sum_tp4_f32_rank` (tp4 path only —
+   tp2 is already commutative). Cheap, complementary to (1); does
+   nothing on its own for the tp2/pp2tp2 cases measured here.
 
-## Fix directions (NOT implemented — needs sweep cert + the user's call)
+3. **Host-sync everywhere** (`EVENT_PATH_MAX_ELEMS = 0`) is **NOT a
+   fix** — this investigation shows it leaves the output multi-modal
+   random. It also costs the decode-decoupling lever the event path
+   exists for. Do not ship it as a correctness toggle; it does not
+   restore determinism.
 
-1. **System-scope release fence in the producer / acquire in the
-   consumer** (correct fix). The `sum_tp{2,4}_f32_rank` kernel needs a
-   `__threadfence_system()`-equivalent acquire on the peer-pointer
-   reads, and the producer needs a system-scope release after writing
-   its partial. This is the real fix — it keeps the event fast path
-   (no host `Stream::synchronize`, no decode perf regression) while
-   making the BAR1 read see committed peer writes. Kernel change +
-   correctness sweep + a determinism regression test (md5 of greedy
-   decode ×N must be identical). Multi-session, cert-gated.
+## A note on the determinism regression test
 
-2. **Pin the accumulation order** in `sum_tp{2,4}_f32_rank` so the
-   float sum is associative-stable run-to-run (rank 0 + rank 1 +
-   ... in fixed order, no atomics). Removes the ULP-jitter even if
-   visibility were perfect. Cheap, complementary to (1).
-
-3. **Ship the host-sync path for decode** (stopgap, NOT recommended as
-   the final answer). Setting `EVENT_PATH_MAX_ELEMS = 0` made EXP9
-   period-2 instead of random — i.e. it fixes Bug A but costs the
-   decode-decoupling win the event path exists for (see the ar.rs
-   comment: event path is the gfx906 decode lever). It also does NOT
-   fix Bug B. Use only as a temporary correctness-over-perf toggle if
-   a release is blocked on this.
-
-Bug B must be isolated first (re-run EXP10 with `--inflight-slots 1`
-on a quiet rig; if deterministic → per-slot state carries across
-requests; if still period-2 → mixed-batch
-(`supports_mixed_batch()` is true for gemma4) leaks state between the
-prefill-leader and decode followers).
+Whatever the fix, the acceptance gate is a near-tie prompt
+(`"Spell cat"` on gemma-4-26B-A4B-Q8_0 reproduces reliably) decoded ×20
+at temp=0 collapsing to a single md5. Confident prompts pass even with
+the bug present, so they are useless as a gate — the cert harness must
+use a prompt that sits on an argmax knife-edge.
 
 ## What was reverted
 
 The diagnostic `EVENT_PATH_MAX_ELEMS = 0` edit in `ar.rs` was reverted
-to `65_536`. It was a probe (fix-direction 3), not a ship — it carries
-a decode perf cost and only addresses Bug A.
+to `65_536`. It was a probe to mask the producer-ordering variable, not
+a ship.
 
 ## Reproduce
 
 ```
+# diagnostic binary (forces host-sync so the result isn't confounded
+# by the event-path producer race — though both paths are non-det):
+#   set EVENT_PATH_MAX_ELEMS = 0 in crates/forward/src/runtime/ar.rs
 cargo build --release -p flambeau-cli --features flambeau-cli/hip_serve
-flambeau serve --model <gemma-4-26B-A4B-Q8_0.gguf> \
-  --mesh-mode pp+tp --pp-size 2 --tp-size 2 --devices hip:0,2,1,3 \
-  --kv q8 --ctx-cap 2048 --port 8080
-# fire the same temp=0 chat completion ~6× under a structured prompt,
-# md5 the response bodies — they will not all match.
-# Then re-run with --mesh-mode pp --devices hip:0,2 (pp-only):
-# all 6 match and stay coherent.
+
+# minimal repro is pure TP2 (no PP needed):
+flambeau serve --model <gemma-4-26B-A4B-it-Q8_0.gguf> \
+  --mesh-mode tp --tp-size 2 --devices hip:0,2 \
+  --kv q8 --ctx-cap 2048 --port 8093
+
+# fire the near-tie prompt ×20, md5 each response body:
+#   {"messages":[{"role":"user","content":"Spell cat"}],
+#    "temperature":0,"max_tokens":64,"seed":0}
+# -> 6+ distinct hashes / 20. Swap to --mesh-mode pp --devices hip:0,2
+#    (pp-only, no TP AR) -> single hash, coherent.
 ```
