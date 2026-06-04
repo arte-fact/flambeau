@@ -19,7 +19,7 @@
           {
             "id": "call_0",
             "function": {
-              "arguments": "{\"location\":\"Paris, France\",\"unit\":\"celsius\"}",
+              "arguments": "{\"location\":\"Paris, France\"}",
               "name": "get_current_weather"
             },
             "type": "function"
@@ -67,7 +67,7 @@
     "max_tokens": 128
   },
   "response": {
-    "id": "chatcmpl-1780559250",
+    "id": "chatcmpl-1780583721",
     "choices": [
       {
         "finish_reason": "stop",
@@ -84,15 +84,15 @@
         }
       }
     ],
-    "created": 1780559252,
-    "model": "Qwen3.6-27B-Q4_0",
+    "created": 1780583724,
+    "model": "Qwen3.6-27B-Q8_0",
     "object": "chat.completion",
     "service_tier": null,
     "system_fingerprint": null,
     "usage": {
       "completion_tokens": 19,
-      "prompt_tokens": 422,
-      "total_tokens": 441,
+      "prompt_tokens": 409,
+      "total_tokens": 428,
       "completion_tokens_details": null,
       "prompt_tokens_details": null
     }

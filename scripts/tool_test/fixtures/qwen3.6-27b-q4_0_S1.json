@@ -44,32 +44,41 @@
     "max_tokens": 256
   },
   "response": {
-    "id": "chatcmpl-1780559243",
+    "id": "chatcmpl-1780583713",
     "choices": [
       {
-        "finish_reason": "stop",
+        "finish_reason": "tool_calls",
         "index": 0,
         "logprobs": null,
         "message": {
-          "content": "<parameter=location>\nParis, France\n</parameter>\n<parameter=unit>\ncelsius\n</parameter>\n</function>\n</tool_call>",
+          "content": null,
           "refusal": null,
           "role": "assistant",
           "annotations": null,
           "audio": null,
           "function_call": null,
-          "tool_calls": null
+          "tool_calls": [
+            {
+              "id": "call_0",
+              "function": {
+                "arguments": "{\"location\":\"Paris, France\"}",
+                "name": "get_current_weather"
+              },
+              "type": "function"
+            }
+          ]
         }
       }
     ],
-    "created": 1780559246,
-    "model": "Qwen3.6-27B-Q4_0",
+    "created": 1780583716,
+    "model": "Qwen3.6-27B-Q8_0",
     "object": "chat.completion",
     "service_tier": null,
     "system_fingerprint": null,
     "usage": {
-      "completion_tokens": 40,
+      "completion_tokens": 34,
       "prompt_tokens": 332,
-      "total_tokens": 372,
+      "total_tokens": 366,
       "completion_tokens_details": null,
       "prompt_tokens_details": null
     }
@@ -77,14 +86,49 @@
   "checks": [
     {
       "name": "finish_reason=tool_calls",
-      "pass": false,
-      "detail": "got 'stop'"
+      "pass": true,
+      "detail": "got 'tool_calls'"
     },
     {
       "name": "tool_calls non-empty",
-      "pass": false,
-      "detail": "len=0"
+      "pass": true,
+      "detail": "len=1"
+    },
+    {
+      "name": "tool_call.id present",
+      "pass": true,
+      "detail": "id='call_0'"
+    },
+    {
+      "name": "tool_call.type=function",
+      "pass": true,
+      "detail": "type='function'"
+    },
+    {
+      "name": "tool_call.function.name=get_current_weather",
+      "pass": true,
+      "detail": "name='get_current_weather'"
+    },
+    {
+      "name": "arguments parses as JSON string",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "arguments.location mentions Paris",
+      "pass": true,
+      "detail": "location='Paris, France'"
+    },
+    {
+      "name": "content empty or whitespace",
+      "pass": true,
+      "detail": "content=''"
+    },
+    {
+      "name": "no raw tool/channel tokens in content",
+      "pass": true,
+      "detail": "leaked pattern: None"
     }
   ],
-  "verdict": "fail"
+  "verdict": "pass"
 }

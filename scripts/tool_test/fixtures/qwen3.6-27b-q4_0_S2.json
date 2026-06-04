@@ -62,7 +62,7 @@
     "max_tokens": 256
   },
   "response": {
-    "id": "chatcmpl-1780559246",
+    "id": "chatcmpl-1780583716",
     "choices": [
       {
         "finish_reason": "tool_calls",
@@ -88,8 +88,8 @@
         }
       }
     ],
-    "created": 1780559248,
-    "model": "Qwen3.6-27B-Q4_0",
+    "created": 1780583719,
+    "model": "Qwen3.6-27B-Q8_0",
     "object": "chat.completion",
     "service_tier": null,
     "system_fingerprint": null,

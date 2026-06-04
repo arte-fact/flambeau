@@ -361,6 +361,20 @@ Goal: the failure modes S1–S6 don't reach — streaming parity, parser
 fuzz, the full format matrix, multi-turn agent loops, concurrency, and
 the Anthropic surface.
 
+**Layer A — DONE** (`tool_call_parser::fuzz`, `cargo test
+-p flambeau-server`, 74/74). It immediately earned its keep: the
+chunk-decomposition + arguments-is-a-string invariants exposed that
+`HermesJsonParser` was a **passthrough stub** (T2.1 skeleton that
+emitted every chunk as text and never parsed a call). The 4 production
+models dodged it — gemma4 selects the Gemma4 parser, the qwen3.6 GGUFs
+select QwenCoder via template detection — but any true-Hermes-template
+GGUF would have silently produced zero `tool_calls`. Implemented the
+real streaming Hermes parser (string/escape-aware JSON-object scan,
+back-to-back calls, `<think>` handling, char-by-char parity). Same
+layer also fixed the gemma4 garbled-thought-close echo leak
+(`thought**\n` / `thought>\n` variants T2 missed). Layers B–D (live)
+remain.
+
 Spec lives in `TOOL_CALLING_TEST_PROTOCOL.md` §"Deep testing" (Layers
 A–D). Each fix slice (T2–T4) is only "done" when the layers it touches
 are green:

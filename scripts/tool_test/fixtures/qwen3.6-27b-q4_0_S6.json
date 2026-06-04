@@ -15,14 +15,14 @@
     "max_tokens": 64
   },
   "response": {
-    "id": "chatcmpl-1780559260",
+    "id": "chatcmpl-1780583733",
     "choices": [
       {
         "finish_reason": "stop",
         "index": 0,
         "logprobs": null,
         "message": {
-          "content": "The capital of France is **Paris**.\n\nParis is the most populous city in France and serves as the nation's political, economic, and cultural center.",
+          "content": "The capital of France is **Paris**.\n\nParis is the most populous city in France and serves as the nation's cultural, financial, and political center.",
           "refusal": null,
           "role": "assistant",
           "annotations": null,
@@ -32,8 +32,8 @@
         }
       }
     ],
-    "created": 1780559261,
-    "model": "Qwen3.6-27B-Q4_0",
+    "created": 1780583736,
+    "model": "Qwen3.6-27B-Q8_0",
     "object": "chat.completion",
     "service_tier": null,
     "system_fingerprint": null,
