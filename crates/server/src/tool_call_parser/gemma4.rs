@@ -91,12 +91,19 @@ const TEXT_OPEN_TAGS: &[&str] = &[
     "<|end_of_turn>",
     "<end_of_turn>",
     "<|file_separator|>",
+    "<|endoftext|>",
 ];
 
 /// Structural gemma special tokens that are never legitimate content —
 /// dropped wherever they appear (the model echoes / hallucinates them,
 /// especially at higher temperature).
-const DROP_TOKENS: &[&str] = &["<turn|>", "<|end_of_turn>", "<end_of_turn>", "<|file_separator|>"];
+const DROP_TOKENS: &[&str] = &[
+    "<turn|>",
+    "<|end_of_turn>",
+    "<end_of_turn>",
+    "<|file_separator|>",
+    "<|endoftext|>",
+];
 
 const CALL_PREFIX: &str = "call:";
 const STRING_QUOTE: &str = "<|\"|>";
