@@ -133,7 +133,48 @@ can still sit in the *producer's* L2 unwritten-back, while a peer reads
 the producer's *HBM* through the BAR1 aperture and gets stale bytes. No
 reader-side fence can close that.
 
-## Fix directions (refined; NOT implemented — cert-gated, user's call)
+## Attempted fix #2 — producer-side L2 writeback (NULL, 2026-06-04)
+
+Hypothesis from the #1 null: the partial sits in the *producer's* L2,
+unwritten-back, so a peer's BAR1 read of the producer's HBM gets stale
+bytes. Implemented a coordinator-level writeback: a dtype-agnostic
+kernel (`flambeau_p2p_l2_writeback`) that re-stores every 32-bit word of
+the partial through a `volatile` store and then issues
+`__threadfence_system()` (system-scope release), launched on each rank's
+own stream after the producer `synchronize` and before peers read
+(threaded a byte-count through `ar_publish_with_host_sync` + all 5 AR
+entry points; forced via `EVENT_PATH_MAX_ELEMS = 0`).
+
+Result — **NULL**. pp2tp2 host-sync + L2-writeback: **10 distinct / 20**
+— no improvement over host-sync alone. Reverted.
+
+## Re-opened diagnosis (both AR fixes are null)
+
+Two AR-targeted fixes — reader-side acquire (#1) and producer-side
+release/L2-writeback (#2) — are *both* null, on top of host-sync (full
+producer drain) also being null. A reader acquire, a producer drain,
+*and* an explicit producer L2-writeback-plus-system-fence all fail. That
+is strong evidence the bug is **not the BAR1 read/visibility of the
+partial at all.**
+
+The pp-only-vs-pp2tp2 contrast localizes the bug to the **TP path
+broadly**, which is *both* the AR *and* the sharded row-parallel matmuls
+that **produce** the partials. The AR has now been heavily ruled out, so
+the prime remaining suspect is **non-deterministic partial production
+under TP** — e.g. an `atomicAdd`-based or otherwise order-unstable
+reduction in the TP-sharded attention-output / FFN-down / MoE-down
+projection kernels that does not run (or runs deterministically) in the
+single-device pp-only path.
+
+**The diagnostic that actually localizes it (next step, not yet run):**
+checksum each rank's `partial` buffer *before* the AR sum, across N
+identical runs. If the per-rank partials differ run-to-run → the
+producer (sharded matmul) is non-deterministic and the AR is exonerated.
+If the partials are bit-identical but the post-AR result differs → it is
+genuinely the AR. This converts blind kernel-patching into a localized
+fix and should precede any further AR or producer kernel change.
+
+## Fix directions (superseded by the re-opened diagnosis above)
 
 1. **Producer-side system-scope release** (the real fix, per the null
    above). Each kernel that produces an AR partial (attention output
