@@ -224,7 +224,46 @@ own DtoH and same-device reads see) but the BAR1 aperture maps DRAM, and
 the L2→DRAM writeback that a peer needs is not produced by
 `threadfence_system` on this silicon.
 
-## Fix SHIPPED — `--deterministic` host-bounce AR (2026-06-04, gate PASSED)
+## Fix SHIPPED v2 — `--deterministic` DtoD copy-engine AR (2026-06-04, near-BAR1 speed)
+
+The host-bounce fix below works but costs −25 %/−38 % decode. A research
+workflow + GPU validation produced a far better fix that keeps the
+throughput: **route the F32 AR through the DMA copy engine instead of the
+in-kernel BAR1 shader load.** `--deterministic` now selects this (commit
+`685506c`); host-bounce remains only as the no-BAR fallback.
+
+Mechanism: each rank pulls every peer's partial into rank-local scratch
+via `hipMemcpyPeerAsync` (`HipDevice::memcpy_peer_in_async`, a consumer-
+stream peer read) — the *same copy engine* the diagnostic proved reads
+peer memory coherently — then runs the **existing** `sum_tp{2,4}_f32_rank`
+kernel with its `peer` arg pointed at that local scratch, so the kernel
+reads only coherent rank-local memory. **Zero kernel changes.** Wiring:
+`BarArCoordinator { dtod, recv_staging, pull_events }`,
+`dtod_ar_sum_f32`, `make_bar_ar_callback` dispatch.
+
+Critical subtlety found on the rig: the AR sum is *in place* (`buf +=
+peer`), so a peer can clobber its `buf` with its own sum while another
+rank is mid-pull — **~30 % of AR calls raced** (7 distinct/20 on the
+first cut). Fixed with a **read-all-then-write-all GPU fence**: each rank
+records a pulls-done event after copying, and waits on every peer's
+pulls-done event before its in-place sum. The `ar_epilogue` host barriers
+cannot do this (they order host threads, not async GPU copies/sums).
+
+**GATES (pp2tp2 `hip:0,2,1,3`, `--kv q8`):**
+
+| Model | determinism | DtoD decode | vs BAR1 | vs host-bounce |
+|-------|-------------|-------------|---------|----------------|
+| gemma-4-26B-A4B-Q8_0 | **20/20** (matches host-bounce result) | 38.50 tps | −5.5 % (40.72) | +26 % (30.57) |
+| Qwen3.6-27B-Q8_0 | **12/12** | 27.12 tps | −0.2 % (27.17) | +61 % (16.82) |
+
+DtoD recovers ~78 %/~100 % of the host-bounce loss while staying
+deterministic and coherent (`"Paris."` on a confident prompt). pp≥512
+tg128, 5–7-run median. The F16/fused AR paths (`ar_sum_f16`,
+`ar_residual_f16`, postattn fused) still use BAR1 — gemma4/qwen3.6 are
+F32-only AR (gates confirm), so this is full coverage for them; extending
+DtoD to the F16/fused paths is the follow-up for models that use them.
+
+## Fix SHIPPED v1 — `--deterministic` host-bounce AR (2026-06-04, superseded by v2)
 
 Implemented fix direction #1 below. New server flag `--deterministic`
 (env `FLAMBEAU_DETERMINISTIC`, off by default) sets
