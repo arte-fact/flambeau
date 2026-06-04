@@ -224,10 +224,27 @@ own DtoH and same-device reads see) but the BAR1 aperture maps DRAM, and
 the L2→DRAM writeback that a peer needs is not produced by
 `threadfence_system` on this silicon.
 
+## Fix SHIPPED — `--deterministic` host-bounce AR (2026-06-04, gate PASSED)
+
+Implemented fix direction #1 below. New server flag `--deterministic`
+(env `FLAMBEAU_DETERMINISTIC`, off by default) sets
+`LaunchParams.deterministic_ar`; the TP/Hybrid launchers then build
+`bar = None`, so the F32 AR callback falls back to the host-bounce
+`ArCoordinator` (DtoH → CPU sum in fixed rank order → HtoD) and every
+BAR-only fast path (`ar_sum_f16`, `ar_residual_f16`, postattn fused)
+reports unsupported and uses the host-bounce split. No BAR1 aperture
+read on any AR path.
+
+**GATE PASSED:** gemma-4-26B-A4B-Q8_0, pp2tp2 (`hip:0,2,1,3`), `--kv q8`,
+`"Spell cat"` temp=0 ×20 → **20/20 identical md5** (`e6b35b31`), output
+coherent (`c-a-t (cat)…`). Without the flag the same prompt gave 6–10
+distinct hashes. Commit `c06b189`. Off by default — it trades the
+DtoH/HtoD decode-throughput cost for determinism; enable per deployment.
+
 ## Fix directions (post-diagnostic)
 
-1. **Host-bounce AR for the affected path (guaranteed-correct fallback,
-   recommended to try first).** The diagnostic *proves* DtoH reads the
+1. **Host-bounce AR for the affected path (guaranteed-correct fallback —
+   SHIPPED above as `--deterministic`).** The diagnostic *proves* DtoH reads the
    true partial deterministically. The existing host-bounce coordinator
    `ArCoordinator::ar_sum_f32` (DtoH → CPU sum in fixed rank order →
    HtoD) sidesteps the BAR1 aperture entirely and is therefore
