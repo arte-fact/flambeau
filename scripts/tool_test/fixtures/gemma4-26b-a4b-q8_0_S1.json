@@ -44,14 +44,14 @@
     "max_tokens": 256
   },
   "response": {
-    "id": "chatcmpl-1780555659",
+    "id": "chatcmpl-1780558093",
     "choices": [
       {
         "finish_reason": "tool_calls",
         "index": 0,
         "logprobs": null,
         "message": {
-          "content": "thought\n",
+          "content": null,
           "refusal": null,
           "role": "assistant",
           "annotations": null,
@@ -70,7 +70,7 @@
         }
       }
     ],
-    "created": 1780555659,
+    "created": 1780558094,
     "model": "gemma-4-26B-A4B-it-Q8_0",
     "object": "chat.completion",
     "service_tier": null,
@@ -121,8 +121,8 @@
     },
     {
       "name": "content empty or whitespace",
-      "pass": false,
-      "detail": "content='thought\\n'"
+      "pass": true,
+      "detail": "content=''"
     },
     {
       "name": "no raw tool/channel tokens in content",
@@ -130,5 +130,5 @@
       "detail": "leaked pattern: None"
     }
   ],
-  "verdict": "fail"
+  "verdict": "pass"
 }

@@ -136,8 +136,8 @@ pub async fn messages_anthropic(
             .map_err(ApiError::internal)?;
 
     let (text_out, tool_calls) = if has_tools {
-        use crate::tool_call_parser::{dispatcher, split_events, ParserEvent};
-        let mut parser = dispatcher(None, state.tool_call_format_default)
+        use crate::tool_call_parser::{dispatcher_with_prompt, split_events, ParserEvent};
+        let mut parser = dispatcher_with_prompt(None, state.tool_call_format_default, &prompt)
             .map_err(|e| ApiError::bad_request(e.to_string()))?;
         let mut events = parser.push(&text);
         events.extend(parser.finish());

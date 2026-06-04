@@ -86,6 +86,12 @@ pub struct Gemma4ToolCallParser {
     /// the matching `<|"|>` close. Suppresses brace / bracket
     /// counting inside strings.
     args_in_string: bool,
+    /// `true` when the chat-template prompt ended with
+    /// `<|channel>thought\n<channel|>` and the model may echo
+    /// `thought\n<channel|>` (or just `<channel|>`) as the first
+    /// decoded bytes. Cleared after the first `push()` that sees
+    /// non-prefix content. See [`Self::with_pending_channel_close`].
+    pending_thought_echo: bool,
 }
 
 impl Default for Gemma4ToolCallParser {
@@ -106,6 +112,23 @@ impl std::fmt::Debug for Gemma4ToolCallParser {
 
 impl Gemma4ToolCallParser {
     pub fn new() -> Self {
+        Self::with_thought_echo_guard(false)
+    }
+
+    /// Construct a parser that knows the rendered prompt ended with
+    /// `<|channel>thought\n<channel|>` (a closed empty thought block —
+    /// the gemma4 default when `add_generation_prompt=true` and
+    /// reasoning is disabled). The model often echoes the
+    /// `thought\n<channel|>` tail before producing real content; with
+    /// the echo-guard the parser drops that leading prefix from the
+    /// first push() without consuming the rest of the reply, so a
+    /// straight `<|tool_call>...` continuation still parses normally
+    /// and a plain prose reply lands intact in `content`.
+    pub fn with_pending_channel_close() -> Self {
+        Self::with_thought_echo_guard(true)
+    }
+
+    fn with_thought_echo_guard(pending_thought_echo: bool) -> Self {
         Self {
             state: State::Text,
             buf: String::new(),
@@ -114,7 +137,63 @@ impl Gemma4ToolCallParser {
             args_body: String::new(),
             args_depth: 0,
             args_in_string: false,
+            pending_thought_echo,
         }
+    }
+
+    /// True if `prompt` ends in the gemma4 `<channel|>` close marker
+    /// (with optional trailing whitespace). Cheap byte-suffix match —
+    /// the chat route calls this once per request after rendering the
+    /// chat-template prompt.
+    pub fn prompt_ends_with_channel_close(prompt: &str) -> bool {
+        prompt.trim_end().ends_with(CHANNEL_CLOSE)
+    }
+
+    /// Strip the gemma4 `thought\n<channel|>` echo prefix once, if
+    /// present, then clear the guard so it never fires again on the
+    /// same parser. Tolerates streaming: if not enough bytes have
+    /// landed to disambiguate, leaves the buffer untouched and returns
+    /// false; the next `push()` retries. Once enough bytes are
+    /// available, accepts any of:
+    /// - `<channel|>...` — bare close, drop just the close.
+    /// - `thought\n<channel|>...` — full echo, drop both.
+    /// - anything else — clear the guard, the model is going straight
+    ///   to a reply without echoing.
+    fn try_consume_echo_prefix(&mut self, is_finish: bool) {
+        if !self.pending_thought_echo {
+            return;
+        }
+        const ECHO_FULL: &str = "thought\n<channel|>";
+        if self.buf.starts_with(ECHO_FULL) {
+            self.buf.drain(..ECHO_FULL.len());
+            self.pending_thought_echo = false;
+            return;
+        }
+        if self.buf.starts_with(CHANNEL_CLOSE) {
+            self.buf.drain(..CHANNEL_CLOSE.len());
+            self.pending_thought_echo = false;
+            return;
+        }
+        // Streaming guard: while more bytes might still land that
+        // complete the echo, wait. At EOF (`is_finish`) we have to
+        // make a call.
+        let is_strict_prefix = !self.buf.is_empty()
+            && (ECHO_FULL.starts_with(self.buf.as_str())
+                || CHANNEL_CLOSE.starts_with(self.buf.as_str()));
+        if is_strict_prefix && !is_finish {
+            return;
+        }
+        if is_strict_prefix && is_finish {
+            // The model emitted a truncated echo prefix and then
+            // stopped (e.g. just `thought`). Drop it — it was meant to
+            // be reasoning, not content.
+            self.buf.clear();
+            self.pending_thought_echo = false;
+            return;
+        }
+        // Any other content: the model isn't echoing. Disarm so the
+        // first byte lands in `content` (or starts a tool call).
+        self.pending_thought_echo = false;
     }
 
     fn drain(&mut self, out: &mut Vec<ParserEvent>, is_finish: bool) {
@@ -586,6 +665,7 @@ impl ToolCallParser for Gemma4ToolCallParser {
             return Vec::new();
         }
         self.buf.push_str(chunk);
+        self.try_consume_echo_prefix(/*is_finish=*/ false);
         let mut out = Vec::new();
         self.drain(&mut out, /*is_finish=*/ false);
         out
@@ -593,6 +673,7 @@ impl ToolCallParser for Gemma4ToolCallParser {
 
     fn finish(&mut self) -> Vec<ParserEvent> {
         let mut out = Vec::new();
+        self.try_consume_echo_prefix(/*is_finish=*/ true);
         self.drain(&mut out, /*is_finish=*/ true);
         // If we're stuck mid-call at EOF, surface what we have so the
         // assistant turn isn't dropped.
@@ -748,6 +829,117 @@ mod tests {
             e,
             ParserEvent::TextDelta(s) if s.contains("<channel|>")
         )));
+    }
+
+    #[test]
+    fn with_pending_channel_close_drops_full_echo_then_keeps_text() {
+        // gemma4 prompt ends with `<|channel>thought\n<channel|>` so the
+        // model often echoes `thought\n<channel|>` as its first decoded
+        // bytes. The echo guard drops that prefix and keeps the real
+        // reply intact in `content`.
+        let mut p = Gemma4ToolCallParser::with_pending_channel_close();
+        let mut events = p.push("thought\n<channel|>Paris is the capital.");
+        events.extend(p.finish());
+        let text: String = events
+            .iter()
+            .filter_map(|e| match e {
+                ParserEvent::TextDelta(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "Paris is the capital.");
+    }
+
+    #[test]
+    fn with_pending_channel_close_then_tool_call() {
+        // Echo followed by a clean tool call.
+        let mut p = Gemma4ToolCallParser::with_pending_channel_close();
+        let mut events = p.push(
+            "thought\n<channel|><|tool_call>call:get_weather{location:<|\"|>Paris<|\"|>}<tool_call|>",
+        );
+        events.extend(p.finish());
+        let names: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                ParserEvent::ToolCallOpen { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, ["get_weather"]);
+        let text: String = events
+            .iter()
+            .filter_map(|e| match e {
+                ParserEvent::TextDelta(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(text.is_empty(), "expected no leaked text, got {text:?}");
+    }
+
+    #[test]
+    fn with_pending_channel_close_no_echo_passes_text_through() {
+        // Model goes straight to text without echoing the prompt tail.
+        let mut p = Gemma4ToolCallParser::with_pending_channel_close();
+        let mut events = p.push("Paris is the capital.");
+        events.extend(p.finish());
+        let text: String = events
+            .iter()
+            .filter_map(|e| match e {
+                ParserEvent::TextDelta(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "Paris is the capital.");
+    }
+
+    #[test]
+    fn with_pending_channel_close_no_echo_goes_straight_to_tool_call() {
+        // No echo, model emits a tool call directly.
+        let mut p = Gemma4ToolCallParser::with_pending_channel_close();
+        let mut events = p.push(
+            "<|tool_call>call:get_weather{location:<|\"|>Paris<|\"|>}<tool_call|>",
+        );
+        events.extend(p.finish());
+        let names: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                ParserEvent::ToolCallOpen { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, ["get_weather"]);
+    }
+
+    #[test]
+    fn with_pending_channel_close_bare_close_only() {
+        // Model echoes just the close, no `thought\n` prefix.
+        let mut p = Gemma4ToolCallParser::with_pending_channel_close();
+        let mut events = p.push("<channel|>The answer is 42.");
+        events.extend(p.finish());
+        let text: String = events
+            .iter()
+            .filter_map(|e| match e {
+                ParserEvent::TextDelta(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "The answer is 42.");
+    }
+
+    #[test]
+    fn prompt_ends_with_channel_close_detects_marker() {
+        assert!(Gemma4ToolCallParser::prompt_ends_with_channel_close(
+            "<|turn>model\n<|channel>thought\n<channel|>"
+        ));
+        // Trailing whitespace tolerated.
+        assert!(Gemma4ToolCallParser::prompt_ends_with_channel_close(
+            "...<channel|>\n  "
+        ));
+        // qwen3.6 / non-gemma4 prompts don't match.
+        assert!(!Gemma4ToolCallParser::prompt_ends_with_channel_close(
+            "<|im_start|>assistant\n"
+        ));
+        assert!(!Gemma4ToolCallParser::prompt_ends_with_channel_close(""));
     }
 
     #[test]

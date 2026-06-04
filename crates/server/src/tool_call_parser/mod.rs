@@ -255,10 +255,34 @@ pub fn dispatcher(
     request_override: Option<&str>,
     server_default: ToolCallFormat,
 ) -> Result<Box<dyn ToolCallParser>> {
+    dispatcher_with_prompt(request_override, server_default, "")
+}
+
+/// Same as [`dispatcher`] but inspects the rendered prompt tail so the
+/// parser can prime itself when the prompt's last marker carries state
+/// the model will continue. Concretely: gemma4's chat template ends
+/// the assistant-generation prompt with `<channel|>` (a closed empty
+/// thought block); the model often re-opens that block in its first
+/// decoded tokens, so the parser starts in `InChannel` to route those
+/// bytes into reasoning instead of user-visible content. Non-gemma4
+/// formats ignore the hint.
+pub fn dispatcher_with_prompt(
+    request_override: Option<&str>,
+    server_default: ToolCallFormat,
+    prompt: &str,
+) -> Result<Box<dyn ToolCallParser>> {
     match choose_format(request_override, server_default)? {
         ToolCallFormat::Hermes => Ok(Box::new(hermes::HermesJsonParser::new())),
         ToolCallFormat::QwenCoder => Ok(Box::new(qwen3_coder::QwenCoderXmlParser::new())),
-        ToolCallFormat::Gemma4 => Ok(Box::new(gemma4::Gemma4ToolCallParser::new())),
+        ToolCallFormat::Gemma4 => {
+            let parser =
+                if gemma4::Gemma4ToolCallParser::prompt_ends_with_channel_close(prompt) {
+                    gemma4::Gemma4ToolCallParser::with_pending_channel_close()
+                } else {
+                    gemma4::Gemma4ToolCallParser::new()
+                };
+            Ok(Box::new(parser))
+        }
     }
 }
 

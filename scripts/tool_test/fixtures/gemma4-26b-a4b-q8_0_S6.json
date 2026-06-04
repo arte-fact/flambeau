@@ -15,14 +15,14 @@
     "max_tokens": 64
   },
   "response": {
-    "id": "chatcmpl-1780555666",
+    "id": "chatcmpl-1780558102",
     "choices": [
       {
         "finish_reason": "stop",
         "index": 0,
         "logprobs": null,
         "message": {
-          "content": "thought\nThe capital of France is **Paris**.",
+          "content": "The capital of France is **Paris**.",
           "refusal": null,
           "role": "assistant",
           "annotations": null,
@@ -32,7 +32,7 @@
         }
       }
     ],
-    "created": 1780555666,
+    "created": 1780558102,
     "model": "gemma-4-26B-A4B-it-Q8_0",
     "object": "chat.completion",
     "service_tier": null,
@@ -54,7 +54,7 @@
     {
       "name": "content mentions Paris",
       "pass": true,
-      "detail": "content[:80]='thought\\nThe capital of France is **Paris**.'"
+      "detail": "content[:80]='The capital of France is **Paris**.'"
     },
     {
       "name": "no tool/channel markers leak",

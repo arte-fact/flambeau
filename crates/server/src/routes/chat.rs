@@ -258,7 +258,7 @@ pub async fn chat_completions(
         .map_err(ApiError::internal)?;
 
     let (final_content, mut final_tool_calls) = {
-        use crate::tool_call_parser::{dispatcher, split_events, ParserEvent};
+        use crate::tool_call_parser::{dispatcher_with_prompt, split_events, ParserEvent};
         if dev_flag("FLAMBEAU_DEBUG_TOOL_RAW") {
             tracing::info!(
                 target: "server.tool_raw",
@@ -267,9 +267,10 @@ pub async fn chat_completions(
                 "raw model text before tool-call parser"
             );
         }
-        let mut parser = dispatcher(
+        let mut parser = dispatcher_with_prompt(
             req.tool_call_format.as_deref(),
             state.tool_call_format_default,
+            &prompt,
         )
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
         let mut events = parser.push(&text);

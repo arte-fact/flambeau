@@ -150,14 +150,31 @@ Harness at `scripts/tool_test/{run.py, scenarios.py, assertions.py}`;
    format. Compare T3 work against gemma4-26B-A4B fixture (which DOES
    produce native format — parser path is OK there).
 
-2. **gemma4-26B-A4B MoE — channel-leak in non-tool-call turns**.
-   S3 fails on a finish-reason=length cut-off (max_tokens=128) AFTER
-   the model burns ~50 tokens narrating `thought\nThe user wants to
-   know...\nI have called get_current_weather...\nNow I should
-   formulate a response...\nResponse: "The cur` — the reasoning
-   channel is leaking into visible content as plain text. Bumping
-   max_tokens would mask this; T2 (template strip) is the right fix.
-   S5 also shows the same `thought\n` prefix on a plain reply.
+2. **gemma4-26B-A4B MoE — channel-leak in non-tool-call turns**
+   (PARTIALLY FIXED in T2). The chat template ends the prompt with
+   `<|channel>thought\n<channel|>` (a closed empty thought block) when
+   `add_generation_prompt=true` and reasoning is disabled. The model
+   often *echoes* `thought\n<channel|>` (or just `<channel|>`) as the
+   first decoded bytes, leaking `thought\n` into `content`. T2 ships
+   `Gemma4ToolCallParser::with_pending_channel_close()` plus a
+   `prompt_ends_with_channel_close()` detector; the dispatcher
+   (`dispatcher_with_prompt`) inspects the rendered prompt and
+   primes the parser to drop the leading echo. Net on gemma4-26B:
+   - S1, S4, S5, S6: PASS (echo cleanly absorbed; tool calls land
+     intact; plain chat free of channel markers).
+   - S2: still fails sometimes — model decides not to call any tool
+     for the "Find me the latest news" prompt and repeats the user
+     query back verbatim. Not a parser bug; it's a chat-template
+     issue (the tools section may be confusing the model). Defer to
+     a follow-up template slice.
+   - S3 (round-trip): still fails on a finish-reason=length cut-off
+     because the model produces ~200 tokens of inline narrative
+     (`thought\nThe user is asking...\nNow I should formulate a
+     response...\nResponse: "The current weather in Paris..."`)
+     before reaching the final answer, exceeding max_tokens=128.
+     This is gemma4's *inline reasoning* pattern — distinct from the
+     `<|channel>`-marker leak — and isn't reachable from the echo
+     guard. Same follow-up template work as S2.
 
 3. **All 4 models — `tool_choice="none"` was ignored** (FIXED in T2.5).
    `req.tool_choice` was parsed but never read in either

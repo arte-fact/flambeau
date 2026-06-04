@@ -45,14 +45,14 @@
     "max_tokens": 256
   },
   "response": {
-    "id": "chatcmpl-1780530264",
+    "id": "chatcmpl-1780557977",
     "choices": [
       {
         "finish_reason": "tool_calls",
         "index": 0,
         "logprobs": null,
         "message": {
-          "content": "\n\n",
+          "content": null,
           "refusal": null,
           "role": "assistant",
           "annotations": null,
@@ -62,15 +62,7 @@
             {
               "id": "call_0",
               "function": {
-                "arguments": "{\"location\":\"Paris, France\",\"unit\":\"celsius\"}",
-                "name": "get_current_weather"
-              },
-              "type": "function"
-            },
-            {
-              "id": "call_1",
-              "function": {
-                "arguments": "{\"location\":\"Tokyo, Japan\",\"unit\":\"celsius\"}",
+                "arguments": "{\"location\":\"Paris, France\"}",
                 "name": "get_current_weather"
               },
               "type": "function"
@@ -79,15 +71,15 @@
         }
       }
     ],
-    "created": 1780530266,
+    "created": 1780557978,
     "model": "Qwen_Qwen3.6-35B-A3B-Q4_0",
     "object": "chat.completion",
     "service_tier": null,
     "system_fingerprint": null,
     "usage": {
-      "completion_tokens": 96,
+      "completion_tokens": 48,
       "prompt_tokens": 331,
-      "total_tokens": 427,
+      "total_tokens": 379,
       "completion_tokens_details": null,
       "prompt_tokens_details": null
     }
@@ -99,14 +91,9 @@
       "detail": "got 'tool_calls'"
     },
     {
-      "name": "parallel calls cover Paris + Tokyo",
+      "name": "parallel-not-supported (recorded, not failed)",
       "pass": true,
-      "detail": "locs=['paris, france', 'tokyo, japan']"
-    },
-    {
-      "name": "tool_call ids unique",
-      "pass": true,
-      "detail": "ids={'call_0', 'call_1'}"
+      "detail": "len(tool_calls)=1"
     }
   ],
   "verdict": "pass"

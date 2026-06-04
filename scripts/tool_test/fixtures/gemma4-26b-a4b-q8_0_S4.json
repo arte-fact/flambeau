@@ -45,14 +45,14 @@
     "max_tokens": 256
   },
   "response": {
-    "id": "chatcmpl-1780555664",
+    "id": "chatcmpl-1780558099",
     "choices": [
       {
         "finish_reason": "tool_calls",
         "index": 0,
         "logprobs": null,
         "message": {
-          "content": "thought\n",
+          "content": null,
           "refusal": null,
           "role": "assistant",
           "annotations": null,
@@ -79,7 +79,7 @@
         }
       }
     ],
-    "created": 1780555665,
+    "created": 1780558100,
     "model": "gemma-4-26B-A4B-it-Q8_0",
     "object": "chat.completion",
     "service_tier": null,

@@ -9,7 +9,7 @@
         "content": "What's the weather in Paris right now?"
       },
       {
-        "content": "thought\n",
+        "content": null,
         "refusal": null,
         "role": "assistant",
         "annotations": null,
@@ -67,14 +67,14 @@
     "max_tokens": 128
   },
   "response": {
-    "id": "chatcmpl-1780555661",
+    "id": "chatcmpl-1780558097",
     "choices": [
       {
         "finish_reason": "length",
         "index": 0,
         "logprobs": null,
         "message": {
-          "content": "thought\nThe user is asking for the current weather in Paris.\nI have called the `get_current_weather` tool with `location=\"Paris, France\"`.\nThe tool returned `{\"temperature_c\": 18, \"sky\": \"overcast\"}`.\nNow I need to formulate a response to the user based on this information.\nThe temperature is 18 degrees Celsius and the sky is overcast.\n\nResponse: The current weather in Paris is 18\u00b0C with an overcast sky.",
+          "content": "thought\nThe user is asking for the current weather in Paris. I have already called the `get_current_weather` tool and received the response: `{\"temperature_c\": 18, \"sky\": \"overcast\"}`.\n\nNow I need to formulate a natural language response to the user based on this information.\nThe temperature is 18 degrees Celsius and the sky is overcast.\n\nResponse: \"The current weather in Paris is 18\u00b0C with an overcast sky.\" (or something similar).\n\nI will provide the answer directly.\n<|thought|>The current weather in Paris is",
           "refusal": null,
           "role": "assistant",
           "annotations": null,
@@ -84,15 +84,15 @@
         }
       }
     ],
-    "created": 1780555664,
+    "created": 1780558099,
     "model": "gemma-4-26B-A4B-it-Q8_0",
     "object": "chat.completion",
     "service_tier": null,
     "system_fingerprint": null,
     "usage": {
       "completion_tokens": 128,
-      "prompt_tokens": 197,
-      "total_tokens": 325,
+      "prompt_tokens": 195,
+      "total_tokens": 323,
       "completion_tokens_details": null,
       "prompt_tokens_details": null
     }
@@ -106,7 +106,7 @@
     {
       "name": "content non-empty",
       "pass": true,
-      "detail": "len=407"
+      "detail": "len=515"
     },
     {
       "name": "content mentions Paris",
