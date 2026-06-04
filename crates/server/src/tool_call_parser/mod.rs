@@ -275,13 +275,18 @@ pub fn dispatcher_with_prompt(
         ToolCallFormat::Hermes => Ok(Box::new(hermes::HermesJsonParser::new())),
         ToolCallFormat::QwenCoder => Ok(Box::new(qwen3_coder::QwenCoderXmlParser::new())),
         ToolCallFormat::Gemma4 => {
-            let parser =
-                if gemma4::Gemma4ToolCallParser::prompt_ends_with_channel_close(prompt) {
-                    gemma4::Gemma4ToolCallParser::with_pending_channel_close()
-                } else {
-                    gemma4::Gemma4ToolCallParser::new()
-                };
-            Ok(Box::new(parser))
+            // Always prime the scaffolding-echo strip for gemma4. The
+            // model regurgitates a corrupted `<|turn>model` /
+            // `<|channel>thought` / `<channel|>` echo at the response
+            // start whether or not the prompt ended with `<channel|>`
+            // (thinking-mode renders `<|turn>model\n` and the model
+            // still emits a garbled `thought` block). The strip is a
+            // tight signal — short, lowercase-only, marker+scaffold-word
+            // — so priming it on every gemma4 turn can't eat real prose.
+            let _ = prompt;
+            Ok(Box::new(
+                gemma4::Gemma4ToolCallParser::with_pending_channel_close(),
+            ))
         }
     }
 }

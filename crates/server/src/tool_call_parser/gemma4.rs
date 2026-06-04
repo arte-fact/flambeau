@@ -75,6 +75,8 @@ enum State {
     AwaitingClose,
     /// Saw `<|tool_code|>`, buffering until `</tool_code>`.
     InToolCode,
+    /// Saw `<|turn>`, dropping the turn-header line until `\n`.
+    InTurnHeader,
 }
 
 /// Tags watched while in [`State::Text`]. Order doesn't matter; the
@@ -84,7 +86,17 @@ const TEXT_OPEN_TAGS: &[&str] = &[
     "<|channel>",
     CHANNEL_CLOSE,
     TOOL_CODE_OPEN,
+    TURN_OPEN,
+    "<turn|>",
+    "<|end_of_turn>",
+    "<end_of_turn>",
+    "<|file_separator|>",
 ];
+
+/// Structural gemma special tokens that are never legitimate content —
+/// dropped wherever they appear (the model echoes / hallucinates them,
+/// especially at higher temperature).
+const DROP_TOKENS: &[&str] = &["<turn|>", "<|end_of_turn>", "<end_of_turn>", "<|file_separator|>"];
 
 const CALL_PREFIX: &str = "call:";
 const STRING_QUOTE: &str = "<|\"|>";
@@ -92,6 +104,7 @@ const TOOL_CALL_CLOSE: &str = "<tool_call|>";
 const CHANNEL_CLOSE: &str = "<channel|>";
 const TOOL_CODE_OPEN: &str = "<|tool_code|>";
 const TOOL_CODE_CLOSE: &str = "</tool_code>";
+const TURN_OPEN: &str = "<|turn>";
 
 pub struct Gemma4ToolCallParser {
     state: State,
@@ -177,88 +190,54 @@ impl Gemma4ToolCallParser {
         prompt.trim_end().ends_with(CHANNEL_CLOSE)
     }
 
-    /// Strip the gemma4 forced-thought echo prefix once, then disarm.
+    /// Strip the gemma4 forced-scaffolding echo from the response start,
+    /// then disarm.
     ///
     /// The chat template ends the generation prompt with
-    /// `<|channel>thought\n<channel|>`. gemma4 then frequently echoes a
-    /// corrupted form of that tail before the real reply. Observed live
-    /// on gemma4-26B: `thought\n…`, `thought**\n…`, `thought>\n…`,
-    /// `thought\n<channel|>…`, and bare `<channel|>…`. The `**` / `>`
-    /// are the model's garbled attempt at re-emitting `<channel|>`.
+    /// `<|turn>model\n<|channel>thought\n<channel|>`. gemma4-26B
+    /// frequently regurgitates a *corrupted* echo of that scaffolding
+    /// before the real reply — one or more lines drawn from the
+    /// scaffolding vocabulary, with the `|`/bracket characters dropped
+    /// or mangled. Observed live: `thought\n…`, `thought**\n…`,
+    /// `thought>\n…`, `<channelthought>\n…`, `thought\n<|turn>model\n…`,
+    /// bare `<channel|>…`.
     ///
-    /// Rule: when the buffer starts with `thought`, the inter-text up to
-    /// the first newline is treated as a garbled close ONLY if it
-    /// contains no alphanumerics — so a real word (`thoughts`,
-    /// `thought experiments`) is preserved. The whole
-    /// `thought<junk>\n` run is dropped; anything after the newline is
-    /// the reply. A bare `<channel|>` echo is dropped too. Streaming:
-    /// wait while the buffer is still a strict prefix of an echo form.
+    /// Rule: while the leading whole line is a "scaffolding line" —
+    /// short, contains a scaffolding word (`turn`/`channel`/`thought`/
+    /// `model`/`system`/`user`), and consists only of ASCII-lowercase +
+    /// the marker chars `<>|*/` + whitespace (so it can't be prose:
+    /// real replies carry capitals, digits, or punctuation) — drop it
+    /// and check the next line. Stop at the first real-content line.
+    /// Streaming: wait for the newline that ends a candidate line.
     fn try_consume_echo_prefix(&mut self, is_finish: bool) {
         if !self.pending_thought_echo {
             return;
         }
-        const THOUGHT: &str = "thought";
-        // Bare `<channel|>` close echo.
-        if self.buf.starts_with(CHANNEL_CLOSE) {
-            self.buf.drain(..CHANNEL_CLOSE.len());
-            self.pending_thought_echo = false;
-            return;
-        }
-        // Still buffering toward a recognizable echo opener — wait.
-        if !is_finish
-            && !self.buf.is_empty()
-            && (CHANNEL_CLOSE.starts_with(self.buf.as_str())
-                || THOUGHT.starts_with(self.buf.as_str()))
-        {
-            return;
-        }
-        if self.buf.starts_with(THOUGHT) {
-            // Marker characters a garbled `<channel|>` collapses to.
-            // A real word (`thought-provoking`, `thoughts`) continues
-            // with an alphanumeric or word-punctuation char instead.
-            const MARKER_JUNK: &[char] = &['<', '>', '|', '*'];
-            let rest = &self.buf[THOUGHT.len()..];
-            match rest.chars().next() {
+        loop {
+            match self.buf.find('\n') {
+                Some(nl) => {
+                    if is_scaffolding_line(&self.buf[..nl]) {
+                        self.buf.drain(..nl + 1);
+                        // Check the next line too (e.g. `thought\n<|turn>model\n`).
+                        continue;
+                    }
+                    self.pending_thought_echo = false;
+                    return;
+                }
                 None => {
-                    // Bare `thought` — wait for more, or drop at EOF.
-                    if is_finish {
+                    // No newline yet. The current partial line is either
+                    // a scaffolding line still streaming, or real content.
+                    if !is_finish && could_extend_to_scaffolding_line(&self.buf) {
+                        return; // wait for the newline
+                    }
+                    if is_finish && is_scaffolding_line(&self.buf) {
                         self.buf.clear();
-                        self.pending_thought_echo = false;
                     }
-                }
-                Some('\n') => {
-                    // `thought\n…` — strip `thought` + the newline.
-                    self.buf.drain(..THOUGHT.len() + 1);
                     self.pending_thought_echo = false;
-                }
-                Some(c) if MARKER_JUNK.contains(&c) => {
-                    // `thought**\n…` / `thought>\n…` — garbled close.
-                    match rest.find('\n') {
-                        Some(nl) if rest[..nl].chars().all(|c| MARKER_JUNK.contains(&c)) => {
-                            self.buf.drain(..THOUGHT.len() + nl + 1);
-                            self.pending_thought_echo = false;
-                        }
-                        Some(_) => {
-                            // Junk run contains non-marker bytes — not a
-                            // clean echo; keep it as content.
-                            self.pending_thought_echo = false;
-                        }
-                        None if is_finish => {
-                            self.buf.clear();
-                            self.pending_thought_echo = false;
-                        }
-                        None => { /* wait for the newline */ }
-                    }
-                }
-                Some(_) => {
-                    // Real word/sentence starting `thought…` — keep.
-                    self.pending_thought_echo = false;
+                    return;
                 }
             }
-            return;
         }
-        // Not an echo opener — disarm and let the reply flow.
-        self.pending_thought_echo = false;
     }
 
     fn drain(&mut self, out: &mut Vec<ParserEvent>, is_finish: bool) {
@@ -270,6 +249,7 @@ impl Gemma4ToolCallParser {
                 State::InArgs => self.step_in_args(out),
                 State::AwaitingClose => self.step_awaiting_close(out),
                 State::InToolCode => self.step_in_tool_code(out, is_finish),
+                State::InTurnHeader => self.step_in_turn_header(is_finish),
             };
             if !progress {
                 return;
@@ -291,11 +271,15 @@ impl Gemma4ToolCallParser {
                 "<|tool_call>" => State::InCallHeader,
                 "<|channel>" => State::InChannel,
                 t if t == TOOL_CODE_OPEN => State::InToolCode,
+                t if t == TURN_OPEN => State::InTurnHeader,
                 // The chat template ends with `<|channel>thought\n<channel|>`,
                 // so the model's first emitted token is often a stuttered
                 // `<channel|>`. With no preceding `<|channel>` open, we're
                 // already in State::Text — drop the close marker and stay.
-                t if t == CHANNEL_CLOSE => State::Text,
+                // The other DROP_TOKENS (turn close, end-of-turn,
+                // file separator) are likewise structural noise — drop
+                // and stay in Text.
+                t if t == CHANNEL_CLOSE || DROP_TOKENS.contains(&t) => State::Text,
                 _ => unreachable!("unexpected tag matched: {tag}"),
             };
             return true;
@@ -311,6 +295,20 @@ impl Gemma4ToolCallParser {
             let chunk: String = self.buf.drain(..emit_upto).collect();
             emit_text(out, &chunk);
             return true;
+        }
+        false
+    }
+
+    fn step_in_turn_header(&mut self, is_finish: bool) -> bool {
+        // `<|turn>role\n` — drop the whole header line.
+        if let Some(nl) = self.buf.find('\n') {
+            self.buf.drain(..nl + 1);
+            self.state = State::Text;
+            return true;
+        }
+        if is_finish {
+            self.buf.clear();
+            self.state = State::Text;
         }
         false
     }
@@ -783,6 +781,56 @@ fn first_identifier(s: &str) -> Option<String> {
     (!id.is_empty()).then_some(id)
 }
 
+/// Characters a garbled gemma scaffolding marker collapses to.
+fn is_scaffold_char(c: char) -> bool {
+    c.is_ascii_lowercase() || matches!(c, '<' | '>' | '|' | '*' | '/') || c.is_whitespace()
+}
+
+const SCAFFOLD_WORDS: &[&str] = &[
+    "turn", "channel", "thought", "model", "system", "user", "assistant",
+];
+
+/// True if `line` is a corrupted echo of the gemma generation-prompt
+/// scaffolding (`<|turn>model`, `<|channel>thought`, `<channel|>`, …)
+/// rather than real reply content. Tight signal: short, drawn only from
+/// ASCII-lowercase + marker chars + whitespace (real replies carry
+/// capitals / digits / punctuation), and either carries a marker char
+/// alongside a scaffolding word or is the bare `thought` echo.
+fn is_scaffolding_line(line: &str) -> bool {
+    let s = line.trim();
+    if s.is_empty() || s.len() > 40 {
+        return false;
+    }
+    if !s.chars().all(is_scaffold_char) {
+        return false;
+    }
+    let has_marker = s.contains(['<', '>', '|']);
+    let has_word = SCAFFOLD_WORDS.iter().any(|w| s.contains(w));
+    // The bare `thought` echo: `thought` then only marker/whitespace
+    // (so `thoughts`, `thoughtful` — real words — are NOT scaffolding).
+    let bare_thought = s.strip_prefix("thought").is_some_and(|rest| {
+        rest.chars()
+            .all(|c| matches!(c, '<' | '>' | '|' | '*' | '/') || c.is_whitespace())
+    });
+    (has_marker && has_word) || bare_thought
+}
+
+/// True if a partial (newline-less) leading run could still become a
+/// scaffolding line, so the echo guard should wait for more bytes
+/// rather than emit it as content. Only waits when the partial already
+/// shows scaffolding intent (a marker char, or a `thought` prefix) —
+/// real lowercase prose flows immediately.
+fn could_extend_to_scaffolding_line(partial: &str) -> bool {
+    let s = partial.trim_start();
+    if s.is_empty() {
+        return true;
+    }
+    if s.len() > 40 || !s.chars().all(is_scaffold_char) {
+        return false;
+    }
+    s.contains(['<', '>', '|']) || "thought".starts_with(s) || s.starts_with("thought")
+}
+
 fn emit_text(out: &mut Vec<ParserEvent>, s: &str) {
     if !s.is_empty() {
         out.push(ParserEvent::TextDelta(s.to_owned()));
@@ -872,9 +920,10 @@ impl ToolCallParser for Gemma4ToolCallParser {
                 self.next_index += 1;
                 self.state = State::Text;
             }
-            State::InChannel | State::Text | State::InToolCode => {
+            State::InChannel | State::Text | State::InToolCode | State::InTurnHeader => {
                 // Already drained on is_finish=true above (InToolCode's
-                // EOF leak/parse is handled inside step_in_tool_code).
+                // EOF leak/parse + InTurnHeader's EOF drop are handled
+                // inside their step fns).
             }
         }
         out
@@ -1224,6 +1273,54 @@ mod tests {
             echo_text("thought experiments are useful."),
             "thought experiments are useful."
         );
+    }
+
+    #[test]
+    fn structural_tokens_dropped_anywhere() {
+        // Clean gemma special tokens are never content — dropped mid /
+        // end of response too (not just at the start).
+        let t = |s: &str| {
+            let mut p = Gemma4ToolCallParser::new();
+            let mut e = p.push(s);
+            e.extend(p.finish());
+            ParserEvent::coalesce(e)
+                .iter()
+                .filter_map(|x| match x {
+                    ParserEvent::TextDelta(s) => Some(s.clone()),
+                    _ => None,
+                })
+                .collect::<String>()
+        };
+        assert_eq!(t("c-a-t (cat)<|end_of_turn>"), "c-a-t (cat)");
+        assert_eq!(t("answer here <|file_separator|>"), "answer here ");
+        assert_eq!(t("<|turn>model\nThe reply."), "The reply.");
+        assert_eq!(t("mid <turn|> response"), "mid  response");
+    }
+
+    #[test]
+    fn with_pending_channel_close_turn_header_echo() {
+        // The user-reported shape: `thought\n<|turn>model\n` then reply.
+        assert_eq!(
+            echo_text("thought\n<|turn>model\nThe capital is Paris."),
+            "The capital is Paris."
+        );
+        // Garbled `<|channel>thought` merged: `<channelthought>`.
+        assert_eq!(
+            echo_text("<channelthought>\nHello! How can I help you today?"),
+            "Hello! How can I help you today?"
+        );
+        // Bare `<|turn>model` line.
+        assert_eq!(echo_text("<|turn>model\nApple."), "Apple.");
+    }
+
+    #[test]
+    fn with_pending_channel_close_scaffolding_keeps_real_lowercase() {
+        // Real lowercase content that merely contains a scaffold word or
+        // an angle bracket must NOT be stripped.
+        assert_eq!(echo_text("the model is large."), "the model is large.");
+        assert_eq!(echo_text("use <br> for line breaks."), "use <br> for line breaks.");
+        // A reply that is the single word the user asked for.
+        assert_eq!(echo_text("thoughts"), "thoughts");
     }
 
     #[test]
