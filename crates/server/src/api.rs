@@ -282,6 +282,23 @@ pub struct ToolChoiceNamed {
     pub function: ToolChoiceFunction,
 }
 
+impl ToolChoice {
+    /// True for OpenAI `tool_choice == "none"` — the model MUST NOT
+    /// emit a tool call. Server enforces this by dropping the tools
+    /// section from the rendered prompt and refusing to lift any
+    /// `tool_calls[]` from the model's output.
+    pub fn forbids_tools(&self) -> bool {
+        matches!(self, ToolChoice::Mode(s) if s.eq_ignore_ascii_case("none"))
+    }
+}
+
+impl AnthropicToolChoice {
+    /// Anthropic counterpart of [`ToolChoice::forbids_tools`].
+    pub fn forbids_tools(&self) -> bool {
+        matches!(self, AnthropicToolChoice::None)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ToolChoiceFunction {
     pub name: String,
@@ -730,6 +747,32 @@ mod tests {
             }
             _ => panic!("expected named tool choice"),
         }
+    }
+
+    #[test]
+    fn tool_choice_forbids_tools_recognises_none() {
+        let none: ToolChoice = serde_json::from_str(r#""none""#).unwrap();
+        assert!(none.forbids_tools());
+        // Case-insensitive (some clients send "None" or "NONE").
+        let ucase: ToolChoice = serde_json::from_str(r#""NONE""#).unwrap();
+        assert!(ucase.forbids_tools());
+        let auto: ToolChoice = serde_json::from_str(r#""auto""#).unwrap();
+        assert!(!auto.forbids_tools());
+        let required: ToolChoice = serde_json::from_str(r#""required""#).unwrap();
+        assert!(!required.forbids_tools());
+        let named: ToolChoice =
+            serde_json::from_str(r#"{"type":"function","function":{"name":"f"}}"#).unwrap();
+        assert!(!named.forbids_tools());
+    }
+
+    #[test]
+    fn anthropic_tool_choice_forbids_tools_recognises_none() {
+        let none: AnthropicToolChoice = serde_json::from_str(r#"{"type":"none"}"#).unwrap();
+        assert!(none.forbids_tools());
+        let auto: AnthropicToolChoice = serde_json::from_str(r#"{"type":"auto"}"#).unwrap();
+        assert!(!auto.forbids_tools());
+        let any: AnthropicToolChoice = serde_json::from_str(r#"{"type":"any"}"#).unwrap();
+        assert!(!any.forbids_tools());
     }
 
     #[test]

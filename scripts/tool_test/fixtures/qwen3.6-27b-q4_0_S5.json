@@ -44,41 +44,32 @@
     "max_tokens": 256
   },
   "response": {
-    "id": "chatcmpl-1780530193",
+    "id": "chatcmpl-1780555593",
     "choices": [
       {
-        "finish_reason": "tool_calls",
+        "finish_reason": "stop",
         "index": 0,
         "logprobs": null,
         "message": {
-          "content": null,
+          "content": "As an AI, I don't have access to real-time data, so I cannot provide the current weather conditions in Paris right now.\n\nTo get the most accurate and up-to-date information, please check a reliable weather service such as:\n*   **AccuWeather**\n*   **The Weather Channel**\n*   **M\u00e9t\u00e9o-France** (the official French national meteorological service)\n*   **Weather.com**\n\nThese sources will give you the current temperature, precipitation, wind speed, and hourly or daily forecasts.",
           "refusal": null,
           "role": "assistant",
           "annotations": null,
           "audio": null,
           "function_call": null,
-          "tool_calls": [
-            {
-              "id": "call_0",
-              "function": {
-                "arguments": "{\"location\":\"Paris, France\",\"unit\":\"celsius\"}",
-                "name": "get_current_weather"
-              },
-              "type": "function"
-            }
-          ]
+          "tool_calls": null
         }
       }
     ],
-    "created": 1780530196,
+    "created": 1780555597,
     "model": "Qwen3.6-27B-Q4_0",
     "object": "chat.completion",
     "service_tier": null,
     "system_fingerprint": null,
     "usage": {
-      "completion_tokens": 47,
-      "prompt_tokens": 330,
-      "total_tokens": 377,
+      "completion_tokens": 111,
+      "prompt_tokens": 23,
+      "total_tokens": 134,
       "completion_tokens_details": null,
       "prompt_tokens_details": null
     }
@@ -86,17 +77,17 @@
   "checks": [
     {
       "name": "finish_reason=stop",
-      "pass": false,
-      "detail": "got 'tool_calls'"
+      "pass": true,
+      "detail": "got 'stop'"
     },
     {
       "name": "no tool_calls emitted",
-      "pass": false,
-      "detail": "len=1"
+      "pass": true,
+      "detail": "len=0"
     },
     {
       "name": "content non-empty",
-      "pass": false,
+      "pass": true,
       "detail": ""
     },
     {
@@ -105,5 +96,5 @@
       "detail": "leaked: None"
     }
   ],
-  "verdict": "fail"
+  "verdict": "pass"
 }

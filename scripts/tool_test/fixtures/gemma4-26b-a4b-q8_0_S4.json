@@ -45,7 +45,7 @@
     "max_tokens": 256
   },
   "response": {
-    "id": "chatcmpl-1780530418",
+    "id": "chatcmpl-1780555664",
     "choices": [
       {
         "finish_reason": "tool_calls",
@@ -79,7 +79,7 @@
         }
       }
     ],
-    "created": 1780530419,
+    "created": 1780555665,
     "model": "gemma-4-26B-A4B-it-Q8_0",
     "object": "chat.completion",
     "service_tier": null,
@@ -106,7 +106,7 @@
     {
       "name": "tool_call ids unique",
       "pass": true,
-      "detail": "ids={'call_1', 'call_0'}"
+      "detail": "ids={'call_0', 'call_1'}"
     }
   ],
   "verdict": "pass"

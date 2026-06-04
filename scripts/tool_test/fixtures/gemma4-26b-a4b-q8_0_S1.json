@@ -44,14 +44,14 @@
     "max_tokens": 256
   },
   "response": {
-    "id": "chatcmpl-1780530413",
+    "id": "chatcmpl-1780555659",
     "choices": [
       {
         "finish_reason": "tool_calls",
         "index": 0,
         "logprobs": null,
         "message": {
-          "content": "\n",
+          "content": "thought\n",
           "refusal": null,
           "role": "assistant",
           "annotations": null,
@@ -70,15 +70,15 @@
         }
       }
     ],
-    "created": 1780530414,
+    "created": 1780555659,
     "model": "gemma-4-26B-A4B-it-Q8_0",
     "object": "chat.completion",
     "service_tier": null,
     "system_fingerprint": null,
     "usage": {
-      "completion_tokens": 23,
+      "completion_tokens": 21,
       "prompt_tokens": 130,
-      "total_tokens": 153,
+      "total_tokens": 151,
       "completion_tokens_details": null,
       "prompt_tokens_details": null
     }
@@ -121,8 +121,8 @@
     },
     {
       "name": "content empty or whitespace",
-      "pass": true,
-      "detail": "content='\\n'"
+      "pass": false,
+      "detail": "content='thought\\n'"
     },
     {
       "name": "no raw tool/channel tokens in content",
@@ -130,5 +130,5 @@
       "detail": "leaked pattern: None"
     }
   ],
-  "verdict": "pass"
+  "verdict": "fail"
 }

@@ -44,41 +44,32 @@
     "max_tokens": 256
   },
   "response": {
-    "id": "chatcmpl-1780530419",
+    "id": "chatcmpl-1780555665",
     "choices": [
       {
-        "finish_reason": "tool_calls",
+        "finish_reason": "stop",
         "index": 0,
         "logprobs": null,
         "message": {
-          "content": "thought\n",
+          "content": "thought\nI do not have access to real-time weather data or a search engine to check the current conditions in Paris. To get the most accurate information, I recommend checking a weather website or app like AccuWeather, The Weather Channel, or searching \"weather in Paris\" on Google.",
           "refusal": null,
           "role": "assistant",
           "annotations": null,
           "audio": null,
           "function_call": null,
-          "tool_calls": [
-            {
-              "id": "call_0",
-              "function": {
-                "arguments": "{\"location\":\"Paris, France\"}",
-                "name": "get_current_weather"
-              },
-              "type": "function"
-            }
-          ]
+          "tool_calls": null
         }
       }
     ],
-    "created": 1780530420,
+    "created": 1780555666,
     "model": "gemma-4-26B-A4B-it-Q8_0",
     "object": "chat.completion",
     "service_tier": null,
     "system_fingerprint": null,
     "usage": {
-      "completion_tokens": 21,
-      "prompt_tokens": 128,
-      "total_tokens": 149,
+      "completion_tokens": 60,
+      "prompt_tokens": 32,
+      "total_tokens": 92,
       "completion_tokens_details": null,
       "prompt_tokens_details": null
     }
@@ -86,13 +77,13 @@
   "checks": [
     {
       "name": "finish_reason=stop",
-      "pass": false,
-      "detail": "got 'tool_calls'"
+      "pass": true,
+      "detail": "got 'stop'"
     },
     {
       "name": "no tool_calls emitted",
-      "pass": false,
-      "detail": "len=1"
+      "pass": true,
+      "detail": "len=0"
     },
     {
       "name": "content non-empty",
@@ -105,5 +96,5 @@
       "detail": "leaked: None"
     }
   ],
-  "verdict": "fail"
+  "verdict": "pass"
 }

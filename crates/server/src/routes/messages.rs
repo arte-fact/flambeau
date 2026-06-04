@@ -97,11 +97,18 @@ pub async fn messages_anthropic(
         &state.model_defaults,
     );
 
-    let openai_tools: Option<Vec<ToolDef>> = req
-        .tools
-        .as_deref()
-        .map(anthropic_tools_to_openai)
-        .filter(|v| !v.is_empty());
+    let tools_forbidden = req
+        .tool_choice
+        .as_ref()
+        .is_some_and(|tc| tc.forbids_tools());
+    let openai_tools: Option<Vec<ToolDef>> = if tools_forbidden {
+        None
+    } else {
+        req.tools
+            .as_deref()
+            .map(anthropic_tools_to_openai)
+            .filter(|v| !v.is_empty())
+    };
     let merged_tools = openai_tools.as_ref().map(|ts| {
         ts.iter()
             .filter_map(|t| serde_json::to_value(t).ok())

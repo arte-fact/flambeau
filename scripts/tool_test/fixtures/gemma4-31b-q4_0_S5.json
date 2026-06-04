@@ -44,14 +44,14 @@
     "max_tokens": 256
   },
   "response": {
-    "id": "chatcmpl-1780530336",
+    "id": "chatcmpl-1780555472",
     "choices": [
       {
         "finish_reason": "stop",
         "index": 0,
         "logprobs": null,
         "message": {
-          "content": "\n<|call:get_current_weather{location: 'Paris, France'}<tool_call|>",
+          "content": "I do not have access to real-time weather data. To find the current weather in Paris, I recommend checking a weather website or app like Google Weather, AccuWeather, or The Weather Channel.",
           "refusal": null,
           "role": "assistant",
           "annotations": null,
@@ -61,15 +61,15 @@
         }
       }
     ],
-    "created": 1780530337,
+    "created": 1780555474,
     "model": "gemma-4-31B-it-Q4_0",
     "object": "chat.completion",
     "service_tier": null,
     "system_fingerprint": null,
     "usage": {
-      "completion_tokens": 19,
-      "prompt_tokens": 128,
-      "total_tokens": 147,
+      "completion_tokens": 43,
+      "prompt_tokens": 32,
+      "total_tokens": 75,
       "completion_tokens_details": null,
       "prompt_tokens_details": null
     }
@@ -92,9 +92,9 @@
     },
     {
       "name": "no markers leak",
-      "pass": false,
-      "detail": "leaked: '<tool_call\\\\|>'"
+      "pass": true,
+      "detail": "leaked: None"
     }
   ],
-  "verdict": "fail"
+  "verdict": "pass"
 }

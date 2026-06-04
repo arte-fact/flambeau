@@ -159,16 +159,18 @@ Harness at `scripts/tool_test/{run.py, scenarios.py, assertions.py}`;
    max_tokens would mask this; T2 (template strip) is the right fix.
    S5 also shows the same `thought\n` prefix on a plain reply.
 
-3. **All 4 models — `tool_choice="none"` is ignored**. Server still
-   passes tools to the model and lifts a `tool_calls[0]` payload
-   when the request explicitly forbids it. This is a server-side
-   gating bug, separate from the parser/template axis. Not in
-   T2/T3/T4 scope as originally written — adding a new slice:
-   - **T2.5 — server-side `tool_choice="none"` enforcement**. When
-     `tool_choice=="none"`, suppress the tools section in the rendered
-     chat template AND blank `tool_calls[]` post-decode if anything
-     leaks through. Trivial in `crates/server/src/routes/chat.rs`;
-     gates on S5 turning green for all 4 models.
+3. **All 4 models — `tool_choice="none"` was ignored** (FIXED in T2.5).
+   `req.tool_choice` was parsed but never read in either
+   `routes/chat.rs` or `routes/messages.rs` — the server always
+   rendered the tools section regardless of the client's request and
+   lifted `tool_calls[0]` if the model emitted anything. New helpers
+   `ToolChoice::forbids_tools()` and
+   `AnthropicToolChoice::forbids_tools()` recognize `"none"` (case-
+   insensitive on OpenAI, exact tagged-variant on Anthropic); both
+   routes now set `merged_tools = None` when forbidden so the chat
+   template doesn't render the tools section, plus the OpenAI path
+   blanks `final_tool_calls` post-parse as defence-in-depth. S5
+   turns green for all 4 models; S1–S4/S6 unaffected.
 
 4. **qwen3.6 family is fine on the V1 rig**. Both 27B dense and 35B
    MoE pass S1, S2, S3 (round-trip), S4 (parallel — actually emits

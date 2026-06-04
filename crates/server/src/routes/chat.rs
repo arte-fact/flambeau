@@ -112,12 +112,20 @@ pub async fn chat_completions(
         .chain(req.messages.iter().map(normalise_message))
         .collect();
 
-    let merged_tools = req.tools.as_deref().map(|ts| {
-        ts.iter()
-            .map(serde_json::to_value)
-            .filter_map(Result::ok)
-            .collect::<Vec<_>>()
-    });
+    let tools_forbidden = req
+        .tool_choice
+        .as_ref()
+        .is_some_and(|tc| tc.forbids_tools());
+    let merged_tools = if tools_forbidden {
+        None
+    } else {
+        req.tools.as_deref().map(|ts| {
+            ts.iter()
+                .map(serde_json::to_value)
+                .filter_map(Result::ok)
+                .collect::<Vec<_>>()
+        })
+    };
 
     let json_mode = matches!(
         req.response_format.as_ref(),
@@ -268,6 +276,9 @@ pub async fn chat_completions(
         events.extend(parser.finish());
         split_events(ParserEvent::coalesce(events))
     };
+    if tools_forbidden {
+        final_tool_calls.clear();
+    }
     if !parallel_tool_calls && final_tool_calls.len() > 1 {
         final_tool_calls.truncate(1);
     }
