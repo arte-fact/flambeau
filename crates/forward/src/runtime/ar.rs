@@ -140,28 +140,78 @@ pub struct BarArCoordinator {
     /// `cross_rank_event_barrier` pattern. Large-`n` AR calls keep
     /// host-sync — see `EVENT_PATH_MAX_ELEMS`.
     events: Vec<HipEvent>,
+    /// Per-rank "pulls done" events for the DtoD path. After a rank has
+    /// copied every peer's partial into local scratch it records its
+    /// event; before a rank overwrites its own partial with the AR sum it
+    /// waits on every peer's event. This read-all-then-write-all fence is
+    /// what the host barriers cannot provide (they order host threads,
+    /// not the async GPU copies/sums) — without it a peer's in-place sum
+    /// can clobber its partial mid-pull, corrupting ~30% of AR calls.
+    pull_events: Vec<HipEvent>,
     barrier: Barrier,
+    /// When true, the F32 sum AR pulls peer partials into rank-local
+    /// scratch via the DMA copy engine and sums locally
+    /// ([`dtod_ar_sum_f32`]) instead of reading peers via the in-kernel
+    /// BAR1 aperture (which is non-coherent on gfx906 PCIe P2P — see
+    /// `doc/DETERMINISM_INVESTIGATION.md`). Deterministic at temp=0.
+    dtod: bool,
+    /// Per-rank receive scratch for the DtoD path, holding `(n_ranks-1)`
+    /// contiguous peer-partial slots. Grown on demand; alive for the
+    /// coordinator's lifetime.
+    recv_staging: Vec<Mutex<Option<PeerDeviceBuffer>>>,
 }
 
 impl BarArCoordinator {
-    pub fn new(bar: Arc<BarP2pAllReduce>) -> Result<Self> {
+    pub fn new(bar: Arc<BarP2pAllReduce>, dtod: bool) -> Result<Self> {
         let n = bar.ranks();
         let mut events = Vec::with_capacity(n);
+        let mut pull_events = Vec::with_capacity(n);
         for r in 0..n {
             let dev = bar.device_id(r);
             flambeau_backend_hip::bind(dev)?;
             events.push(HipEvent::new(dev)?);
+            pull_events.push(HipEvent::new(dev)?);
         }
         Ok(Self {
             bar,
             partials: Mutex::new(vec![None; n]),
             events,
+            pull_events,
             barrier: Barrier::new(n),
+            dtod,
+            recv_staging: (0..n).map(|_| Mutex::new(None)).collect(),
         })
     }
 
     pub fn ranks(&self) -> usize {
         self.bar.ranks()
+    }
+
+    /// Rank-local receive scratch for the DtoD path, grown to `bytes`.
+    /// Allocated on `device` (the rank's own device).
+    fn ensure_recv_staging(
+        &self,
+        rank: usize,
+        bytes: usize,
+        device: &HipDevice,
+    ) -> Result<DevicePtr> {
+        let mut g = self.recv_staging[rank].lock().unwrap();
+        let grow = match g.as_ref() {
+            None => true,
+            Some(b) => b.bytes < bytes,
+        };
+        if grow {
+            if let Some(old) = g.take() {
+                // SAFETY: returned by an earlier alloc on this device;
+                // grow only happens when a larger payload arrives, and
+                // the publish barrier ordered all prior AR reads of it.
+                unsafe { Device::dealloc(device, old.ptr, old.bytes)? };
+            }
+            device.bind()?;
+            let ptr = Device::alloc(device, bytes)?;
+            *g = Some(PeerDeviceBuffer { ptr, bytes });
+        }
+        Ok(g.as_ref().expect("recv_staging just ensured").ptr)
     }
 }
 
@@ -520,11 +570,102 @@ pub fn bar_ar_residual_rmsnorm_f16(
     Ok(())
 }
 
+/// DtoD AllReduce-sum (F32). Pulls each peer partial into rank-local
+/// scratch via the DMA copy engine, then runs the same
+/// `sum_tp{2,4}_f32_rank` kernel with the peer arg pointed at that local
+/// scratch — so the kernel reads only coherent rank-local memory. The
+/// copy engine sources peer bytes coherently where the in-kernel BAR1
+/// shader load of [`bar_ar_sum_f32`] is stale on gfx906 PCIe P2P, so
+/// this is bit-deterministic at temp=0. Same on-device byte volume as
+/// BAR1 (one peer copy per rank), no host bounce. See
+/// `doc/DETERMINISM_INVESTIGATION.md`.
+pub fn dtod_ar_sum_f32(
+    coord: &BarArCoordinator,
+    rank: usize,
+    buf: DevicePtr,
+    n_elems: usize,
+    device: &HipDevice,
+    stream: &HipStream,
+) -> Result<()> {
+    let n_ranks = coord.ranks();
+    if n_ranks == 1 {
+        return Ok(());
+    }
+    let peers = if n_elems <= EVENT_PATH_MAX_ELEMS {
+        ar_publish_with_events(coord, rank, buf, stream)?
+    } else {
+        ar_publish_with_host_sync(coord, rank, buf, stream)?
+    };
+    let n_bytes = n_elems * 4;
+    let staging = coord.ensure_recv_staging(rank, (n_ranks - 1) * n_bytes, device)?;
+    // Pull every peer partial into local scratch on this rank's stream.
+    // The publish helper already ordered `stream` after each peer's
+    // producer event (or drained via host-sync), so the copy reads a
+    // committed partial; the copy engine sources it coherently.
+    let mut local_peers: Vec<DevicePtr> = Vec::with_capacity(n_ranks - 1);
+    let mut off = 0usize;
+    for (r, &peer_ptr) in peers.iter().enumerate() {
+        if r == rank {
+            continue;
+        }
+        let dst = DevicePtr(staging.0 + off);
+        // SAFETY: dst owns n_bytes within the (n_ranks-1)*n_bytes staging
+        // slab on this device; peer_ptr owns n_bytes on device r; peer
+        // access authorised at cluster bring-up; stream belongs to `device`.
+        unsafe {
+            device.memcpy_peer_in_async(stream, dst, peer_ptr, coord.bar.device_id(r), n_bytes)?;
+        }
+        local_peers.push(dst);
+        off += n_bytes;
+    }
+    // Read-all-then-write-all fence: the sum below overwrites `buf`
+    // (= this rank's published partial) in place, but peers are still
+    // pulling that same `buf`. Record this rank's pulls-done event, host-
+    // barrier so all ranks have recorded, then make `stream` wait on every
+    // peer's pulls-done event so no peer's in-place sum can clobber a
+    // partial another rank is mid-pull. Without this ~30% of AR calls race.
+    coord.pull_events[rank].record(stream)?;
+    coord.barrier.wait();
+    for (r, ev) in coord.pull_events.iter().enumerate() {
+        if r != rank {
+            ev.stream_wait(stream)?;
+        }
+    }
+    // Local partial + local peer copies. Same-stream ordering serializes
+    // the sum after the pulls; the kernel reads only rank-local memory.
+    // SAFETY: all pointers are rank-local DevicePtrs valid for n_elems F32.
+    unsafe {
+        match n_ranks {
+            2 => coord.bar.sum_tp2_f32_rank(
+                rank,
+                peers[rank],
+                local_peers[0],
+                n_elems as u32,
+                stream,
+            )?,
+            4 => {
+                let p3 = [local_peers[0], local_peers[1], local_peers[2]];
+                coord
+                    .bar
+                    .sum_tp4_f32_rank(rank, peers[rank], p3, n_elems as u32, stream)?
+            }
+            other => anyhow::bail!("dtod_ar_sum_f32: unsupported n_ranks={other}"),
+        }
+    }
+    ar_epilogue(coord, rank);
+    Ok(())
+}
+
 /// Build the boxed callback that TpHooks / HybridHooks expect, with
-/// the BAR1 P2P backend.
+/// the BAR1 P2P backend. Dispatches to the coherent DtoD path when the
+/// coordinator was built with `dtod=true`.
 pub fn make_bar_ar_callback(coord: Arc<BarArCoordinator>, rank: usize) -> ArCallback {
     Box::new(move |_r, _nr, buf, n_elems, dev, st| {
-        bar_ar_sum_f32(&coord, rank, buf, n_elems, dev, st)
+        if coord.dtod {
+            dtod_ar_sum_f32(&coord, rank, buf, n_elems, dev, st)
+        } else {
+            bar_ar_sum_f32(&coord, rank, buf, n_elems, dev, st)
+        }
     })
 }
 

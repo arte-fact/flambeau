@@ -216,10 +216,10 @@ enum Cmd {
         /// saving on decode; quality cert required per model).
         #[arg(long = "kv", env = "FLAMBEAU_KV", default_value = "f16")]
         kv: String,
-        /// Route TP/Hybrid AllReduce through the host-bounce path for
-        /// bit-reproducible greedy (temp=0) output. The BAR1 P2P AR is
-        /// non-coherent on gfx906 (see doc/DETERMINISM_INVESTIGATION.md);
-        /// this trades decode throughput for determinism.
+        /// Make TP/Hybrid AllReduce bit-reproducible at temp=0 via the
+        /// coherent DtoD copy-engine path (pull peer partials to local
+        /// scratch, sum locally) instead of the in-kernel BAR1 read,
+        /// which is non-coherent on gfx906 (doc/DETERMINISM_INVESTIGATION.md).
         #[arg(
             long = "deterministic",
             env = "FLAMBEAU_DETERMINISTIC",

@@ -1205,6 +1205,46 @@ impl HipDevice {
         };
         check(code, "hipMemcpyPeerAsync")
     }
+
+    /// Cross-device peer PULL: copy `src` (on `src_device_id`) into `dst`
+    /// (on `self`) enqueued on `stream` (which must belong to `self`, the
+    /// DESTINATION device). The DMA copy engine sources the peer bytes
+    /// coherently — unlike an in-kernel BAR1 shader load, which is stale
+    /// on gfx906 PCIe P2P (see doc/DETERMINISM_INVESTIGATION.md). Used by
+    /// the deterministic DtoD AllReduce: each rank pulls peer partials
+    /// into local scratch on its own stream, then sums locally.
+    ///
+    /// # Safety
+    /// `dst` must be a live allocation on `self` valid for `bytes` writes;
+    /// `src` a live allocation on `src_device_id` valid for `bytes` reads;
+    /// peer access authorised at cluster bring-up; no in-flight op on
+    /// `stream` may alias either pointer.
+    pub unsafe fn memcpy_peer_in_async(
+        &self,
+        stream: &HipStream,
+        dst: DevicePtr,
+        src: DevicePtr,
+        src_device_id: i32,
+        bytes: usize,
+    ) -> DeviceResult<()> {
+        if bytes == 0 {
+            return Ok(());
+        }
+        self.bind()?;
+        // SAFETY: caller's contract above; `stream.raw()` belongs to
+        // `self` (the destination device), matching the just-bound device.
+        let code = unsafe {
+            sys::hipMemcpyPeerAsync(
+                dst.0 as *mut _,
+                self.id,
+                src.0 as *const _,
+                src_device_id,
+                bytes,
+                stream.raw(),
+            )
+        };
+        check(code, "hipMemcpyPeerAsync(pull)")
+    }
 }
 
 impl Drop for HipDevice {

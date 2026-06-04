@@ -103,11 +103,11 @@ pub struct ServeConfig {
     pub prefix_cache_max_gb: f64,
     /// KV cache layout: `"f16"` or `"q8"`.
     pub kv: String,
-    /// Route TP/Hybrid AllReduce through the host-bounce coordinator
-    /// instead of BAR1 P2P, making greedy (temp=0) output bit-
-    /// reproducible. The BAR1 aperture read is non-coherent on gfx906
-    /// (see `doc/DETERMINISM_INVESTIGATION.md`); host-bounce trades
-    /// decode throughput for determinism. Off by default.
+    /// Make TP/Hybrid AllReduce bit-reproducible at temp=0 by routing it
+    /// through the coherent DtoD copy-engine path (pull peer partials to
+    /// local scratch, sum locally) instead of the in-kernel BAR1 read,
+    /// which is non-coherent on gfx906 (see
+    /// `doc/DETERMINISM_INVESTIGATION.md`). Stays on-device. Off by default.
     pub deterministic: bool,
     /// Default system prompt prepended to chat-template requests when
     /// none is provided.

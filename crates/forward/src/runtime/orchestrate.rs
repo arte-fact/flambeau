@@ -29,7 +29,7 @@ use super::{Arch, Topology};
 /// permits. Returns `None` on partial peer-access matrices, missing
 /// hsaco, or BAR1-incompatible topologies — callers fall back to the
 /// host-bounce coordinator.
-fn try_build_bar_ar(devices: &[i32]) -> Option<Arc<BarArCoordinator>> {
+fn try_build_bar_ar(devices: &[i32], dtod: bool) -> Option<Arc<BarArCoordinator>> {
     if devices.len() < 2 {
         return None;
     }
@@ -38,7 +38,7 @@ fn try_build_bar_ar(devices: &[i32]) -> Option<Arc<BarArCoordinator>> {
         return None;
     }
     let bar = Arc::new(BarP2pAllReduce::new(Arc::clone(&cluster)).ok()?);
-    Some(Arc::new(BarArCoordinator::new(bar).ok()?))
+    Some(Arc::new(BarArCoordinator::new(bar, dtod).ok()?))
 }
 
 pub fn launch<A: Arch>(
@@ -79,11 +79,7 @@ fn launch_tp<A: Arch>(
 ) -> Result<Vec<WorkerHandle<A>>> {
     let n = devices.len();
     let ar = Arc::new(ArCoordinator::new(n));
-    let bar = if params.deterministic_ar {
-        None
-    } else {
-        try_build_bar_ar(devices)
-    };
+    let bar = try_build_bar_ar(devices, params.deterministic_ar);
     let mut handles = Vec::with_capacity(n);
     for (rank, &dev) in devices.iter().enumerate() {
         let role = WorkerRole::Tp {
@@ -110,12 +106,12 @@ pub struct LaunchParams {
     pub max_slots: usize,
     pub paged_kv_pages: Option<usize>,
     pub kv_layout: crate::core::KvLayout,
-    /// Route TP/Hybrid AllReduce through the host-bounce coordinator
-    /// (DtoH → CPU sum → HtoD) instead of BAR1 P2P. The BAR1 aperture
-    /// read is non-coherent on gfx906 (see
-    /// `doc/DETERMINISM_INVESTIGATION.md`), so BAR1 AR is not bit-
-    /// reproducible at temp=0; host-bounce is. Costs the DtoH/HtoD
-    /// bytes BAR1 avoids — opt-in via the server `--deterministic` flag.
+    /// Make TP/Hybrid AllReduce bit-deterministic at temp=0 by pulling
+    /// peer partials into rank-local scratch via the DMA copy engine and
+    /// summing locally (`dtod=true` on the BAR coordinator), instead of
+    /// the in-kernel BAR1 aperture read which is non-coherent on gfx906
+    /// PCIe P2P (see `doc/DETERMINISM_INVESTIGATION.md`). Stays on-device
+    /// (no host bounce) — opt-in via the server `--deterministic` flag.
     pub deterministic_ar: bool,
 }
 
@@ -269,11 +265,7 @@ fn launch_hybrid<A: Arch>(
     for (stage_idx, ranks) in stages.iter().enumerate() {
         let tp_size = ranks.len();
         let ar = Arc::new(ArCoordinator::new(tp_size));
-        let bar = if params.deterministic_ar {
-            None
-        } else {
-            try_build_bar_ar(ranks)
-        };
+        let bar = try_build_bar_ar(ranks, params.deterministic_ar);
         let (layer_start, layer_end) = if !split.is_empty() {
             let s = layer_cursor;
             let count = split[stage_idx];
