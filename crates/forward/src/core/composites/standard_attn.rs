@@ -404,6 +404,15 @@ pub fn standard_attn_local<H: TopologyHooks>(
     // K/V slot stride / slab-view sizing below derives from this, never
     // from the global `max_seq_len` (which stays the position bound).
     let slab_depth = kv.depth;
+    // A ring-buffered SWA layer: its slab is window-sized (< the global ctx
+    // cap), so KV rows are addressed modulo `slab_depth`. The contiguous
+    // decode pointer-slide is only valid until the cache wraps
+    // (`n_tokens_kv > slab_depth`); past that the kernels take the ring path
+    // (`ring_depth = slab_depth`, no slide, real window, single-block — splitk
+    // can't bound its chunk count to the window in ring space). Below the wrap
+    // the slab is still physically contiguous, so the existing slide path is
+    // bit-identical and is kept.
+    let is_ring_layer = slab_depth < max_seq_len;
     let slot_stride_elems = slab_depth * kv_width;
     let slot_stride_bytes = slot_stride_elems * 2;
     let scale = weights
@@ -649,6 +658,11 @@ pub fn standard_attn_local<H: TopologyHooks>(
         let mut attn_out = unsafe { Tensor::<F16>::from_raw(state.pool.attn_out_f16, n * q_width) };
         if n == 1 {
             let n_tokens_kv = start_position + 1;
+            // Ring addressing kicks in only once the window-sized slab has
+            // wrapped; below the wrap the slab is contiguous and the slide
+            // path is bit-identical.
+            let ring_active = is_ring_layer && n_tokens_kv > slab_depth;
+            let ring_depth_arg: i32 = if ring_active { slab_depth as i32 } else { 0 };
             if is_q8 {
                 // SWA at decode: when window < n_tokens_kv, slide the
                 // cache pointer to the window's start and pass the
@@ -657,7 +671,8 @@ pub fn standard_attn_local<H: TopologyHooks>(
                 // masking inside the kernel) and there's no waste over
                 // out-of-window chunks. window_size = 0 keeps the full
                 // causal range.
-                let (eff_n_tokens_kv, k_ptr_eff, v_ptr_eff) = if weights.window_size > 0
+                let (eff_n_tokens_kv, k_ptr_eff, v_ptr_eff) = if !ring_active
+                    && weights.window_size > 0
                     && (weights.window_size as usize) < n_tokens_kv
                 {
                     let w = weights.window_size as usize;
@@ -679,12 +694,18 @@ pub fn standard_attn_local<H: TopologyHooks>(
                         slab_depth * kv_width,
                     )
                 };
-                // Effective window length is the kernel's view of the
-                // cache; the SWA mask becomes a no-op inside the kernel.
-                let kernel_window = 0i32;
+                // Ring layers pass the real window (kernel applies the SWA
+                // mask + ring addressing); contiguous layers slid the pointer
+                // above so the kernel's window is a no-op.
+                let kernel_window = if ring_active { weights.window_size } else { 0i32 };
                 let chunk_size = flambeau_model_ops::splitk_chunk_size(eff_n_tokens_kv);
                 let n_chunks = eff_n_tokens_kv.div_ceil(chunk_size);
-                let use_splitk = eff_n_tokens_kv > 256
+                // Ring decode forces single-block: under ring `eff_n_tokens_kv`
+                // is the full (unslid) length, whose chunk count can exceed
+                // MAX_SPLITK_CHUNKS; the single-block kernel loops only the
+                // window via `t_start`.
+                let use_splitk = !ring_active
+                    && eff_n_tokens_kv > 256
                     && n_chunks > 1
                     && n_chunks <= crate::core::scratch::MAX_SPLITK_CHUNKS
                     && state.pool.splitk_partials_m.as_usize() != 0;
@@ -717,7 +738,7 @@ pub fn standard_attn_local<H: TopologyHooks>(
                             n_tokens_kv: eff_n_tokens_kv,
                             chunk_size,
                         },
-                        flambeau_ops::AttnKnobs { scale, window_size: kernel_window, ring_depth: 0 },
+                        flambeau_ops::AttnKnobs { scale, window_size: kernel_window, ring_depth: ring_depth_arg },
                         &ops,
                     )?;
                 } else {
@@ -732,7 +753,7 @@ pub fn standard_attn_local<H: TopologyHooks>(
                             head_dim: weights.head_dim,
                             n_tokens_kv: eff_n_tokens_kv,
                         },
-                        flambeau_ops::AttnKnobs { scale, window_size: kernel_window, ring_depth: 0 },
+                        flambeau_ops::AttnKnobs { scale, window_size: kernel_window, ring_depth: ring_depth_arg },
                         &ops,
                     )?;
                 }
@@ -746,7 +767,10 @@ pub fn standard_attn_local<H: TopologyHooks>(
             // chunk_size heuristic pick a tighter chunking for the
             // active window.
             let (eff_n_tokens_kv, k_cache_eff_t, v_cache_eff_t) =
-                if weights.window_size > 0 && (weights.window_size as usize) < n_tokens_kv {
+                if !ring_active
+                    && weights.window_size > 0
+                    && (weights.window_size as usize) < n_tokens_kv
+                {
                     let w = weights.window_size as usize;
                     let offset_tokens = n_tokens_kv - w;
                     let offset_bytes = offset_tokens * kv.bytes_per_row;
@@ -764,10 +788,14 @@ pub fn standard_attn_local<H: TopologyHooks>(
                         unsafe { Tensor::<F16>::from_raw(v_slot_ptr, slot_stride_elems) },
                     )
                 };
-            let kernel_window = 0i32;
+            // Ring layers pass the real window (kernel applies SWA mask + ring
+            // addressing); contiguous layers slid the pointer so it's a no-op.
+            let kernel_window = if ring_active { weights.window_size } else { 0i32 };
             let chunk_size = flambeau_model_ops::splitk_chunk_size(eff_n_tokens_kv);
             let n_chunks = eff_n_tokens_kv.div_ceil(chunk_size);
-            let use_splitk = eff_n_tokens_kv > 256
+            // Ring decode forces single-block (see the Q8 branch above).
+            let use_splitk = !ring_active
+                && eff_n_tokens_kv > 256
                 && n_chunks > 1
                 && n_chunks <= crate::core::scratch::MAX_SPLITK_CHUNKS
                 && state.pool.splitk_partials_m.as_usize() != 0;
@@ -797,7 +825,7 @@ pub fn standard_attn_local<H: TopologyHooks>(
                         n_tokens_kv: eff_n_tokens_kv,
                         chunk_size,
                     },
-                    flambeau_ops::AttnKnobs { scale, window_size: kernel_window, ring_depth: 0 },
+                    flambeau_ops::AttnKnobs { scale, window_size: kernel_window, ring_depth: ring_depth_arg },
                     &ops,
                 )?;
             } else {
@@ -812,7 +840,7 @@ pub fn standard_attn_local<H: TopologyHooks>(
                         head_dim: weights.head_dim,
                         n_tokens_kv: eff_n_tokens_kv,
                     },
-                    flambeau_ops::AttnKnobs { scale, window_size: kernel_window, ring_depth: 0 },
+                    flambeau_ops::AttnKnobs { scale, window_size: kernel_window, ring_depth: ring_depth_arg },
                     &ops,
                 )?;
             }
@@ -845,7 +873,11 @@ pub fn standard_attn_local<H: TopologyHooks>(
                     n_k_tokens,
                     q_offset: start_position,
                 },
-                flambeau_ops::AttnKnobs { scale, window_size: weights.window_size, ring_depth: 0 },
+                flambeau_ops::AttnKnobs {
+                    scale,
+                    window_size: weights.window_size,
+                    ring_depth: if is_ring_layer { slab_depth as i32 } else { 0 },
+                },
                 &ops,
             )?;
             let _ = (k_cache, v_cache);
@@ -864,7 +896,11 @@ pub fn standard_attn_local<H: TopologyHooks>(
                     n_k_tokens,
                     q_offset: start_position,
                 },
-                flambeau_ops::AttnKnobs { scale, window_size: weights.window_size, ring_depth: 0 },
+                flambeau_ops::AttnKnobs {
+                    scale,
+                    window_size: weights.window_size,
+                    ring_depth: if is_ring_layer { slab_depth as i32 } else { 0 },
+                },
                 &ops,
             )?;
         }
@@ -1036,7 +1072,7 @@ pub fn standard_attn_local<H: TopologyHooks>(
             host_v_base_ptrs.push(slot_v_base.as_usize() as u64);
             let n_kv_full = pos + 1;
             let (k_read_ptr, v_read_ptr, n_kv_eff) =
-                if window_size > 0 && window < n_kv_full {
+                if !is_ring_layer && window_size > 0 && window < n_kv_full {
                     any_offset = true;
                     let off_tokens = n_kv_full - window;
                     let off_bytes = off_tokens * bytes_per_row;
@@ -1172,7 +1208,7 @@ pub fn standard_attn_local<H: TopologyHooks>(
             flambeau_ops::AttnKnobs {
                 scale,
                 window_size: kernel_window,
-                ring_depth: 0,
+                ring_depth: if is_ring_layer { slab_depth as i32 } else { 0 },
             },
             &ops,
         )?;
