@@ -300,6 +300,40 @@ gone. `flambeau_p2p_l2_flush` (`bar_p2p.rs::l2_flush`, called from
 kernel like the AR sum kernels). The earlier within-session-only
 characterization above is superseded.
 
+### Extended to the F16/fused AR paths (2026-06-05, SHIPPED)
+
+The F32 work covered `ar_sum_f32` only. **Correction:** the earlier note
+"gemma4/qwen3.6 are F32-only AR" is right for gemma4 (its `post_*_norm`
+are set, so decode routes `ar_sum_f32` → dtod) but **wrong for Qwen3.x**:
+Qwen (qwen35-v2 GDN hybrid, `post_*_norm` = None) routes decode AR through
+the **F16 fused** paths — `ar_residual_rmsnorm_f16` on every GDN+FullAttn
+layer, `ar_residual_f16` on every dense-FFN layer — which were wired
+directly via the hooks and never consulted `coord.dtod`, so under
+`--deterministic` they still did the in-kernel BAR1 read.
+
+The F32 dtod core is now factored into a shared `dtod_publish_pull`
+helper (flush + publish + copy-engine pull + pull-done fence;
+`peer_bytes_per_elem` sizes the F16 vs F32 flush words / pull bytes), and
+all four F16/fused paths (`bar_ar_sum_f16`, `bar_ar_residual_f16`,
+`bar_ar_residual_rmsnorm_f16`, `bar_ar_postattn_residual_rmsnorm_f32_to_f16`)
+route through it under `coord.dtod`. Zero kernel changes. The residual
+paths reassemble the canonical (rank0, rank1) partial order with the
+staged peer copy in the peer's slot; the F16 flush word count is
+`n_elems.div_ceil(2)`.
+
+So `--deterministic` now routes **every** TP AR (F32 + F16 + fused)
+through the coherent DtoD+flush mechanism — a complete coherence
+guarantee, not just F32. GATES (pp2tp2, `--kv q8`): Qwen3.6-27B-Q8_0
+open-ended prompt ×10 → 1 md5, cross-boot 2/2, output **unchanged** vs the
+F16-BAR1 path (verifies the canonical reassembly + F16 dtype sizing are
+correct and non-regressive — the two traps the design review flagged),
+decode 25.15 vs BAR1 27.17 (−7.4 %, the per-layer residual AR
+copy+flush+fence). gemma4 F32 control unchanged (6/6). The conservative
+pull-done fence is kept on the out-of-place residual/rmsnorm/postattn
+paths (the partial is read-only there, so it's optional — eliding it is
+the open perf lever for Qwen's −7.4 %). `ar_sum_f16` + `postattn` have no
+current consumer → shipped template-symmetric, not behaviorally gated.
+
 ## Fix SHIPPED v2 — `--deterministic` DtoD copy-engine AR (2026-06-04, near-BAR1 speed)
 
 The host-bounce fix below works but costs −25 %/−38 % decode. A research
