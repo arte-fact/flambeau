@@ -247,23 +247,22 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         m_range: (1, 127),
         cert_rel_path: "certs/hip/gfx906/qmatmul_q3_K_mmvq_r2_dp4a_gfx906.json",
     },
-    // MMQ (prefill): m ≥ 128
+    // MMQ (prefill): m ≥ 32. Owns the short prefill-chunk tail (e.g. a 554-tok
+    // prompt chunks 512+42 → the 42-row chunk lands here) — the kernel guards
+    // partial-M tiles (`row_ok`), so it tiles weights at small M where the
+    // oracle re-read all weights per row (~36 % of dense prefill, 7 ms/call).
     KernelDescriptor {
         op_name: "QMatMul",
-        // TILE_N=16 wave64 MMQ replaces TILE_N=8 at m ≥ 128. Halves weight
-        // HBM fetches (each decoded weight tile reused across 16 activations vs 8).
-        // Kernel PMC at m=512 k=2048 n=4096: MemUnitBusy 97.6 % → 83.1 %,
-        // VALUBusy 19.1 % → 65.5 %. End-to-end Qwen3.6-35B prefill is a wash
-        // (MoE Q4_K dominates); tile16 wins show on Q8_0-heavy workloads.
-        // `FLAMBEAU_VARIANT=baseline` reverts to the TILE_N=8 kernel.
-        // 1.b: dispatch_qmatmul() overrides tile16 → tile8 when n < 1024
-        // (small-N shapes like shexp gate/up k=2048 n=512 lose at tile16).
+        // TILE_N=16 wave64 MMQ: each decoded weight tile is reused across 16
+        // activation columns, halving weight HBM fetches vs the untiled oracle.
+        // Owns m >= 32 — the full prefill chunk and its short tail alike (the
+        // partial MMQ_Y=64 tile is row-guarded); below 32 the oracle takes over.
         impl_id: "qmatmul_q8_0_mmq_wave64_tile16_gfx906",
         backend: "hip",
         arch: "gfx906",
         dtype_weight: QDtype::Q8_0,
         dtype_activation: QDtype::Q8_1,
-        m_range: (128, usize::MAX),
+        m_range: (32, usize::MAX),
         cert_rel_path: "certs/hip/gfx906/qmatmul_q8_0_mmq_wave64_tile16_gfx906.json",
     },
     KernelDescriptor {
@@ -398,7 +397,8 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         m_range: (128, usize::MAX),
         cert_rel_path: "certs/hip/gfx906/qmatmul_q3_K_mmq_wave64_gfx906.json",
     },
-    // MMQ oracle covers the mid-M band (4..128) for Q8_0.
+    // MMQ oracle covers only the tiny-M band (4..31) for Q8_0 — at m < 32 the
+    // tile16 MMQ_Y=64 tile is mostly empty, so the untiled oracle is competitive.
     KernelDescriptor {
         op_name: "QMatMul",
         impl_id: "qmatmul_q8_0_mmq_oracle_gfx906",
@@ -406,7 +406,7 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         arch: "gfx906",
         dtype_weight: QDtype::Q8_0,
         dtype_activation: QDtype::Q8_1,
-        m_range: (4, 127),
+        m_range: (4, 31),
         cert_rel_path: "certs/hip/gfx906/qmatmul_q8_0_mmq_oracle_gfx906.json",
     },
     //— remaining 7 dense MMQ wave64 (IQ4_NL,

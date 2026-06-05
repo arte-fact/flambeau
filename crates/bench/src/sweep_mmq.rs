@@ -469,6 +469,16 @@ impl SweepSpec {
     pub fn v1_4_prefill(dtype: Dtype) -> Self {
         let shapes = vec![
             Shape {
+                m: 32,
+                k: 5120,
+                n: 5120,
+            },
+            Shape {
+                m: 64,
+                k: 5120,
+                n: 5120,
+            },
+            Shape {
                 m: 128,
                 k: 2048,
                 n: 2048,

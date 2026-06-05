@@ -279,7 +279,7 @@ notes   = "Phase 3b — DP4A 256-thread Q3_K MMVQ port of llama.cpp vec_dot_q3_K
 [[qmatmul_mmq]]
 dtype   = "Q8_0"
 dtype_q = "Q8_1"
-shape   = { m = ">=128", k = "any", n = "any" }
+shape   = { m = ">=32", k = "any", n = "any" }
 impl    = "qmatmul_q8_0_mmq_wave64_tile16_gfx906"
 cert    = "certs/hip/gfx906/qmatmul_q8_0_mmq_wave64_tile16_gfx906.json"
 notes   = "V2.7: wave64 MMQ with TILE_N=16 (each weight tile reused across 16 activations, halves weight HBM fetches vs TILE_N=8). Kernel PMC at m=512 k=2048 n=4096: MemUnitBusy 97.6% → 83.1%, VALUBusy 19.1% → 65.5%, grid.y halved. VGPR=112 (2 waves/SIMD), 64 threads/block. End-to-end Qwen3.6-35B prefill is a wash (MoE Q4_K dominates); tile16 wins show up on Q8_0-heavy workloads. `FLAMBEAU_VARIANT=baseline` reverts to tile8. V2.11.b attempted n<1024 → tile8 shape-aware but regressed (+4 % kernel time); see memory entry."
@@ -645,10 +645,10 @@ notes   = "Online-softmax per (q_token, q_head) with causal limit. Correctness o
 [[qmatmul_mmq]]
 dtype   = "Q8_0"
 dtype_q = "Q8_1"
-shape   = { m = "4..127", k = "any", n = "any" }
+shape   = { m = "4..31", k = "any", n = "any" }
 impl    = "qmatmul_q8_0_mmq_oracle_gfx906"
 cert    = "certs/hip/gfx906/qmatmul_q8_0_mmq_oracle_gfx906.json"
-notes   = "Correctness oracle — 2D grid of single-wave blocks, one output element per block. Kept as the M<128 fallback until a small-M MMQ variant is cert'd."
+notes   = "Correctness oracle — 2D grid of single-wave blocks, one output element per block. Owns only the tiny-M band (4..31); tile16 owns m>=32 (the short prefill-chunk tail), where weight-tiling beats the oracle's per-row weight re-read."
 
 # ----- MoE (V1.5 — TopK router + indexed expert matmul + combine) -----------
 
