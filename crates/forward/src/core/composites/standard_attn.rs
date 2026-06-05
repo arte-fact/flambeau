@@ -702,8 +702,24 @@ pub fn standard_attn_local<H: TopologyHooks>(
                 // mask + ring addressing); contiguous layers slid the pointer
                 // above so the kernel's window is a no-op.
                 let kernel_window = if ring_active { weights.window_size } else { 0i32 };
-                let chunk_size = flambeau_model_ops::splitk_chunk_size(eff_n_tokens_kv);
-                let n_chunks = eff_n_tokens_kv.div_ceil(chunk_size);
+                // Ring chunks the SWA window finely: size the chunk by the window
+                // length so the active window splits into many chunks for
+                // occupancy (pre-window chunks collapse to empty in-kernel). If
+                // that overflows the chunk cap (very high ctx) fall back to coarse
+                // full-length chunking, then the use_splitk gate → single-block.
+                let (chunk_size, n_chunks) = {
+                    let mut cs = flambeau_model_ops::splitk_chunk_size(eff_n_tokens_kv);
+                    if ring_active && weights.window_size > 0 {
+                        let w = (weights.window_size as usize).min(eff_n_tokens_kv);
+                        let cs_fine = flambeau_model_ops::splitk_chunk_size(w);
+                        if eff_n_tokens_kv.div_ceil(cs_fine)
+                            <= crate::core::scratch::MAX_SPLITK_CHUNKS
+                        {
+                            cs = cs_fine;
+                        }
+                    }
+                    (cs, eff_n_tokens_kv.div_ceil(cs))
+                };
                 // Ring decode also splits-K: the chunk kernel clamps each chunk
                 // to the SWA window (chunks before it collapse to empty) and
                 // addresses rows mod ring_depth, so the unslid full length is
@@ -795,8 +811,20 @@ pub fn standard_attn_local<H: TopologyHooks>(
             // Ring layers pass the real window (kernel applies SWA mask + ring
             // addressing); contiguous layers slid the pointer so it's a no-op.
             let kernel_window = if ring_active { weights.window_size } else { 0i32 };
-            let chunk_size = flambeau_model_ops::splitk_chunk_size(eff_n_tokens_kv);
-            let n_chunks = eff_n_tokens_kv.div_ceil(chunk_size);
+            // Ring chunks the SWA window finely with coarse fallback (Q8 branch).
+            let (chunk_size, n_chunks) = {
+                let mut cs = flambeau_model_ops::splitk_chunk_size(eff_n_tokens_kv);
+                if ring_active && weights.window_size > 0 {
+                    let w = (weights.window_size as usize).min(eff_n_tokens_kv);
+                    let cs_fine = flambeau_model_ops::splitk_chunk_size(w);
+                    if eff_n_tokens_kv.div_ceil(cs_fine)
+                        <= crate::core::scratch::MAX_SPLITK_CHUNKS
+                    {
+                        cs = cs_fine;
+                    }
+                }
+                (cs, eff_n_tokens_kv.div_ceil(cs))
+            };
             // Ring decode also splits-K (see the Q8 branch); single-block
             // fallback only above the MAX_SPLITK_CHUNKS cap (ctx > 16384).
             let use_splitk = eff_n_tokens_kv > 256
