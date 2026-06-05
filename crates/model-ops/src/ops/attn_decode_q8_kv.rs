@@ -140,6 +140,7 @@ mod tests {
                 kv_width: KV_WIDTH,
                 write_pos: 0,
                 max_seq_len: MAX_SEQ_LEN,
+                ring_depth: 0,
             },
             &device,
             stream,
@@ -182,6 +183,7 @@ mod tests {
                 kv_width: KV_WIDTH,
                 write_pos: 0,
                 max_seq_len: MAX_SEQ_LEN,
+                ring_depth: 0,
             },
             &ops,
         )

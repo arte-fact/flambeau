@@ -34,7 +34,8 @@ __device__ __forceinline__ void kv_append_v_unit_norm_f16_body(
     fb_fp16_t*       __restrict__ v_cache,
     const int n_kv_heads,
     const int write_pos,
-    const float eps
+    const float eps,
+    const int ring_depth
 ) {
     const int token = blockIdx.x;
     const int kv_head = blockIdx.y;
@@ -43,8 +44,13 @@ __device__ __forceinline__ void kv_append_v_unit_norm_f16_body(
     const int lane = tid & 63;
     const int n_warps = HEAD_DIM / 64;
 
+    // Ring-buffered SWA slab: each token's row wraps independently at
+    // `ring_depth`, so a prefill chunk straddling the wrap is correct
+    // per-token. ring_depth = 0 → absolute addressing (bit-identical).
+    const int dst_pos = (ring_depth > 0) ? ((write_pos + token) % ring_depth)
+                                         : (write_pos + token);
     const size_t row_src = ((size_t) token * n_kv_heads + kv_head) * HEAD_DIM;
-    const size_t row_dst = ((size_t) (write_pos + token) * n_kv_heads + kv_head) * HEAD_DIM;
+    const size_t row_dst = ((size_t) dst_pos * n_kv_heads + kv_head) * HEAD_DIM;
 
     // Load V (for the norm) + K (for direct copy).
     const float v_val_f = (tid < HEAD_DIM) ? (float) v_src[row_src + tid] : 0.0f;
@@ -97,10 +103,11 @@ void flambeau_kv_append_v_unit_norm_f16_d64(
     fb_fp16_t* __restrict__ v_cache,
     const int n_kv_heads,
     const int write_pos,
-    const float eps
+    const float eps,
+    const int ring_depth
 ) {
     kv_append_v_unit_norm_f16_body</*HEAD_DIM=*/64>(
-        k_src, v_src, k_cache, v_cache, n_kv_heads, write_pos, eps);
+        k_src, v_src, k_cache, v_cache, n_kv_heads, write_pos, eps, ring_depth);
 }
 
 extern "C" __global__ __launch_bounds__(128, 8)
@@ -111,10 +118,11 @@ void flambeau_kv_append_v_unit_norm_f16_d128(
     fb_fp16_t* __restrict__ v_cache,
     const int n_kv_heads,
     const int write_pos,
-    const float eps
+    const float eps,
+    const int ring_depth
 ) {
     kv_append_v_unit_norm_f16_body</*HEAD_DIM=*/128>(
-        k_src, v_src, k_cache, v_cache, n_kv_heads, write_pos, eps);
+        k_src, v_src, k_cache, v_cache, n_kv_heads, write_pos, eps, ring_depth);
 }
 
 extern "C" __global__ __launch_bounds__(256, 4)
@@ -125,10 +133,11 @@ void flambeau_kv_append_v_unit_norm_f16_d256(
     fb_fp16_t* __restrict__ v_cache,
     const int n_kv_heads,
     const int write_pos,
-    const float eps
+    const float eps,
+    const int ring_depth
 ) {
     kv_append_v_unit_norm_f16_body</*HEAD_DIM=*/256>(
-        k_src, v_src, k_cache, v_cache, n_kv_heads, write_pos, eps);
+        k_src, v_src, k_cache, v_cache, n_kv_heads, write_pos, eps, ring_depth);
 }
 
 extern "C" __global__ __launch_bounds__(512, 2)
@@ -139,8 +148,9 @@ void flambeau_kv_append_v_unit_norm_f16_d512(
     fb_fp16_t* __restrict__ v_cache,
     const int n_kv_heads,
     const int write_pos,
-    const float eps
+    const float eps,
+    const int ring_depth
 ) {
     kv_append_v_unit_norm_f16_body</*HEAD_DIM=*/512>(
-        k_src, v_src, k_cache, v_cache, n_kv_heads, write_pos, eps);
+        k_src, v_src, k_cache, v_cache, n_kv_heads, write_pos, eps, ring_depth);
 }

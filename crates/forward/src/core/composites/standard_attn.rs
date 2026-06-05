@@ -567,6 +567,7 @@ pub fn standard_attn_local<H: TopologyHooks>(
                         n_tokens: n,
                         n_kv_heads: weights.n_kv_heads,
                         head_dim: weights.head_dim,
+                        ring_depth: if is_ring_layer { slab_depth } else { 0 },
                     },
                     start_position,
                     weights.rms_eps,
@@ -609,6 +610,7 @@ pub fn standard_attn_local<H: TopologyHooks>(
                         kv_width,
                         write_pos: start_position,
                         max_seq_len: slab_depth,
+                        ring_depth: if is_ring_layer { slab_depth } else { 0 },
                     },
                     &ops,
                 )?;
@@ -635,6 +637,7 @@ pub fn standard_attn_local<H: TopologyHooks>(
                         kv_width,
                         write_pos: start_position,
                         max_seq_len: slab_depth,
+                        ring_depth: if is_ring_layer { slab_depth } else { 0 },
                     },
                     &ops,
                 )?;
@@ -649,6 +652,7 @@ pub fn standard_attn_local<H: TopologyHooks>(
                         kv_width,
                         write_pos: start_position,
                         max_seq_len: slab_depth,
+                        ring_depth: if is_ring_layer { slab_depth } else { 0 },
                     },
                     state.device,
                     state.stream,
@@ -1155,7 +1159,11 @@ pub fn standard_attn_local<H: TopologyHooks>(
                     slot_v_dst_ptrs: state.pool.attn_slot_v_dst_ptrs,
                     slot_write_pos: state.pool.attn_slot_write_pos,
                 },
-                flambeau_ops::KvAppendBatchedSlotsShape { n_slots: n, kv_width },
+                flambeau_ops::KvAppendBatchedSlotsShape {
+                    n_slots: n,
+                    kv_width,
+                    ring_depth: if is_ring_layer { slab_depth } else { 0 },
+                },
                 &ops,
             )?;
         }

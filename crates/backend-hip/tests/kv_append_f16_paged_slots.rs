@@ -133,6 +133,7 @@ fn run_case(
 
     let n_slots_i = n_slots as i32;
     let kv_width_i = kv_width as i32;
+    let ring_depth_i = 0i32;
     let k_src_ptr: u64 = k_src_dev.as_usize() as u64;
     let v_src_ptr: u64 = v_src_dev.as_usize() as u64;
     let bk_dst_arr_ptr: u64 = batched_k_dst_arr.as_usize() as u64;
@@ -146,6 +147,7 @@ fn run_case(
     args.push(&bwpos_ptr);
     args.push(&n_slots_i);
     args.push(&kv_width_i);
+    args.push(&ring_depth_i);
     let block_threads: u32 = (kv_width as u32).clamp(1, 128);
     let cfg = LaunchCfg {
         grid: (n_slots as u32, 1, 1),

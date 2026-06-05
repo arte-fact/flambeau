@@ -433,6 +433,8 @@ pub struct KvAppendVUnitShape {
     pub n_tokens: usize,
     pub n_kv_heads: usize,
     pub head_dim: usize,
+    /// Ring-buffer slab depth in rows; 0 = absolute addressing.
+    pub ring_depth: usize,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -455,6 +457,8 @@ pub struct KvAppendPagedPrefillShape {
 pub struct KvAppendBatchedSlotsShape {
     pub n_slots: usize,
     pub kv_width: usize,
+    /// Ring-buffer slab depth in rows; 0 = absolute addressing.
+    pub ring_depth: usize,
 }
 
 // --- MoE sort-by-expert family ---------------------------------------------

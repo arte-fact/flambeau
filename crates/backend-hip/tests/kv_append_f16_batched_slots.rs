@@ -174,6 +174,7 @@ fn run_case(n_slots: usize, kv_width: usize, max_seq_len: usize, seed: u64) -> C
         let stream = dev.default_stream();
         let n_slots_i = n_slots as i32;
         let kv_width_i = kv_width as i32;
+        let ring_depth_i = 0i32;
         let k_src_ptr: u64 = d_k_src.as_usize() as u64;
         let v_src_ptr: u64 = d_v_src.as_usize() as u64;
         let k_dst_arr: u64 = d_k_ptrs.as_usize() as u64;
@@ -187,6 +188,7 @@ fn run_case(n_slots: usize, kv_width: usize, max_seq_len: usize, seed: u64) -> C
         args.push(&wpos_ptr);
         args.push(&n_slots_i);
         args.push(&kv_width_i);
+        args.push(&ring_depth_i);
         let block_threads = (kv_width.min(128) as u32).max(1);
         let cfg = LaunchCfg {
             grid: (n_slots as u32, 1, 1),

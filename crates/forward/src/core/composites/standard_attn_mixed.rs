@@ -96,6 +96,17 @@ pub fn standard_attn_mixed_local<H: TopologyHooks>(
     }
     let kv_local_idx = local_idx;
     let max_seq_len = state.pool.config.max_seq_len;
+    // Ring-buffered SWA slabs (depth < max_seq_len) address KV modulo the
+    // slab depth. This composite computes slot strides and write positions in
+    // absolute space only, so it would corrupt a wrapped ring slab. Bail until
+    // the mixed path grows the ring fork (mirroring `standard_attn`). The
+    // default server path is unaffected — mixed batching is opt-in.
+    if state.pool.kv_caches[kv_local_idx].depth < max_seq_len {
+        bail!(
+            "standard_attn_mixed: ring-buffered SWA layers not yet supported; \
+             disable mixed-batch for this model"
+        );
+    }
     let max_slots = state.pool.config.max_slots.max(1);
     for (i, (&pos, &slot)) in positions.iter().zip(slot_ids.iter()).enumerate() {
         if pos >= max_seq_len {
@@ -412,6 +423,7 @@ pub fn standard_attn_mixed_local<H: TopologyHooks>(
                 kv_width,
                 write_pos: pos0,
                 max_seq_len,
+                ring_depth: 0,
             },
             state.device,
             state.stream,
@@ -539,6 +551,7 @@ pub fn standard_attn_mixed_local<H: TopologyHooks>(
             flambeau_ops::KvAppendBatchedSlotsShape {
                 n_slots: n_dec,
                 kv_width,
+                ring_depth: 0,
             },
             &ops,
         )?;

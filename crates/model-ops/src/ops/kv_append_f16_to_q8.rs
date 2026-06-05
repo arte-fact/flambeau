@@ -30,7 +30,8 @@ pub fn kv_append_f16_to_q8(
     spec: crate::ops::kv_append::KvAppendSpec,
     ops: &HipOps<'_>,
 ) -> Result<()> {
-    let crate::ops::kv_append::KvAppendSpec { n_tokens, kv_width, write_pos, max_seq_len } = spec;
+    let crate::ops::kv_append::KvAppendSpec { n_tokens, kv_width, write_pos, max_seq_len, ring_depth } =
+        spec;
     if n_tokens == 0 {
         return Ok(());
     }
@@ -52,11 +53,15 @@ pub fn kv_append_f16_to_q8(
             v_src.n_elems
         );
     }
-    if write_pos + n_tokens > max_seq_len {
-        bail!(
-            "kv_append_f16_to_q8: write_pos {write_pos} + n_tokens {n_tokens} > \
-             max_seq_len {max_seq_len}"
-        );
+    if ring_depth == 0 {
+        if write_pos + n_tokens > max_seq_len {
+            bail!(
+                "kv_append_f16_to_q8: write_pos {write_pos} + n_tokens {n_tokens} > \
+                 max_seq_len {max_seq_len}"
+            );
+        }
+    } else if n_tokens > ring_depth {
+        bail!("kv_append_f16_to_q8: n_tokens {n_tokens} > ring_depth {ring_depth}");
     }
     // `Tensor<Q8_0>::n_elems` is the LOGICAL F16-equivalent element
     // count (per the model-ops Tensor contract on block dtypes), so
@@ -76,10 +81,25 @@ pub fn kv_append_f16_to_q8(
     }
     let blocks_per_row = kv_width / QK8_0;
     let row_bytes = blocks_per_row * Q8_0_BLOCK_BYTES;
-    let k_dst: DevicePtr = k_cache.ptr.offset_bytes(write_pos * row_bytes);
-    let v_dst: DevicePtr = v_cache.ptr.offset_bytes(write_pos * row_bytes);
-    ops.quantize_f16_q8_0(k_src.ptr, k_dst, src_need)?;
-    ops.quantize_f16_q8_0(v_src.ptr, v_dst, src_need)?;
+    // A ring write that straddles the slab boundary splits into a head
+    // segment ending at the last physical row and a wrap segment from row 0.
+    // The contiguous quantize can't wrap in one call, so each segment is a
+    // separate launch; `ring_depth == 0` collapses to the single absolute
+    // segment (bit-identical to the pre-ring path).
+    for (phys_row, src_row, rows) in
+        crate::ops::kv_append::ring_append_segments(write_pos, n_tokens, ring_depth)
+    {
+        if rows == 0 {
+            continue;
+        }
+        let elems = rows * kv_width;
+        let k_dst: DevicePtr = k_cache.ptr.offset_bytes(phys_row * row_bytes);
+        let v_dst: DevicePtr = v_cache.ptr.offset_bytes(phys_row * row_bytes);
+        let k_src_seg = k_src.ptr.offset_bytes(src_row * kv_width * 2);
+        let v_src_seg = v_src.ptr.offset_bytes(src_row * kv_width * 2);
+        ops.quantize_f16_q8_0(k_src_seg, k_dst, elems)?;
+        ops.quantize_f16_q8_0(v_src_seg, v_dst, elems)?;
+    }
     Ok(())
 }
 
@@ -132,6 +152,7 @@ mod tests {
                 kv_width: KV_WIDTH,
                 write_pos: WRITE_POS,
                 max_seq_len: MAX_SEQ_LEN,
+                ring_depth: 0,
             },
             &ops,
         )
@@ -204,5 +225,106 @@ mod tests {
         free(&device, k_cache_ptr, k_cache_t.bytes());
         free(&device, v_cache_ptr, v_cache_t.bytes());
         let _ = alloc::<Q8_0>;
+    }
+
+    #[test]
+    fn kv_append_f16_to_q8_ring_wrap_splits_quantize() {
+        // Ring slab DEPTH rows; a 4-row write at logical pos DEPTH-2 lands
+        // physical rows [DEPTH-2, DEPTH-1] then wraps to [0, 1]. The Q8
+        // quantize can't wrap in one call, so this exercises the split.
+        const KV_WIDTH: usize = 64;
+        const DEPTH: usize = 6;
+        const N_TOKENS: usize = 4;
+        const WRITE_POS: usize = 10; // 10 % 6 = 4 → straddles (4,5,0,1)
+        const BLOCKS_PER_ROW: usize = KV_WIDTH / QK8_0;
+
+        let device = test_device();
+        device.bind().expect("device bind");
+        let stream = device.default_stream();
+        let reg = test_ops_registry(&device);
+        let ops = HipOps::new(&reg, stream);
+
+        let k_src_host: Vec<f16> = (0..N_TOKENS * KV_WIDTH)
+            .map(|i| f16::from_f32(0.1 + (i as f32) * 0.01))
+            .collect();
+        let v_src_host: Vec<f16> = (0..N_TOKENS * KV_WIDTH)
+            .map(|i| f16::from_f32(-0.2 + (i as f32) * 0.013))
+            .collect();
+
+        const CACHE_LOGICAL_ELEMS: usize = DEPTH * KV_WIDTH;
+        const CACHE_BYTES: usize = DEPTH * BLOCKS_PER_ROW * Q8_0_BLOCK_BYTES;
+        let cache_init: Vec<u8> = vec![0xAB; CACHE_BYTES];
+
+        let (k_src_t, k_src_ptr) = upload::<F16, f16>(&device, &k_src_host, k_src_host.len());
+        let (v_src_t, v_src_ptr) = upload::<F16, f16>(&device, &v_src_host, v_src_host.len());
+        let (mut k_cache_t, k_cache_ptr) =
+            upload::<Q8_0, u8>(&device, &cache_init, CACHE_LOGICAL_ELEMS);
+        let (mut v_cache_t, v_cache_ptr) =
+            upload::<Q8_0, u8>(&device, &cache_init, CACHE_LOGICAL_ELEMS);
+
+        kv_append_f16_to_q8(
+            &k_src_t,
+            &v_src_t,
+            &mut k_cache_t,
+            &mut v_cache_t,
+            crate::ops::kv_append::KvAppendSpec {
+                n_tokens: N_TOKENS,
+                kv_width: KV_WIDTH,
+                write_pos: WRITE_POS,
+                max_seq_len: DEPTH,
+                ring_depth: DEPTH,
+            },
+            &ops,
+        )
+        .expect("kv_append_f16_to_q8 ring");
+        stream.synchronize().expect("stream sync");
+
+        let k_raw: Vec<u8> = download::<Q8_0, u8>(&device, &k_cache_t);
+        let v_raw: Vec<u8> = download::<Q8_0, u8>(&device, &v_cache_t);
+
+        // Token t → physical row (WRITE_POS + t) % DEPTH; dequant matches src.
+        for tok in 0..N_TOKENS {
+            let phys = (WRITE_POS + tok) % DEPTH;
+            let byte_off = phys * BLOCKS_PER_ROW * Q8_0_BLOCK_BYTES;
+            let k_row = &k_raw[byte_off..byte_off + BLOCKS_PER_ROW * Q8_0_BLOCK_BYTES];
+            let v_row = &v_raw[byte_off..byte_off + BLOCKS_PER_ROW * Q8_0_BLOCK_BYTES];
+            let k_got = flambeau_quant::dequantize_to_vec(
+                flambeau_quant::GgmlDType::Q8_0,
+                k_row,
+                KV_WIDTH,
+            )
+            .expect("dequant K");
+            let v_got = flambeau_quant::dequantize_to_vec(
+                flambeau_quant::GgmlDType::Q8_0,
+                v_row,
+                KV_WIDTH,
+            )
+            .expect("dequant V");
+            for col in 0..KV_WIDTH {
+                let src_idx = tok * KV_WIDTH + col;
+                assert!(
+                    (k_got[col] - k_src_host[src_idx].to_f32()).abs() < 0.05,
+                    "K phys row {phys} (tok {tok}) col {col}: got {} expected {}",
+                    k_got[col],
+                    k_src_host[src_idx].to_f32()
+                );
+                assert!(
+                    (v_got[col] - v_src_host[src_idx].to_f32()).abs() < 0.05,
+                    "V phys row {phys} col {col}"
+                );
+            }
+        }
+        // Physical rows 2 and 3 untouched (still 0xAB).
+        for phys in [2usize, 3] {
+            let byte_off = phys * BLOCKS_PER_ROW * Q8_0_BLOCK_BYTES;
+            for b in &k_raw[byte_off..byte_off + BLOCKS_PER_ROW * Q8_0_BLOCK_BYTES] {
+                assert_eq!(*b, 0xAB, "k_cache phys row {phys} overwritten");
+            }
+        }
+
+        free(&device, k_src_ptr, k_src_t.bytes());
+        free(&device, v_src_ptr, v_src_t.bytes());
+        free(&device, k_cache_ptr, k_cache_t.bytes());
+        free(&device, v_cache_ptr, v_cache_t.bytes());
     }
 }

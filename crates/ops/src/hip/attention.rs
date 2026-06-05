@@ -516,6 +516,7 @@ pub fn kv_append_f16_batched_slots(
 
     let n_slots_i = shape.n_slots as i32;
     let kv_width_i = shape.kv_width as i32;
+    let ring_depth_i = shape.ring_depth as i32;
     let k_src_ptr: u64 = buf.k_src.as_usize() as u64;
     let v_src_ptr: u64 = buf.v_src.as_usize() as u64;
     let k_dst_arr: u64 = buf.slot_k_dst_ptrs.as_usize() as u64;
@@ -529,6 +530,7 @@ pub fn kv_append_f16_batched_slots(
     args.push(&wpos_ptr);
     args.push(&n_slots_i);
     args.push(&kv_width_i);
+    args.push(&ring_depth_i);
     let block_threads: u32 = shape.kv_width.min(128) as u32;
     let cfg = LaunchCfg {
         grid: (shape.n_slots as u32, 1, 1),
@@ -1256,6 +1258,7 @@ pub fn kv_append_v_unit_norm_f16(
 
     let n_kv_heads_i = shape.n_kv_heads as i32;
     let write_pos_i = write_pos as i32;
+    let ring_depth_i = shape.ring_depth as i32;
     let k_src_p: u64 = buf.k_src.as_usize() as u64;
     let v_src_p: u64 = buf.v_src.as_usize() as u64;
     let k_dst_p: u64 = buf.k_dst.as_usize() as u64;
@@ -1268,6 +1271,7 @@ pub fn kv_append_v_unit_norm_f16(
     args.push(&n_kv_heads_i);
     args.push(&write_pos_i);
     args.push(&eps);
+    args.push(&ring_depth_i);
     let cfg = flambeau_backend_hip::LaunchCfg {
         grid: (shape.n_tokens as u32, shape.n_kv_heads as u32, 1),
         block: (shape.head_dim as u32, 1, 1),
