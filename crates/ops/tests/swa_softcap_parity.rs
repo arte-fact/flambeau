@@ -121,6 +121,10 @@ struct CpuDecodeAttnRef {
     t_start: usize,
     t_end: usize,
     scale: f32,
+    /// Ring-buffer slab depth. `0` = absolute addressing (physical row ==
+    /// logical `t`). `>0` = the K/V physical row for logical `t` is
+    /// `t % ring_depth`, mirroring the kernel's ring-SWA addressing.
+    ring_depth: usize,
 }
 
 fn cpu_decode_attn_ref(
@@ -136,7 +140,9 @@ fn cpu_decode_attn_ref(
         t_start,
         t_end,
         scale,
+        ring_depth,
     } = args;
+    let phys = |t: usize| if ring_depth > 0 { t % ring_depth } else { t };
     let group = n_heads_q / n_heads_kv;
     let mut out = vec![0.0f32; n_heads_q * head_dim];
     for qh in 0..n_heads_q {
@@ -148,7 +154,7 @@ fn cpu_decode_attn_ref(
             let mut dot = 0.0f64;
             for d in 0..head_dim {
                 let qv = q[qh * head_dim + d] as f64;
-                let kv = k[(t * n_heads_kv + kvh) * head_dim + d] as f64;
+                let kv = k[(phys(t) * n_heads_kv + kvh) * head_dim + d] as f64;
                 dot += qv * kv;
             }
             scores[i] = dot * scale as f64;
@@ -168,7 +174,7 @@ fn cpu_decode_attn_ref(
         for d in 0..head_dim {
             let mut acc = 0.0f64;
             for (i, t) in (t_start..t_end).enumerate() {
-                let vv = v[(t * n_heads_kv + kvh) * head_dim + d] as f64;
+                let vv = v[(phys(t) * n_heads_kv + kvh) * head_dim + d] as f64;
                 acc += scores[i] * vv;
             }
             // Round through F16 to match GPU output's storage precision.
@@ -240,6 +246,7 @@ fn swa_decode_window_4_of_8() {
             t_start: 4,
             t_end: n_tokens,
             scale,
+            ring_depth: 0,
         },
     );
 
@@ -536,6 +543,7 @@ fn swa_prefill_window_3_of_8() {
                 t_start,
                 t_end,
                 scale,
+                ring_depth: 0,
             },
         );
         reference[q_idx * n_heads_q * head_dim..(q_idx + 1) * n_heads_q * head_dim]
@@ -715,6 +723,7 @@ fn swa_prefill_flash_tile_window_4() {
                 t_start,
                 t_end,
                 scale,
+                ring_depth: 0,
             },
         );
         reference[q_idx * n_heads_q * head_dim..(q_idx + 1) * n_heads_q * head_dim]
@@ -847,5 +856,253 @@ fn softcap_f32_inplace() {
 
     unsafe {
         dev.dealloc(d_x, n * 4).unwrap();
+    }
+}
+
+// ---- Ring-buffered SWA (Phase 2 ring_depth addressing) -----------------
+//
+// The kernel and CPU reference both read the SAME ring_depth-row K/V slab at
+// physical row `t % ring_depth`. Parameters are chosen so the windowed key
+// range straddles the ring wrap, so a wrong modulo (or a wrong arg position
+// for `ring_depth`) reads the wrong physical rows and the test fails. The
+// `ring_depth = 0` regression guard is the rest of this file's existing tests.
+
+#[test]
+fn ring_swa_decode_wrap_window4_depth6() {
+    // ring_depth=6 slab; window=4; n_tokens=8 → windowed read t in [4,8)
+    // maps to physical rows {4,5,0,1} — straddling the wrap.
+    let Some(dev) = dev_or_skip() else {
+        return;
+    };
+    let reg = OpsRegistry::new(&dev).unwrap();
+
+    let head_dim = 64usize;
+    let n_heads_q = 2usize;
+    let n_heads_kv = 1usize;
+    let ring_depth = 6usize;
+    let window = 4i32;
+    let n_tokens = 8usize;
+
+    let q_f32 = seeded_f32(0x21A0, n_heads_q * head_dim, 0.5);
+    let k_f32 = seeded_f32(0x21A1, ring_depth * n_heads_kv * head_dim, 0.5);
+    let v_f32 = seeded_f32(0x21A2, ring_depth * n_heads_kv * head_dim, 0.5);
+    let q_f16: Vec<f16> = q_f32.iter().map(|v| f16::from_f32(*v)).collect();
+    let k_f16: Vec<f16> = k_f32.iter().map(|v| f16::from_f32(*v)).collect();
+    let v_f16: Vec<f16> = v_f32.iter().map(|v| f16::from_f32(*v)).collect();
+
+    let d_q = upload_f16(&dev, &q_f16);
+    let d_k = upload_f16(&dev, &k_f16);
+    let d_v = upload_f16(&dev, &v_f16);
+    let out_n = n_heads_q * head_dim;
+    let d_out = dev.alloc(out_n * 2).unwrap();
+
+    let scale = 1.0 / (head_dim as f32).sqrt();
+    attention_decode_f16(
+        flambeau_ops::OpCtx { reg: &reg, stream: dev.default_stream() },
+        flambeau_ops::AttnBuffers { q: d_q, k: d_k, v: d_v, out: d_out },
+        flambeau_ops::AttnDecodeShape { n_heads_q, n_heads_kv, head_dim, n_tokens_kv: n_tokens },
+        flambeau_ops::AttnKnobs { scale, window_size: window, ring_depth: ring_depth as i32 },
+    )
+    .unwrap();
+    dev.default_stream().synchronize().unwrap();
+    let got: Vec<f32> = download_f16(&dev, d_out, out_n)
+        .iter()
+        .map(|v| v.to_f32())
+        .collect();
+
+    let q_ref: Vec<f32> = q_f16.iter().map(|v| v.to_f32()).collect();
+    let k_ref: Vec<f32> = k_f16.iter().map(|v| v.to_f32()).collect();
+    let v_ref: Vec<f32> = v_f16.iter().map(|v| v.to_f32()).collect();
+    // qpos = n_tokens - 1 = 7; window = 4 → t_start = 4, t_end = 8.
+    let reference = cpu_decode_attn_ref(
+        &q_ref,
+        &k_ref,
+        &v_ref,
+        CpuDecodeAttnRef {
+            n_heads_q,
+            n_heads_kv,
+            head_dim,
+            t_start: (n_tokens - 1) - window as usize + 1,
+            t_end: n_tokens,
+            scale,
+            ring_depth,
+        },
+    );
+    let err = max_abs_diff(&got, &reference);
+    assert!(err < 5e-3, "ring SWA decode max-abs-diff {err} too high");
+
+    unsafe {
+        dev.dealloc(d_q, q_f16.len() * 2).unwrap();
+        dev.dealloc(d_k, k_f16.len() * 2).unwrap();
+        dev.dealloc(d_v, v_f16.len() * 2).unwrap();
+        dev.dealloc(d_out, out_n * 2).unwrap();
+    }
+}
+
+#[test]
+fn ring_swa_prefill_wrap_window3_depth8() {
+    // ring_depth=8 slab; window=3; q at global positions 7,8,9. Per-q windows:
+    // 7→[5,8), 8→[6,9), 9→[7,10) → physical rows wrap (e.g. q=9 reads {7,0,1}).
+    let Some(dev) = dev_or_skip() else {
+        return;
+    };
+    let reg = OpsRegistry::new(&dev).unwrap();
+
+    let head_dim = 64usize;
+    let n_heads_q = 2usize;
+    let n_heads_kv = 1usize;
+    let ring_depth = 8usize;
+    let window = 3i32;
+    let n_q = 3usize; // < 4 → oracle flash-tile prefill path
+    let q_offset = 7usize;
+    let n_k = q_offset + n_q; // 10 logical keys over an 8-row ring slab
+
+    let q_f32 = seeded_f32(0x31A0, n_q * n_heads_q * head_dim, 0.5);
+    let k_f32 = seeded_f32(0x31A1, ring_depth * n_heads_kv * head_dim, 0.5);
+    let v_f32 = seeded_f32(0x31A2, ring_depth * n_heads_kv * head_dim, 0.5);
+    let q_f16: Vec<f16> = q_f32.iter().map(|v| f16::from_f32(*v)).collect();
+    let k_f16: Vec<f16> = k_f32.iter().map(|v| f16::from_f32(*v)).collect();
+    let v_f16: Vec<f16> = v_f32.iter().map(|v| f16::from_f32(*v)).collect();
+
+    let d_q = upload_f16(&dev, &q_f16);
+    let d_k = upload_f16(&dev, &k_f16);
+    let d_v = upload_f16(&dev, &v_f16);
+    let out_n = n_q * n_heads_q * head_dim;
+    let d_out = dev.alloc(out_n * 2).unwrap();
+
+    let scale = 1.0 / (head_dim as f32).sqrt();
+    attention_prefill_f16(
+        flambeau_ops::OpCtx { reg: &reg, stream: dev.default_stream() },
+        flambeau_ops::AttnBuffers { q: d_q, k: d_k, v: d_v, out: d_out },
+        flambeau_ops::AttnPrefillShape { n_q_tokens: n_q, n_heads_q, n_heads_kv, head_dim, n_k_tokens: n_k, q_offset },
+        flambeau_ops::AttnKnobs { scale, window_size: window, ring_depth: ring_depth as i32 },
+    )
+    .unwrap();
+    dev.default_stream().synchronize().unwrap();
+    let got: Vec<f32> = download_f16(&dev, d_out, out_n)
+        .iter()
+        .map(|v| v.to_f32())
+        .collect();
+
+    let q_ref: Vec<f32> = q_f16.iter().map(|v| v.to_f32()).collect();
+    let k_ref: Vec<f32> = k_f16.iter().map(|v| v.to_f32()).collect();
+    let v_ref: Vec<f32> = v_f16.iter().map(|v| v.to_f32()).collect();
+    let mut reference = vec![0.0f32; out_n];
+    for q_idx in 0..n_q {
+        let qpos = q_offset + q_idx;
+        let t_start = (qpos + 1).saturating_sub(window as usize).min(n_k);
+        let t_end = (qpos + 1).min(n_k);
+        let q_slice = &q_ref[q_idx * n_heads_q * head_dim..(q_idx + 1) * n_heads_q * head_dim];
+        let per_q = cpu_decode_attn_ref(
+            q_slice,
+            &k_ref,
+            &v_ref,
+            CpuDecodeAttnRef {
+                n_heads_q,
+                n_heads_kv,
+                head_dim,
+                t_start,
+                t_end,
+                scale,
+                ring_depth,
+            },
+        );
+        reference[q_idx * n_heads_q * head_dim..(q_idx + 1) * n_heads_q * head_dim]
+            .copy_from_slice(&per_q);
+    }
+    let err = max_abs_diff(&got, &reference);
+    assert!(err < 5e-3, "ring SWA prefill max-abs-diff {err} too high");
+
+    unsafe {
+        dev.dealloc(d_q, q_f16.len() * 2).unwrap();
+        dev.dealloc(d_k, k_f16.len() * 2).unwrap();
+        dev.dealloc(d_v, v_f16.len() * 2).unwrap();
+        dev.dealloc(d_out, out_n * 2).unwrap();
+    }
+}
+
+#[test]
+fn ring_swa_prefill_flash_tile_wrap_multichunk() {
+    // Flash-tile prefill (n_q >= 4) with ring addressing across BOTH a chunk
+    // boundary AND a ring wrap — the plan's most-scrutinized correctness case
+    // (chunk-skip stays in logical space; the per-element LDS gather handles the
+    // physical wrap). d64 → BC=64; ring_depth=68; window=64; q at global
+    // [68,76); n_k=76 → the second chunk (rows 64..75) straddles the wrap
+    // (phys 64..67 then 0..7).
+    let Some(dev) = dev_or_skip() else {
+        return;
+    };
+    let reg = OpsRegistry::new(&dev).unwrap();
+
+    let head_dim = 64usize;
+    let n_heads_q = 2usize;
+    let n_heads_kv = 1usize;
+    let ring_depth = 68usize;
+    let window = 64i32;
+    let n_q = 8usize; // >= 4 → flash-tile path; 2 q-tiles at BR=4
+    let q_offset = 68usize;
+    let n_k = q_offset + n_q; // 76 logical keys over a 68-row ring slab
+
+    let q_f32 = seeded_f32(0x41A0, n_q * n_heads_q * head_dim, 0.5);
+    let k_f32 = seeded_f32(0x41A1, ring_depth * n_heads_kv * head_dim, 0.5);
+    let v_f32 = seeded_f32(0x41A2, ring_depth * n_heads_kv * head_dim, 0.5);
+    let q_f16: Vec<f16> = q_f32.iter().map(|v| f16::from_f32(*v)).collect();
+    let k_f16: Vec<f16> = k_f32.iter().map(|v| f16::from_f32(*v)).collect();
+    let v_f16: Vec<f16> = v_f32.iter().map(|v| f16::from_f32(*v)).collect();
+
+    let d_q = upload_f16(&dev, &q_f16);
+    let d_k = upload_f16(&dev, &k_f16);
+    let d_v = upload_f16(&dev, &v_f16);
+    let out_n = n_q * n_heads_q * head_dim;
+    let d_out = dev.alloc(out_n * 2).unwrap();
+
+    let scale = 1.0 / (head_dim as f32).sqrt();
+    attention_prefill_f16(
+        flambeau_ops::OpCtx { reg: &reg, stream: dev.default_stream() },
+        flambeau_ops::AttnBuffers { q: d_q, k: d_k, v: d_v, out: d_out },
+        flambeau_ops::AttnPrefillShape { n_q_tokens: n_q, n_heads_q, n_heads_kv, head_dim, n_k_tokens: n_k, q_offset },
+        flambeau_ops::AttnKnobs { scale, window_size: window, ring_depth: ring_depth as i32 },
+    )
+    .unwrap();
+    dev.default_stream().synchronize().unwrap();
+    let got: Vec<f32> = download_f16(&dev, d_out, out_n)
+        .iter()
+        .map(|v| v.to_f32())
+        .collect();
+
+    let q_ref: Vec<f32> = q_f16.iter().map(|v| v.to_f32()).collect();
+    let k_ref: Vec<f32> = k_f16.iter().map(|v| v.to_f32()).collect();
+    let v_ref: Vec<f32> = v_f16.iter().map(|v| v.to_f32()).collect();
+    let mut reference = vec![0.0f32; out_n];
+    for q_idx in 0..n_q {
+        let qpos = q_offset + q_idx;
+        let t_start = (qpos + 1).saturating_sub(window as usize).min(n_k);
+        let t_end = (qpos + 1).min(n_k);
+        let q_slice = &q_ref[q_idx * n_heads_q * head_dim..(q_idx + 1) * n_heads_q * head_dim];
+        let per_q = cpu_decode_attn_ref(
+            q_slice,
+            &k_ref,
+            &v_ref,
+            CpuDecodeAttnRef {
+                n_heads_q,
+                n_heads_kv,
+                head_dim,
+                t_start,
+                t_end,
+                scale,
+                ring_depth,
+            },
+        );
+        reference[q_idx * n_heads_q * head_dim..(q_idx + 1) * n_heads_q * head_dim]
+            .copy_from_slice(&per_q);
+    }
+    let err = max_abs_diff(&got, &reference);
+    assert!(err < 5e-3, "ring SWA flash-tile prefill max-abs-diff {err} too high");
+
+    unsafe {
+        dev.dealloc(d_q, q_f16.len() * 2).unwrap();
+        dev.dealloc(d_k, k_f16.len() * 2).unwrap();
+        dev.dealloc(d_v, v_f16.len() * 2).unwrap();
+        dev.dealloc(d_out, out_n * 2).unwrap();
     }
 }

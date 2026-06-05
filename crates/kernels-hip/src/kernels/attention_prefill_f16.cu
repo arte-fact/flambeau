@@ -41,7 +41,8 @@ extern "C" __global__ void flambeau_attention_prefill_f16(
     const int n_k_tokens,
     const int q_offset,                        // global position of Q[0]
     const float scale,
-    const int window_size                      // SWA radius, 0 = unbounded causal
+    const int window_size,                     // SWA radius, 0 = unbounded causal
+    const int ring_depth                       // ring-buffer slab depth in rows; 0 = absolute
 ) {
     const int q_token = blockIdx.x;
     const int q_head  = blockIdx.y;
@@ -86,7 +87,8 @@ extern "C" __global__ void flambeau_attention_prefill_f16(
     __syncthreads();
 
     for (int t = t_start; t < limit; ++t) {
-        const size_t kv_row = ((size_t) t * n_heads_kv + kv_head) * head_dim;
+        const int t_phys = (ring_depth > 0) ? (t % ring_depth) : t;
+        const size_t kv_row = ((size_t) t_phys * n_heads_kv + kv_head) * head_dim;
 
         // 1. Q · K[t, kv_head]
         float my_partial = 0.0f;
