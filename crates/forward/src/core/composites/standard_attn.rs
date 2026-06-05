@@ -704,12 +704,12 @@ pub fn standard_attn_local<H: TopologyHooks>(
                 let kernel_window = if ring_active { weights.window_size } else { 0i32 };
                 let chunk_size = flambeau_model_ops::splitk_chunk_size(eff_n_tokens_kv);
                 let n_chunks = eff_n_tokens_kv.div_ceil(chunk_size);
-                // Ring decode forces single-block: under ring `eff_n_tokens_kv`
-                // is the full (unslid) length, whose chunk count can exceed
-                // MAX_SPLITK_CHUNKS; the single-block kernel loops only the
-                // window via `t_start`.
-                let use_splitk = !ring_active
-                    && eff_n_tokens_kv > 256
+                // Ring decode also splits-K: the chunk kernel clamps each chunk
+                // to the SWA window (chunks before it collapse to empty) and
+                // addresses rows mod ring_depth, so the unslid full length is
+                // safe. The n_chunks cap falls back to single-block only above
+                // ctx 16384, where the unslid length exceeds MAX_SPLITK_CHUNKS.
+                let use_splitk = eff_n_tokens_kv > 256
                     && n_chunks > 1
                     && n_chunks <= crate::core::scratch::MAX_SPLITK_CHUNKS
                     && state.pool.splitk_partials_m.as_usize() != 0;
@@ -797,9 +797,9 @@ pub fn standard_attn_local<H: TopologyHooks>(
             let kernel_window = if ring_active { weights.window_size } else { 0i32 };
             let chunk_size = flambeau_model_ops::splitk_chunk_size(eff_n_tokens_kv);
             let n_chunks = eff_n_tokens_kv.div_ceil(chunk_size);
-            // Ring decode forces single-block (see the Q8 branch above).
-            let use_splitk = !ring_active
-                && eff_n_tokens_kv > 256
+            // Ring decode also splits-K (see the Q8 branch); single-block
+            // fallback only above the MAX_SPLITK_CHUNKS cap (ctx > 16384).
+            let use_splitk = eff_n_tokens_kv > 256
                 && n_chunks > 1
                 && n_chunks <= crate::core::scratch::MAX_SPLITK_CHUNKS
                 && state.pool.splitk_partials_m.as_usize() != 0;

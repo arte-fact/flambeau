@@ -300,6 +300,82 @@ fn gemma_ring_swa_mixed_matches_full_depth() {
 }
 
 #[test]
+fn gemma_ring_swa_splitk_decode_matches_full_depth() {
+    // Decode at n_tokens_kv > 256 on a ring slab triggers split-K over the
+    // ring (the Phase-4 lever): the chunk kernel clamps each chunk to the SWA
+    // window (earlier chunks collapse to empty) and addresses rows mod
+    // ring_depth. Must match the full-context (slide → single-block) path.
+    const W: i32 = 64;
+    const UB: usize = 128; // max_prefill_tokens
+    const D: usize = W as usize + UB; // ring slab depth = 192
+    const MSL: usize = 512; // > D (ring active) and > TGT (full slab fits)
+    const CHUNK: usize = 128; // prefill chunk (<= UB and <= D - W)
+    const TGT: usize = 300; // decode pos → n_kv 301 > 256 (splitk) and > D (ring)
+
+    let device = HipDevice::new(0).expect("HipDevice 0");
+    device.bind().expect("bind");
+    let reg = OpsRegistry::new(&device).expect("OpsRegistry::new");
+    let mut allocs = DeviceAllocs::new(HipDevice::new(0).expect("HipDevice 0 alias"));
+    let mut attn = build_attn(&mut allocs);
+    attn.window_size = W;
+    let q_width = N_HEADS * HEAD_DIM;
+    let kv_width = N_KV_HEADS * HEAD_DIM;
+
+    let run = |ring: bool, resid: DevicePtr| -> Vec<f32> {
+        let stream = device.default_stream();
+        let cfg = ScratchConfig {
+            hidden: HIDDEN,
+            intermediate: 256,
+            q_width,
+            kv_width,
+            vocab: 64,
+            max_seq_len: MSL,
+            num_layers: 1,
+            max_experts: 0,
+            max_experts_per_tok: 0,
+            gdn: None,
+            per_layer_kv_widths: None,
+            attn_q_gated: false,
+            shared_intermediate: 0,
+            max_prefill_tokens: UB,
+            max_slots: 1,
+            per_layer_embd: 0,
+            paged_kv: None,
+            kv_layout: KvLayout::F16Contig,
+            per_layer_kv_layouts: None,
+            per_layer_kv_depths: if ring { Some(vec![D]) } else { None },
+        };
+        let mut pool = ScratchPool::new(&device, cfg).expect("pool");
+        let mut ctx = SingleDeviceForwardCtx::new(&device, stream, &reg, &mut pool);
+        // Chunked prefill [0, TGT) into slot 0 (chunks straddle the ring wrap).
+        let mut pos = 0;
+        while pos < TGT {
+            let n = CHUNK.min(TGT - pos);
+            let t = unsafe { Tensor::<F16>::from_raw(resid.offset_bytes(pos * HIDDEN * 2), n * HIDDEN) };
+            let positions: Vec<usize> = (pos..pos + n).collect();
+            ctx.standard_attn(&t, &attn, 0, &positions, &vec![0usize; n], None)
+                .expect("prefill")
+                .expect("prefill resid");
+            pos += n;
+        }
+        // Decode at TGT (n_kv > 256 → split-K; > D → ring active).
+        let dt = unsafe { Tensor::<F16>::from_raw(resid.offset_bytes(TGT * HIDDEN * 2), HIDDEN) };
+        let delta = ctx
+            .standard_attn(&dt, &attn, 0, &[TGT], &[0usize], None)
+            .expect("decode")
+            .expect("decode resid");
+        let out = read_f16(&device, delta.ptr, HIDDEN);
+        pool.dispose(&device).expect("dispose");
+        out
+    };
+
+    let resid_host = det_signal((TGT + 1) * HIDDEN, 41);
+    let full = run(false, upload_residual(&device, &resid_host));
+    let ring = run(true, upload_residual(&device, &resid_host));
+    assert_close("ring-swa splitk decode", &full, &ring);
+}
+
+#[test]
 fn gemma_ring_swa_f16_matches_full_depth() {
     // F16 KV → kv_append_v_unit_norm_f16 per-token wrap write path.
     ring_vs_full(KvLayout::F16Contig, "ring-swa f16");
