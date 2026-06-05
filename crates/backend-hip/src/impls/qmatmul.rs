@@ -158,7 +158,7 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         arch: "gfx906",
         dtype_weight: QDtype::Q4_1,
         dtype_activation: QDtype::Q8_1,
-        m_range: (1, 127),
+        m_range: (1, 31),
         cert_rel_path: "certs/hip/gfx906/qmatmul_q4_1_mmvq_t128_gfx906.json",
     },
     KernelDescriptor {
@@ -173,7 +173,7 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         // t/s, 200-token greedy), microbench shows 2.48× per-call vs
         // the prior nw1_r2 at the production shape. m>=128 hits the
         // wave64 MMQ kernel below.
-        m_range: (1, 127),
+        m_range: (1, 31),
         cert_rel_path: "certs/hip/gfx906/qmatmul_q5_K_mmvq_dp4a_gfx906.json",
     },
     // Dormant nw1_r2 baseline — preserved for A/B regression checks.
@@ -197,7 +197,7 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         arch: "gfx906",
         dtype_weight: QDtype::Q5_K,
         dtype_activation: QDtype::Q8_1,
-        m_range: (128, usize::MAX),
+        m_range: (32, usize::MAX),
         cert_rel_path: "certs/hip/gfx906/qmatmul_q5_K_mmq_wave64_gfx906.json",
     },
     KernelDescriptor {
@@ -214,7 +214,7 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         arch: "gfx906",
         dtype_weight: QDtype::Q6_K,
         dtype_activation: QDtype::Q8_1,
-        m_range: (1, 127),
+        m_range: (1, 31),
         cert_rel_path: "certs/hip/gfx906/qmatmul_q6_K_mmvq_dp4a_gfx906.json",
     },
     KernelDescriptor {
@@ -234,7 +234,7 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         arch: "gfx906",
         dtype_weight: QDtype::Q2_K,
         dtype_activation: QDtype::Q8_1,
-        m_range: (1, 127),
+        m_range: (1, 31),
         cert_rel_path: "certs/hip/gfx906/qmatmul_q2_K_mmvq_r2_dp4a_gfx906.json",
     },
     KernelDescriptor {
@@ -244,7 +244,7 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         arch: "gfx906",
         dtype_weight: QDtype::Q3_K,
         dtype_activation: QDtype::Q8_1,
-        m_range: (1, 127),
+        m_range: (1, 31),
         cert_rel_path: "certs/hip/gfx906/qmatmul_q3_K_mmvq_r2_dp4a_gfx906.json",
     },
     // MMQ (prefill): m ≥ 32. Owns the short prefill-chunk tail (e.g. a 554-tok
@@ -264,6 +264,19 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         dtype_activation: QDtype::Q8_1,
         m_range: (32, usize::MAX),
         cert_rel_path: "certs/hip/gfx906/qmatmul_q8_0_mmq_wave64_tile16_gfx906.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul",
+        // wave64 Q4_1 MMQ — owns m=32..127 (the 4warp_lds row below takes
+        // m >= 128 where the larger MMQ_Y=128 tile fills). Mirrors the Q4_0
+        // wave64/4warp split; below 32 the table routes to the Q4_1 MMVQ.
+        impl_id: "qmatmul_q4_1_mmq_wave64_gfx906",
+        backend: "hip",
+        arch: "gfx906",
+        dtype_weight: QDtype::Q4_1,
+        dtype_activation: QDtype::Q8_1,
+        m_range: (32, 127),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q4_1_mmq_wave64_gfx906.json",
     },
     KernelDescriptor {
         op_name: "QMatMul",
@@ -364,7 +377,7 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         arch: "gfx906",
         dtype_weight: QDtype::Q6_K,
         dtype_activation: QDtype::Q8_1,
-        m_range: (128, usize::MAX),
+        m_range: (32, usize::MAX),
         cert_rel_path: "certs/hip/gfx906/qmatmul_q6_K_mmq_wave64_gfx906.json",
     },
     KernelDescriptor {
@@ -384,7 +397,7 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         arch: "gfx906",
         dtype_weight: QDtype::Q2_K,
         dtype_activation: QDtype::Q8_1,
-        m_range: (128, usize::MAX),
+        m_range: (32, usize::MAX),
         cert_rel_path: "certs/hip/gfx906/qmatmul_q2_K_mmq_wave64_gfx906.json",
     },
     KernelDescriptor {
@@ -394,7 +407,7 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         arch: "gfx906",
         dtype_weight: QDtype::Q3_K,
         dtype_activation: QDtype::Q8_1,
-        m_range: (128, usize::MAX),
+        m_range: (32, usize::MAX),
         cert_rel_path: "certs/hip/gfx906/qmatmul_q3_K_mmq_wave64_gfx906.json",
     },
     // MMQ oracle covers only the tiny-M band (4..31) for Q8_0 — at m < 32 the
