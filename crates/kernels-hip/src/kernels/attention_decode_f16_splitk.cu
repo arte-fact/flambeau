@@ -43,7 +43,8 @@ extern "C" __global__ void flambeau_attention_decode_f16_splitk_chunk(
     const int chunk_size,
     const float scale,
     const int window_size,                 // SWA radius, 0 = unbounded causal
-    const int ring_depth                   // ring-buffer slab depth in rows; 0 = absolute
+    const int ring_depth,                  // ring-buffer slab depth in rows; 0 = absolute
+    const int chunk_base                   // first logical token chunk 0 covers; 0 = from start
 ) {
     const int q_head = blockIdx.x;
     const int chunk  = blockIdx.y;
@@ -56,7 +57,7 @@ extern "C" __global__ void flambeau_attention_decode_f16_splitk_chunk(
     const int lane   = tid & 63;
     const int nwarps = blockDim.x >> 6;
 
-    int t_start = chunk * chunk_size;
+    int t_start = chunk_base + chunk * chunk_size;
     int t_end   = t_start + chunk_size;
     if (t_end > n_tokens) t_end = n_tokens;
     // SWA: clamp chunk range to the window. Query position is the last

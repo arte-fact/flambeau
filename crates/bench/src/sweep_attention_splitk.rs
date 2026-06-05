@@ -174,6 +174,8 @@ fn run_shape(
         let d_out_ptr: u64 = d_out.as_usize() as u64;
         let scale_f = scale;
         let window_i: i32 = 0;
+        let ring_depth_i: i32 = 0;
+        let chunk_base_i: i32 = 0;
 
         let mut a1 = KernelArgs::new();
         a1.push(&d_q_ptr);
@@ -190,6 +192,8 @@ fn run_shape(
         a1.push(&chunk_size_i);
         a1.push(&scale_f);
         a1.push(&window_i);
+        a1.push(&ring_depth_i);
+        a1.push(&chunk_base_i);
         let cfg1 = LaunchCfg {
             grid: (n_heads_q as u32, n_chunks as u32, 1),
             block: (head_dim as u32, 1, 1),

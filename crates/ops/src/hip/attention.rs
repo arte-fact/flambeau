@@ -579,6 +579,7 @@ pub fn attention_decode_f16_splitk(
         head_dim,
         n_tokens_kv,
         chunk_size,
+        chunk_base,
     } = shape;
     let crate::AttnKnobs { scale, window_size, ring_depth } = knobs;
     assert!(
@@ -586,18 +587,20 @@ pub fn attention_decode_f16_splitk(
         "attention_decode_f16_splitk: head_dim {head_dim} not supported"
     );
     assert!(chunk_size > 0);
+    assert!(chunk_base <= n_tokens_kv);
 
     let module = ctx.reg.expect_module("attention_decode_f16_splitk")?;
     let k_chunk = module.kernel("flambeau_attention_decode_f16_splitk_chunk")?;
     let k_combine = module.kernel("flambeau_attention_decode_f16_splitk_combine")?;
 
-    let n_chunks = n_tokens_kv.div_ceil(chunk_size);
+    let n_chunks = (n_tokens_kv - chunk_base).div_ceil(chunk_size);
     let n_heads_q_i = n_heads_q as i32;
     let n_heads_kv_i = n_heads_kv as i32;
     let head_dim_i = head_dim as i32;
     let n_tokens_i = n_tokens_kv as i32;
     let n_chunks_i = n_chunks as i32;
     let chunk_size_i = chunk_size as i32;
+    let chunk_base_i = chunk_base as i32;
     let q_ptr: u64 = q.as_usize() as u64;
     let k_ptr: u64 = k.as_usize() as u64;
     let v_ptr: u64 = v.as_usize() as u64;
@@ -621,6 +624,7 @@ pub fn attention_decode_f16_splitk(
     a1.push(&scale);
     a1.push(&window_size);
     a1.push(&ring_depth);
+    a1.push(&chunk_base_i);
     let cfg1 = LaunchCfg {
         grid: (n_heads_q as u32, n_chunks as u32, 1),
         block: (head_dim as u32, 1, 1),
@@ -675,6 +679,9 @@ pub fn attention_decode_f16_splitk_h2(
         head_dim,
         n_tokens_kv,
         chunk_size,
+        // The h2 chunk kernel chunks from position 0; ring chunk_base is not
+        // wired here (this variant is unused — kept for the head_dim=256 lever).
+        chunk_base: _,
     } = shape;
     let crate::AttnKnobs { scale, window_size, ring_depth } = knobs;
     assert!(
@@ -847,6 +854,7 @@ pub fn attention_decode_q8_kv_splitk(
         head_dim,
         n_tokens_kv,
         chunk_size,
+        chunk_base,
     } = shape;
     let crate::AttnKnobs { scale, window_size, ring_depth } = knobs;
     // head_dim ∈ {64, 128, 256, 512}. d=512 enables Q8 on gemma4
@@ -857,18 +865,20 @@ pub fn attention_decode_q8_kv_splitk(
         "attention_decode_q8_kv_splitk: head_dim {head_dim} not supported"
     );
     assert!(chunk_size > 0);
+    assert!(chunk_base <= n_tokens_kv);
 
     let module = ctx.reg.expect_module("attention_decode_q8_kv_splitk")?;
     let k_chunk = module.kernel("flambeau_attention_decode_q8_kv_splitk_chunk")?;
     let k_combine = module.kernel("flambeau_attention_decode_q8_kv_splitk_combine")?;
 
-    let n_chunks = n_tokens_kv.div_ceil(chunk_size);
+    let n_chunks = (n_tokens_kv - chunk_base).div_ceil(chunk_size);
     let n_heads_q_i = n_heads_q as i32;
     let n_heads_kv_i = n_heads_kv as i32;
     let head_dim_i = head_dim as i32;
     let n_tokens_i = n_tokens_kv as i32;
     let n_chunks_i = n_chunks as i32;
     let chunk_size_i = chunk_size as i32;
+    let chunk_base_i = chunk_base as i32;
     let q_ptr: u64 = q.as_usize() as u64;
     let k_ptr: u64 = k.as_usize() as u64;
     let v_ptr: u64 = v.as_usize() as u64;
@@ -893,6 +903,7 @@ pub fn attention_decode_q8_kv_splitk(
     a1.push(&scale);
     a1.push(&window_size);
     a1.push(&ring_depth);
+    a1.push(&chunk_base_i);
     // chunk pass uses block = head_dim/4 (one
     // thread per int32-packed quad). Combine pass still needs
     // head_dim threads (one per output element).

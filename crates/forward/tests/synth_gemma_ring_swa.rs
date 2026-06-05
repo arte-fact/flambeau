@@ -299,18 +299,17 @@ fn gemma_ring_swa_mixed_matches_full_depth() {
     ring_vs_full_mixed(KvLayout::F16Contig, "ring-swa mixed");
 }
 
-#[test]
-fn gemma_ring_swa_splitk_decode_matches_full_depth() {
-    // Decode at n_tokens_kv > 256 on a ring slab triggers split-K over the
-    // ring (the Phase-4 lever): the chunk kernel clamps each chunk to the SWA
-    // window (earlier chunks collapse to empty) and addresses rows mod
-    // ring_depth. Must match the full-context (slide → single-block) path.
-    const W: i32 = 64;
+fn splitk_ring_vs_full(layout: KvLayout, label: &str) {
+    // Decode with a > 256-key SWA window on a ring slab triggers windowed
+    // split-K (chunk_base): the chunk kernel chunks [n_kv - window, n_kv) over
+    // the ring, addressing rows mod ring_depth. Must match the full-context
+    // (slide → split-K) path, which chunks the same window off the slid pointer.
+    const W: i32 = 288; // > 256 so the window splits into >1 chunk (split-K)
     const UB: usize = 128; // max_prefill_tokens
-    const D: usize = W as usize + UB; // ring slab depth = 192
+    const D: usize = W as usize + UB; // ring slab depth = 416
     const MSL: usize = 512; // > D (ring active) and > TGT (full slab fits)
     const CHUNK: usize = 128; // prefill chunk (<= UB and <= D - W)
-    const TGT: usize = 300; // decode pos → n_kv 301 > 256 (splitk) and > D (ring)
+    const TGT: usize = 450; // decode pos → n_kv 451 > D (ring); window 288 > 256 (split-K)
 
     let device = HipDevice::new(0).expect("HipDevice 0");
     device.bind().expect("bind");
@@ -341,7 +340,7 @@ fn gemma_ring_swa_splitk_decode_matches_full_depth() {
             max_slots: 1,
             per_layer_embd: 0,
             paged_kv: None,
-            kv_layout: KvLayout::F16Contig,
+            kv_layout: layout,
             per_layer_kv_layouts: None,
             per_layer_kv_depths: if ring { Some(vec![D]) } else { None },
         };
@@ -372,7 +371,19 @@ fn gemma_ring_swa_splitk_decode_matches_full_depth() {
     let resid_host = det_signal((TGT + 1) * HIDDEN, 41);
     let full = run(false, upload_residual(&device, &resid_host));
     let ring = run(true, upload_residual(&device, &resid_host));
-    assert_close("ring-swa splitk decode", &full, &ring);
+    assert_close(label, &full, &ring);
+}
+
+#[test]
+fn gemma_ring_swa_splitk_f16_matches_full_depth() {
+    splitk_ring_vs_full(KvLayout::F16Contig, "ring-swa splitk f16");
+}
+
+#[test]
+fn gemma_ring_swa_splitk_q8_matches_full_depth() {
+    // Q8 split-K over the ring — caught the chunk_base kernel bug the F16-only
+    // test missed (Q8 chunk kernel's t_start wasn't using chunk_base).
+    splitk_ring_vs_full(KvLayout::Q8Contig, "ring-swa splitk q8");
 }
 
 #[test]

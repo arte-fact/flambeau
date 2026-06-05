@@ -32,6 +32,7 @@ pub fn attn_decode_q8_kv_splitk(
         head_dim,
         n_tokens_kv,
         chunk_size,
+        chunk_base,
     } = shape;
     if !matches!(head_dim, 64 | 128 | 256 | 512) {
         bail!("attn_decode_q8_kv_splitk: head_dim {head_dim} not in {{64, 128, 256, 512}}");
@@ -48,7 +49,7 @@ pub fn attn_decode_q8_kv_splitk(
              n_heads_kv ({n_heads_kv})"
         );
     }
-    let n_chunks = n_tokens_kv.div_ceil(chunk_size);
+    let n_chunks = (n_tokens_kv - chunk_base).div_ceil(chunk_size);
     let q_need = n_heads_q * head_dim;
     let cache_rows = crate::ops::kv_append::ring_cache_rows(n_tokens_kv, knobs.ring_depth as usize);
     let cache_need = cache_rows * n_heads_kv * head_dim;

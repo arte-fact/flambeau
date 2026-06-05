@@ -40,7 +40,8 @@ extern "C" __global__ void flambeau_attention_decode_q8_kv_splitk_chunk(
     const int chunk_size,
     const float scale,
     const int window_size,                              // 0 = unbounded causal; >0 = SWA
-    const int ring_depth                                // ring-buffer slab depth in rows; 0 = absolute
+    const int ring_depth,                               // ring-buffer slab depth in rows; 0 = absolute
+    const int chunk_base                                // first logical token chunk 0 covers; 0 = from start
 ) {
     const int q_head = blockIdx.x;
     const int chunk  = blockIdx.y;
@@ -58,7 +59,7 @@ extern "C" __global__ void flambeau_attention_decode_q8_kv_splitk_chunk(
     const int n_quads_per_block = 8;
     const int quad_in_block     = (elem_base % 32) / 4;
 
-    int t_start = chunk * chunk_size;
+    int t_start = chunk_base + chunk * chunk_size;
     int t_end   = t_start + chunk_size;
     if (t_end > n_tokens) t_end = n_tokens;
     // SWA mask: keys older than (qpos - window_size + 1) are

@@ -189,6 +189,10 @@ pub struct AttnSplitkShape {
     pub head_dim: usize,
     pub n_tokens_kv: usize,
     pub chunk_size: usize,
+    /// First logical token chunk 0 covers (the SWA window start for ring
+    /// decode). `0` = chunk from position 0. `n_chunks` is derived as
+    /// `(n_tokens_kv - chunk_base).div_ceil(chunk_size)`.
+    pub chunk_base: usize,
 }
 
 #[derive(Copy, Clone, Debug)]
