@@ -29,7 +29,7 @@ use super::{Arch, Topology};
 /// permits. Returns `None` on partial peer-access matrices, missing
 /// hsaco, or BAR1-incompatible topologies — callers fall back to the
 /// host-bounce coordinator.
-fn try_build_bar_ar(devices: &[i32], dtod: bool) -> Option<Arc<BarArCoordinator>> {
+fn try_build_bar_ar(devices: &[i32]) -> Option<Arc<BarArCoordinator>> {
     if devices.len() < 2 {
         return None;
     }
@@ -38,7 +38,7 @@ fn try_build_bar_ar(devices: &[i32], dtod: bool) -> Option<Arc<BarArCoordinator>
         return None;
     }
     let bar = Arc::new(BarP2pAllReduce::new(Arc::clone(&cluster)).ok()?);
-    Some(Arc::new(BarArCoordinator::new(bar, dtod).ok()?))
+    Some(Arc::new(BarArCoordinator::new(bar).ok()?))
 }
 
 pub fn launch<A: Arch>(
@@ -79,7 +79,7 @@ fn launch_tp<A: Arch>(
 ) -> Result<Vec<WorkerHandle<A>>> {
     let n = devices.len();
     let ar = Arc::new(ArCoordinator::new(n));
-    let bar = try_build_bar_ar(devices, params.deterministic_ar);
+    let bar = try_build_bar_ar(devices);
     let mut handles = Vec::with_capacity(n);
     for (rank, &dev) in devices.iter().enumerate() {
         let role = WorkerRole::Tp {
@@ -106,13 +106,6 @@ pub struct LaunchParams {
     pub max_slots: usize,
     pub paged_kv_pages: Option<usize>,
     pub kv_layout: crate::core::KvLayout,
-    /// Make TP/Hybrid AllReduce bit-deterministic at temp=0 by pulling
-    /// peer partials into rank-local scratch via the DMA copy engine and
-    /// summing locally (`dtod=true` on the BAR coordinator), instead of
-    /// the in-kernel BAR1 aperture read which is non-coherent on gfx906
-    /// PCIe P2P (see `doc/DETERMINISM_INVESTIGATION.md`). Stays on-device
-    /// (no host bounce) — opt-in via the server `--deterministic` flag.
-    pub deterministic_ar: bool,
 }
 
 /// Shared runtime configuration for the topology launchers.
@@ -265,7 +258,7 @@ fn launch_hybrid<A: Arch>(
     for (stage_idx, ranks) in stages.iter().enumerate() {
         let tp_size = ranks.len();
         let ar = Arc::new(ArCoordinator::new(tp_size));
-        let bar = try_build_bar_ar(ranks, params.deterministic_ar);
+        let bar = try_build_bar_ar(ranks);
         let (layer_start, layer_end) = if !split.is_empty() {
             let s = layer_cursor;
             let count = split[stage_idx];

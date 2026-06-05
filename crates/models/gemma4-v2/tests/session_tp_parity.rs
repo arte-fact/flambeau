@@ -37,7 +37,6 @@ fn session_gemma4_31b_tp_size_2_runs() {
             max_slots: 1,
             paged_kv_pages: None,
             kv_layout: flambeau_forward::KvLayout::F16Contig,
-            deterministic_ar: false,
         },
     )
     .expect("Session<Gemma4V2> TP=2");

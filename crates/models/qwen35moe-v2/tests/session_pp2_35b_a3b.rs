@@ -40,7 +40,6 @@ fn session_qwen36_a3b_q3_k_s_pp_size_2_runs() {
             max_slots: 1,
             paged_kv_pages: None,
             kv_layout: flambeau_forward::KvLayout::F16Contig,
-            deterministic_ar: false,
         },
     ) {
         Ok(s) => s,

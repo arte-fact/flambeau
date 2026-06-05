@@ -157,7 +157,6 @@ impl<A: Arch> Session<A> {
             max_slots,
             paged_kv_pages: _,
             kv_layout: _,
-            deterministic_ar: _,
         } = params;
         if prefill_ubatch == 0 {
             anyhow::bail!("Session::new: prefill_ubatch must be > 0");

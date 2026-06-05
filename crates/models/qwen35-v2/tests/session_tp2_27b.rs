@@ -31,7 +31,6 @@ fn session_qwen35_27b_q4_0_tp_size_2_runs() {
             max_slots: 1,
             paged_kv_pages: None,
             kv_layout: flambeau_forward::KvLayout::F16Contig,
-            deterministic_ar: false,
         },
     )
     .expect("Session<Qwen35V2> TP=2");

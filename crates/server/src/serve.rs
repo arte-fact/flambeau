@@ -247,12 +247,6 @@ pub(crate) async fn serve_inner_v2(
             max_slots: inflight_slots,
             paged_kv_pages: cfg.paged_kv_pages,
             kv_layout,
-            // TP/Hybrid AllReduce is unconditionally routed through the
-            // coherent DtoD copy-engine path — the in-kernel BAR1 aperture
-            // read is non-coherent on gfx906 PCIe P2P and the only fully
-            // coherent mechanism is the copy engine. See
-            // `doc/DETERMINISM_INVESTIGATION.md`.
-            deterministic_ar: true,
         },
     )
     .with_context(|| format!("v2 shared session ({gguf_arch})"))?;
