@@ -356,7 +356,7 @@ pub fn bar_ar_postattn_residual_rmsnorm_f32_to_f16(
     rank: usize,
     bufs: crate::core::ArPostAttnRmsNormHookBuffers,
     params: BarArPostAttnNormParams,
-    _device: &HipDevice,
+    device: &HipDevice,
     stream: &HipStream,
 ) -> Result<()> {
     let BarArPostAttnNormParams { n_rows, n, eps } = params;
@@ -374,6 +374,54 @@ pub fn bar_ar_postattn_residual_rmsnorm_f32_to_f16(
         );
     }
     let total_elems = n_rows * n;
+    let shape = flambeau_backend_hip::ArPostAttnNormShape {
+        n_rows: n_rows as u32,
+        n: n as u32,
+    };
+    if coord.dtod {
+        // proj partials are F32 (4 bytes/elem). Pull peers into local
+        // scratch; the kernel sums proj_local + proj_peer(s) coherently.
+        let DtodPull { peers, local_peers } =
+            dtod_publish_pull(coord, rank, proj_local_f32, total_elems, 4, device, stream)?;
+        // SAFETY: proj_local + local peer copies + resid/weight are
+        // rank-local; resid_out not aliased to resid_in (caller contract).
+        unsafe {
+            match n_ranks {
+                2 => coord.bar.postattn_residual_rmsnorm_f32_to_f16_tp2_rank(
+                    rank,
+                    flambeau_backend_hip::ArPostAttnNormRankBuffersTp2 {
+                        proj_local: peers[rank],
+                        peer: local_peers[0],
+                        post_norm_w: post_norm_w_f16,
+                        resid_in: resid_in_f16,
+                        resid_out: resid_out_f16,
+                    },
+                    shape,
+                    eps,
+                    stream,
+                )?,
+                4 => {
+                    let peer3 = [local_peers[0], local_peers[1], local_peers[2]];
+                    coord.bar.postattn_residual_rmsnorm_f32_to_f16_tp4_rank(
+                        rank,
+                        flambeau_backend_hip::ArPostAttnNormRankBuffersTp4 {
+                            proj_local: peers[rank],
+                            peers: peer3,
+                            post_norm_w: post_norm_w_f16,
+                            resid_in: resid_in_f16,
+                            resid_out: resid_out_f16,
+                        },
+                        shape,
+                        eps,
+                        stream,
+                    )?
+                }
+                other => anyhow::bail!("BarArCoordinator: unsupported n_ranks={other}"),
+            }
+        }
+        ar_epilogue(coord, rank);
+        return Ok(());
+    }
     let peers = if total_elems <= EVENT_PATH_MAX_ELEMS {
         ar_publish_with_events(coord, rank, proj_local_f32, stream)?
     } else {
@@ -384,10 +432,6 @@ pub fn bar_ar_postattn_residual_rmsnorm_f32_to_f16(
     // kernel reads `resid_in` and writes `resid_out` (caller's
     // contract: not aliased).
     unsafe {
-        let shape = flambeau_backend_hip::ArPostAttnNormShape {
-            n_rows: n_rows as u32,
-            n: n as u32,
-        };
         match n_ranks {
             2 => coord.bar.postattn_residual_rmsnorm_f32_to_f16_tp2_rank(
                 rank,
@@ -438,11 +482,38 @@ pub fn bar_ar_sum_f16(
     rank: usize,
     buf: DevicePtr,
     n_elems: usize,
-    _device: &HipDevice,
+    device: &HipDevice,
     stream: &HipStream,
 ) -> Result<()> {
     let n_ranks = coord.ranks();
     if n_ranks == 1 {
+        return Ok(());
+    }
+    if coord.dtod {
+        // Coherent F16 sum: pull each peer partial (2 bytes/elem) into
+        // local scratch + flush, then the existing kernel reads local.
+        let DtodPull { peers, local_peers } =
+            dtod_publish_pull(coord, rank, buf, n_elems, 2, device, stream)?;
+        // SAFETY: all pointers rank-local, valid for n_elems F16.
+        unsafe {
+            match n_ranks {
+                2 => coord.bar.sum_tp2_rank(
+                    rank,
+                    peers[rank],
+                    local_peers[0],
+                    n_elems as u32,
+                    stream,
+                )?,
+                4 => {
+                    let p3 = [local_peers[0], local_peers[1], local_peers[2]];
+                    coord
+                        .bar
+                        .sum_tp4_rank(rank, peers[rank], p3, n_elems as u32, stream)?
+                }
+                other => anyhow::bail!("bar_ar_sum_f16: unsupported n_ranks={other}"),
+            }
+        }
+        ar_epilogue(coord, rank);
         return Ok(());
     }
     let peers = if n_elems <= EVENT_PATH_MAX_ELEMS {
@@ -488,7 +559,7 @@ pub fn bar_ar_residual_f16(
     residual_inout_f16: DevicePtr,
     partial_f16: DevicePtr,
     n_elems: usize,
-    _device: &HipDevice,
+    device: &HipDevice,
     stream: &HipStream,
 ) -> Result<()> {
     let n_ranks = coord.ranks();
@@ -499,6 +570,28 @@ pub fn bar_ar_residual_f16(
     }
     if n_ranks != 2 {
         anyhow::bail!("bar_ar_residual_f16: only TP=2 supported (got {n_ranks})");
+    }
+    if coord.dtod {
+        let DtodPull { peers, local_peers } =
+            dtod_publish_pull(coord, rank, partial_f16, n_elems, 2, device, stream)?;
+        // Keep canonical (rank0, rank1) partial order so both ranks reduce
+        // the same two physical partials in the same slots: own partial in
+        // this rank's slot, the staged peer copy in the peer's slot.
+        let canon0 = if rank == 0 { peers[0] } else { local_peers[0] };
+        let canon1 = if rank == 1 { peers[1] } else { local_peers[0] };
+        // SAFETY: hidden + both partials are rank-local, valid for n_elems F16.
+        unsafe {
+            coord.bar.residual_tp2_rank(
+                rank,
+                residual_inout_f16,
+                canon0,
+                canon1,
+                n_elems as u32,
+                stream,
+            )?;
+        }
+        ar_epilogue(coord, rank);
+        return Ok(());
     }
     let peers = if n_elems <= EVENT_PATH_MAX_ELEMS {
         ar_publish_with_events(coord, rank, partial_f16, stream)?
@@ -531,7 +624,7 @@ pub fn bar_ar_residual_rmsnorm_f16(
     bufs: crate::core::ArResidualRmsNormHookBuffers,
     n_elems: usize,
     eps: f32,
-    _device: &HipDevice,
+    device: &HipDevice,
     stream: &HipStream,
 ) -> Result<()> {
     let crate::core::ArResidualRmsNormHookBuffers {
@@ -543,6 +636,30 @@ pub fn bar_ar_residual_rmsnorm_f16(
     let n_ranks = coord.ranks();
     if n_ranks != 2 {
         anyhow::bail!("bar_ar_residual_rmsnorm_f16: only TP=2 supported (got {n_ranks})");
+    }
+    if coord.dtod {
+        let DtodPull { peers, local_peers } =
+            dtod_publish_pull(coord, rank, partial_f16, n_elems, 2, device, stream)?;
+        let canon0 = if rank == 0 { peers[0] } else { local_peers[0] };
+        let canon1 = if rank == 1 { peers[1] } else { local_peers[0] };
+        // SAFETY: hidden/weights/out + both partials are rank-local.
+        unsafe {
+            coord.bar.residual_rmsnorm_tp2_rank(
+                rank,
+                flambeau_backend_hip::ArResidualRmsNormRankBuffers {
+                    hidden: residual_inout_f16,
+                    partial_canonical_rank0: canon0,
+                    partial_canonical_rank1: canon1,
+                    rms_weight,
+                    out_norm,
+                },
+                n_elems as u32,
+                eps,
+                stream,
+            )?;
+        }
+        ar_epilogue(coord, rank);
+        return Ok(());
     }
     let peers = if n_elems <= EVENT_PATH_MAX_ELEMS {
         ar_publish_with_events(coord, rank, partial_f16, stream)?
@@ -570,6 +687,93 @@ pub fn bar_ar_residual_rmsnorm_f16(
     Ok(())
 }
 
+/// Coherent peer exchange shared by every DtoD AR path. Returns
+/// rank-local pointers to every rank's partial so the caller's kernel
+/// reads only coherent local memory: `peers` is the published-pointer
+/// snapshot in rank order (`peers[rank] == buf`, this rank's own
+/// partial); `local_peers` are copy-engine staging copies of each peer's
+/// partial, in ascending-peer-rank order (the `r == rank` slot skipped).
+///
+/// Steps (mirrors the original [`dtod_ar_sum_f32`] body): on the event
+/// path, L2→DRAM flush `buf` so the peers' copy-engine pull is coherent
+/// (the host-sync path drains the stream instead); publish + order;
+/// copy-engine pull each peer partial into rank-local staging; then a
+/// read-all-then-write-all pull-done fence. `peer_bytes_per_elem` (2 for
+/// F16, 4 for F32) sizes the flush word count and the pull/staging bytes
+/// — a single source of truth so no path can mis-size the F16 case.
+struct DtodPull {
+    peers: Vec<DevicePtr>,
+    local_peers: Vec<DevicePtr>,
+}
+
+fn dtod_publish_pull(
+    coord: &BarArCoordinator,
+    rank: usize,
+    buf: DevicePtr,
+    n_elems: usize,
+    peer_bytes_per_elem: usize,
+    device: &HipDevice,
+    stream: &HipStream,
+) -> Result<DtodPull> {
+    let n_ranks = coord.ranks();
+    let n_bytes = n_elems * peer_bytes_per_elem;
+    let event_path = n_elems <= EVENT_PATH_MAX_ELEMS;
+    if event_path {
+        // The event path orders peers after this rank's producer event but
+        // does not flush the producer's writes from L2 to DRAM; a peer's
+        // copy-engine pull then sources a timing-dependent (boot-varying)
+        // value. Flush `buf` to DRAM before the producer event is recorded
+        // so the pull is coherent. `l2_flush` counts u32 words — for F16
+        // (2 bytes/elem) that is `n_elems.div_ceil(2)`, not `n_elems`;
+        // flushing too few words leaves the buffer's upper half stale in L2
+        // and silently reintroduces non-determinism. See
+        // `doc/DETERMINISM_INVESTIGATION.md`.
+        // SAFETY: `buf` is this rank's partial on `device`; `stream`
+        // belongs to that device, ordered after the producer.
+        let n_words = (n_bytes as u32).div_ceil(4);
+        unsafe { coord.bar.l2_flush(rank, buf, n_words, stream)? };
+    }
+    let peers = if event_path {
+        ar_publish_with_events(coord, rank, buf, stream)?
+    } else {
+        ar_publish_with_host_sync(coord, rank, buf, stream)?
+    };
+    let staging = coord.ensure_recv_staging(rank, (n_ranks - 1) * n_bytes, device)?;
+    // Pull every peer partial into local scratch on this rank's stream.
+    // The publish helper already ordered `stream` after each peer's
+    // producer (event or host-sync drain), so the copy reads a committed
+    // partial; the copy engine sources it coherently.
+    let mut local_peers: Vec<DevicePtr> = Vec::with_capacity(n_ranks - 1);
+    let mut off = 0usize;
+    for (r, &peer_ptr) in peers.iter().enumerate() {
+        if r == rank {
+            continue;
+        }
+        let dst = DevicePtr(staging.0 + off);
+        // SAFETY: dst owns n_bytes within the (n_ranks-1)*n_bytes staging
+        // slab on this device; peer_ptr owns n_bytes on device r; peer
+        // access authorised at cluster bring-up; stream belongs to `device`.
+        unsafe {
+            device.memcpy_peer_in_async(stream, dst, peer_ptr, coord.bar.device_id(r), n_bytes)?;
+        }
+        local_peers.push(dst);
+        off += n_bytes;
+    }
+    // Read-all-then-write-all fence. Strictly required for the in-place sum
+    // paths (a peer's `buf += peer` would clobber a partial another rank is
+    // mid-pull); conservative for the residual/rmsnorm/postattn paths (they
+    // write `hidden`/`out`, leaving the published partial read-only) but
+    // kept for one uniform coherent core.
+    coord.pull_events[rank].record(stream)?;
+    coord.barrier.wait();
+    for (r, ev) in coord.pull_events.iter().enumerate() {
+        if r != rank {
+            ev.stream_wait(stream)?;
+        }
+    }
+    Ok(DtodPull { peers, local_peers })
+}
+
 /// DtoD AllReduce-sum (F32). Pulls each peer partial into rank-local
 /// scratch via the DMA copy engine, then runs the same
 /// `sum_tp{2,4}_f32_rank` kernel with the peer arg pointed at that local
@@ -591,60 +795,8 @@ pub fn dtod_ar_sum_f32(
     if n_ranks == 1 {
         return Ok(());
     }
-    let event_path = n_elems <= EVENT_PATH_MAX_ELEMS;
-    if event_path {
-        // The event path orders peers after this rank's producer event
-        // but does not flush the producer's writes from L2 to DRAM; a
-        // peer's copy-engine pull then sources a timing-dependent (boot-
-        // varying) value. Flush `buf` to DRAM before the producer event
-        // is recorded so the pull is coherent. The host-sync path drains
-        // the whole stream and needs no flush. See
-        // `doc/DETERMINISM_INVESTIGATION.md`.
-        // SAFETY: `buf` is this rank's F32 partial (`n_elems` words) on
-        // `device`; `stream` belongs to that device, ordered after the
-        // producer.
-        unsafe { coord.bar.l2_flush(rank, buf, n_elems as u32, stream)? };
-    }
-    let peers = if event_path {
-        ar_publish_with_events(coord, rank, buf, stream)?
-    } else {
-        ar_publish_with_host_sync(coord, rank, buf, stream)?
-    };
-    let n_bytes = n_elems * 4;
-    let staging = coord.ensure_recv_staging(rank, (n_ranks - 1) * n_bytes, device)?;
-    // Pull every peer partial into local scratch on this rank's stream.
-    // The publish helper already ordered `stream` after each peer's
-    // producer event (or drained via host-sync), so the copy reads a
-    // committed partial; the copy engine sources it coherently.
-    let mut local_peers: Vec<DevicePtr> = Vec::with_capacity(n_ranks - 1);
-    let mut off = 0usize;
-    for (r, &peer_ptr) in peers.iter().enumerate() {
-        if r == rank {
-            continue;
-        }
-        let dst = DevicePtr(staging.0 + off);
-        // SAFETY: dst owns n_bytes within the (n_ranks-1)*n_bytes staging
-        // slab on this device; peer_ptr owns n_bytes on device r; peer
-        // access authorised at cluster bring-up; stream belongs to `device`.
-        unsafe {
-            device.memcpy_peer_in_async(stream, dst, peer_ptr, coord.bar.device_id(r), n_bytes)?;
-        }
-        local_peers.push(dst);
-        off += n_bytes;
-    }
-    // Read-all-then-write-all fence: the sum below overwrites `buf`
-    // (= this rank's published partial) in place, but peers are still
-    // pulling that same `buf`. Record this rank's pulls-done event, host-
-    // barrier so all ranks have recorded, then make `stream` wait on every
-    // peer's pulls-done event so no peer's in-place sum can clobber a
-    // partial another rank is mid-pull. Without this ~30% of AR calls race.
-    coord.pull_events[rank].record(stream)?;
-    coord.barrier.wait();
-    for (r, ev) in coord.pull_events.iter().enumerate() {
-        if r != rank {
-            ev.stream_wait(stream)?;
-        }
-    }
+    let DtodPull { peers, local_peers } =
+        dtod_publish_pull(coord, rank, buf, n_elems, 4, device, stream)?;
     // Local partial + local peer copies. Same-stream ordering serializes
     // the sum after the pulls; the kernel reads only rank-local memory.
     // SAFETY: all pointers are rank-local DevicePtrs valid for n_elems F32.
