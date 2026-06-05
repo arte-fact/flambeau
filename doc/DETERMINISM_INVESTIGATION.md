@@ -224,6 +224,58 @@ own DtoH and same-device reads see) but the BAR1 aperture maps DRAM, and
 the L2→DRAM writeback that a peer needs is not produced by
 `threadfence_system` on this silicon.
 
+## Squeeze + scope refinement (2026-06-05)
+
+Tried to close the residual −5.5 % gemma4 gap and characterized the
+determinism scope precisely.
+
+**Barrier-reduction squeeze — NULL (reverted).** The DtoD path runs 4
+host-barrier rendezvous/AR (publish, pull-done, 2×epilogue). Dropping the
+redundant epilogue slab-clear + barrier (the pull-done barrier is already
+a valid post-snapshot rendezvous) *looked* safe and stayed within-session
+deterministic (20/20) — but the result md5 **changed** (`e6b35b31` →
+`1da90277`), i.e. it computed a different AR. The epilogue barriers are
+load-bearing for cross-call ordering in a way the static analysis missed
+(host-thread interleaving / memory ordering around the `DevicePtr` slab on
+this rig). Reverted — correctness over ~5 %.
+
+**Determinism scope is WITHIN-SESSION, not cross-process.** The shipped
+event-path dtod is deterministic within a running server (10/10, 20/20,
+12/12) — the actual requirement (the original bug was non-reproducibility
+*within* a session). But the near-tie token can differ *across server
+restarts* (`e6b35b31` vs `1da90277` = `_ ` vs `_\n` after `c-a-t (cat)`).
+Localized decisively:
+- pp-only (no AR): cross-boot **stable** (`9fbf4085` ×2 boots).
+- prefill AR (host-sync path): cross-boot **bit-identical** (input
+  partials + outputs, via DtoH checksum ×2 boots).
+- decode AR (event path): cross-boot **variable** — the event ordering
+  (`stream_wait` on the producer event) does **not** guarantee the
+  partial is flushed to DRAM before the copy engine reads it, so the
+  copied value is timing-(boot-)dependent.
+- forcing host-sync for *all* dtod (`EVENT_PATH_MAX_ELEMS = 0`):
+  cross-boot **stable** (`1da90277` ×2 boots) and coherent — confirming
+  the event path is the source. The host-sync result is the *correct*
+  one; the event path occasionally freezes on a slightly-stale near-tie.
+
+**Speed/coherence tradeoff (gemma4-26B-A4B-Q8_0 pp2tp2, tg128 median):**
+
+| AR path | decode tps | determinism | coherence |
+|---------|-----------|-------------|-----------|
+| BAR1 (default, non-det) | 40.72 | none | broken |
+| **event-path dtod (shipped `--deterministic`)** | **38.50** (−5.5 %) | within-session | mild decode residual |
+| host-sync dtod (`EVENT_PATH_MAX_ELEMS=0`) | 32.06 (−21 %) | within-session **+ cross-boot** | full |
+| host-bounce | 30.57 (−25 %) | full | full |
+
+The shipped event-path dtod's speed comes precisely from skipping the
+per-AR `Stream::synchronize`; full cross-boot coherence costs 4× the
+penalty (−21 % vs −5.5 %). For within-session reproducibility (the
+requirement) the event path is the speed-optimal choice and is kept as
+the `--deterministic` default. A future `--deterministic-strict` could
+select the host-sync dtod for cross-process bit-identity at −21 %; the
+cheaper proper fix is a targeted producer→DRAM flush on the decode AR
+that the copy engine can read coherently without a full stream drain
+(open).
+
 ## Fix SHIPPED v2 — `--deterministic` DtoD copy-engine AR (2026-06-04, near-BAR1 speed)
 
 The host-bounce fix below works but costs −25 %/−38 % decode. A research
