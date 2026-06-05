@@ -761,6 +761,10 @@ const SIMPLE_SWEEPS: &[(&str, SweepFn)] = &[
         "attention_decode_splitk",
         flambeau_bench::sweep_attention_splitk::run_sweep,
     ),
+    (
+        "attention_decode_q8_kv_splitk",
+        flambeau_bench::sweep_attention_q8_kv_splitk::run_sweep,
+    ),
     ("mmvq_f16", flambeau_bench::sweep_mmvq_f16::run_sweep),
     ("mmq_f16", flambeau_bench::sweep_mmvq_f16::run_mmq_sweep),
     (
