@@ -267,14 +267,38 @@ Localized decisively:
 | host-bounce | 30.57 (−25 %) | full | full |
 
 The shipped event-path dtod's speed comes precisely from skipping the
-per-AR `Stream::synchronize`; full cross-boot coherence costs 4× the
-penalty (−21 % vs −5.5 %). For within-session reproducibility (the
-requirement) the event path is the speed-optimal choice and is kept as
-the `--deterministic` default. A future `--deterministic-strict` could
-select the host-sync dtod for cross-process bit-identity at −21 %; the
-cheaper proper fix is a targeted producer→DRAM flush on the decode AR
-that the copy engine can read coherently without a full stream drain
-(open).
+per-AR `Stream::synchronize`; full cross-boot coherence via host-sync
+costs 4× the penalty (−21 % vs −5.5 %). The cheaper proper fix landed —
+see below.
+
+### Targeted L2→DRAM flush — cross-boot determinism at event-path speed (2026-06-05, SHIPPED)
+
+A tiny per-rank flush kernel (`flambeau_p2p_l2_flush`) re-stores every
+word of the partial — `volatile`, so the value becomes the flush
+thread's own write, since a separate kernel's `__threadfence_system()`
+cannot flush the *producer* kernel's writes — then issues
+`__threadfence_system()` to release past L2 to DRAM. It is launched on
+the producer stream before the producer event is recorded, **only on the
+event (decode) path** (the host-sync prefill path already drains). The
+peer's copy-engine pull then sources the producer's value coherently
+from DRAM. Confirms `__threadfence_system()` *does* do an L2→DRAM
+writeback on gfx906 when the data is the fencing thread's own write
+(fix #2's null was the wrong context).
+
+**GATES (pp2tp2, `--kv q8`, `"Spell cat"` temp=0):**
+
+| Model | cross-boot determinism | decode tps | vs BAR1 |
+|-------|------------------------|-----------|---------|
+| gemma4-26B-A4B-Q8_0 | **6/6 boots identical** (event path was 2/3) | 38.16 | −6.3 % |
+| Qwen3.6-27B-Q8_0 | **2/2 boots identical** | 26.43 | −2.7 % |
+
+So `--deterministic` is now **within-session AND cross-process
+deterministic + fully coherent** (matches the host-sync ground-truth
+result) at essentially event-path speed — the −21 % host-sync penalty is
+gone. `flambeau_p2p_l2_flush` (`bar_p2p.rs::l2_flush`, called from
+`dtod_ar_sum_f32`); no dispatch row / cert (a fixed backend utility
+kernel like the AR sum kernels). The earlier within-session-only
+characterization above is superseded.
 
 ## Fix SHIPPED v2 — `--deterministic` DtoD copy-engine AR (2026-06-04, near-BAR1 speed)
 
