@@ -538,3 +538,28 @@ flambeau serve --model <gemma-4-26B-A4B-it-Q8_0.gguf> \
 # -> 6+ distinct hashes / 20. Swap to --mesh-mode pp --devices hip:0,2
 #    (pp-only, no TP AR) -> single hash, coherent.
 ```
+
+## Re-verified on the ring-SWA build (2026-06-05)
+
+Re-ran the determinism gate after the ring-buffered SWA + split-K decode
+work (commits `e68b5fd … 800c7f1`), which is the relevant new risk: gemma4
+SWA decode now runs through **split-K**, summing per-chunk partials in a
+combine pass. That stays deterministic because the split is *structural* —
+a fixed `n_chunks`, a fixed grid, each block writing its own partial slot
+with no atomics and no cross-block races — so the reduction order is
+identical on every run. The TP-AllReduce path (coherent copy-engine DtoD)
+is per-rank-orthogonal to these attention changes and untouched.
+
+Gate: `gemma-4-26B-A4B-it-Q8_0`, pp2tp2 (`--mesh-mode pp+tp --pp-size 2
+--tp-size 2 --devices hip:0,2,1,3 --kv q8`), a **2102-token prompt** (so the
+window-1024 SWA layers ring-wrap and decode via split-K), greedy
+`temperature=0`, `max_tokens=96`, md5 of the completion body:
+
+| run set | runs | distinct md5 |
+| --- | --- | --- |
+| within-session (boot 1) | 10 | **1** (`6057a97d1ca93d97f8c7cde4d10ba1ff`) |
+| cross-boot (boot 2, fresh process) | 10 | **1** (same hash) |
+
+**20/20 byte-identical**, within-session *and* across a full server restart
+(the harder cross-boot case the L2->DRAM flush fix `d54f66a` targets).
+Determinism holds on the final ring-SWA build.
