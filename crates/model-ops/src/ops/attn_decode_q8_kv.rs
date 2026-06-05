@@ -152,7 +152,7 @@ mod tests {
             head_dim: HEAD_DIM,
             n_tokens_kv: N_TOKENS_KV,
         };
-        let dec_knobs = flambeau_ops::AttnKnobs { scale: SCALE, window_size: 0 };
+        let dec_knobs = flambeau_ops::AttnKnobs { scale: SCALE, window_size: 0, ring_depth: 0 };
         attn_decode_f16(
             &q_t,
             &k_cache_f16,

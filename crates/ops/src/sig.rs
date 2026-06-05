@@ -216,6 +216,12 @@ pub struct AttnPrefillPagedShape {
 pub struct AttnKnobs {
     pub scale: f32,
     pub window_size: i32,
+    /// Ring-buffer KV slab depth in rows. `0` = absolute addressing
+    /// (full-context contiguous cache, today's default). `>0` = the
+    /// attention kernel addresses KV rows modulo this depth, for
+    /// window-sized sliding-window-attention slabs. Set from the
+    /// per-layer KV slab depth; equals the slab's row count.
+    pub ring_depth: i32,
 }
 
 /// Graph-capture slot for `attention_decode_f16_slots`. `Some(slot)`

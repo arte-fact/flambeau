@@ -42,7 +42,8 @@ extern "C" __global__ void flambeau_attention_decode_f16_splitk_chunk(
     const int n_chunks,
     const int chunk_size,
     const float scale,
-    const int window_size                  // SWA radius, 0 = unbounded causal
+    const int window_size,                 // SWA radius, 0 = unbounded causal
+    const int ring_depth                   // ring-buffer slab depth in rows; 0 = absolute
 ) {
     const int q_head = blockIdx.x;
     const int chunk  = blockIdx.y;
@@ -89,11 +90,17 @@ extern "C" __global__ void flambeau_attention_decode_f16_splitk_chunk(
     // by the single-token loop afterwards.
     int t = t_start;
     for (; t + 3 < t_end; t += 4) {
-        const size_t kv_row_0 = ((size_t) t * n_heads_kv + kv_head) * head_dim;
-        const size_t stride   = (size_t) n_heads_kv * head_dim;
-        const size_t kv_row_1 = kv_row_0 + stride;
-        const size_t kv_row_2 = kv_row_0 + 2 * stride;
-        const size_t kv_row_3 = kv_row_0 + 3 * stride;
+        // Per-row physical index: under ring addressing four consecutive
+        // logical rows may straddle a wrap, so each is reduced independently
+        // (ring_depth == 0 → identity → kv_row_k == base + k*row_stride).
+        const int tp0 = (ring_depth > 0) ? (t % ring_depth) : t;
+        const int tp1 = (ring_depth > 0) ? ((t + 1) % ring_depth) : (t + 1);
+        const int tp2 = (ring_depth > 0) ? ((t + 2) % ring_depth) : (t + 2);
+        const int tp3 = (ring_depth > 0) ? ((t + 3) % ring_depth) : (t + 3);
+        const size_t kv_row_0 = ((size_t) tp0 * n_heads_kv + kv_head) * head_dim;
+        const size_t kv_row_1 = ((size_t) tp1 * n_heads_kv + kv_head) * head_dim;
+        const size_t kv_row_2 = ((size_t) tp2 * n_heads_kv + kv_head) * head_dim;
+        const size_t kv_row_3 = ((size_t) tp3 * n_heads_kv + kv_head) * head_dim;
 
         float partial_0 = 0.0f, partial_1 = 0.0f, partial_2 = 0.0f, partial_3 = 0.0f;
         if (tid < head_dim) {
@@ -158,7 +165,8 @@ extern "C" __global__ void flambeau_attention_decode_f16_splitk_chunk(
     }
     // Tail (at most three tokens): single-token update path.
     for (; t < t_end; ++t) {
-        const size_t kv_row = ((size_t) t * n_heads_kv + kv_head) * head_dim;
+        const int t_phys = (ring_depth > 0) ? (t % ring_depth) : t;
+        const size_t kv_row = ((size_t) t_phys * n_heads_kv + kv_head) * head_dim;
         float my_partial = 0.0f;
         if (tid < head_dim) {
             my_partial = q_shared[tid] * (float) k_cache[kv_row + tid];

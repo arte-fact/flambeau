@@ -41,7 +41,8 @@ extern "C" __global__ void flambeau_attention_decode_q8_kv(
     const int head_dim,                                 // 64, 128, 256 or 512
     const int n_tokens,
     const float scale,
-    const int window_size                               // 0 = unbounded causal; >0 = SWA
+    const int window_size,                              // 0 = unbounded causal; >0 = SWA
+    const int ring_depth                                // ring-buffer slab depth in rows; 0 = absolute
 ) {
     const int q_head  = blockIdx.x;
     if (q_head >= n_heads_q) return;
@@ -111,8 +112,9 @@ extern "C" __global__ void flambeau_attention_decode_q8_kv(
         if (t_start < 0) t_start = 0;
     }
     for (int t = t_start; t < n_tokens; ++t) {
+        const int t_phys = (ring_depth > 0) ? (t % ring_depth) : t;
         const size_t kv_row_blocks =
-            ((size_t) t * n_heads_kv + kv_head) * n_blocks_per_row;
+            ((size_t) t_phys * n_heads_kv + kv_head) * n_blocks_per_row;
 
         // 3. K-block load: this thread reads its 4 int8 K bytes as one int32.
         const flambeau_block_q8_0* k_block = k_cache + kv_row_blocks + q8_block_idx;

@@ -67,7 +67,7 @@ fn cpu_attn_decode(
     knobs: flambeau_ops::AttnKnobs,
 ) -> Vec<f32> {
     let flambeau_ops::AttnDecodeShape { n_heads_q, n_heads_kv, head_dim, n_tokens_kv: n_tokens } = shape;
-    let flambeau_ops::AttnKnobs { scale, window_size } = knobs;
+    let flambeau_ops::AttnKnobs { scale, window_size, ring_depth: _ } = knobs;
     let group = n_heads_q / n_heads_kv;
     let mut out = vec![0.0_f32; n_heads_q * head_dim];
     for q_head in 0..n_heads_q {
@@ -156,7 +156,7 @@ mod tests {
             head_dim,
             n_tokens_kv: n_tokens,
         };
-        let knobs = flambeau_ops::AttnKnobs { scale, window_size };
+        let knobs = flambeau_ops::AttnKnobs { scale, window_size, ring_depth: 0 };
         let expected_f32 = cpu_attn_decode(&q_kernel_f32, &k_kernel_f32, &v_kernel_f32, shape, knobs);
 
         let (q_t, q_ptr) = upload::<F16, f16>(&device, &q_host_f16, q_n);

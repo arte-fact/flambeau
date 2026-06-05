@@ -161,6 +161,7 @@ fn ab_perf_qwen36_27b_tp2_local() -> Result<()> {
                     flambeau_ops::AttnKnobs {
                         scale,
                         window_size: 0,
+                        ring_depth: 0,
                     },
                     None,
                 )
@@ -191,6 +192,7 @@ fn ab_perf_qwen36_27b_tp2_local() -> Result<()> {
                 flambeau_ops::AttnKnobs {
                     scale,
                     window_size: 0,
+                    ring_depth: 0,
                 },
             )
             .unwrap();

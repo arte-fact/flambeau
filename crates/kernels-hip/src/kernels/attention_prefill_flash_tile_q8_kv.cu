@@ -33,7 +33,8 @@ static __device__ __forceinline__ void flash_attn_prefill_v2_q8_impl(
     const int n_k_tokens,
     const int q_offset,
     const float scale,
-    const int window_size                              // 0 = unbounded causal; >0 = SWA
+    const int window_size,                             // 0 = unbounded causal; >0 = SWA
+    const int ring_depth                               // ring-buffer slab depth in rows; 0 = absolute
 ) {
     static_assert(D == 64 || D == 128 || D == 256, "D must be 64, 128, or 256");
     static_assert(D % WARP_SIZE == 0, "D must be a multiple of WARP_SIZE");
@@ -128,8 +129,9 @@ static __device__ __forceinline__ void flash_attn_prefill_v2_q8_impl(
                 if (valid) {
                     const int blk_idx    = d / 32;
                     const int blk_off    = d & 31;
+                    const int row_phys   = (ring_depth > 0) ? (row % ring_depth) : row;
                     const size_t row_blocks =
-                        ((size_t) row * n_heads_kv + h_kv) * BLOCKS_PER_ROW;
+                        ((size_t) row_phys * n_heads_kv + h_kv) * BLOCKS_PER_ROW;
                     const flambeau_block_q8_0* k_block =
                         k_cache + row_blocks + blk_idx;
                     const flambeau_block_q8_0* v_block =
@@ -210,12 +212,13 @@ void flambeau_attention_prefill_flash_tile_d64_q8_kv(
     const int n_k_tokens,
     const int q_offset,
     const float scale,
-    const int window_size
+    const int window_size,
+    const int ring_depth
 ) {
     flash_attn_prefill_v2_q8_impl</*D=*/64, /*BR=*/4, /*BC=*/64>(
         q, k_cache, v_cache, out,
         n_q_tokens, n_heads_q, n_heads_kv,
-        n_k_tokens, q_offset, scale, window_size);
+        n_k_tokens, q_offset, scale, window_size, ring_depth);
 }
 
 extern "C" __global__ __launch_bounds__(256, 2)
@@ -230,12 +233,13 @@ void flambeau_attention_prefill_flash_tile_d128_q8_kv(
     const int n_k_tokens,
     const int q_offset,
     const float scale,
-    const int window_size
+    const int window_size,
+    const int ring_depth
 ) {
     flash_attn_prefill_v2_q8_impl</*D=*/128, /*BR=*/4, /*BC=*/32>(
         q, k_cache, v_cache, out,
         n_q_tokens, n_heads_q, n_heads_kv,
-        n_k_tokens, q_offset, scale, window_size);
+        n_k_tokens, q_offset, scale, window_size, ring_depth);
 }
 
 extern "C" __global__ __launch_bounds__(256, 2)
@@ -250,12 +254,13 @@ void flambeau_attention_prefill_flash_tile_d256_q8_kv(
     const int n_k_tokens,
     const int q_offset,
     const float scale,
-    const int window_size
+    const int window_size,
+    const int ring_depth
 ) {
     flash_attn_prefill_v2_q8_impl</*D=*/256, /*BR=*/4, /*BC=*/16>(
         q, k_cache, v_cache, out,
         n_q_tokens, n_heads_q, n_heads_kv,
-        n_k_tokens, q_offset, scale, window_size);
+        n_k_tokens, q_offset, scale, window_size, ring_depth);
 }
 
 extern "C" __global__ __launch_bounds__(512, 1)
@@ -270,10 +275,11 @@ void flambeau_attention_prefill_flash_tile_d256_br8_q8_kv(
     const int n_k_tokens,
     const int q_offset,
     const float scale,
-    const int window_size
+    const int window_size,
+    const int ring_depth
 ) {
     flash_attn_prefill_v2_q8_impl</*D=*/256, /*BR=*/8, /*BC=*/16>(
         q, k_cache, v_cache, out,
         n_q_tokens, n_heads_q, n_heads_kv,
-        n_k_tokens, q_offset, scale, window_size);
+        n_k_tokens, q_offset, scale, window_size, ring_depth);
 }

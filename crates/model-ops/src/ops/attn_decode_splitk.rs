@@ -244,7 +244,7 @@ mod attn_microbench {
                         n_tokens_kv: N_TOKENS_KV,
                         chunk_size,
                     },
-                    flambeau_ops::AttnKnobs { scale, window_size: 0 },
+                    flambeau_ops::AttnKnobs { scale, window_size: 0, ring_depth: 0 },
                     &ops,
                 )
                 .unwrap();
@@ -268,7 +268,7 @@ mod attn_microbench {
                         n_tokens_kv: N_TOKENS_KV,
                         chunk_size,
                     },
-                    flambeau_ops::AttnKnobs { scale, window_size: 0 },
+                    flambeau_ops::AttnKnobs { scale, window_size: 0, ring_depth: 0 },
                     &ops,
                 )
                 .unwrap();

@@ -103,7 +103,7 @@ fn cpu_attn_prefill(
         n_k_tokens,
         q_offset,
     } = shape;
-    let flambeau_ops::AttnKnobs { scale, window_size } = knobs;
+    let flambeau_ops::AttnKnobs { scale, window_size, ring_depth: _ } = knobs;
     let group = n_heads_q / n_heads_kv;
     let mut out = vec![0.0_f32; n_q_tokens * n_heads_q * head_dim];
     for q_token in 0..n_q_tokens {
@@ -196,7 +196,7 @@ mod tests {
             n_k_tokens,
             q_offset,
         };
-        let knobs = flambeau_ops::AttnKnobs { scale, window_size };
+        let knobs = flambeau_ops::AttnKnobs { scale, window_size, ring_depth: 0 };
         let expected_f32 = cpu_attn_prefill(
             &q_kernel_f32,
             &k_kernel_f32,

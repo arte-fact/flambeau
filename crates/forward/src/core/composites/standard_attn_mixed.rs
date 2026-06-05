@@ -432,7 +432,7 @@ pub fn standard_attn_mixed_local<H: TopologyHooks>(
                 n_k_tokens,
                 q_offset: pos0,
             },
-            flambeau_ops::AttnKnobs { scale, window_size: weights.window_size },
+            flambeau_ops::AttnKnobs { scale, window_size: weights.window_size, ring_depth: 0 },
             &ops,
         )?;
     }
@@ -584,6 +584,7 @@ pub fn standard_attn_mixed_local<H: TopologyHooks>(
             flambeau_ops::AttnKnobs {
                 scale,
                 window_size: kernel_window,
+                ring_depth: 0,
             },
             &ops,
         )?;

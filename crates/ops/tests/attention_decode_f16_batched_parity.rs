@@ -194,6 +194,7 @@ fn run_parity(
             flambeau_ops::AttnKnobs {
                 scale,
                 window_size: 0,
+                ring_depth: 0,
             },
             None,
         )?;
@@ -222,6 +223,7 @@ fn run_parity(
         flambeau_ops::AttnKnobs {
             scale,
             window_size: 0,
+            ring_depth: 0,
         },
     )?;
     stream.synchronize()?;

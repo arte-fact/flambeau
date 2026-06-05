@@ -518,6 +518,7 @@ pub fn standard_attn_local<H: TopologyHooks>(
                 scale,
                 // window_size guard above already bailed on SWA when paged on.
                 window_size: 0,
+                ring_depth: 0,
             },
             &ops,
         )?;
@@ -716,7 +717,7 @@ pub fn standard_attn_local<H: TopologyHooks>(
                             n_tokens_kv: eff_n_tokens_kv,
                             chunk_size,
                         },
-                        flambeau_ops::AttnKnobs { scale, window_size: kernel_window },
+                        flambeau_ops::AttnKnobs { scale, window_size: kernel_window, ring_depth: 0 },
                         &ops,
                     )?;
                 } else {
@@ -731,7 +732,7 @@ pub fn standard_attn_local<H: TopologyHooks>(
                             head_dim: weights.head_dim,
                             n_tokens_kv: eff_n_tokens_kv,
                         },
-                        flambeau_ops::AttnKnobs { scale, window_size: kernel_window },
+                        flambeau_ops::AttnKnobs { scale, window_size: kernel_window, ring_depth: 0 },
                         &ops,
                     )?;
                 }
@@ -796,7 +797,7 @@ pub fn standard_attn_local<H: TopologyHooks>(
                         n_tokens_kv: eff_n_tokens_kv,
                         chunk_size,
                     },
-                    flambeau_ops::AttnKnobs { scale, window_size: kernel_window },
+                    flambeau_ops::AttnKnobs { scale, window_size: kernel_window, ring_depth: 0 },
                     &ops,
                 )?;
             } else {
@@ -811,7 +812,7 @@ pub fn standard_attn_local<H: TopologyHooks>(
                         head_dim: weights.head_dim,
                         n_tokens_kv: eff_n_tokens_kv,
                     },
-                    flambeau_ops::AttnKnobs { scale, window_size: kernel_window },
+                    flambeau_ops::AttnKnobs { scale, window_size: kernel_window, ring_depth: 0 },
                     &ops,
                 )?;
             }
@@ -844,7 +845,7 @@ pub fn standard_attn_local<H: TopologyHooks>(
                     n_k_tokens,
                     q_offset: start_position,
                 },
-                flambeau_ops::AttnKnobs { scale, window_size: weights.window_size },
+                flambeau_ops::AttnKnobs { scale, window_size: weights.window_size, ring_depth: 0 },
                 &ops,
             )?;
             let _ = (k_cache, v_cache);
@@ -863,7 +864,7 @@ pub fn standard_attn_local<H: TopologyHooks>(
                     n_k_tokens,
                     q_offset: start_position,
                 },
-                flambeau_ops::AttnKnobs { scale, window_size: weights.window_size },
+                flambeau_ops::AttnKnobs { scale, window_size: weights.window_size, ring_depth: 0 },
                 &ops,
             )?;
         }
@@ -1171,6 +1172,7 @@ pub fn standard_attn_local<H: TopologyHooks>(
             flambeau_ops::AttnKnobs {
                 scale,
                 window_size: kernel_window,
+                ring_depth: 0,
             },
             &ops,
         )?;

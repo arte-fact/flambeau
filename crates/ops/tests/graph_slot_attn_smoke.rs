@@ -124,7 +124,7 @@ fn attention_prefill_slot_update_parity() -> Result<()> {
         flambeau_ops::OpCtx { reg: &reg, stream: &stream },
         flambeau_ops::AttnBuffers { q: q_dev, k: k_dev, v: v_dev, out: out_ref_dev },
         flambeau_ops::AttnPrefillShape { n_q_tokens: N_Q, n_heads_q: N_HEADS_Q, n_heads_kv: N_HEADS_KV, head_dim: HEAD_DIM, n_k_tokens: N_K_FINAL, q_offset: Q_OFF_FINAL },
-        flambeau_ops::AttnKnobs { scale, window_size: 0 },
+        flambeau_ops::AttnKnobs { scale, window_size: 0, ring_depth: 0 },
     )?;
     stream.synchronize().unwrap();
     let y_ref = readback_f16(&dev, &stream, out_ref_dev, N_Q * N_HEADS_Q * HEAD_DIM);
@@ -138,7 +138,7 @@ fn attention_prefill_slot_update_parity() -> Result<()> {
             flambeau_ops::OpCtx { reg: &reg, stream: s },
             flambeau_ops::AttnBuffers { q: q_dev, k: k_dev, v: v_dev, out: out_capt_dev },
             flambeau_ops::AttnPrefillShape { n_q_tokens: N_Q, n_heads_q: N_HEADS_Q, n_heads_kv: N_HEADS_KV, head_dim: HEAD_DIM, n_k_tokens: N_K_INIT, q_offset: Q_OFF_INIT },
-            flambeau_ops::AttnKnobs { scale, window_size: 0 },
+            flambeau_ops::AttnKnobs { scale, window_size: 0, ring_depth: 0 },
             Some(flambeau_ops::AttnPrefillSlots { n_k: slot_n_k, q_off: slot_q_off }),
         )
         .map_err(|e| flambeau_core::DeviceError::Backend {
@@ -163,10 +163,10 @@ fn attention_prefill_slot_update_parity() -> Result<()> {
     assert_eq!(b_n_k.kernel_node_idx, 0);
     assert_eq!(b_q_off.kernel_node_idx, 0);
     // Flash-tile path: args are [q, k, v, out, n_q, n_heads_q, n_heads_kv,
-    // n_k, q_off, scale, window_size] → n_k at idx 7, q_off at idx 8.
+    // n_k, q_off, scale, window_size, ring_depth] → n_k at idx 7, q_off at idx 8.
     assert_eq!(b_n_k.arg_index, 7, "n_k expected at arg idx 7");
     assert_eq!(b_q_off.arg_index, 8, "q_off expected at arg idx 8");
-    assert_eq!(b_n_k.arity, 11);
+    assert_eq!(b_n_k.arity, 12);
 
     // Sanity check: pre-update replay should match uncaptured at
     // (N_K_INIT, Q_OFF_INIT). If this fails, the capture itself is
@@ -180,7 +180,7 @@ fn attention_prefill_slot_update_parity() -> Result<()> {
         flambeau_ops::OpCtx { reg: &reg, stream: &stream },
         flambeau_ops::AttnBuffers { q: q_dev, k: k_dev, v: v_dev, out: out_init_ref_dev },
         flambeau_ops::AttnPrefillShape { n_q_tokens: N_Q, n_heads_q: N_HEADS_Q, n_heads_kv: N_HEADS_KV, head_dim: HEAD_DIM, n_k_tokens: N_K_INIT, q_offset: Q_OFF_INIT },
-        flambeau_ops::AttnKnobs { scale, window_size: 0 },
+        flambeau_ops::AttnKnobs { scale, window_size: 0, ring_depth: 0 },
     )?;
     stream.synchronize().unwrap();
     let y_init_ref = readback_f16(&dev, &stream, out_init_ref_dev, N_Q * N_HEADS_Q * HEAD_DIM);

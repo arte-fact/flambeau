@@ -54,7 +54,7 @@ pub fn attention_decode_f16_slots(
         head_dim,
         n_tokens_kv,
     } = shape;
-    let crate::AttnKnobs { scale, window_size } = knobs;
+    let crate::AttnKnobs { scale, window_size, ring_depth } = knobs;
     assert!(
         head_dim == 64 || head_dim == 128 || head_dim == 256 || head_dim == 512,
         "attention_decode_f16: head_dim {head_dim} not supported (expected 64, 128, 256, or 512)"
@@ -84,6 +84,7 @@ pub fn attention_decode_f16_slots(
     }
     args.push(&scale);
     args.push(&window_size);
+    args.push(&ring_depth);
     let cfg = LaunchCfg::one_d(n_heads_q as u32, head_dim as u32);
     unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
@@ -135,7 +136,7 @@ pub fn attention_decode_f16_batched(
         head_dim,
         n_slots,
     } = shape;
-    let crate::AttnKnobs { scale, window_size } = knobs;
+    let crate::AttnKnobs { scale, window_size, ring_depth } = knobs;
     assert!(
         head_dim == 64 || head_dim == 128 || head_dim == 256 || head_dim == 512,
         "attention_decode_f16_batched: head_dim {head_dim} not supported (expected 64, 128, 256, or 512)"
@@ -168,6 +169,7 @@ pub fn attention_decode_f16_batched(
     args.push(&n_slots_i);
     args.push(&scale);
     args.push(&window_size);
+    args.push(&ring_depth);
     let cfg = LaunchCfg {
         grid: (n_heads_q as u32, n_slots as u32, 1),
         block: (head_dim as u32, 1, 1),
@@ -381,7 +383,7 @@ pub fn attention_prefill_f16_paged(
         q_offset,
         page_size,
     } = shape;
-    let crate::AttnKnobs { scale, window_size } = knobs;
+    let crate::AttnKnobs { scale, window_size, ring_depth } = knobs;
     assert!(
         head_dim == 64 || head_dim == 128 || head_dim == 256 || head_dim == 512,
         "attention_prefill_f16_paged: head_dim {head_dim} not supported (expected 64, 128, 256, or 512)"
@@ -420,6 +422,7 @@ pub fn attention_prefill_f16_paged(
     args.push(&page_size_i);
     args.push(&scale);
     args.push(&window_size);
+    args.push(&ring_depth);
     let cfg = LaunchCfg {
         grid: (n_q_tokens as u32, n_heads_q as u32, 1),
         block: (head_dim as u32, 1, 1),
@@ -575,7 +578,7 @@ pub fn attention_decode_f16_splitk(
         n_tokens_kv,
         chunk_size,
     } = shape;
-    let crate::AttnKnobs { scale, window_size } = knobs;
+    let crate::AttnKnobs { scale, window_size, ring_depth } = knobs;
     assert!(
         head_dim == 64 || head_dim == 128 || head_dim == 256 || head_dim == 512,
         "attention_decode_f16_splitk: head_dim {head_dim} not supported"
@@ -615,6 +618,7 @@ pub fn attention_decode_f16_splitk(
     a1.push(&chunk_size_i);
     a1.push(&scale);
     a1.push(&window_size);
+    a1.push(&ring_depth);
     let cfg1 = LaunchCfg {
         grid: (n_heads_q as u32, n_chunks as u32, 1),
         block: (head_dim as u32, 1, 1),
@@ -670,7 +674,7 @@ pub fn attention_decode_f16_splitk_h2(
         n_tokens_kv,
         chunk_size,
     } = shape;
-    let crate::AttnKnobs { scale, window_size } = knobs;
+    let crate::AttnKnobs { scale, window_size, ring_depth } = knobs;
     assert!(
         head_dim == 128 || head_dim == 256 || head_dim == 512,
         "attention_decode_f16_splitk_h2: head_dim {head_dim} not in {{128, 256, 512}}"
@@ -713,6 +717,7 @@ pub fn attention_decode_f16_splitk_h2(
     a1.push(&chunk_size_i);
     a1.push(&scale);
     a1.push(&window_size);
+    a1.push(&ring_depth);
     let cfg1 = LaunchCfg {
         grid: (n_heads_q as u32, n_chunks as u32, 1),
         block: ((head_dim / 2) as u32, 1, 1),
@@ -775,7 +780,7 @@ pub fn attention_decode_q8_kv(
         head_dim,
         n_tokens_kv,
     } = shape;
-    let crate::AttnKnobs { scale, window_size } = knobs;
+    let crate::AttnKnobs { scale, window_size, ring_depth } = knobs;
     // Kernel supports head_dim ∈ {64, 128, 256, 512}. block = head_dim/4
     // threads (16/32/64/128). At d=512 the block is 2 waves and the
     // sum-of-blocks reduction adds a tiny cross-wave LDS rendezvous
@@ -807,6 +812,7 @@ pub fn attention_decode_q8_kv(
     args.push(&n_tokens_i);
     args.push(&scale);
     args.push(&window_size);
+    args.push(&ring_depth);
     // block.x = head_dim/4 (one thread per int32-
     // packed quad). For head_dim=256 that's 64 threads = 1 wavefront.
     let cfg = LaunchCfg::one_d(n_heads_q as u32, (head_dim / 4) as u32);
@@ -840,7 +846,7 @@ pub fn attention_decode_q8_kv_splitk(
         n_tokens_kv,
         chunk_size,
     } = shape;
-    let crate::AttnKnobs { scale, window_size } = knobs;
+    let crate::AttnKnobs { scale, window_size, ring_depth } = knobs;
     // head_dim ∈ {64, 128, 256, 512}. d=512 enables Q8 on gemma4
     // global layers; the kernel adds a cross-wave LDS reduce for that
     // case (see attention_decode_q8_kv comments).
@@ -884,6 +890,7 @@ pub fn attention_decode_q8_kv_splitk(
     a1.push(&chunk_size_i);
     a1.push(&scale);
     a1.push(&window_size);
+    a1.push(&ring_depth);
     // chunk pass uses block = head_dim/4 (one
     // thread per int32-packed quad). Combine pass still needs
     // head_dim threads (one per output element).
@@ -937,7 +944,7 @@ pub fn attention_prefill_q8_kv(
         n_k_tokens,
         q_offset,
     } = shape;
-    let crate::AttnKnobs { scale, window_size } = knobs;
+    let crate::AttnKnobs { scale, window_size, ring_depth } = knobs;
     // head_dim ∈ {64, 128, 256, 512}. d=512 routes through the oracle
     // single-pass kernel (no flash_tile template at d=512); d≤256 goes
     // flash_tile when n_q_tokens ≥ 4.
@@ -983,6 +990,7 @@ pub fn attention_prefill_q8_kv(
         args.push(&q_off_i);
         args.push(&scale);
         args.push(&window_size);
+        args.push(&ring_depth);
         let br: u32 = if head_dim == 256 { 8 } else { 4 };
         const WARP: u32 = 64;
         let cfg = LaunchCfg {
@@ -1011,6 +1019,7 @@ pub fn attention_prefill_q8_kv(
     args.push(&q_off_i);
     args.push(&scale);
     args.push(&window_size);
+    args.push(&ring_depth);
     let cfg = LaunchCfg {
         grid: (n_q_tokens as u32, n_heads_q as u32, 1),
         block: ((head_dim / 4) as u32, 1, 1),
@@ -1114,7 +1123,7 @@ pub fn attention_prefill_f16_slots(
         n_k_tokens,
         q_offset,
     } = shape;
-    let crate::AttnKnobs { scale, window_size } = knobs;
+    let crate::AttnKnobs { scale, window_size, ring_depth } = knobs;
     let (n_k_slot, q_off_slot) = match slots {
         Some(s) => (Some(s.n_k), Some(s.q_off)),
         None => (None, None),
@@ -1162,6 +1171,7 @@ pub fn attention_prefill_f16_slots(
         push_scalar_maybe_slot(&mut args, &q_off_i, q_off_slot);
         args.push(&scale);
         args.push(&window_size);
+        args.push(&ring_depth);
         // 9.b — BR depends on which variant we dispatch to.
         // d256_br8 uses BR=8 (more Q rows per block, fewer blocks);
         // other head_dims still use BR=4.
@@ -1194,6 +1204,7 @@ pub fn attention_prefill_f16_slots(
     push_scalar_maybe_slot(&mut args, &q_off_i, q_off_slot);
     args.push(&scale);
     args.push(&window_size);
+    args.push(&ring_depth);
     let cfg = LaunchCfg {
         grid: (n_q_tokens as u32, n_heads_q as u32, 1),
         block: (head_dim as u32, 1, 1),
