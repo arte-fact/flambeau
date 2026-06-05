@@ -42,6 +42,19 @@ pub(crate) fn ring_append_segments(
     [(phys_start, 0, first), (0, first, n_tokens - first)]
 }
 
+/// Distinct physical KV rows a ring-buffer attention read can touch:
+/// `min(n_tokens, ring_depth)` when ring-addressed (rows wrap at
+/// `ring_depth`), else `n_tokens`. The attention read ops size their
+/// cache-tensor bounds check with this so a window-depth slab (which holds
+/// fewer rows than the logical `n_k_tokens`) is not rejected.
+pub(crate) fn ring_cache_rows(n_tokens: usize, ring_depth: usize) -> usize {
+    if ring_depth > 0 {
+        n_tokens.min(ring_depth)
+    } else {
+        n_tokens
+    }
+}
+
 /// Two stream-ordered DtoD memcpys (K and V) into per-layer caches.
 pub fn kv_append_f16(
     k_src: &Tensor<F16>,

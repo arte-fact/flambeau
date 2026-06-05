@@ -34,7 +34,8 @@ pub fn attn_decode_q8_kv(
         );
     }
     let q_need = n_heads_q * head_dim;
-    let cache_need = n_tokens_kv * n_heads_kv * head_dim;
+    let cache_rows = crate::ops::kv_append::ring_cache_rows(n_tokens_kv, knobs.ring_depth as usize);
+    let cache_need = cache_rows * n_heads_kv * head_dim;
     if q.n_elems < q_need {
         bail!(
             "attn_decode_q8_kv: q has {} F16 elems, need >= {q_need}",

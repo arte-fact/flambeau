@@ -42,7 +42,8 @@ pub fn attn_prefill_q8_kv(
         );
     }
     let q_need = n_q_tokens * n_heads_q * head_dim;
-    let cache_need = n_k_tokens * n_heads_kv * head_dim;
+    let cache_rows = crate::ops::kv_append::ring_cache_rows(n_k_tokens, knobs.ring_depth as usize);
+    let cache_need = cache_rows * n_heads_kv * head_dim;
     let out_need = n_q_tokens * n_heads_q * head_dim;
     if q.n_elems < q_need {
         bail!(

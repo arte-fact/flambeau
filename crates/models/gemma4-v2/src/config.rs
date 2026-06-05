@@ -230,6 +230,17 @@ impl KvLayerShape for Gemma4V2Config {
     fn window_size_at(&self, li: usize) -> i32 {
         self.attn[li].window_size
     }
+    fn kv_depth_at(&self, li: usize, max_seq_len: usize, prefill_ubatch: usize) -> usize {
+        // SWA layers ring-buffer at window + one prefill batch (the live
+        // span one forward can touch); global layers stay full-context.
+        // Clamped to max_seq_len so a small ctx cap never inflates the slab.
+        let window = self.attn[li].window_size;
+        if window > 0 {
+            (window as usize + prefill_ubatch).min(max_seq_len)
+        } else {
+            max_seq_len
+        }
+    }
 }
 
 fn read_bool_array_or_scalar(
