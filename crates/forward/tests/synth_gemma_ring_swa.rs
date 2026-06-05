@@ -15,7 +15,7 @@ mod common;
 use common::{det_signal, DeviceAllocs};
 use flambeau_backend_hip::HipDevice;
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
-use flambeau_forward::core::{KvLayout, ScratchConfig};
+use flambeau_forward::core::{KvLayout, MixedBatch, ScratchConfig};
 use flambeau_forward::ctx::{AttnWeights, ForwardCtx, RopeVariant};
 use flambeau_forward::{ScratchPool, SingleDeviceForwardCtx};
 use flambeau_model_ops::{Tensor, F16};
@@ -62,7 +62,7 @@ fn build_attn(allocs: &mut DeviceAllocs) -> AttnWeights {
     }
 }
 
-fn build_scratch_cfg(ring: bool, layout: KvLayout) -> ScratchConfig {
+fn build_scratch_cfg(ring: bool, layout: KvLayout, max_slots: usize) -> ScratchConfig {
     let q_width = N_HEADS * HEAD_DIM;
     let kv_width = N_KV_HEADS * HEAD_DIM;
     ScratchConfig {
@@ -80,7 +80,7 @@ fn build_scratch_cfg(ring: bool, layout: KvLayout) -> ScratchConfig {
         attn_q_gated: false,
         shared_intermediate: 0,
         max_prefill_tokens: UBATCH,
-        max_slots: 1,
+        max_slots,
         per_layer_embd: 0,
         paged_kv: None,
         kv_layout: layout,
@@ -138,7 +138,7 @@ fn run(
     layout: KvLayout,
 ) -> (Vec<f32>, Vec<f32>) {
     let stream = device.default_stream();
-    let mut pool = ScratchPool::new(device, build_scratch_cfg(ring, layout)).expect("pool");
+    let mut pool = ScratchPool::new(device, build_scratch_cfg(ring, layout, 1)).expect("pool");
     let mut ctx = SingleDeviceForwardCtx::new(device, stream, reg, &mut pool);
 
     // Chunk 1: prefill positions [0, U) into slot 0.
@@ -218,6 +218,85 @@ fn ring_vs_full(layout: KvLayout, label: &str) {
 
     assert_close(&format!("{label} chunk2 straddle prefill"), &full_c2, &ring_c2);
     assert_close(&format!("{label} decode wrap"), &full_d, &ring_d);
+}
+
+/// Mixed-batch (`standard_attn_mixed`) on a ring layer: populate a decode
+/// slot past the wrap, then run a mixed batch (K prefill rows for a fresh
+/// slot + 1 decode row for the wrapped slot). A ring slab must match a
+/// full-context slab. Returns the (K+1)-row delta.
+fn run_mixed(
+    device: &HipDevice,
+    reg: &OpsRegistry,
+    attn: &AttnWeights,
+    resid_pop: DevicePtr,
+    resid_mix: DevicePtr,
+    ring: bool,
+    layout: KvLayout,
+) -> Vec<f32> {
+    let stream = device.default_stream();
+    let mut pool = ScratchPool::new(device, build_scratch_cfg(ring, layout, 2)).expect("pool mix");
+    let mut ctx = SingleDeviceForwardCtx::new(device, stream, reg, &mut pool);
+
+    // Populate slot 1 to position 2U-1 via two prefill chunks (the second
+    // straddles the wrap for a ring slab).
+    let pa = unsafe { Tensor::<F16>::from_raw(resid_pop, UBATCH * HIDDEN) };
+    ctx.standard_attn(&pa, attn, 0, &(0..UBATCH).collect::<Vec<_>>(), &[1usize; UBATCH], None)
+        .expect("populate A")
+        .expect("populate A resid");
+    let pb_ptr = resid_pop.offset_bytes(UBATCH * HIDDEN * 2);
+    let pb = unsafe { Tensor::<F16>::from_raw(pb_ptr, UBATCH * HIDDEN) };
+    ctx.standard_attn(&pb, attn, 0, &(UBATCH..2 * UBATCH).collect::<Vec<_>>(), &[1usize; UBATCH], None)
+        .expect("populate B")
+        .expect("populate B resid");
+
+    // Mixed: K=UBATCH prefill rows for fresh slot 0 (pos 0..U) + 1 decode row
+    // for slot 1 at position 2U (n_kv > ring_depth → wraps).
+    // K+N must fit max_prefill_tokens (= UBATCH): UBATCH-1 prefill rows + 1
+    // decode. The decode row (slot 1 @ pos 2U, wrapped) is the ring target.
+    let kp = UBATCH - 1;
+    let mix = unsafe { Tensor::<F16>::from_raw(resid_mix, (kp + 1) * HIDDEN) };
+    let mut positions: Vec<usize> = (0..kp).collect();
+    positions.push(2 * UBATCH);
+    let mut slot_ids = vec![0usize; kp];
+    slot_ids.push(1);
+    let delta = ctx
+        .standard_attn_mixed(
+            &mix,
+            attn,
+            0,
+            MixedBatch { positions: &positions, slot_ids: &slot_ids, prefill_rows: kp },
+            None,
+        )
+        .expect("mixed")
+        .expect("mixed resid");
+    let out = read_f16(device, delta.ptr, (kp + 1) * HIDDEN);
+    pool.dispose(device).expect("dispose");
+    out
+}
+
+fn ring_vs_full_mixed(layout: KvLayout, label: &str) {
+    let device = HipDevice::new(0).expect("HipDevice 0");
+    device.bind().expect("bind");
+    let reg = OpsRegistry::new(&device).expect("OpsRegistry::new");
+    let mut allocs = DeviceAllocs::new(HipDevice::new(0).expect("HipDevice 0 alias"));
+    let attn = build_attn(&mut allocs);
+
+    let pop_host = det_signal(2 * UBATCH * HIDDEN, 23);
+    let mix_host = det_signal(UBATCH * HIDDEN, 29);
+    let pop_full = upload_residual(&device, &pop_host);
+    let mix_full = upload_residual(&device, &mix_host);
+    let pop_ring = upload_residual(&device, &pop_host);
+    let mix_ring = upload_residual(&device, &mix_host);
+
+    let full = run_mixed(&device, &reg, &attn, pop_full, mix_full, false, layout);
+    let ring = run_mixed(&device, &reg, &attn, pop_ring, mix_ring, true, layout);
+    assert_close(&format!("{label} mixed wrap"), &full, &ring);
+}
+
+#[test]
+fn gemma_ring_swa_mixed_matches_full_depth() {
+    // standard_attn_mixed on a ring layer (the #142 follow-up).
+    ring_vs_full_mixed(KvLayout::F16Contig, "ring-swa mixed");
 }
 
 #[test]

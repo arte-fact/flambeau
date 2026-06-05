@@ -96,17 +96,6 @@ pub fn standard_attn_mixed_local<H: TopologyHooks>(
     }
     let kv_local_idx = local_idx;
     let max_seq_len = state.pool.config.max_seq_len;
-    // Ring-buffered SWA slabs (depth < max_seq_len) address KV modulo the
-    // slab depth. This composite computes slot strides and write positions in
-    // absolute space only, so it would corrupt a wrapped ring slab. Bail until
-    // the mixed path grows the ring fork (mirroring `standard_attn`). The
-    // default server path is unaffected — mixed batching is opt-in.
-    if state.pool.kv_caches[kv_local_idx].depth < max_seq_len {
-        bail!(
-            "standard_attn_mixed: ring-buffered SWA layers not yet supported; \
-             disable mixed-batch for this model"
-        );
-    }
     let max_slots = state.pool.config.max_slots.max(1);
     for (i, (&pos, &slot)) in positions.iter().zip(slot_ids.iter()).enumerate() {
         if pos >= max_seq_len {
@@ -385,7 +374,14 @@ pub fn standard_attn_mixed_local<H: TopologyHooks>(
     }
 
     let kv = state.pool.kv_caches[kv_local_idx];
-    let slot_stride_elems = max_seq_len * kv_width;
+    // Per-layer KV slab depth: window-sized for ring-buffered SWA layers,
+    // else max_seq_len. Slot strides and ring addressing both derive from it,
+    // mirroring `standard_attn`'s read/write forks.
+    let slab_depth = kv.depth;
+    let is_ring_layer = slab_depth < max_seq_len;
+    let ring_depth = if is_ring_layer { slab_depth } else { 0 };
+    let ring_depth_i = ring_depth as i32;
+    let slot_stride_elems = slab_depth * kv_width;
     let slot_stride_bytes = slot_stride_elems * 2;
     let scale = weights
         .softmax_scale
@@ -422,8 +418,8 @@ pub fn standard_attn_mixed_local<H: TopologyHooks>(
                 n_tokens: k,
                 kv_width,
                 write_pos: pos0,
-                max_seq_len,
-                ring_depth: 0,
+                max_seq_len: slab_depth,
+                ring_depth,
             },
             state.device,
             state.stream,
@@ -444,7 +440,7 @@ pub fn standard_attn_mixed_local<H: TopologyHooks>(
                 n_k_tokens,
                 q_offset: pos0,
             },
-            flambeau_ops::AttnKnobs { scale, window_size: weights.window_size, ring_depth: 0 },
+            flambeau_ops::AttnKnobs { scale, window_size: weights.window_size, ring_depth: ring_depth_i },
             &ops,
         )?;
     }
@@ -478,8 +474,11 @@ pub fn standard_attn_mixed_local<H: TopologyHooks>(
             host_k_base_ptrs.push(slot_k_base.as_usize() as u64);
             host_v_base_ptrs.push(slot_v_base.as_usize() as u64);
             let n_kv_full = pos + 1;
+            // Ring layers can't slide (rows wrap); they pass the real window +
+            // full n_kv + ring_depth and let the kernel mask + wrap. Only the
+            // contiguous (full-depth) layers use the pointer slide.
             let (k_read_ptr, v_read_ptr, n_kv_eff) =
-                if window_size > 0 && window < n_kv_full {
+                if !is_ring_layer && window_size > 0 && window < n_kv_full {
                     any_offset = true;
                     let off_tokens = n_kv_full - window;
                     let off_bytes = off_tokens * bytes_per_row;
@@ -551,7 +550,7 @@ pub fn standard_attn_mixed_local<H: TopologyHooks>(
             flambeau_ops::KvAppendBatchedSlotsShape {
                 n_slots: n_dec,
                 kv_width,
-                ring_depth: 0,
+                ring_depth,
             },
             &ops,
         )?;
@@ -597,7 +596,7 @@ pub fn standard_attn_mixed_local<H: TopologyHooks>(
             flambeau_ops::AttnKnobs {
                 scale,
                 window_size: kernel_window,
-                ring_depth: 0,
+                ring_depth: ring_depth_i,
             },
             &ops,
         )?;
