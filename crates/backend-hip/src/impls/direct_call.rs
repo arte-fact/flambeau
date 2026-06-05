@@ -19,6 +19,12 @@ pub const DIRECT_CALL_KERNELS_GFX906: &[DirectCallKernel] = &[
         impl_id: "attention_decode_f16_splitk_gfx906",
         cert_rel_path: "certs/hip/gfx906/attention_decode_f16_splitk_gfx906.json",
     },
+    // Q8_0-KV sibling of the split-K decode (ring-SWA + long-ctx full-attn);
+    // forward invokes it directly above n_tokens_kv > 256 with --kv q8.
+    DirectCallKernel {
+        impl_id: "attention_decode_q8_kv_splitk_gfx906",
+        cert_rel_path: "certs/hip/gfx906/attention_decode_q8_kv_splitk_gfx906.json",
+    },
     // 3.a — dense Q4_0 / Q5_0 MMVQ (DP4A) for Qwen3.6-35B-A3B-Q4_0
     // attention and shared-expert weights. Single-kernel per dtype.
     DirectCallKernel {
