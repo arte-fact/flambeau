@@ -136,7 +136,7 @@ fn parity_snapshot_dense_single_token() {
             paged_kv: None,
             kv_layout: flambeau_forward::core::KvLayout::F16Contig,
             per_layer_kv_layouts: None,
-    };
+            per_layer_kv_depths: None,    };
     let mut pool = ScratchPool::new(&device, cfg).expect("ScratchPool::new");
 
     let logits: Vec<f32>;

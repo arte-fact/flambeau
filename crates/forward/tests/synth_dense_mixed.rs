@@ -83,7 +83,7 @@ fn build_scratch_cfg() -> ScratchConfig {
         paged_kv: None,
         kv_layout: flambeau_forward::core::KvLayout::F16Contig,
         per_layer_kv_layouts: None,
-    }
+        per_layer_kv_depths: None,    }
 }
 
 fn det_signal_f16(n: usize, seed: u32) -> Vec<f32> {

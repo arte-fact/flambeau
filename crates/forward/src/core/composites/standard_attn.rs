@@ -399,7 +399,12 @@ pub fn standard_attn_local<H: TopologyHooks>(
     let _ = weights.rope_variant;
 
     let kv = state.pool.kv_caches[kv_local_idx];
-    let slot_stride_elems = max_seq_len * kv_width;
+    // Per-layer KV slab depth in rows. Equals `max_seq_len` for
+    // full-context layers; smaller (ring-buffered) for SWA layers. All
+    // K/V slot stride / slab-view sizing below derives from this, never
+    // from the global `max_seq_len` (which stays the position bound).
+    let slab_depth = kv.depth;
+    let slot_stride_elems = slab_depth * kv_width;
     let slot_stride_bytes = slot_stride_elems * 2;
     let scale = weights
         .softmax_scale
@@ -526,7 +531,7 @@ pub fn standard_attn_local<H: TopologyHooks>(
         // `scratch_config_for`'s Q8 viability check (head_dim ∈ {64,128,256,512})
         // — at runtime we just trust the cache layout.
         let is_q8 = kv.layout == crate::core::KvLayout::Q8Contig;
-        let q8_slot_stride_bytes = max_seq_len * kv.bytes_per_row;
+        let q8_slot_stride_bytes = slab_depth * kv.bytes_per_row;
         let slot_offset = if is_q8 {
             primary_slot * q8_slot_stride_bytes
         } else {
@@ -575,13 +580,13 @@ pub fn standard_attn_local<H: TopologyHooks>(
                 let mut k_cache_q8 = unsafe {
                     Tensor::<flambeau_model_ops::Q8_0>::from_raw(
                         k_slot_ptr,
-                        max_seq_len * kv_width,
+                        slab_depth * kv_width,
                     )
                 };
                 let mut v_cache_q8 = unsafe {
                     Tensor::<flambeau_model_ops::Q8_0>::from_raw(
                         v_slot_ptr,
-                        max_seq_len * kv_width,
+                        slab_depth * kv_width,
                     )
                 };
                 flambeau_model_ops::kv_append_f16_to_q8(
@@ -593,7 +598,7 @@ pub fn standard_attn_local<H: TopologyHooks>(
                         n_tokens: n,
                         kv_width,
                         write_pos: start_position,
-                        max_seq_len,
+                        max_seq_len: slab_depth,
                     },
                     &ops,
                 )?;
@@ -601,13 +606,13 @@ pub fn standard_attn_local<H: TopologyHooks>(
                 let mut k_cache_q8 = unsafe {
                     Tensor::<flambeau_model_ops::Q8_0>::from_raw(
                         k_slot_ptr,
-                        max_seq_len * kv_width,
+                        slab_depth * kv_width,
                     )
                 };
                 let mut v_cache_q8 = unsafe {
                     Tensor::<flambeau_model_ops::Q8_0>::from_raw(
                         v_slot_ptr,
-                        max_seq_len * kv_width,
+                        slab_depth * kv_width,
                     )
                 };
                 flambeau_model_ops::kv_append_f16_to_q8(
@@ -619,7 +624,7 @@ pub fn standard_attn_local<H: TopologyHooks>(
                         n_tokens: n,
                         kv_width,
                         write_pos: start_position,
-                        max_seq_len,
+                        max_seq_len: slab_depth,
                     },
                     &ops,
                 )?;
@@ -633,7 +638,7 @@ pub fn standard_attn_local<H: TopologyHooks>(
                         n_tokens: n,
                         kv_width,
                         write_pos: start_position,
-                        max_seq_len,
+                        max_seq_len: slab_depth,
                     },
                     state.device,
                     state.stream,
@@ -664,13 +669,13 @@ pub fn standard_attn_local<H: TopologyHooks>(
                 let k_cache_q8 = unsafe {
                     Tensor::<flambeau_model_ops::Q8_0>::from_raw(
                         k_ptr_eff,
-                        max_seq_len * kv_width,
+                        slab_depth * kv_width,
                     )
                 };
                 let v_cache_q8 = unsafe {
                     Tensor::<flambeau_model_ops::Q8_0>::from_raw(
                         v_ptr_eff,
-                        max_seq_len * kv_width,
+                        slab_depth * kv_width,
                     )
                 };
                 // Effective window length is the kernel's view of the
@@ -816,13 +821,13 @@ pub fn standard_attn_local<H: TopologyHooks>(
             let k_cache_q8 = unsafe {
                 Tensor::<flambeau_model_ops::Q8_0>::from_raw(
                     k_slot_ptr,
-                    max_seq_len * kv_width,
+                    slab_depth * kv_width,
                 )
             };
             let v_cache_q8 = unsafe {
                 Tensor::<flambeau_model_ops::Q8_0>::from_raw(
                     v_slot_ptr,
-                    max_seq_len * kv_width,
+                    slab_depth * kv_width,
                 )
             };
             let n_k_tokens = start_position + n;

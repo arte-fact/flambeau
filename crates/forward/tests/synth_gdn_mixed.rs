@@ -90,7 +90,7 @@ fn build_scratch_cfg(dims: GdnDims) -> ScratchConfig {
         paged_kv: None,
         kv_layout: flambeau_forward::core::KvLayout::F16Contig,
         per_layer_kv_layouts: None,
-    }
+        per_layer_kv_depths: None,    }
 }
 
 fn zero_gdn_state(device: &HipDevice, pool: &ScratchPool, dims: GdnDims) {

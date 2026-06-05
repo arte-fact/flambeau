@@ -3,7 +3,8 @@
 use flambeau_forward::ctx::GdnDims;
 use flambeau_forward::loader::ShardMode;
 use flambeau_forward::{
-    per_layer_kv_widths, scratch_config_for, KvLayerShape, KvLayout, MoeShape, ScratchShape,
+    per_layer_kv_depths, per_layer_kv_widths, scratch_config_for, KvLayerShape, KvLayout, MoeShape,
+    ScratchShape,
 };
 
 struct HybridShape {
@@ -55,6 +56,57 @@ fn per_layer_kv_widths_uniform_n_ranks_1() {
     }
     let widths = per_layer_kv_widths(&Uniform { n: 4, w: 1024 }, 1);
     assert_eq!(widths, vec![1024; 4]);
+}
+
+#[test]
+fn per_layer_kv_depths_default_is_max_seq_len() {
+    // An arch that does not override `kv_depth_at` must get a
+    // full-context (`max_seq_len`) slab depth for every layer — this is
+    // the byte-identical default that keeps non-SWA arches unchanged.
+    let shape = HybridShape {
+        n_layers: 6,
+        kv_heads: 4,
+        head_dim: 128,
+        full_attn_interval: 3,
+    };
+    let depths = per_layer_kv_depths(&shape, 8192, 512);
+    assert_eq!(depths, vec![8192; 6]);
+}
+
+#[test]
+fn per_layer_kv_depths_honors_override() {
+    // A SWA-style override (window + prefill_ubatch for windowed layers,
+    // max_seq_len otherwise) must flow through unchanged.
+    struct Swa {
+        n: usize,
+        window: usize,
+        full_every: usize,
+    }
+    impl KvLayerShape for Swa {
+        fn num_layers(&self) -> usize {
+            self.n
+        }
+        fn kv_width_at(&self, _li: usize, _n_ranks: usize) -> usize {
+            512
+        }
+        fn kv_depth_at(&self, li: usize, max_seq_len: usize, prefill_ubatch: usize) -> usize {
+            if (li + 1) % self.full_every == 0 {
+                max_seq_len
+            } else {
+                self.window + prefill_ubatch
+            }
+        }
+    }
+    let depths = per_layer_kv_depths(
+        &Swa {
+            n: 6,
+            window: 1024,
+            full_every: 3,
+        },
+        262144,
+        512,
+    );
+    assert_eq!(depths, vec![1536, 1536, 262144, 1536, 1536, 262144]);
 }
 
 // ---- ScratchShape golden-diff tests ---------------------------------

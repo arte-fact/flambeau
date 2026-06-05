@@ -83,6 +83,12 @@ pub struct ScratchConfig {
     /// uses `v[li]`. Used by gemma4 under `--kv q8` to keep
     /// head_dim=512 global layers on F16 while SWA layers go Q8.
     pub per_layer_kv_layouts: Option<Vec<KvLayout>>,
+    /// Per-layer KV slab depth in tokens. `None` ⇒ every layer uses
+    /// `max_seq_len` (contiguous full-context). `Some(v)` (length ==
+    /// num_layers) ⇒ layer `li`'s K/V slab is allocated at `v[li]` rows
+    /// and addressed modulo `v[li]` (ring-buffered SWA). Built from
+    /// [`KvLayerShape::kv_depth_at`] via [`per_layer_kv_depths`].
+    pub per_layer_kv_depths: Option<Vec<usize>>,
 }
 
 impl Default for ScratchConfig {
@@ -107,6 +113,7 @@ impl Default for ScratchConfig {
             paged_kv: None,
             kv_layout: KvLayout::F16Contig,
             per_layer_kv_layouts: None,
+            per_layer_kv_depths: None,
         }
     }
 }
@@ -143,6 +150,18 @@ pub trait KvLayerShape {
     fn window_size_at(&self, _li: usize) -> i32 {
         0
     }
+    /// Per-layer KV slab depth in tokens (rows). Default `max_seq_len`
+    /// (contiguous full-context cache). Sliding-window arches override
+    /// to ring-buffer SWA layers: return `window_size + prefill_ubatch`
+    /// for SWA layers (the live span one forward can touch — the floor
+    /// is `window + max_prefill_tokens - 1`; the extra slot is slack),
+    /// `max_seq_len` for global layers. The runtime sizes each per-layer
+    /// K/V slab at this depth and the attention/append kernels address
+    /// rows modulo it. `prefill_ubatch` is the upper bound on
+    /// tokens-per-forward (== [`ScratchConfig::max_prefill_tokens`]).
+    fn kv_depth_at(&self, _li: usize, max_seq_len: usize, _prefill_ubatch: usize) -> usize {
+        max_seq_len
+    }
 }
 
 /// Build the per-layer KV width vector for `ScratchConfig`. Length
@@ -152,6 +171,21 @@ pub trait KvLayerShape {
 pub fn per_layer_kv_widths<S: KvLayerShape + ?Sized>(shape: &S, n_ranks: usize) -> Vec<usize> {
     (0..shape.num_layers())
         .map(|li| shape.kv_width_at(li, n_ranks))
+        .collect()
+}
+
+/// Build the per-layer KV slab depth vector for `ScratchConfig`. Length
+/// equals `shape.num_layers()`. Each entry is the slab depth in tokens —
+/// `max_seq_len` for full-context layers, `window_size + prefill_ubatch`
+/// for ring-buffered SWA layers. Mirrors [`per_layer_kv_widths`]; the
+/// runtime slices it to the owned PP range.
+pub fn per_layer_kv_depths<S: KvLayerShape + ?Sized>(
+    shape: &S,
+    max_seq_len: usize,
+    prefill_ubatch: usize,
+) -> Vec<usize> {
+    (0..shape.num_layers())
+        .map(|li| shape.kv_depth_at(li, max_seq_len, prefill_ubatch))
         .collect()
 }
 
@@ -208,6 +242,7 @@ pub fn scratch_config_for<S: ScratchShape + ?Sized>(
     let n_ranks = shard.n_ranks();
     let per_layer_kv = per_layer_kv_widths(shape, n_ranks);
     let kv_width = per_layer_kv.iter().copied().max().unwrap_or(0);
+    let per_layer_depths = per_layer_kv_depths(shape, shape.max_seq_len(), prefill_ubatch);
     // Per-layer KV layout. `kv_layout` is the uniform request from --kv.
     // Q8 attention now covers head_dim ∈ {64, 128, 256, 512}; the d=512
     // path uses a 2-wave block with cross-wave LDS reduction. Layers
@@ -294,6 +329,7 @@ pub fn scratch_config_for<S: ScratchShape + ?Sized>(
         paged_kv,
         kv_layout,
         per_layer_kv_layouts,
+        per_layer_kv_depths: Some(per_layer_depths),
     }
 }
 
@@ -363,6 +399,11 @@ pub struct KvCache {
     /// family. Q8Contig ⇒ the Q8 family (kernels ported in S7b; dispatch
     /// wired in S7c).
     pub layout: KvLayout,
+    /// Slab depth in tokens (rows). Slot stride = `depth * bytes_per_row`.
+    /// Equals `max_seq_len` for full-context layers; `window_size +
+    /// max_prefill_tokens` for ring-buffered SWA layers, where the
+    /// attention/append kernels address rows modulo `depth`.
+    pub depth: usize,
 }
 
 /// Geometry for a paged KV cache.
@@ -1169,6 +1210,11 @@ impl ScratchPool {
                 .map(|v| v[li])
                 .unwrap_or(config.kv_layout);
             let bytes_per_row = layer_layout.bytes_per_row(slot_kvw);
+            let slot_depth = config
+                .per_layer_kv_depths
+                .as_ref()
+                .map(|d| d[li])
+                .unwrap_or(config.max_seq_len);
             if paged_on {
                 kv_caches.push(KvCache {
                     k: DevicePtr::NULL,
@@ -1176,10 +1222,11 @@ impl ScratchPool {
                     kv_width: slot_kvw,
                     bytes_per_row,
                     layout: layer_layout,
+                    depth: slot_depth,
                 });
                 continue;
             }
-            let slab_bytes = n_slots * config.max_seq_len * bytes_per_row;
+            let slab_bytes = n_slots * slot_depth * bytes_per_row;
             let k = alloc_bytes(slab_bytes)?;
             let v = alloc_bytes(slab_bytes)?;
             kv_caches.push(KvCache {
@@ -1188,6 +1235,7 @@ impl ScratchPool {
                 kv_width: slot_kvw,
                 bytes_per_row,
                 layout: layer_layout,
+                depth: slot_depth,
             });
         }
 

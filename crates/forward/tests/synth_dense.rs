@@ -128,7 +128,7 @@ fn synth_dense_one_token_forward() {
             paged_kv: None,
             kv_layout: flambeau_forward::core::KvLayout::F16Contig,
             per_layer_kv_layouts: None,
-    };
+            per_layer_kv_depths: None,    };
     let mut pool = ScratchPool::new(&device, cfg).expect("ScratchPool::new");
     let layout = ModelLayout {
         num_layers: NUM_LAYERS,
