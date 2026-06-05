@@ -591,7 +591,21 @@ pub fn dtod_ar_sum_f32(
     if n_ranks == 1 {
         return Ok(());
     }
-    let peers = if n_elems <= EVENT_PATH_MAX_ELEMS {
+    let event_path = n_elems <= EVENT_PATH_MAX_ELEMS;
+    if event_path {
+        // The event path orders peers after this rank's producer event
+        // but does not flush the producer's writes from L2 to DRAM; a
+        // peer's copy-engine pull then sources a timing-dependent (boot-
+        // varying) value. Flush `buf` to DRAM before the producer event
+        // is recorded so the pull is coherent. The host-sync path drains
+        // the whole stream and needs no flush. See
+        // `doc/DETERMINISM_INVESTIGATION.md`.
+        // SAFETY: `buf` is this rank's F32 partial (`n_elems` words) on
+        // `device`; `stream` belongs to that device, ordered after the
+        // producer.
+        unsafe { coord.bar.l2_flush(rank, buf, n_elems as u32, stream)? };
+    }
+    let peers = if event_path {
         ar_publish_with_events(coord, rank, buf, stream)?
     } else {
         ar_publish_with_host_sync(coord, rank, buf, stream)?

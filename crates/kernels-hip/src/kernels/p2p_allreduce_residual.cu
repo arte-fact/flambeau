@@ -214,3 +214,27 @@ void flambeau_p2p_allreduce_sum_tp4_f32(
                            + partial_peer2[idx];
     }
 }
+
+// ------------------------------------------------------------------------
+// L2 -> DRAM flush of a freshly-produced partial. The producer kernel's
+// writes land in this device's L2; a peer's copy-engine read sources DRAM
+// through the BAR1 aperture, so without a flush it reads a not-yet-evicted
+// (timing-dependent) value. Re-store every word (volatile, so the value
+// becomes THIS kernel's write — a separate kernel's threadfence cannot
+// flush the producer kernel's writes), then a system-scope release fence
+// pushes them past L2 to DRAM where the peer copy engine reads coherently.
+// Far cheaper than a full Stream::synchronize. dtype-agnostic (32-bit
+// words). See doc/DETERMINISM_INVESTIGATION.md.
+// ------------------------------------------------------------------------
+extern "C" __global__ __launch_bounds__(P2P_AR_THREADS)
+void flambeau_p2p_l2_flush(
+    unsigned int* __restrict__ buf,
+    const unsigned int n_words
+) {
+    const unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n_words) {
+        volatile unsigned int* p = buf + idx;
+        *p = *p;
+    }
+    __threadfence_system();
+}

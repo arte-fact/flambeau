@@ -49,6 +49,7 @@ const FN_SUM_TP4: &str = "flambeau_p2p_allreduce_sum_tp4";
 const FN_SUM_TP2: &str = "flambeau_p2p_allreduce_sum_tp2";
 const FN_SUM_TP4_F32: &str = "flambeau_p2p_allreduce_sum_tp4_f32";
 const FN_SUM_TP2_F32: &str = "flambeau_p2p_allreduce_sum_tp2_f32";
+const FN_L2_FLUSH: &str = "flambeau_p2p_l2_flush";
 const FN_RESIDUAL_RMSNORM_TP4: &str = "flambeau_p2p_allreduce_residual_rmsnorm_tp4";
 const FN_RESIDUAL_RMSNORM_TP2: &str = "flambeau_p2p_allreduce_residual_rmsnorm_tp2";
 const FN_RESIDUAL_RMSNORM_Q8_1_TP4: &str = "flambeau_p2p_allreduce_residual_rmsnorm_q8_1_tp4";
@@ -275,6 +276,38 @@ impl BarP2pAllReduce {
     /// Number of ranks this AllReduce was constructed for.
     pub fn ranks(&self) -> usize {
         self.cluster.ranks()
+    }
+
+    /// Flush `n_words` 32-bit words of `buf` on rank `rank`'s device from
+    /// L2 to DRAM (system scope), so a peer's copy-engine read of `buf`
+    /// sources the producer's value coherently. Cheap targeted alternative
+    /// to a full `Stream::synchronize`. Enqueued on `stream` (rank `rank`'s
+    /// device); order it after the producer and before the producer event
+    /// the peers wait on.
+    /// # Safety
+    /// `buf` addresses `n_words` `u32`s on rank `rank`'s device; `stream`
+    /// belongs to that device.
+    pub unsafe fn l2_flush(
+        &self,
+        rank: usize,
+        buf: DevicePtr,
+        n_words: u32,
+        stream: &HipStream,
+    ) -> DeviceResult<()> {
+        if n_words == 0 {
+            return Ok(());
+        }
+        self.cluster.device(rank).bind()?;
+        let cfg = LaunchCfg::one_d(n_words.div_ceil(BLOCK_THREADS), BLOCK_THREADS);
+        let kern: HipKernel<'_> = self.modules[rank].kernel(FN_L2_FLUSH)?;
+        let b = buf.as_usize() as u64;
+        let mut k_args = KernelArgs::new();
+        k_args.push(&b);
+        k_args.push(&n_words);
+        // SAFETY: `kern`/`stream` outlive the launch; arg locals live until
+        // the synchronous return of `hipModuleLaunchKernel`.
+        unsafe { kern.launch(stream, cfg, k_args)? };
+        Ok(())
     }
 
     /// HIP device id for `rank`. Used by callers that need to allocate
