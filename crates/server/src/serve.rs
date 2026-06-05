@@ -103,12 +103,6 @@ pub struct ServeConfig {
     pub prefix_cache_max_gb: f64,
     /// KV cache layout: `"f16"` or `"q8"`.
     pub kv: String,
-    /// Make TP/Hybrid AllReduce bit-reproducible at temp=0 by routing it
-    /// through the coherent DtoD copy-engine path (pull peer partials to
-    /// local scratch, sum locally) instead of the in-kernel BAR1 read,
-    /// which is non-coherent on gfx906 (see
-    /// `doc/DETERMINISM_INVESTIGATION.md`). Stays on-device. Off by default.
-    pub deterministic: bool,
     /// Default system prompt prepended to chat-template requests when
     /// none is provided.
     pub default_system: Option<String>,
@@ -253,7 +247,12 @@ pub(crate) async fn serve_inner_v2(
             max_slots: inflight_slots,
             paged_kv_pages: cfg.paged_kv_pages,
             kv_layout,
-            deterministic_ar: cfg.deterministic,
+            // TP/Hybrid AllReduce is unconditionally routed through the
+            // coherent DtoD copy-engine path — the in-kernel BAR1 aperture
+            // read is non-coherent on gfx906 PCIe P2P and the only fully
+            // coherent mechanism is the copy engine. See
+            // `doc/DETERMINISM_INVESTIGATION.md`.
+            deterministic_ar: true,
         },
     )
     .with_context(|| format!("v2 shared session ({gguf_arch})"))?;
