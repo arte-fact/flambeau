@@ -224,6 +224,40 @@ own DtoH and same-device reads see) but the BAR1 aperture maps DRAM, and
 the L2→DRAM writeback that a peer needs is not produced by
 `threadfence_system` on this silicon.
 
+## Determinism made unconditional — flag removed (2026-06-05)
+
+Chased a zero-cost always-on path (so the `--deterministic` flag could be
+dropped without the DtoD overhead). Two decisive nulls:
+
+- **Cheap in-kernel fix (flush + `glc` reader load) is insufficient for the
+  in-place F32 sum.** gemma4-26B-A4B with the F32 sum kernel's peer read
+  marked `volatile` (glc) *and* the partial flushed L2→DRAM before the
+  in-kernel read: **5 distinct / 20** (16/20 land on the correct value).
+  The gfx906 PCIe BAR1 *aperture read itself* isn't reliably coherent even
+  from fresh DRAM, and the in-place `partial_local += peer` has a
+  cross-rank read-vs-write race that — unlike the DtoD copy — can't be
+  fenced read-all-then-write-all (read and write are fused in one kernel).
+  Only the copy engine is fully coherent.
+- **The F16 path was never genuinely coherent — false-green by margin.**
+  Qwen3.5-27B-Q4_0 (flat quant → flatter logits → more near-ties) on the
+  **plain BAR1** F16 path, open-ended prompt: **9 distinct / 16**. The
+  earlier "Qwen F16 is already deterministic" was Q8 confident-prompt
+  margin luck; the F16 DtoD extension was necessary, not defensive.
+
+**Decision (user):** since there's no zero-cost path, make the coherent
+DtoD the **unconditional default** and **remove the flag** (no fence
+trim). `deterministic_ar` is hardcoded true; the `--deterministic` CLI
+flag + `FLAMBEAU_DETERMINISTIC` env + `ServeConfig.deterministic` are
+deleted. The DtoD cost (gemma4 −5.5%, Qwen −7.4%) is now always paid — the
+price of coherent cross-device AR on this silicon. Commit `ab1fc3a`.
+
+GATES (no flag, default): gemma4-26B-A4B-Q8_0 "Spell cat" ×6 → 1 md5;
+Qwen3.5-27B-Q4_0 (the flat-quant false-green) open-ended ×16 → 1 md5
+(was 9/16 on plain BAR1). Vestigial follow-up: `LaunchParams.deterministic_ar`
++ the non-dtod BAR1 branches + `coord.dtod` are now reachable only from
+the 9 model-crate test constructions (still `false`); a cleanup can drop
+the bool + dead branches and align tests to the coherent path.
+
 ## Squeeze + scope refinement (2026-06-05)
 
 Tried to close the residual −5.5 % gemma4 gap and characterized the
