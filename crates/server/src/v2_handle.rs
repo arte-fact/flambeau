@@ -458,8 +458,36 @@ pub fn chat_stops_for(gguf_arch: &str) -> &'static [&'static str] {
 
 /// Whether this arch wants BOS prepended to every fresh prompt.
 pub fn wants_bos_prepend(gguf_arch: &str) -> bool {
+    is_gemma_family(gguf_arch)
+}
+
+fn is_gemma_family(gguf_arch: &str) -> bool {
     matches!(
         gguf_arch,
         "gemma3" | "gemma4" | "gemma4-26b-a4b" | "gemma4-31b" | "gemma4-9b" | "gemma4-2b"
     )
+}
+
+/// Minimum decode steps before a stop token is honored, guarding against
+/// immediate-EOS empty replies (Qwen3.6 multi-turn). gemma4 emits its
+/// turn-end as soon as a short answer is complete and has no immediate-EOS
+/// failure mode, so forcing continuation only drives it into repetition /
+/// off-topic drift — trust its stop (the first-token stop mask still applies).
+pub fn min_response_tokens_for(gguf_arch: &str) -> usize {
+    if is_gemma_family(gguf_arch) {
+        2
+    } else {
+        24
+    }
+}
+
+/// Nats subtracted from every stop-token logit beyond the min-response
+/// window to discourage premature stops. Zero for gemma4 (see
+/// [`min_response_tokens_for`]).
+pub fn stop_bias_for(gguf_arch: &str) -> f32 {
+    if is_gemma_family(gguf_arch) {
+        0.0
+    } else {
+        3.0
+    }
 }

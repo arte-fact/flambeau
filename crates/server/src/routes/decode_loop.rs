@@ -531,8 +531,8 @@ fn run_completion_scheduler_pp_blocking(
 
         let mut last_token = first_next;
         let mut finish_reason = "length";
-        const MIN_RESPONSE_TOKENS: usize = 24;
-        const STOP_BIAS: f32 = 3.0;
+        let min_response_tokens = crate::v2_handle::min_response_tokens_for(&state.cfg.arch);
+        let stop_bias = crate::v2_handle::stop_bias_for(&state.cfg.arch);
         let user_stop_max = params
             .stop_strings
             .iter()
@@ -545,7 +545,7 @@ fn run_completion_scheduler_pp_blocking(
         // loop instead of allocating a fresh ~600 KB Vec per step.
         let mut logits: Vec<f32> = Vec::with_capacity(vocab);
         for step in 1..params.max_tokens as usize {
-            let force_mask = step < MIN_RESPONSE_TOKENS && !relax_stop_mask;
+            let force_mask = step < min_response_tokens && !relax_stop_mask;
             state
                 .decode_via_scheduler_into(
                     slot_idx,
@@ -560,7 +560,7 @@ fn run_completion_scheduler_pp_blocking(
                         if force_mask || always_stop_ids.contains(&sid) {
                             logits[sid as usize] = f32::NEG_INFINITY;
                         } else {
-                            logits[sid as usize] -= STOP_BIAS;
+                            logits[sid as usize] -= stop_bias;
                         }
                     }
                 }
@@ -579,7 +579,7 @@ fn run_completion_scheduler_pp_blocking(
             // (mirrors the legacy handler).
             let need_user_check = !params.stop_strings.is_empty();
             if (need_user_check || !relax_stop_mask)
-                && (step % 4 == 0 || step >= MIN_RESPONSE_TOKENS)
+                && (step % 4 == 0 || step >= min_response_tokens)
             {
                 let n = generated.len();
                 let token_window = 16.max((user_stop_max / 2).min(64));
@@ -847,7 +847,7 @@ fn run_completion_blocking_ids(
     // the-response loops. 8 lets short greetings stop naturally; the
     // first-token NEG_INFINITY mask still prevents immediate-EOS on
     // multi-turn prompts.
-    const MIN_RESPONSE_TOKENS: usize = 24;
+    let min_response_tokens = crate::v2_handle::min_response_tokens_for(&state.cfg.arch);
     // Nats subtracted from every stop-token logit beyond MIN_RESPONSE_TOKENS.
     // was 0.5 (was 3.0 before that). Even 0.5 is enough to push
     // EOS below the next-best continuation when the model wants to stop at
@@ -869,9 +869,9 @@ fn run_completion_blocking_ids(
     // most natural endpoints. The prior concern about `0.5
     // → repeat loops` was driven by Coder-Next-80B specifically;
     // Qwen3.6 doesn't show that failure at this bias on chat tests.
-    const STOP_BIAS: f32 = 3.0;
+    let stop_bias = crate::v2_handle::stop_bias_for(&state.cfg.arch);
     for step in 1..params.max_tokens as usize {
-        let force_mask = step < MIN_RESPONSE_TOKENS && !relax_stop_mask;
+        let force_mask = step < min_response_tokens && !relax_stop_mask;
         // Phase 12.5 — decode goes through the host-path DtoH always.
         // The GPU sampler keep-on-device branch was retired with the
         // decode/batched collapse (see `use_gpu_sampler` initialiser).
@@ -890,7 +890,7 @@ fn run_completion_blocking_ids(
                         if always_stop_ids.contains(&sid) || force_mask {
                             logits_buf[sid as usize] = f32::NEG_INFINITY;
                         } else {
-                            logits_buf[sid as usize] -= STOP_BIAS;
+                            logits_buf[sid as usize] -= stop_bias;
                         }
                     }
                 }
@@ -955,7 +955,7 @@ fn run_completion_blocking_ids(
             .max()
             .unwrap_or(0);
         let need_user_check = !params.stop_strings.is_empty();
-        if (need_user_check || !relax_stop_mask) && (step % 4 == 0 || step >= MIN_RESPONSE_TOKENS) {
+        if (need_user_check || !relax_stop_mask) && (step % 4 == 0 || step >= min_response_tokens) {
             let n = generated.len();
             // 16 tokens covers ≥48 chars typical; widen if a user
             // stop string is longer than ~32 chars.
@@ -1178,7 +1178,7 @@ pub(crate) fn run_completion_blocking_streaming(
     // See non-streaming path for the MIN_RESPONSE_TOKENS rationale.
     // Sampler-G — lowered from 24 to 8 to let short greetings stop
     // at natural endpoints instead of wandering into leak territory.
-    const MIN_RESPONSE_TOKENS: usize = 24;
+    let min_response_tokens = crate::v2_handle::min_response_tokens_for(&state.cfg.arch);
     // Nats subtracted from every stop-token logit beyond MIN_RESPONSE_TOKENS.
     // was 0.5 (was 3.0 before that). Even 0.5 is enough to push
     // EOS below the next-best continuation when the model wants to stop at
@@ -1200,7 +1200,7 @@ pub(crate) fn run_completion_blocking_streaming(
     // most natural endpoints. The prior concern about `0.5
     // → repeat loops` was driven by Coder-Next-80B specifically;
     // Qwen3.6 doesn't show that failure at this bias on chat tests.
-    const STOP_BIAS: f32 = 3.0;
+    let stop_bias = crate::v2_handle::stop_bias_for(&state.cfg.arch);
     // env-gated TP-decode profiling. When FLAMBEAU_PROFILE_DECODE
     // is set, enable HipEvent section recording for `n` warm-up-skipped decode
     // steps, then flush + dump aggregate per-section ms to stderr. Skips the
@@ -1258,7 +1258,7 @@ pub(crate) fn run_completion_blocking_streaming(
             }
         }
         // T4.1: same relax-stop-mask behaviour as the non-streaming path.
-        let force_mask = step < MIN_RESPONSE_TOKENS && !relax_stop_mask;
+        let force_mask = step < min_response_tokens && !relax_stop_mask;
         let hp_step_t0 = if host_profile_on {
             Some(Instant::now())
         } else {
@@ -1283,7 +1283,7 @@ pub(crate) fn run_completion_blocking_streaming(
                     if always_stop_ids.contains(&sid) || force_mask {
                         logits_buf[sid as usize] = f32::NEG_INFINITY;
                     } else {
-                        logits_buf[sid as usize] -= STOP_BIAS;
+                        logits_buf[sid as usize] -= stop_bias;
                     }
                 }
             }
