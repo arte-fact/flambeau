@@ -146,6 +146,39 @@ pub fn mmvq_q4_0_gate_up_t128_decode(
     )
 }
 
+/// Fused gate+up decode for Q8_0 dense FFN — one launch produces both
+/// projections, sharing the Q8_1 activation HBM read. Caller guarantees
+/// `n_rows_gate == n_rows_up == n` and `m == 1`. Wave-neutral vs the two
+/// unfused launches (gate==up rows are symmetric → same block count).
+pub fn mmvq_q8_0_gate_up_t128_decode(
+    gate_w: &Tensor<Q8_0>,
+    up_w: &Tensor<Q8_0>,
+    act_q8_1: &Tensor<Q8_1>,
+    gate_out: &mut Tensor<F32>,
+    up_out: &mut Tensor<F32>,
+    shape: flambeau_ops::MmvqShape,
+    ops: &HipOps<'_>,
+) -> Result<()> {
+    let flambeau_ops::MmvqShape { n_rows: n, k } = shape;
+    if gate_out.n_elems < n || up_out.n_elems < n {
+        bail!(
+            "mmvq_q8_0_gate_up_t128_decode: outputs too small (gate={}, up={}, need {n})",
+            gate_out.n_elems,
+            up_out.n_elems
+        );
+    }
+    ops.mmvq_q8_0_gate_up(
+        flambeau_ops::MmvqGateUpBuffers {
+            gate_w: gate_w.ptr,
+            up_w: up_w.ptr,
+            act_q8_1: act_q8_1.ptr,
+            gate_out: gate_out.ptr,
+            up_out: up_out.ptr,
+        },
+        flambeau_ops::MmvqGateUpShape { n_rows_gate: n, n_rows_up: n, k },
+    )
+}
+
 /// Fused K+V decode for Q4_0 attention — one launch produces both
 /// projections in F16 directly, sharing the Q8_1 activation HBM read.
 /// K and V must share shape `[n, k]`; caller guarantees `m == 1`.
@@ -293,5 +326,74 @@ mod tests {
         free(&device, act_f32_ptr, act_f32_t.bytes());
         free(&device, act_q8_1_ptr, act_q8_1_t.bytes());
         free(&device, out_ptr, out_t.bytes());
+    }
+
+    #[test]
+    fn mmvq_q8_0_gate_up_decode_matches_cpu_reference() {
+        const K: usize = 64;
+        const N: usize = 8;
+
+        let device = test_device();
+        device.bind().expect("device bind");
+        let stream = device.default_stream();
+        let reg = test_ops_registry(&device);
+        let ops = HipOps::new(&reg, stream);
+
+        let mk_weight = |bias: f32| -> (Vec<u8>, Vec<f32>) {
+            let wf: Vec<f32> = (0..N * K)
+                .map(|i| (i as f32) / (N * K - 1) as f32 - 0.5 + bias)
+                .collect();
+            let mut bytes = Vec::new();
+            for row in 0..N {
+                quantize_row_q8_0(&wf[row * K..(row + 1) * K], &mut bytes);
+            }
+            let deq =
+                flambeau_quant::dequantize_to_vec(flambeau_quant::GgmlDType::Q8_0, &bytes, N * K)
+                    .expect("dequant Q8_0 weight");
+            (bytes, deq)
+        };
+        // Distinct gate/up weights so a swapped output is caught.
+        let (gate_bytes, gate_deq) = mk_weight(0.0);
+        let (up_bytes, up_deq) = mk_weight(0.1);
+
+        let act_f32: Vec<f32> = (0..K).map(|i| (i as f32) * 0.01 - 0.32).collect();
+        let cpu_row = |deq: &[f32]| -> Vec<f32> {
+            (0..N)
+                .map(|ni| (0..K).map(|ki| deq[ni * K + ki] * act_f32[ki]).sum())
+                .collect()
+        };
+        let exp_gate = cpu_row(&gate_deq);
+        let exp_up = cpu_row(&up_deq);
+
+        let (gate_t, gate_ptr) = upload::<Q8_0, u8>(&device, &gate_bytes, N * K);
+        let (up_t, up_ptr) = upload::<Q8_0, u8>(&device, &up_bytes, N * K);
+        let (act_f32_t, act_f32_ptr) = upload::<F32, f32>(&device, &act_f32, act_f32.len());
+        let (mut act_q8_1_t, act_q8_1_ptr) = alloc::<Q8_1>(&device, K);
+        quantize_f32_to_q8_1(&act_f32_t, &mut act_q8_1_t, K, &ops).expect("quant act");
+        let (mut gate_out, gate_out_ptr) = alloc::<F32>(&device, N);
+        let (mut up_out, up_out_ptr) = alloc::<F32>(&device, N);
+
+        mmvq_q8_0_gate_up_t128_decode(
+            &gate_t,
+            &up_t,
+            &act_q8_1_t,
+            &mut gate_out,
+            &mut up_out,
+            flambeau_ops::MmvqShape { n_rows: N, k: K },
+            &ops,
+        )
+        .expect("mmvq_q8_0_gate_up_t128_decode");
+
+        let got_gate: Vec<f32> = download::<F32, f32>(&device, &gate_out);
+        let got_up: Vec<f32> = download::<F32, f32>(&device, &up_out);
+        assert_close_f32(&got_gate, &exp_gate, 5e-2, 5e-2);
+        assert_close_f32(&got_up, &exp_up, 5e-2, 5e-2);
+
+        free(&device, gate_ptr, gate_t.bytes());
+        free(&device, up_ptr, up_t.bytes());
+        free(&device, act_f32_ptr, act_f32_t.bytes());
+        free(&device, act_q8_1_ptr, act_q8_1_t.bytes());
+        free(&device, gate_out_ptr, gate_out.bytes());
+        free(&device, up_out_ptr, up_out.bytes());
     }
 }

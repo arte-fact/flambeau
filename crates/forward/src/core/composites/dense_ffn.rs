@@ -65,6 +65,9 @@ pub fn dense_ffn_local<H: TopologyHooks>(
     let fuse_q4_0_decode = n == 1
         && weights.ffn_gate.dtype == flambeau_core::op::QDtype::Q4_0
         && weights.ffn_up.dtype == flambeau_core::op::QDtype::Q4_0;
+    let fuse_q8_0_decode = n == 1
+        && weights.ffn_gate.dtype == flambeau_core::op::QDtype::Q8_0
+        && weights.ffn_up.dtype == flambeau_core::op::QDtype::Q8_0;
     if fuse_q4_0_decode {
         let gate_w = unsafe {
             Tensor::<flambeau_model_ops::Q4_0>::from_raw(
@@ -79,6 +82,28 @@ pub fn dense_ffn_local<H: TopologyHooks>(
             )
         };
         flambeau_model_ops::mmvq_q4_0_gate_up_t128_decode(
+            &gate_w,
+            &up_w,
+            &norm_q8_1,
+            &mut gate_f32,
+            &mut up_f32,
+            flambeau_ops::MmvqShape { n_rows: m, k: hidden },
+            &ops,
+        )?;
+    } else if fuse_q8_0_decode {
+        let gate_w = unsafe {
+            Tensor::<flambeau_model_ops::Q8_0>::from_raw(
+                weights.ffn_gate.ptr,
+                weights.ffn_gate.n_elems,
+            )
+        };
+        let up_w = unsafe {
+            Tensor::<flambeau_model_ops::Q8_0>::from_raw(
+                weights.ffn_up.ptr,
+                weights.ffn_up.n_elems,
+            )
+        };
+        flambeau_model_ops::mmvq_q8_0_gate_up_t128_decode(
             &gate_w,
             &up_w,
             &norm_q8_1,
