@@ -90,17 +90,19 @@ Flambeau already implements the core of jobs 1–4 for the **Qwen/DeepSeek
 
 ## Gaps (flambeau)
 
-1. **Only the `<think>` tag family is parsed.** The reasoning split and the
-   leaked-marker list are hardcoded to `<think>…</think>` (+ a few aliases).
-   **gemma's `<|channel|>thought … <|eot_thought|>` / `</channel>` channel is
-   not recognized**, so gemma4 reasoning leaks into `content` and the model
-   repeats/degenerates on short answers (observed: "Canberra. thought
-   Canberra. thought…"). The harmony `analysis`/`final` channel is likewise
-   unsupported. Fix: make the reasoning parser **per-arch** (mirror
-   vLLM/SGLang's plugin selection) — a small `reasoning_markers(arch)` table
-   returning the open/close delimiters, consumed by `finalise` and the
-   stop-id builder. Add gemma's channel markers to the gemma4 stop +
-   `always_stop` set (`tokenizer.rs`).
+1. **gemma4 channel reasoning — FIXED.** `finalise` now detects the
+   harmony-style channel from the output (`<|channel>thought {cot} <channel|>
+   {answer}`, content-based not arch-string) and splits the CoT into
+   `reasoning_content` with a clean `content`; the `<think>…</think>` path is
+   unchanged for qwen/deepseek (commit 97c32fd). The companion short-answer
+   degeneration ("Canberra. thought Canberra…" / off-topic drift) was the
+   `MIN_RESPONSE_TOKENS=24` + `STOP_BIAS=3.0` force-window — a Qwen3.6
+   immediate-EOS guard that gemma4 doesn't need; both are now arch-aware
+   (`min_response_tokens_for` / `stop_bias_for`, gemma → 2 / 0.0; commit
+   158cc70). gemma-4-12b chat battery: clean + 8/8. STILL TODO: the harmony
+   `analysis`/`final`/`commentary` channel set for gpt-oss; and lift this from
+   output-format detection to a proper per-arch `reasoning_markers()` table
+   (rule-13) once a third reasoning format lands.
 2. **No streaming separation of `reasoning_content`.** The split happens in
    `finalise` (non-stream). Streaming should emit reasoning deltas distinctly.
 3. **No thinking budget / effort control.** No `budget_tokens` / max-thinking
