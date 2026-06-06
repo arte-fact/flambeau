@@ -7,9 +7,19 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::json;
 
+/// Which API's error envelope to render. The two surfaces disagree on
+/// shape: OpenAI nests `{error:{message,type,code,param}}`; Anthropic uses
+/// `{type:"error",error:{type,message}}`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ErrorFlavor {
+    OpenAi,
+    Anthropic,
+}
+
 pub struct ApiError {
     pub status: StatusCode,
     pub message: String,
+    pub flavor: ErrorFlavor,
 }
 
 impl ApiError {
@@ -17,12 +27,14 @@ impl ApiError {
         Self {
             status: StatusCode::BAD_REQUEST,
             message: msg.into(),
+            flavor: ErrorFlavor::OpenAi,
         }
     }
     pub fn queue_full() -> Self {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
             message: "server queue full — too many concurrent requests".into(),
+            flavor: ErrorFlavor::OpenAi,
         }
     }
     pub fn internal(err: impl std::fmt::Display) -> Self {
@@ -37,28 +49,51 @@ impl ApiError {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: top,
+            flavor: ErrorFlavor::OpenAi,
         }
+    }
+
+    /// Render this error in the Anthropic `/v1/messages` envelope.
+    pub fn anthropic(mut self) -> Self {
+        self.flavor = ErrorFlavor::Anthropic;
+        self
     }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
         let is_overloaded = self.status == StatusCode::SERVICE_UNAVAILABLE;
-        let err_type = if is_overloaded {
-            "overloaded"
-        } else {
-            "invalid_request_error"
+        let body = match self.flavor {
+            ErrorFlavor::OpenAi => {
+                let err_type = if is_overloaded {
+                    "overloaded"
+                } else {
+                    "invalid_request_error"
+                };
+                json!({
+                    "error": {
+                        "message": self.message,
+                        "type": err_type,
+                        "code": serde_json::Value::Null,
+                        "param": serde_json::Value::Null,
+                    }
+                })
+            }
+            ErrorFlavor::Anthropic => {
+                let err_type = if is_overloaded {
+                    "overloaded_error"
+                } else if self.status == StatusCode::INTERNAL_SERVER_ERROR {
+                    "api_error"
+                } else {
+                    "invalid_request_error"
+                };
+                json!({
+                    "type": "error",
+                    "error": {"type": err_type, "message": self.message},
+                })
+            }
         };
-        let mut resp = (
-            self.status,
-            Json(json!({
-                "error": {
-                    "message": self.message,
-                    "type": err_type,
-                }
-            })),
-        )
-            .into_response();
+        let mut resp = (self.status, Json(body)).into_response();
         if is_overloaded {
             resp.headers_mut().insert(
                 axum::http::header::RETRY_AFTER,

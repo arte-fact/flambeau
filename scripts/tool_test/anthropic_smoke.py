@@ -223,6 +223,32 @@ def a6_streaming_thinking(client: anthropic.Anthropic, model: str) -> list[dict]
     return out
 
 
+def a7_error_envelope(client: anthropic.Anthropic, model: str) -> list[dict]:
+    """A 400 (empty messages[]) must come back in the Anthropic error
+    envelope so the official SDK raises its typed error."""
+    out = _checks()
+    try:
+        client.messages.create(model=model, max_tokens=8, messages=[])
+        _add(out, "SDK raised BadRequestError on 400", False, "no error raised")
+        return out
+    except anthropic.BadRequestError as e:
+        body = {}
+        try:
+            body = e.response.json()
+        except Exception:
+            pass
+        _add(out, "SDK raised BadRequestError on 400", True, f"status={e.status_code}")
+        _add(out, "envelope type=error", body.get("type") == "error",
+             f"body_type={body.get('type')!r}")
+        _add(out, "error.type present", bool(body.get("error", {}).get("type")),
+             f"err_type={body.get('error', {}).get('type')!r}")
+        return out
+    except Exception as e:  # noqa: BLE001
+        _add(out, "SDK raised BadRequestError on 400", False,
+             f"raised {type(e).__name__} instead")
+        return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--base-url", default="http://localhost:8080")
@@ -240,6 +266,7 @@ def main() -> int:
     suites.append(("A4 streaming", a4_streaming(client, args.model)))
     suites.append(("A5 thinking", a5_thinking(client, args.model)))
     suites.append(("A6 streaming thinking", a6_streaming_thinking(client, args.model)))
+    suites.append(("A7 error envelope", a7_error_envelope(client, args.model)))
 
     all_pass = True
     for title, checks in suites:

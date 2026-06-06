@@ -25,11 +25,26 @@ use crate::routes::{
 };
 use crate::state::SamplingParams;
 
-#[tracing::instrument(name = "server.messages", skip_all, fields(stream = req.stream))]
+/// Public `/v1/messages` entry point. Delegates to the inner handler and
+/// re-renders any error in the Anthropic envelope (`{type:"error",…}`).
 pub async fn messages_anthropic(
+    state: State<SharedState>,
+    req: Json<AnthropicMessagesRequest>,
+) -> Response {
+    match messages_anthropic_inner(state, req).await {
+        Ok(resp) => resp,
+        Err(e) => e.anthropic().into_response(),
+    }
+}
+
+#[tracing::instrument(name = "server.messages", skip_all, fields(stream = req.stream))]
+async fn messages_anthropic_inner(
     State(state): State<SharedState>,
     Json(req): Json<AnthropicMessagesRequest>,
 ) -> Result<Response, ApiError> {
+    if req.messages.is_empty() {
+        return Err(ApiError::bad_request("messages[] is empty"));
+    }
     let _admission = state.try_admit().ok_or_else(ApiError::queue_full)?;
     let mut messages: Vec<ChatMessage> = Vec::with_capacity(req.messages.len() + 1);
     if let Some(sys) = req.system.as_ref() {

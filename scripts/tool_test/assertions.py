@@ -396,8 +396,31 @@ def check_s9(resp: Any) -> list[dict]:
     return out
 
 
+def check_s10(resp: Any) -> list[dict]:
+    """`resp` is the negative-error dict from run.py (`{raised, type,
+    has_code, has_param}`)."""
+    out = []
+    out.append({
+        "name": "SDK raised BadRequestError on 400",
+        "pass": resp.get("raised") == "BadRequestError",
+        "detail": f"raised={resp.get('raised')!r}",
+    })
+    out.append({
+        "name": "error envelope carries code + param",
+        "pass": bool(resp.get("has_code")) and bool(resp.get("has_param")),
+        "detail": f"code={resp.get('has_code')} param={resp.get('has_param')}",
+    })
+    out.append({
+        "name": "error.type = invalid_request_error",
+        "pass": resp.get("type") == "invalid_request_error",
+        "detail": f"type={resp.get('type')!r}",
+    })
+    return out
+
+
 CHECKS = {
     "S1": check_s1, "S2": check_s2, "S3": check_s3,
     "S4": check_s4, "S5": check_s5, "S6": check_s6,
     "S7": check_s7, "S8": check_s8, "S9": check_s9,
+    "S10": check_s10,
 }

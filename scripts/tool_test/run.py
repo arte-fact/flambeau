@@ -26,7 +26,27 @@ import scenarios  # noqa: E402
 MODELS = ["qwen3.6-27b-q4_0", "qwen3.6-35b-a3b-q4_0",
           "gemma4-31b-q4_0", "gemma4-26b-a4b-q8_0"]
 
-SCENARIOS = ["S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9"]
+SCENARIOS = ["S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9", "S10"]
+
+
+def run_openai_negative(client: OpenAI, model: str) -> dict:
+    """Drive a 400 (empty messages[]) and report whether the official SDK
+    raised its typed error and whether the envelope carries code/param."""
+    import openai
+    try:
+        client.chat.completions.create(model=model, messages=[], max_tokens=8)
+        return {"raised": "none"}
+    except openai.BadRequestError as e:
+        err = {}
+        try:
+            err = (e.response.json() or {}).get("error", {})
+        except Exception:
+            pass
+        return {"raised": "BadRequestError", "status": e.status_code,
+                "has_code": "code" in err, "has_param": "param" in err,
+                "type": err.get("type")}
+    except Exception as e:  # noqa: BLE001
+        return {"raised": type(e).__name__}
 
 
 def tokenize_ids(base_url: str, text: str) -> list[int]:
@@ -124,9 +144,9 @@ def run_one(client: OpenAI, model: str, scenario: str,
             }
             return True, fixture
         kwargs = scenarios.s3_followup(model, to_dict(s1_msg), tcs[0].id)
-    elif scenario == "S9":
+    elif scenario in ("S9", "S10"):
         try:
-            resp = run_logit_bias(client, model)
+            resp = (run_logit_bias if scenario == "S9" else run_openai_negative)(client, model)
         except Exception as e:
             print(f"REQUEST FAILED: {e}")
             return False, {"scenario": scenario, "error": str(e), "verdict": "error"}
