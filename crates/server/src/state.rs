@@ -35,6 +35,12 @@ pub struct SamplingParams {
     /// generated text at the closing tag into
     /// `(reasoning_content, content)` for the response body.
     pub enable_thinking: bool,
+    /// Soft cap on reasoning tokens (OpenAI `reasoning_effort` tier or
+    /// Anthropic `budget_tokens`). When `Some(n)` and the model is still
+    /// inside its `<think>` block after `n` generated tokens, the decode
+    /// loop forces the reasoning-close marker so the model moves to the
+    /// answer. `None` ⇒ unbounded reasoning.
+    pub reasoning_budget: Option<u32>,
     /// **#236 P0.1b** — bytes to feed into the JSON state machine
     /// before the first decoded token. Two callers populate this:
     /// (a) JSON-mode requests where the last `messages[]` entry is
@@ -115,6 +121,7 @@ pub struct ResponseMode {
     pub json_mode: bool,
     pub collect_logprobs: Option<u32>,
     pub enable_thinking: bool,
+    pub reasoning_budget: Option<u32>,
     pub json_prime_bytes: Vec<u8>,
 }
 
@@ -161,6 +168,7 @@ impl SamplingParams {
             json_mode,
             collect_logprobs,
             enable_thinking,
+            reasoning_budget,
             json_prime_bytes,
         } = mode;
         // Resolution order: explicit OpenAI request → GGUF model
@@ -222,6 +230,7 @@ impl SamplingParams {
             stop_strings,
             collect_logprobs: collect_logprobs.map(|n| n.min(20)),
             enable_thinking,
+            reasoning_budget,
             json_prime_bytes,
         }
     }

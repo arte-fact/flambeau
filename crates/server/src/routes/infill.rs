@@ -58,7 +58,7 @@ pub async fn infill(
     );
 
     let prompt_tokens = prompt_ids.len() as u32;
-    let (text, _, completion_tokens, finish, _, _) =
+    let (text, _, completion_tokens, finish, _, _, _) =
         run_completion_ids(state.clone(), prompt_ids, params, true)
             .await
             .map_err(ApiError::internal)?;

@@ -164,6 +164,15 @@ pub async fn chat_completions(
             .reasoning_effort
             .as_deref()
             .is_some_and(|e| !e.eq_ignore_ascii_case("none"));
+    // Map the o-series effort tiers to a soft reasoning-token budget.
+    let reasoning_budget = req.reasoning_effort.as_deref().and_then(|e| {
+        match e.to_ascii_lowercase().as_str() {
+            "low" => Some(1024),
+            "medium" => Some(8192),
+            "high" => Some(24576),
+            _ => None,
+        }
+    });
     let params = SamplingParams::from_parts(
         crate::state::SamplingKnobs {
             temperature: req.temperature,
@@ -186,6 +195,7 @@ pub async fn chat_completions(
             json_mode,
             collect_logprobs,
             enable_thinking,
+            reasoning_budget,
             json_prime_bytes,
         },
         &state.model_defaults,
@@ -263,6 +273,7 @@ pub async fn chat_completions(
         iter_finish,
         final_logprobs,
         final_reasoning_content,
+        _matched_stop,
     ) = run_completion(state.clone(), &prompt, params.clone(), relax_stop_mask)
         .await
         .map_err(ApiError::internal)?;

@@ -542,6 +542,7 @@ fn run_completion_scheduler_pp_blocking(
         let mut finish_reason = "length";
         let min_response_tokens = crate::v2_handle::min_response_tokens_for(&state.cfg.arch);
         let stop_bias = crate::v2_handle::stop_bias_for(&state.cfg.arch);
+        let mut reasoning_closer = ReasoningCloser::new(reasoning_close_ids(&state, &params));
         let user_stop_max = params
             .stop_strings
             .iter()
@@ -574,7 +575,12 @@ fn run_completion_scheduler_pp_blocking(
                     }
                 }
             }
-            let next = sampler.sample(&logits, sampling, &generated);
+            // Force the reasoning-close marker once the thinking budget is
+            // spent so the model stops thinking and answers.
+            let next = match reasoning_closer.next_forced(&generated, params.reasoning_budget) {
+                Some(forced) => forced,
+                None => sampler.sample(&logits, sampling, &generated),
+            };
             if is_stop(next) {
                 finish_reason = "stop";
                 break;
@@ -639,6 +645,61 @@ fn run_completion_scheduler_pp_blocking(
     })();
     state.release_slot(slot_idx);
     result
+}
+
+/// The token sequence for the arch's reasoning-close marker, resolved once
+/// per request — only when a thinking budget is in play. Empty otherwise.
+/// The marker is often multi-token (qwen `</think>` = `[510, 26003, 29]`),
+/// so the whole sequence must be forced to actually close the block.
+fn reasoning_close_ids(state: &ServerState, params: &SamplingParams) -> Vec<u32> {
+    if !(params.enable_thinking && params.reasoning_budget.is_some()) {
+        return Vec::new();
+    }
+    let close = state.model.reasoning_markers().close;
+    state.tokenizer.encode(close).unwrap_or_default()
+}
+
+/// True if `needle` appears as a contiguous run anywhere in `haystack`.
+fn tokens_contain(haystack: &[u32], needle: &[u32]) -> bool {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return false;
+    }
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+/// State for forcing the reasoning-close marker once the thinking budget is
+/// spent. While the model is still inside its `<think>` block past `budget`
+/// generated tokens, the close marker's token sequence is emitted verbatim
+/// (one token per step) so the model moves on to the answer.
+#[derive(Default)]
+struct ReasoningCloser {
+    close_ids: Vec<u32>,
+    queue: std::collections::VecDeque<u32>,
+    fired: bool,
+}
+
+impl ReasoningCloser {
+    fn new(close_ids: Vec<u32>) -> Self {
+        Self {
+            close_ids,
+            ..Default::default()
+        }
+    }
+
+    /// Next forced token (the marker sequence), or `None` to sample normally.
+    /// `generated` is the per-turn token history; `budget` the cap.
+    fn next_forced(&mut self, generated: &[u32], budget: Option<u32>) -> Option<u32> {
+        if self.queue.is_empty()
+            && !self.fired
+            && !self.close_ids.is_empty()
+            && budget.is_some_and(|b| generated.len() as u32 >= b)
+            && !tokens_contain(generated, &self.close_ids)
+        {
+            self.fired = true;
+            self.queue.extend(self.close_ids.iter().copied());
+        }
+        self.queue.pop_front()
+    }
 }
 
 fn run_completion_blocking_ids(
@@ -879,6 +940,7 @@ fn run_completion_blocking_ids(
     // → repeat loops` was driven by Coder-Next-80B specifically;
     // Qwen3.6 doesn't show that failure at this bias on chat tests.
     let stop_bias = crate::v2_handle::stop_bias_for(&state.cfg.arch);
+    let mut reasoning_closer = ReasoningCloser::new(reasoning_close_ids(&state, &params));
     for step in 1..params.max_tokens as usize {
         let force_mask = step < min_response_tokens && !relax_stop_mask;
         // Phase 12.5 — decode goes through the host-path DtoH always.
@@ -918,10 +980,15 @@ fn run_completion_blocking_ids(
                     /*max_candidates=*/ 2048,
                 );
             }
-            // Pass `generated` as history so penalties can fire on
-            // repeats / frequent tokens. T4.b.2 — without this,
-            // Qwen3.5/3.6 agent loops degrade to long-CoT drift.
-            let next = sampler.sample(&logits_buf, sampling, &generated);
+            // Once the thinking budget is spent, emit the reasoning-close
+            // marker verbatim so the model stops thinking and answers.
+            // Otherwise pass `generated` as history so penalties can fire on
+            // repeats / frequent tokens (T4.b.2 — without this, Qwen3.5/3.6
+            // agent loops degrade to long-CoT drift).
+            let next = match reasoning_closer.next_forced(&generated, params.reasoning_budget) {
+                Some(forced) => forced,
+                None => sampler.sample(&logits_buf, sampling, &generated),
+            };
             // P1.7 — collect per-token logprobs (host path only).
             if let Some(lp) = logprobs_acc.as_mut() {
                 if let Some(entry) = build_logprob_entry(
@@ -1210,6 +1277,7 @@ pub(crate) fn run_completion_blocking_streaming(
     // → repeat loops` was driven by Coder-Next-80B specifically;
     // Qwen3.6 doesn't show that failure at this bias on chat tests.
     let stop_bias = crate::v2_handle::stop_bias_for(&state.cfg.arch);
+    let mut reasoning_closer = ReasoningCloser::new(reasoning_close_ids(&state, &params));
     // env-gated TP-decode profiling. When FLAMBEAU_PROFILE_DECODE
     // is set, enable HipEvent section recording for `n` warm-up-skipped decode
     // steps, then flush + dump aggregate per-section ms to stderr. Skips the
@@ -1302,7 +1370,12 @@ pub(crate) fn run_completion_blocking_streaming(
         } else {
             None
         };
-        let next = sampler.sample(&logits_buf, sampling, &generated);
+        // Once the thinking budget is spent, emit the reasoning-close marker
+        // verbatim so the model stops thinking and answers.
+        let next = match reasoning_closer.next_forced(&generated, params.reasoning_budget) {
+            Some(forced) => forced,
+            None => sampler.sample(&logits_buf, sampling, &generated),
+        };
         let hp_after_sample = if host_profile_on {
             Some(Instant::now())
         } else {

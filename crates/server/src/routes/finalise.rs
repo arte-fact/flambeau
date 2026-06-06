@@ -14,13 +14,16 @@ use crate::routes::ServerState;
 /// finish_reason, optional per-token logprobs, optional reasoning_content
 /// (populated when `enable_thinking=true` and the model emitted a
 /// `<think>...</think>` block; the leading reasoning is split off and
-/// returned here while `text` keeps only the post-think answer).
+/// returned here while `text` keeps only the post-think answer), and the
+/// caller-supplied stop string that matched (so the Anthropic path can
+/// report `stop_reason="stop_sequence"`).
 pub(super) type CompletionOutput = (
     String,
     u32,
     u32,
     String,
     Option<Vec<ChatLogProbContent>>,
+    Option<String>,
     Option<String>,
 );
 
@@ -168,10 +171,12 @@ pub(super) fn finalise(
     };
 
     let mut earliest = text.len();
+    let mut matched_stop: Option<String> = None;
     for s in stop_strings {
         if let Some(idx) = text.find(s.as_str()) {
             if idx < earliest {
                 earliest = idx;
+                matched_stop = Some(s.clone());
             }
         }
     }
@@ -185,6 +190,7 @@ pub(super) fn finalise(
         reason.to_owned(),
         logprobs,
         reasoning_content,
+        matched_stop,
     ))
 }
 

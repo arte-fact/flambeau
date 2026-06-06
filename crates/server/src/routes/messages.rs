@@ -111,6 +111,11 @@ async fn messages_anthropic_inner(
         },
         crate::state::ResponseMode {
             enable_thinking,
+            reasoning_budget: req
+                .thinking
+                .as_ref()
+                .filter(|t| t.is_enabled())
+                .and_then(|t| t.budget_tokens),
             ..Default::default()
         },
         &state.model_defaults,
@@ -149,7 +154,7 @@ async fn messages_anthropic_inner(
         );
     }
 
-    let (text, prompt_tokens, completion_tokens, finish, _, reasoning) =
+    let (text, prompt_tokens, completion_tokens, finish, _, reasoning, matched_stop) =
         run_completion(state.clone(), &prompt, params, relax_stop_mask)
             .await
             .map_err(ApiError::internal)?;
@@ -168,6 +173,8 @@ async fn messages_anthropic_inner(
 
     let stop_reason: &str = if !tool_calls.is_empty() {
         "tool_use"
+    } else if matched_stop.is_some() {
+        "stop_sequence"
     } else {
         match finish.as_str() {
             "stop" => "end_turn",
@@ -176,7 +183,13 @@ async fn messages_anthropic_inner(
             other => other,
         }
     };
-    let stop_sequence: Option<String> = None;
+    // Anthropic reports the matched custom stop sequence alongside the
+    // `stop_sequence` reason; null for a model-driven end-of-turn.
+    let stop_sequence: Option<String> = if tool_calls.is_empty() {
+        matched_stop
+    } else {
+        None
+    };
 
     let mut content: Vec<AnthropicResponseBlock> = Vec::new();
     if let Some(reasoning) = reasoning.filter(|r| !r.is_empty()) {
