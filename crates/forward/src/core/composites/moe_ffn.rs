@@ -492,10 +492,12 @@ fn moe_ffn_loop<H: TopologyHooks>(
         let shared_view = flambeau_model_ops::SharedExpertPrefillScratch {
             max_tokens: state.pool.config.max_prefill_tokens,
             x_q8_1: state.pool.norm_q8_1,
+            x_q8_1_mmq: state.pool.norm_q8_1_mmq,
             gate_f32: state.pool.gate_f32,
             up_f32: state.pool.up_f32,
             activated_f16: state.pool.gated_f16,
             activated_q8_1: state.pool.gated_q8_1,
+            activated_q8_1_mmq: state.pool.gated_q8_1_mmq,
             down_f32: state.pool.down_f32,
             x_norm_f32: state.pool.shared_x_norm_f32,
         };
@@ -760,10 +762,12 @@ fn gemma4_moe_cascade_batched<H: TopologyHooks>(
     let shared_scratch = flambeau_model_ops::SharedExpertPrefillScratch {
         max_tokens: state.pool.config.max_prefill_tokens,
         x_q8_1: state.pool.norm_q8_1,
+        x_q8_1_mmq: state.pool.norm_q8_1_mmq,
         gate_f32: state.pool.gate_f32,
         up_f32: state.pool.up_f32,
         activated_f16: state.pool.gated_f16,
         activated_q8_1: state.pool.gated_q8_1,
+        activated_q8_1_mmq: state.pool.gated_q8_1_mmq,
         down_f32: state.pool.down_f32,
         x_norm_f32: state.pool.shared_x_norm_f32,
     };

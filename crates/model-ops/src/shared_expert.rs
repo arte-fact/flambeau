@@ -37,13 +37,15 @@ pub struct SharedExpertDecodeScratch {
 #[derive(Copy, Clone)]
 pub struct SharedExpertPrefillScratch {
     pub max_tokens: usize,
-    pub x_q8_1: DevicePtr,         // Q8_1 [max_tokens * hidden / 32]
-    pub gate_f32: DevicePtr,       // F32 [max_tokens, intermediate]
-    pub up_f32: DevicePtr,         // F32 [max_tokens, intermediate]
-    pub activated_f16: DevicePtr,  // F16 [max_tokens, intermediate]
-    pub activated_q8_1: DevicePtr, // Q8_1 [max_tokens * intermediate / 32]
-    pub down_f32: DevicePtr,       // F32 [max_tokens, hidden] — scaled in place
-    pub x_norm_f32: DevicePtr,     // F32 [max_tokens, hidden]
+    pub x_q8_1: DevicePtr,     // Q8_1 (MMVQ) [max_tokens * hidden / 32]
+    pub x_q8_1_mmq: DevicePtr, // Q8_1 (MMQ 144-B/block) sibling for m >= 32
+    pub gate_f32: DevicePtr,   // F32 [max_tokens, intermediate]
+    pub up_f32: DevicePtr,     // F32 [max_tokens, intermediate]
+    pub activated_f16: DevicePtr, // F16 [max_tokens, intermediate]
+    pub activated_q8_1: DevicePtr, // Q8_1 (MMVQ) [max_tokens * intermediate / 32]
+    pub activated_q8_1_mmq: DevicePtr, // Q8_1 (MMQ) sibling for the down matmul
+    pub down_f32: DevicePtr,   // F32 [max_tokens, hidden] — scaled in place
+    pub x_norm_f32: DevicePtr, // F32 [max_tokens, hidden]
 }
 
 /// Shape inputs needed to size a `SharedExpert` decode scratch.
@@ -82,10 +84,12 @@ impl OwnedSharedExpertDecodeScratch {
 pub struct OwnedSharedExpertPrefillScratch {
     pub max_tokens: usize,
     pub x_q8_1: DevicePtr,
+    pub x_q8_1_mmq: DevicePtr,
     pub gate_f32: DevicePtr,
     pub up_f32: DevicePtr,
     pub activated_f16: DevicePtr,
     pub activated_q8_1: DevicePtr,
+    pub activated_q8_1_mmq: DevicePtr,
     pub down_f32: DevicePtr,
     pub x_norm_f32: DevicePtr,
 }
@@ -95,10 +99,12 @@ impl OwnedSharedExpertPrefillScratch {
         SharedExpertPrefillScratch {
             max_tokens: self.max_tokens,
             x_q8_1: self.x_q8_1,
+            x_q8_1_mmq: self.x_q8_1_mmq,
             gate_f32: self.gate_f32,
             up_f32: self.up_f32,
             activated_f16: self.activated_f16,
             activated_q8_1: self.activated_q8_1,
+            activated_q8_1_mmq: self.activated_q8_1_mmq,
             down_f32: self.down_f32,
             x_norm_f32: self.x_norm_f32,
         }
@@ -223,19 +229,23 @@ impl SharedExpert {
             intermediate,
         } = dims;
         let (x_q8_1, _) = tracker.alloc_q8_1(device, max_tokens * hidden)?;
+        let (x_q8_1_mmq, _) = tracker.alloc_q8_1_mmq(device, max_tokens * hidden)?;
         let (gate_f32, _) = tracker.alloc_f32(device, max_tokens * intermediate)?;
         let (up_f32, _) = tracker.alloc_f32(device, max_tokens * intermediate)?;
         let (activated_f16, _) = tracker.alloc_f16(device, max_tokens * intermediate)?;
         let (activated_q8_1, _) = tracker.alloc_q8_1(device, max_tokens * intermediate)?;
+        let (activated_q8_1_mmq, _) = tracker.alloc_q8_1_mmq(device, max_tokens * intermediate)?;
         let (down_f32, _) = tracker.alloc_f32(device, max_tokens * hidden)?;
         let (x_norm_f32, _) = tracker.alloc_f32(device, max_tokens * hidden)?;
         Ok(OwnedSharedExpertPrefillScratch {
             max_tokens,
             x_q8_1,
+            x_q8_1_mmq,
             gate_f32,
             up_f32,
             activated_f16,
             activated_q8_1,
+            activated_q8_1_mmq,
             down_f32,
             x_norm_f32,
         })
@@ -503,16 +513,27 @@ impl SharedExpert {
         let hidden = self.hidden;
         let inter = self.intermediate;
 
-        // 1. Quantise x_norm[L, hidden] → Q8_1.
+        // 1. Quantise x_norm[L, hidden] → Q8_1 (MMVQ), and — only when the
+        // contraction dim is MMQ-eligible (ncols % 128 == 0) — also the MMQ
+        // (144-B/block) layout. The qmatmul auto-dispatches by m=n_tokens and
+        // reads the MMQ activation at m >= 32; when `k` is not MMQ-eligible
+        // the dispatch stays on MMVQ, so a null MMQ pointer is correct.
         ops.quantize_f16_q8_1(x_norm, scratch.x_q8_1, n_tokens * hidden)
             .context("shexp prefill x_norm → Q8_1")?;
+        let x_q8_1_mmq = if hidden % 128 == 0 {
+            ops.quantize_f16_q8_1_mmq(x_norm, scratch.x_q8_1_mmq, hidden, n_tokens)
+                .context("shexp prefill x_norm → Q8_1 (MMQ)")?;
+            scratch.x_q8_1_mmq
+        } else {
+            DevicePtr(0)
+        };
 
         // 2-3. gate + up qmatmul (auto MMVQ / MMQ dispatch by m=n_tokens).
         ops.qmatmul(
             flambeau_ops::QmatmulBuffers {
                 weights: self.ffn_gate_shexp.ptr,
                 act_q8_1: scratch.x_q8_1,
-                act_q8_1_mmq: DevicePtr(0),
+                act_q8_1_mmq: x_q8_1_mmq,
                 dst: scratch.gate_f32,
             },
             flambeau_ops::MatmulShape {
@@ -527,7 +548,7 @@ impl SharedExpert {
             flambeau_ops::QmatmulBuffers {
                 weights: self.ffn_up_shexp.ptr,
                 act_q8_1: scratch.x_q8_1,
-                act_q8_1_mmq: DevicePtr(0),
+                act_q8_1_mmq: x_q8_1_mmq,
                 dst: scratch.up_f32,
             },
             flambeau_ops::MatmulShape {
@@ -561,13 +582,20 @@ impl SharedExpert {
         }
         ops.quantize_f16_q8_1(scratch.activated_f16, scratch.activated_q8_1, n_total)
             .context("shexp prefill activated → Q8_1")?;
+        let activated_q8_1_mmq = if inter % 128 == 0 {
+            ops.quantize_f16_q8_1_mmq(scratch.activated_f16, scratch.activated_q8_1_mmq, inter, n_tokens)
+                .context("shexp prefill activated → Q8_1 (MMQ)")?;
+            scratch.activated_q8_1_mmq
+        } else {
+            DevicePtr(0)
+        };
 
         // 6. down qmatmul → F32 (caller's `down_out_f32` ptr).
         ops.qmatmul(
             flambeau_ops::QmatmulBuffers {
                 weights: self.ffn_down_shexp.ptr,
                 act_q8_1: scratch.activated_q8_1,
-                act_q8_1_mmq: DevicePtr(0),
+                act_q8_1_mmq: activated_q8_1_mmq,
                 dst: down_out_f32,
             },
             flambeau_ops::MatmulShape {

@@ -119,7 +119,12 @@ pub fn qmatmul(
         let _ = act_q8_1_mmq;
         return Ok(());
     }
-    if m < 32
+    // Route to per-row / batched MMVQ for m < 32 (no MMQ amortization) OR
+    // whenever k is not 128-aligned (the LDS-tiled MMQ this dtype would
+    // otherwise dispatch to at m >= 32 requires k % 128 == 0; a shared-expert
+    // intermediate like 1056 is k % 128 == 32). MMVQ consumes the standard
+    // Q8_1 activation and only needs k % 32.
+    if (m < 32 || k % 128 != 0)
         && matches!(dtype_weight, QDtype::Q4_0 | QDtype::Q5_0 | QDtype::Q5_1)
     {
         // K1 — Q4_0 at m ∈ {2, 3, 4}: single-launch batched MMVQ with
@@ -206,7 +211,29 @@ pub fn qmatmul(
             dtype_weight.name()
         )
     })?;
-    let recipe = Recipe::from_impl_id(desc.impl_id)?;
+    let mut recipe = Recipe::from_impl_id(desc.impl_id)?;
+    // MmqLdsX64 (LDS-tiled MMQ with the DS4 144-B/block activation) requires
+    // k % 128 == 0. The m-range dispatch table doesn't encode that, so a
+    // non-128-aligned contraction dim (e.g. a shared-expert intermediate)
+    // can resolve here. Re-dispatch as if m=1 to obtain the dtype's MMVQ
+    // impl, which consumes the standard Q8_1 activation and only needs
+    // k % 32; the Mmvq arm then loops it over the real m rows.
+    if matches!(recipe.kind, RecipeKind::MmqLdsX64) && k % 128 != 0 {
+        let mmvq_cfg = QMatMulCfg {
+            dtype_weight,
+            dtype_activation: QDtype::Q8_1,
+            m: 1,
+            k,
+            n,
+        };
+        let mmvq_desc = dispatch_qmatmul(&mmvq_cfg).ok_or_else(|| {
+            anyhow!(
+                "no MMVQ fallback impl for dtype={} k={k} n={n} (k % 128 != 0)",
+                dtype_weight.name()
+            )
+        })?;
+        recipe = Recipe::from_impl_id(mmvq_desc.impl_id)?;
+    }
 
     match recipe.kind {
         RecipeKind::Mmvq => {
