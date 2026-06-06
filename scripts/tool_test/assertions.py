@@ -361,8 +361,33 @@ def check_s8(resp: Any) -> list[dict]:
     return out
 
 
+def check_s9(resp: Any) -> list[dict]:
+    """`resp` is the logit_bias handler dict from run.py
+    (`{first_word, baseline, banned}`)."""
+    out = []
+    fw = resp.get("first_word", "")
+    banned = resp.get("banned", "")
+    out.append({
+        "name": "baseline produced a lead word",
+        "pass": bool(fw),
+        "detail": f"first_word={fw!r}",
+    })
+    out.append({
+        "name": "banned-run output non-empty",
+        "pass": bool(banned.strip()),
+        "detail": f"out={banned[:60]!r}",
+    })
+    lead = banned.lower().lstrip(' "*\n')
+    out.append({
+        "name": "banned token does not lead the output",
+        "pass": bool(fw) and not lead.startswith(fw.lower()),
+        "detail": f"first_word={fw!r} banned_out={banned[:40]!r}",
+    })
+    return out
+
+
 CHECKS = {
     "S1": check_s1, "S2": check_s2, "S3": check_s3,
     "S4": check_s4, "S5": check_s5, "S6": check_s6,
-    "S7": check_s7, "S8": check_s8,
+    "S7": check_s7, "S8": check_s8, "S9": check_s9,
 }

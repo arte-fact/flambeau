@@ -97,6 +97,8 @@ pub struct SamplingKnobs {
     pub repetition_penalty: Option<f32>,
     pub presence_penalty: Option<f32>,
     pub frequency_penalty: Option<f32>,
+    /// OpenAI `logit_bias` — additive per-token-id bias. `None` when unset.
+    pub logit_bias: Option<std::sync::Arc<std::collections::HashMap<u32, f32>>>,
 }
 
 /// Per-request generation budget + stop conditions.
@@ -152,6 +154,7 @@ impl SamplingParams {
             repetition_penalty,
             presence_penalty,
             frequency_penalty,
+            logit_bias,
         } = knobs;
         let GenerationLimits { max_tokens, seed, stop_strings } = limits;
         let ResponseMode {
@@ -209,6 +212,7 @@ impl SamplingParams {
             repetition_penalty,
             presence_penalty: presence_penalty.unwrap_or(0.0),
             frequency_penalty: frequency_penalty.unwrap_or(0.0),
+            logit_bias,
         };
         SamplingParams {
             sampling,

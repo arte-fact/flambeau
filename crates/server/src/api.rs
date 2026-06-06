@@ -167,6 +167,23 @@ pub struct ChatCompletionRequest {
     /// OpenAI-compat shape.
     #[serde(default)]
     pub enable_thinking: Option<bool>,
+
+    // ---- Newer OpenAI fields ----------------------------------------
+    /// OpenAI `max_completion_tokens` — the current name for `max_tokens`
+    /// on the chat endpoint. When both are sent, `max_tokens` wins (it is
+    /// the legacy explicit field); otherwise this is used.
+    #[serde(default)]
+    pub max_completion_tokens: Option<u32>,
+    /// OpenAI `logit_bias`: map of token-id (as a string key) to an
+    /// additive bias in roughly [-100, 100]; -100 effectively bans a
+    /// token, +100 forces it. Applied to the logits before temperature.
+    #[serde(default)]
+    pub logit_bias: Option<std::collections::HashMap<u32, f32>>,
+    /// OpenAI `reasoning_effort` (`"low"|"medium"|"high"`, o-series).
+    /// Any non-`"none"` value enables the thinking channel; the per-level
+    /// thinking-token budget is applied in a later slice.
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
 }
 
 /// OpenAI streaming-options envelope. Today only `include_usage` is
@@ -327,6 +344,10 @@ pub struct FunctionCall {
 
 // ---- Chat-completion response ---------------------------------------------
 
+/// Build identifier surfaced as OpenAI `system_fingerprint` so clients can
+/// detect a backend change across otherwise-identical requests.
+pub const SYSTEM_FINGERPRINT: &str = concat!("fp_flambeau_", env!("CARGO_PKG_VERSION"));
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ChatCompletionResponse {
     pub id: String,
@@ -335,6 +356,7 @@ pub struct ChatCompletionResponse {
     pub model: String,
     pub choices: Vec<ChatChoice>,
     pub usage: Usage,
+    pub system_fingerprint: &'static str,
 }
 
 #[derive(Debug, Clone, Serialize)]

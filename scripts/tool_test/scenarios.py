@@ -147,3 +147,15 @@ def s8(model: str) -> dict:
         extra_body={"enable_thinking": True},
         **{**COMMON, "temperature": 1.0, "max_tokens": 1024},
     )
+
+
+def s9(model: str) -> dict:
+    """Base kwargs for the logit_bias scenario (handler-driven in run.py):
+    the answer's lead token is tokenized then banned via `logit_bias`, and
+    the re-run must not lead with it."""
+    return dict(
+        model=model,
+        messages=[{"role": "user",
+                   "content": "What is the capital of France? Reply with one word."}],
+        **{**COMMON, "max_tokens": 16},
+    )

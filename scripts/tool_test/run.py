@@ -26,7 +26,40 @@ import scenarios  # noqa: E402
 MODELS = ["qwen3.6-27b-q4_0", "qwen3.6-35b-a3b-q4_0",
           "gemma4-31b-q4_0", "gemma4-26b-a4b-q8_0"]
 
-SCENARIOS = ["S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8"]
+SCENARIOS = ["S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9"]
+
+
+def tokenize_ids(base_url: str, text: str) -> list[int]:
+    """Hit the server's /tokenize endpoint (not an OpenAI route) via stdlib."""
+    import urllib.request
+    body = json.dumps({"content": text}).encode()
+    req = urllib.request.Request(
+        base_url.rstrip("/") + "/tokenize", data=body,
+        headers={"content-type": "application/json"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.load(r)["tokens"]
+
+
+def run_logit_bias(client: OpenAI, model: str) -> dict:
+    """Baseline → ban the answer's lead token via logit_bias → re-run.
+    Returns the dict consumed by assertions.check_s9."""
+    base_url = str(client.base_url)
+    kwargs = scenarios.s9(model)
+    baseline = client.chat.completions.create(**kwargs)
+    content = (baseline.choices[0].message.content or "").strip()
+    first_word = content.split()[0].strip(".,!?\"'") if content else ""
+    if not first_word:
+        return {"first_word": "", "baseline": content, "banned": ""}
+    ids = set(tokenize_ids(base_url, first_word)
+              + tokenize_ids(base_url, " " + first_word))
+    kwargs2 = dict(kwargs)
+    kwargs2["logit_bias"] = {i: -100 for i in ids}
+    banned = client.chat.completions.create(**kwargs2)
+    return {
+        "first_word": first_word,
+        "baseline": content,
+        "banned": (banned.choices[0].message.content or "").strip(),
+    }
 
 
 def accumulate_stream(stream: Any) -> dict:
@@ -91,6 +124,22 @@ def run_one(client: OpenAI, model: str, scenario: str,
             }
             return True, fixture
         kwargs = scenarios.s3_followup(model, to_dict(s1_msg), tcs[0].id)
+    elif scenario == "S9":
+        try:
+            resp = run_logit_bias(client, model)
+        except Exception as e:
+            print(f"REQUEST FAILED: {e}")
+            return False, {"scenario": scenario, "error": str(e), "verdict": "error"}
+        checks = assertions.CHECKS[scenario](resp)
+        verdict = "pass" if all(c["pass"] for c in checks) else "fail"
+        fails = [c for c in checks if not c["pass"]]
+        print(f"{verdict.upper()}"
+              + (f" ({len(fails)} failed: "
+                 + ", ".join(c["name"] for c in fails[:3]) + ")" if fails else ""))
+        return verdict == "pass" or not do_assert, {
+            "model": model, "scenario": scenario, "response": resp,
+            "checks": checks, "verdict": verdict,
+        }
     else:
         kwargs = getattr(scenarios, scenario.lower())(model)
     streaming = bool(kwargs.get("stream"))

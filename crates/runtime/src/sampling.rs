@@ -44,6 +44,9 @@ pub struct Sampling {
     pub repetition_penalty: f32,
     pub presence_penalty: f32,
     pub frequency_penalty: f32,
+    /// OpenAI `logit_bias`: additive per-token-id bias applied to the
+    /// logits before temperature and filtering. `None` when unset.
+    pub logit_bias: Option<std::sync::Arc<std::collections::HashMap<u32, f32>>>,
 }
 
 impl Default for Sampling {
@@ -64,6 +67,7 @@ impl Sampling {
             repetition_penalty: 1.0,
             presence_penalty: 0.0,
             frequency_penalty: 0.0,
+            logit_bias: None,
         }
     }
 
@@ -151,11 +155,24 @@ pub fn sample(logits: &[f32], mode: &Sampling, history: &[u32], rng: &mut Rng) -
     // touching the caller's buffer.
     let mut scratch: Vec<f32> = logits.to_vec();
     apply_penalties(&mut scratch, history, mode);
+    apply_logit_bias(&mut scratch, mode);
     if mode.is_greedy() {
         return argmax(&scratch);
     }
     let mut pair_scratch: Vec<(u32, f32)> = Vec::new();
     sample_stochastic(&scratch, mode, rng, &mut pair_scratch)
+}
+
+/// Add the OpenAI `logit_bias` map (token-id → additive bias) in place.
+/// No-op when unset. Out-of-range ids are ignored.
+fn apply_logit_bias(logits: &mut [f32], mode: &Sampling) {
+    if let Some(bias) = mode.logit_bias.as_deref() {
+        for (&id, &b) in bias.iter() {
+            if let Some(l) = logits.get_mut(id as usize) {
+                *l += b;
+            }
+        }
+    }
 }
 
 /// Per-session sampler that reuses scratch across tokens. On Qwen3.6
@@ -293,16 +310,20 @@ impl Sampler {
         // Saves ~150 µs/token on Qwen3.6's V=151424 vocab at default
         // penalties (the chat-temp+top_p case the user hit).
         let needs_penalties = mode.has_penalties() && !history.is_empty();
-        let logits_view: &[f32] = if needs_penalties {
+        let bias_active = mode.logit_bias.as_deref().is_some_and(|b| !b.is_empty());
+        let logits_view: &[f32] = if needs_penalties || bias_active {
             self.logit_scratch.clear();
             self.logit_scratch.extend_from_slice(logits);
-            apply_penalties_with_scratch(
-                &mut self.logit_scratch,
-                history,
-                mode,
-                &mut self.history_sorted,
-                &mut self.history_counts,
-            );
+            if needs_penalties {
+                apply_penalties_with_scratch(
+                    &mut self.logit_scratch,
+                    history,
+                    mode,
+                    &mut self.history_sorted,
+                    &mut self.history_counts,
+                );
+            }
+            apply_logit_bias(&mut self.logit_scratch, mode);
             &self.logit_scratch
         } else {
             logits
@@ -327,13 +348,26 @@ impl Sampler {
 /// **penalty-adjusted** logits (history is still applied so penalty
 /// effects on the argmax are respected).
 pub fn build_distribution(logits: &[f32], mode: &Sampling, history: &[u32]) -> Vec<(u32, f32)> {
-    // /h penalty-aware path. If no penalties active, skip the
-    // O(V)-byte clone and operate on the input slice directly.
+    // /h penalty-aware path. If neither penalties nor logit_bias are
+    // active, skip the O(V)-byte clone and operate on the input slice.
     let needs_penalties = mode.has_penalties() && !history.is_empty();
+    let bias = mode
+        .logit_bias
+        .as_deref()
+        .filter(|b| !b.is_empty());
     let logits_owned: Vec<f32>;
-    let logits_view: &[f32] = if needs_penalties {
+    let logits_view: &[f32] = if needs_penalties || bias.is_some() {
         let mut scratch: Vec<f32> = logits.to_vec();
-        apply_penalties(&mut scratch, history, mode);
+        if needs_penalties {
+            apply_penalties(&mut scratch, history, mode);
+        }
+        if let Some(bias) = bias {
+            for (&id, &b) in bias.iter() {
+                if let Some(l) = scratch.get_mut(id as usize) {
+                    *l += b;
+                }
+            }
+        }
         logits_owned = scratch;
         &logits_owned
     } else {

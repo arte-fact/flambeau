@@ -157,6 +157,13 @@ pub async fn chat_completions(
         .as_deref()
         .map(|s| s.as_bytes().to_vec())
         .unwrap_or_default();
+    // `reasoning_effort` (o-series) enables thinking when set to anything
+    // other than "none"; `enable_thinking` is the flambeau-native toggle.
+    let enable_thinking = req.enable_thinking.unwrap_or(false)
+        || req
+            .reasoning_effort
+            .as_deref()
+            .is_some_and(|e| !e.eq_ignore_ascii_case("none"));
     let params = SamplingParams::from_parts(
         crate::state::SamplingKnobs {
             temperature: req.temperature,
@@ -166,16 +173,19 @@ pub async fn chat_completions(
             repetition_penalty: req.repetition_penalty,
             presence_penalty: req.presence_penalty,
             frequency_penalty: req.frequency_penalty,
+            logit_bias: req.logit_bias.clone().map(std::sync::Arc::new),
         },
         crate::state::GenerationLimits {
-            max_tokens: req.max_tokens,
+            // `max_completion_tokens` is OpenAI's current name; `max_tokens`
+            // is the legacy field and wins when both are present.
+            max_tokens: req.max_tokens.or(req.max_completion_tokens),
             seed: req.seed,
             stop_strings,
         },
         crate::state::ResponseMode {
             json_mode,
             collect_logprobs,
-            enable_thinking: req.enable_thinking.unwrap_or(false),
+            enable_thinking,
             json_prime_bytes,
         },
         &state.model_defaults,
@@ -337,6 +347,7 @@ pub async fn chat_completions(
             completion_tokens: sum_completion_tokens,
             total_tokens: sum_prompt_tokens.saturating_add(sum_completion_tokens),
         },
+        system_fingerprint: crate::api::SYSTEM_FINGERPRINT,
     })
     .into_response())
 }
