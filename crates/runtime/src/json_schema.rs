@@ -228,6 +228,10 @@ enum ObjStage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[expect(
+    clippy::enum_variant_names,
+    reason = "each stage names the token it expects next"
+)]
 enum ArrStage {
     ExpectValueOrClose,
     ExpectValue,
