@@ -255,25 +255,40 @@ pub fn dispatcher(
     request_override: Option<&str>,
     server_default: ToolCallFormat,
 ) -> Result<Box<dyn ToolCallParser>> {
-    dispatcher_with_prompt(request_override, server_default, "")
+    dispatcher_with_prompt(request_override, server_default, "", false)
 }
 
-/// Same as [`dispatcher`] but inspects the rendered prompt tail so the
-/// parser can prime itself when the prompt's last marker carries state
-/// the model will continue. Concretely: gemma4's chat template ends
-/// the assistant-generation prompt with `<channel|>` (a closed empty
-/// thought block); the model often re-opens that block in its first
-/// decoded tokens, so the parser starts in `InChannel` to route those
-/// bytes into reasoning instead of user-visible content. Non-gemma4
-/// formats ignore the hint.
+/// Same as [`dispatcher`] but primes the parser for state the prompt
+/// already opened. Two triggers:
+///
+/// - `prompt` tail: gemma4's chat template ends the assistant-generation
+///   prompt with `<channel|>` (a closed empty thought block); the model
+///   often re-opens that block in its first decoded tokens, so the parser
+///   starts in `InChannel` to route those bytes into reasoning instead of
+///   user-visible content. Non-gemma4 formats ignore the hint.
+/// - `start_in_reasoning`: the `<think>`-style templates (qwen/deepseek)
+///   prime the reasoning open marker in the prompt prefix when thinking is
+///   enabled, so the model's first decoded tokens are reasoning with no
+///   literal `<think>` to detect. The ThinkTag parsers then start in their
+///   in-think state. Gemma4 reasoning is handled by the channel priming
+///   above, so it ignores this flag.
 pub fn dispatcher_with_prompt(
     request_override: Option<&str>,
     server_default: ToolCallFormat,
     prompt: &str,
+    start_in_reasoning: bool,
 ) -> Result<Box<dyn ToolCallParser>> {
     match choose_format(request_override, server_default)? {
-        ToolCallFormat::Hermes => Ok(Box::new(hermes::HermesJsonParser::new())),
-        ToolCallFormat::QwenCoder => Ok(Box::new(qwen3_coder::QwenCoderXmlParser::new())),
+        ToolCallFormat::Hermes => Ok(Box::new(if start_in_reasoning {
+            hermes::HermesJsonParser::new_in_think()
+        } else {
+            hermes::HermesJsonParser::new()
+        })),
+        ToolCallFormat::QwenCoder => Ok(Box::new(if start_in_reasoning {
+            qwen3_coder::QwenCoderXmlParser::new_in_think()
+        } else {
+            qwen3_coder::QwenCoderXmlParser::new()
+        })),
         ToolCallFormat::Gemma4 => {
             // Always prime the scaffolding-echo strip for gemma4. The
             // model regurgitates a corrupted `<|turn>model` /

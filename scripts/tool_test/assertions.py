@@ -325,8 +325,44 @@ def check_s7(resp: Any) -> list[dict]:
     return out
 
 
+def check_s8(resp: Any) -> list[dict]:
+    """`resp` here is the accumulated-stream dict from run.py
+    (`{reasoning, content, order, finish_reason}`), not an SDK object."""
+    out = []
+    reasoning = resp.get("reasoning", "")
+    content = resp.get("content", "")
+    order = resp.get("order", [])
+    truncated = resp.get("finish_reason") == "length"
+    out.append({
+        "name": "reasoning_content streamed as deltas",
+        "pass": bool(reasoning.strip()),
+        "detail": f"reasoning_len={len(reasoning)}",
+    })
+    out.append({
+        "name": "answer content streamed (or truncated mid-think)",
+        "pass": bool(content.strip()) or truncated,
+        "detail": f"content_len={len(content)} truncated={truncated}",
+    })
+    leaked = "<think>" in content or "</think>" in content or _has_leak(content)
+    out.append({
+        "name": "no think/channel markers in content deltas",
+        "pass": not leaked,
+        "detail": f"content[:80]={content[:80]!r}",
+    })
+    # Reasoning must lead: the first reasoning delta precedes the first
+    # content delta.
+    first_r = order.index("r") if "r" in order else len(order)
+    first_c = order.index("c") if "c" in order else len(order)
+    out.append({
+        "name": "reasoning deltas precede content deltas",
+        "pass": first_r <= first_c,
+        "detail": f"first_reasoning={first_r} first_content={first_c}",
+    })
+    return out
+
+
 CHECKS = {
     "S1": check_s1, "S2": check_s2, "S3": check_s3,
     "S4": check_s4, "S5": check_s5, "S6": check_s6,
-    "S7": check_s7,
+    "S7": check_s7, "S8": check_s8,
 }

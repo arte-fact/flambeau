@@ -26,7 +26,32 @@ import scenarios  # noqa: E402
 MODELS = ["qwen3.6-27b-q4_0", "qwen3.6-35b-a3b-q4_0",
           "gemma4-31b-q4_0", "gemma4-26b-a4b-q8_0"]
 
-SCENARIOS = ["S1", "S2", "S3", "S4", "S5", "S6", "S7"]
+SCENARIOS = ["S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8"]
+
+
+def accumulate_stream(stream: Any) -> dict:
+    """Drain a streaming chat completion into reasoning/content text plus the
+    interleave order, so the S8 check can assert the split + ordering."""
+    reasoning, content, order = "", "", []
+    finish = None
+    for chunk in stream:
+        if not chunk.choices:
+            continue
+        choice = chunk.choices[0]
+        if choice.finish_reason:
+            finish = choice.finish_reason
+        delta = choice.delta
+        rc = getattr(delta, "reasoning_content", None)
+        if rc is None:
+            rc = (getattr(delta, "model_extra", None) or {}).get("reasoning_content")
+        if rc:
+            reasoning += rc
+            order.append("r")
+        if getattr(delta, "content", None):
+            content += delta.content
+            order.append("c")
+    return {"reasoning": reasoning, "content": content,
+            "order": order, "finish_reason": finish}
 
 
 def fixture_path(model: str, scenario: str) -> pathlib.Path:
@@ -68,8 +93,12 @@ def run_one(client: OpenAI, model: str, scenario: str,
         kwargs = scenarios.s3_followup(model, to_dict(s1_msg), tcs[0].id)
     else:
         kwargs = getattr(scenarios, scenario.lower())(model)
+    streaming = bool(kwargs.get("stream"))
     try:
-        resp = client.chat.completions.create(**kwargs)
+        if streaming:
+            resp = accumulate_stream(client.chat.completions.create(**kwargs))
+        else:
+            resp = client.chat.completions.create(**kwargs)
     except Exception as e:
         print(f"REQUEST FAILED: {e}")
         return False, {"scenario": scenario, "error": str(e),

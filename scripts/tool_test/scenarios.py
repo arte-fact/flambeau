@@ -132,3 +132,18 @@ def s7(model: str) -> dict:
         extra_body={"enable_thinking": True},
         **{**COMMON, "temperature": 1.0, "max_tokens": 1024},
     )
+
+
+def s8(model: str) -> dict:
+    """Streaming thinking: reasoning must arrive as distinct
+    `delta.reasoning_content` chunks, ahead of and separate from the
+    answer `delta.content`, with no `<think>` markers leaking into either."""
+    return dict(
+        model=model,
+        messages=[{"role": "user",
+                   "content": "A bat and ball cost $1.10. The bat costs $1 more "
+                              "than the ball. How much is the ball? Think it through."}],
+        stream=True,
+        extra_body={"enable_thinking": True},
+        **{**COMMON, "temperature": 1.0, "max_tokens": 1024},
+    )

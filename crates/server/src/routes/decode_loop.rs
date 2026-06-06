@@ -32,7 +32,8 @@ pub(crate) fn stream_completion_sse(
     relax_stop_mask: bool,
     include_usage: bool,
 ) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
-    use crate::tool_call_parser::{dispatcher, ParserEvent};
+    use crate::model_handle::ReasoningStyle;
+    use crate::tool_call_parser::{dispatcher_with_prompt, ParserEvent};
 
     let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(32);
     let id = request_id("chatcmpl");
@@ -61,9 +62,17 @@ pub(crate) fn stream_completion_sse(
         // Build the parser once per request. Default format is
         // boot-detected from the chat template (L3); the request may
         // override explicitly.
-        let parser_result = dispatcher(
+        // `<think>`-style templates prime the reasoning open marker in the
+        // prompt prefix when thinking is enabled, so the model streams
+        // reasoning with no literal `<think>` to detect — start the parser
+        // in its in-think state so those tokens route to `reasoning_content`.
+        let start_in_reasoning = params.enable_thinking
+            && state_clone.model.reasoning_markers().style == ReasoningStyle::ThinkTag;
+        let parser_result = dispatcher_with_prompt(
             tool_call_format.as_deref(),
             state_clone.tool_call_format_default,
+            &prompt,
+            start_in_reasoning,
         );
         let mut parser = match parser_result {
             Ok(p) => p,
@@ -112,7 +121,7 @@ pub(crate) fn stream_completion_sse(
             for e in events {
                 let sent = match e {
                     ParserEvent::TextDelta(s) => emit_chunk(json!({ "content": s })),
-                    ParserEvent::ThinkDelta(_) => true, // discard; V3 will surface
+                    ParserEvent::ThinkDelta(s) => emit_chunk(json!({ "reasoning_content": s })),
                     ParserEvent::ToolCallOpen { index, name } => {
                         *has_tool_calls = true;
                         emit_chunk(json!({

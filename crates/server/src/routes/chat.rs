@@ -271,6 +271,9 @@ pub async fn chat_completions(
             req.tool_call_format.as_deref(),
             state.tool_call_format_default,
             &prompt,
+            // Non-stream reasoning is split by `finalise` over the full text,
+            // so the parser does not need think-priming here.
+            false,
         )
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
         let mut events = parser.push(&text);

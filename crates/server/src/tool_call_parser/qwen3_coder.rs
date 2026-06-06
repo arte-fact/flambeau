@@ -105,6 +105,16 @@ impl QwenCoderXmlParser {
         }
     }
 
+    /// Start already inside a `<think>` block (template-primed reasoning,
+    /// so the model's first decoded tokens are reasoning with no literal
+    /// `<think>` to detect).
+    pub fn new_in_think() -> Self {
+        Self {
+            state: State::InThink,
+            ..Self::new()
+        }
+    }
+
     /// Drain as much of `self.buf` as the current state allows. Appends
     /// produced events to `out`. Stops when progress is no longer
     /// possible without more input.

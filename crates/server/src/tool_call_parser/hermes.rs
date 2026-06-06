@@ -52,6 +52,16 @@ impl HermesJsonParser {
         Self::default()
     }
 
+    /// Start already inside a `<think>` block. Used when the chat template
+    /// primes the reasoning open marker in the prompt prefix, so the model's
+    /// first decoded tokens are reasoning with no literal `<think>` to detect.
+    pub fn new_in_think() -> Self {
+        Self {
+            state: State::InThink,
+            ..Self::default()
+        }
+    }
+
     fn drain(&mut self, out: &mut Vec<ParserEvent>, is_finish: bool) {
         loop {
             let progress = match self.state {
