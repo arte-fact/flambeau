@@ -150,7 +150,43 @@ pub(super) fn finalise(
     }
     let mut text = state.tokenizer.decode(&generated).context("decode")?;
 
-    let reasoning_content: Option<String> = if enable_thinking {
+    // Reasoning-channel split is per output FORMAT, detected from the text
+    // (not an arch string): gemma4 emits a harmony-style channel
+    // `<|channel>thought {cot} <channel|> {answer}`; qwen/deepseek emit
+    // `<think> {cot} </think> {answer}`. Either way the chain-of-thought is
+    // lifted into `reasoning_content` and the user-facing answer is kept clean.
+    let reasoning_content: Option<String> = if let Some(close) = text.find("<channel|>") {
+        // `text[..close]` is `<|channel>{name}\n{reasoning}` (or just the
+        // marker for an empty thought). Drop the open marker + channel-name
+        // line; keep the reasoning body.
+        let head = text[..close].trim();
+        let head = head.strip_prefix("<|channel>").unwrap_or(head);
+        let cot = head
+            .split_once('\n')
+            .map(|(_name, body)| body.trim())
+            .unwrap_or("")
+            .to_string();
+        let mut answer = text[close + "<channel|>".len()..].to_string();
+        // Drop a leading channel name on the answer span (e.g. "final\n…").
+        if let Some(nl) = answer.find('\n') {
+            let head = answer[..nl].trim();
+            if head.is_empty() || head == "final" {
+                answer = answer[nl + 1..].to_string();
+            }
+        }
+        // Truncate at any further channel scaffolding the model leaks.
+        for m in ["<|channel>", "<channel|>"] {
+            if let Some(i) = answer.find(m) {
+                answer.truncate(i);
+            }
+        }
+        text = answer.trim().to_string();
+        if cot.is_empty() {
+            None
+        } else {
+            Some(cot)
+        }
+    } else if enable_thinking {
         if let Some(end_idx) = text.find("</think>") {
             let cot_raw = &text[..end_idx];
             let cot = cot_raw.trim_start_matches("<think>").trim().to_string();
