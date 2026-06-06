@@ -40,7 +40,7 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         arch: "gfx906",
         dtype_weight: QDtype::IQ4_XS,
         dtype_activation: QDtype::Q8_1,
-        m_range: (1, 127),
+        m_range: (1, 31),
         cert_rel_path: "certs/hip/gfx906/qmatmul_iq4_xs_mmvq_dp4a_gfx906.json",
     },
     KernelDescriptor {
@@ -50,7 +50,7 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         arch: "gfx906",
         dtype_weight: QDtype::IQ4_XS,
         dtype_activation: QDtype::Q8_1,
-        m_range: (128, usize::MAX),
+        m_range: (32, usize::MAX),
         cert_rel_path: "certs/hip/gfx906/qmatmul_iq4_xs_mmq_wave64_gfx906.json",
     },
     KernelDescriptor {
@@ -60,7 +60,7 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         arch: "gfx906",
         dtype_weight: QDtype::IQ4_NL,
         dtype_activation: QDtype::Q8_1,
-        m_range: (1, 127),
+        m_range: (1, 31),
         cert_rel_path: "certs/hip/gfx906/qmatmul_iq4_nl_mmvq_dp4a_gfx906.json",
     },
     // native IQ3 MMVQ (codebook lookup, 256/512-entry u32 grid).
@@ -73,7 +73,7 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         arch: "gfx906",
         dtype_weight: QDtype::IQ3_XXS,
         dtype_activation: QDtype::Q8_1,
-        m_range: (1, 127),
+        m_range: (1, 31),
         cert_rel_path: "certs/hip/gfx906/qmatmul_iq3_xxs_mmvq_dp4a_gfx906.json",
     },
     KernelDescriptor {
@@ -83,7 +83,7 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         arch: "gfx906",
         dtype_weight: QDtype::IQ3_S,
         dtype_activation: QDtype::Q8_1,
-        m_range: (1, 127),
+        m_range: (1, 31),
         cert_rel_path: "certs/hip/gfx906/qmatmul_iq3_s_mmvq_dp4a_gfx906.json",
     },
     KernelDescriptor {
@@ -93,7 +93,7 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         arch: "gfx906",
         dtype_weight: QDtype::IQ3_S,
         dtype_activation: QDtype::Q8_1,
-        m_range: (128, usize::MAX),
+        m_range: (32, usize::MAX),
         cert_rel_path: "certs/hip/gfx906/qmatmul_iq3_s_mmq_wave64_gfx906.json",
     },
     // IQ2 + IQ1 family native MMVQ. r2 multi-row default.
@@ -104,7 +104,7 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         arch: "gfx906",
         dtype_weight: QDtype::IQ2_XXS,
         dtype_activation: QDtype::Q8_1,
-        m_range: (1, 127),
+        m_range: (1, 31),
         cert_rel_path: "certs/hip/gfx906/qmatmul_iq2_xxs_mmvq_dp4a_gfx906.json",
     },
     KernelDescriptor {
@@ -114,7 +114,7 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         arch: "gfx906",
         dtype_weight: QDtype::IQ2_XS,
         dtype_activation: QDtype::Q8_1,
-        m_range: (1, 127),
+        m_range: (1, 31),
         cert_rel_path: "certs/hip/gfx906/qmatmul_iq2_xs_mmvq_dp4a_gfx906.json",
     },
     KernelDescriptor {
@@ -124,7 +124,7 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         arch: "gfx906",
         dtype_weight: QDtype::IQ2_S,
         dtype_activation: QDtype::Q8_1,
-        m_range: (1, 127),
+        m_range: (1, 31),
         cert_rel_path: "certs/hip/gfx906/qmatmul_iq2_s_mmvq_dp4a_gfx906.json",
     },
     KernelDescriptor {
@@ -134,7 +134,7 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         arch: "gfx906",
         dtype_weight: QDtype::IQ1_S,
         dtype_activation: QDtype::Q8_1,
-        m_range: (1, 127),
+        m_range: (1, 31),
         cert_rel_path: "certs/hip/gfx906/qmatmul_iq1_s_mmvq_dp4a_gfx906.json",
     },
     KernelDescriptor {
@@ -144,7 +144,7 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         arch: "gfx906",
         dtype_weight: QDtype::IQ1_M,
         dtype_activation: QDtype::Q8_1,
-        m_range: (1, 127),
+        m_range: (1, 31),
         cert_rel_path: "certs/hip/gfx906/qmatmul_iq1_m_mmvq_dp4a_gfx906.json",
     },
     KernelDescriptor {
@@ -224,7 +224,7 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         arch: "gfx906",
         dtype_weight: QDtype::Q8_K,
         dtype_activation: QDtype::Q8_1,
-        m_range: (1, 127),
+        m_range: (1, 31),
         cert_rel_path: "certs/hip/gfx906/qmatmul_q8_K_mmvq_single_row_gfx906.json",
     },
     KernelDescriptor {
@@ -387,7 +387,7 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         arch: "gfx906",
         dtype_weight: QDtype::Q8_K,
         dtype_activation: QDtype::Q8_1,
-        m_range: (128, usize::MAX),
+        m_range: (32, usize::MAX),
         cert_rel_path: "certs/hip/gfx906/qmatmul_q8_K_mmq_wave64_gfx906.json",
     },
     KernelDescriptor {
@@ -431,7 +431,7 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         arch: "gfx906",
         dtype_weight: QDtype::IQ4_NL,
         dtype_activation: QDtype::Q8_1,
-        m_range: (128, usize::MAX),
+        m_range: (32, usize::MAX),
         cert_rel_path: "certs/hip/gfx906/qmatmul_iq4_nl_mmq_wave64_gfx906.json",
     },
     KernelDescriptor {
@@ -441,7 +441,7 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         arch: "gfx906",
         dtype_weight: QDtype::IQ3_XXS,
         dtype_activation: QDtype::Q8_1,
-        m_range: (128, usize::MAX),
+        m_range: (32, usize::MAX),
         cert_rel_path: "certs/hip/gfx906/qmatmul_iq3_xxs_mmq_wave64_gfx906.json",
     },
     KernelDescriptor {
@@ -451,7 +451,7 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         arch: "gfx906",
         dtype_weight: QDtype::IQ2_XXS,
         dtype_activation: QDtype::Q8_1,
-        m_range: (128, usize::MAX),
+        m_range: (32, usize::MAX),
         cert_rel_path: "certs/hip/gfx906/qmatmul_iq2_xxs_mmq_wave64_gfx906.json",
     },
     KernelDescriptor {
@@ -461,7 +461,7 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         arch: "gfx906",
         dtype_weight: QDtype::IQ2_XS,
         dtype_activation: QDtype::Q8_1,
-        m_range: (128, usize::MAX),
+        m_range: (32, usize::MAX),
         cert_rel_path: "certs/hip/gfx906/qmatmul_iq2_xs_mmq_wave64_gfx906.json",
     },
     KernelDescriptor {
@@ -471,7 +471,7 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         arch: "gfx906",
         dtype_weight: QDtype::IQ2_S,
         dtype_activation: QDtype::Q8_1,
-        m_range: (128, usize::MAX),
+        m_range: (32, usize::MAX),
         cert_rel_path: "certs/hip/gfx906/qmatmul_iq2_s_mmq_wave64_gfx906.json",
     },
     KernelDescriptor {
@@ -481,7 +481,7 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         arch: "gfx906",
         dtype_weight: QDtype::IQ1_S,
         dtype_activation: QDtype::Q8_1,
-        m_range: (128, usize::MAX),
+        m_range: (32, usize::MAX),
         cert_rel_path: "certs/hip/gfx906/qmatmul_iq1_s_mmq_wave64_gfx906.json",
     },
     KernelDescriptor {
@@ -491,7 +491,7 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         arch: "gfx906",
         dtype_weight: QDtype::IQ1_M,
         dtype_activation: QDtype::Q8_1,
-        m_range: (128, usize::MAX),
+        m_range: (32, usize::MAX),
         cert_rel_path: "certs/hip/gfx906/qmatmul_iq1_m_mmq_wave64_gfx906.json",
     },
 ];

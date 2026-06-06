@@ -9,6 +9,24 @@
   "tolerance_formula": "|err| <= 5e-2 * max(|ref|, sqrt(k))",
   "results": [
     {
+      "m": 32,
+      "k": 5120,
+      "n": 5120,
+      "seed": 16748106145607067854,
+      "max_rel_err": 4.734565e-7,
+      "tolerance": 0.05,
+      "pass": true
+    },
+    {
+      "m": 64,
+      "k": 5120,
+      "n": 5120,
+      "seed": 16748106146217907630,
+      "max_rel_err": 6.153268e-7,
+      "tolerance": 0.05,
+      "pass": true
+    },
+    {
       "m": 128,
       "k": 2048,
       "n": 2048,
@@ -73,7 +91,7 @@
     }
   ],
   "pass": true,
-  "emitted_at": "2026-05-13T09:19:03Z",
+  "emitted_at": "2026-06-06T07:00:24Z",
   "rig": "threadreaper-gfx906",
   "pmc": {
     "vgpr_count": 46,
