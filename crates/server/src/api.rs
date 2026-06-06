@@ -56,6 +56,10 @@ pub struct ModelObject {
 
 // ---- /v1/chat/completions --------------------------------------------------
 
+/// OpenAI chat-completions request. Fields the OpenAI spec defines but a
+/// single-model self-hosted server cannot meaningfully honor are deliberately
+/// not modeled (and ignored if sent): `n` (>1 choices), `service_tier`,
+/// `store`, request `metadata`, and per-model routing on `model`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ChatCompletionRequest {
     #[serde(default)]
