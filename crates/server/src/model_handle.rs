@@ -7,6 +7,8 @@
 
 #![cfg(feature = "hip")]
 
-pub use flambeau_server_core::{BatchSlot, Model, Session, SessionContext};
+pub use flambeau_server_core::{
+    BatchSlot, Model, ReasoningMarkers, ReasoningStyle, Session, SessionContext,
+};
 
 pub type LoadedModel = std::sync::Arc<dyn Model>;

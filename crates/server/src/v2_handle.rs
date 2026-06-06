@@ -17,7 +17,7 @@ use flambeau_forward::runtime::{Arch, Session};
 use flambeau_runtime::ModelDriver;
 use tokio::sync::Mutex;
 
-use crate::model_handle::{Model, Session as ServerSession};
+use crate::model_handle::{Model, ReasoningMarkers, ReasoningStyle, Session as ServerSession};
 
 /// Arch-erased trait around `Session<A>` so the server's v2 pool can
 /// dispatch slot-aware forward calls without knowing which `A` is
@@ -322,6 +322,9 @@ impl Model for V2Model {
     fn chat_stop_markers(&self) -> &'static [&'static str] {
         self.chat_stops
     }
+    fn reasoning_markers(&self) -> ReasoningMarkers {
+        reasoning_markers_for(self.gguf_arch)
+    }
     fn release_paged_slot(&self, slot: usize) {
         let mut shared = self.shared.blocking_lock();
         if let Err(e) = shared.release_paged_slot(slot) {
@@ -466,6 +469,25 @@ fn is_gemma_family(gguf_arch: &str) -> bool {
         gguf_arch,
         "gemma3" | "gemma4" | "gemma4-26b-a4b" | "gemma4-31b" | "gemma4-9b" | "gemma4-2b"
     )
+}
+
+/// Reasoning delimiters for this arch. gemma4 emits harmony-style channels
+/// (`<|channel>thought … <channel|> …`); every other arch here uses the
+/// qwen/deepseek `<think>…</think>` convention.
+pub fn reasoning_markers_for(gguf_arch: &str) -> ReasoningMarkers {
+    if is_gemma_family(gguf_arch) {
+        ReasoningMarkers {
+            style: ReasoningStyle::Channel,
+            open: "<|channel>",
+            close: "<channel|>",
+        }
+    } else {
+        ReasoningMarkers {
+            style: ReasoningStyle::ThinkTag,
+            open: "<think>",
+            close: "</think>",
+        }
+    }
 }
 
 /// Minimum decode steps before a stop token is honored, guarding against

@@ -7,6 +7,7 @@
 use anyhow::{Context, Result};
 
 use crate::api::{ChatLogProbContent, TopLogProb};
+use crate::model_handle::{ReasoningMarkers, ReasoningStyle};
 use crate::routes::ServerState;
 
 /// Engine return shape: text, prompt_tokens, completion_tokens,
@@ -150,75 +151,20 @@ pub(super) fn finalise(
     }
     let mut text = state.tokenizer.decode(&generated).context("decode")?;
 
-    // Reasoning-channel split is per output FORMAT, detected from the text
-    // (not an arch string): gemma4 emits a harmony-style channel
-    // `<|channel>thought {cot} <channel|> {answer}`; qwen/deepseek emit
-    // `<think> {cot} </think> {answer}`. Either way the chain-of-thought is
-    // lifted into `reasoning_content` and the user-facing answer is kept clean.
-    let reasoning_content: Option<String> = if let Some(close) = text.find("<channel|>") {
-        // `text[..close]` is `<|channel>{name}\n{reasoning}` (or just the
-        // marker for an empty thought). Drop the open marker + channel-name
-        // line; keep the reasoning body.
-        let head = text[..close].trim();
-        let head = head.strip_prefix("<|channel>").unwrap_or(head);
-        let cot = head
-            .split_once('\n')
-            .map(|(_name, body)| body.trim())
-            .unwrap_or("")
-            .to_string();
-        let mut answer = text[close + "<channel|>".len()..].to_string();
-        // Drop a leading channel name on the answer span (e.g. "final\n…").
-        if let Some(nl) = answer.find('\n') {
-            let head = answer[..nl].trim();
-            if head.is_empty() || head == "final" {
-                answer = answer[nl + 1..].to_string();
-            }
-        }
-        // Truncate at any further channel scaffolding the model leaks.
-        for m in ["<|channel>", "<channel|>"] {
-            if let Some(i) = answer.find(m) {
-                answer.truncate(i);
-            }
-        }
-        text = answer.trim().to_string();
-        if cot.is_empty() {
+    // Reasoning split is per-arch: the model reports its delimiters via
+    // `reasoning_markers()`. gemma4 uses a harmony-style channel, qwen/
+    // deepseek use `<think>…</think>`. Either way the chain-of-thought is
+    // lifted into `reasoning_content` and the answer is kept clean. The
+    // channel style is prompt-triggered (not flag-gated); the think style
+    // splits only when `enable_thinking`, else truncates a leaked marker.
+    let markers = state.model.reasoning_markers();
+    let reasoning_content: Option<String> = match markers.style {
+        ReasoningStyle::Channel => split_channel_reasoning(&mut text, markers, state),
+        ReasoningStyle::ThinkTag if enable_thinking => split_think_reasoning(&mut text, markers),
+        ReasoningStyle::ThinkTag => {
+            truncate_leaked_reasoning(&mut text, state);
             None
-        } else {
-            Some(cot)
         }
-    } else if enable_thinking {
-        if let Some(end_idx) = text.find("</think>") {
-            let cot_raw = &text[..end_idx];
-            let cot = cot_raw.trim_start_matches("<think>").trim().to_string();
-            let answer_start = end_idx + "</think>".len();
-            let answer = text[answer_start..].trim_start().to_string();
-            text = answer;
-            if cot.is_empty() {
-                None
-            } else {
-                Some(cot)
-            }
-        } else {
-            let cot = text.trim_start_matches("<think>").trim().to_string();
-            text = String::new();
-            if cot.is_empty() {
-                None
-            } else {
-                Some(cot)
-            }
-        }
-    } else {
-        for marker in ["</think>", "<end_thought>", "<end_think>", "</thought>"] {
-            if let Some(idx) = text.find(marker) {
-                text.truncate(idx);
-            }
-        }
-        for marker in state.model.chat_stop_markers() {
-            if let Some(idx) = text.find(*marker) {
-                text.truncate(idx);
-            }
-        }
-        None
     };
 
     let mut earliest = text.len();
@@ -240,4 +186,88 @@ pub(super) fn finalise(
         logprobs,
         reasoning_content,
     ))
+}
+
+/// Split a harmony-style channel (`<|channel>{name}\n{cot} <channel|>
+/// {answer}`) into reasoning + clean answer. With no close marker present
+/// (the model never opened a thought) this degrades to leaked-marker
+/// truncation. `text` is rewritten to the answer; the reasoning is returned.
+fn split_channel_reasoning(
+    text: &mut String,
+    markers: ReasoningMarkers,
+    state: &ServerState,
+) -> Option<String> {
+    let Some(close) = text.find(markers.close) else {
+        truncate_leaked_reasoning(text, state);
+        return None;
+    };
+    // `text[..close]` is `{open}{name}\n{reasoning}` (or just the marker for
+    // an empty thought). Drop the open marker + channel-name line.
+    let head = text[..close].trim();
+    let head = head.strip_prefix(markers.open).unwrap_or(head);
+    let cot = head
+        .split_once('\n')
+        .map(|(_name, body)| body.trim())
+        .unwrap_or("")
+        .to_string();
+    let mut answer = text[close + markers.close.len()..].to_string();
+    // Drop a leading channel name on the answer span (e.g. "final\n…").
+    if let Some(nl) = answer.find('\n') {
+        let h = answer[..nl].trim();
+        if h.is_empty() || h == "final" {
+            answer = answer[nl + 1..].to_string();
+        }
+    }
+    // Truncate at any further channel scaffolding the model leaks.
+    for m in [markers.open, markers.close] {
+        if let Some(i) = answer.find(m) {
+            answer.truncate(i);
+        }
+    }
+    *text = answer.trim().to_string();
+    if cot.is_empty() {
+        None
+    } else {
+        Some(cot)
+    }
+}
+
+/// Split a `<think>{cot}</think>{answer}` span. With no close marker the
+/// whole output is treated as an unterminated thought (answer cleared).
+/// `text` is rewritten to the answer; the reasoning is returned.
+fn split_think_reasoning(text: &mut String, markers: ReasoningMarkers) -> Option<String> {
+    let cot = if let Some(end_idx) = text.find(markers.close) {
+        let cot = text[..end_idx]
+            .trim_start_matches(markers.open)
+            .trim()
+            .to_string();
+        let answer = text[end_idx + markers.close.len()..].trim_start().to_string();
+        *text = answer;
+        cot
+    } else {
+        let cot = text.trim_start_matches(markers.open).trim().to_string();
+        text.clear();
+        cot
+    };
+    if cot.is_empty() {
+        None
+    } else {
+        Some(cot)
+    }
+}
+
+/// When thinking is off, cut the answer at any leaked reasoning marker or
+/// arch chat-template fragment so confused-mode scaffolding never reaches
+/// the client.
+fn truncate_leaked_reasoning(text: &mut String, state: &ServerState) {
+    for marker in ["</think>", "<end_thought>", "<end_think>", "</thought>"] {
+        if let Some(idx) = text.find(marker) {
+            text.truncate(idx);
+        }
+    }
+    for marker in state.model.chat_stop_markers() {
+        if let Some(idx) = text.find(*marker) {
+            text.truncate(idx);
+        }
+    }
 }

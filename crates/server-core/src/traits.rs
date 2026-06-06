@@ -49,6 +49,28 @@ pub struct MixedBatchDecodes<'a, 'b> {
     pub logits_refs: &'a mut [&'b mut Vec<f32>],
 }
 
+/// How a model delimits its reasoning span in the decoded output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReasoningStyle {
+    /// `<think> {cot} </think> {answer}` (qwen3, deepseek-r1, QwQ).
+    ThinkTag,
+    /// Harmony-style channel `<|channel>thought {cot} <channel|> {answer}`
+    /// (gemma4): the open marker is followed by a channel-name line, and the
+    /// answer span may carry a leading `final` channel name.
+    Channel,
+}
+
+/// Per-arch reasoning delimiters consumed by the output finaliser to split
+/// chain-of-thought from the user-facing answer.
+#[derive(Debug, Clone, Copy)]
+pub struct ReasoningMarkers {
+    pub style: ReasoningStyle,
+    /// Opening delimiter (`<think>` / `<|channel>`).
+    pub open: &'static str,
+    /// Closing delimiter (`</think>` / `<channel|>`).
+    pub close: &'static str,
+}
+
 pub trait Model: Send + Sync + 'static {
     /// Topology label for handler metrics: `"pp"`, `"tp"`, `"pp+tp"`,
     /// `"gemma4_pp"`, …
@@ -84,6 +106,18 @@ pub trait Model: Send + Sync + 'static {
     /// generation when present in the decoded text. Default `&[]`.
     fn chat_stop_markers(&self) -> &'static [&'static str] {
         &[]
+    }
+
+    /// Reasoning delimiters for this arch's output, used by the finaliser to
+    /// split chain-of-thought into `reasoning_content`. Default is the
+    /// qwen/deepseek `<think>…</think>` convention; gemma4 overrides to the
+    /// channel style.
+    fn reasoning_markers(&self) -> ReasoningMarkers {
+        ReasoningMarkers {
+            style: ReasoningStyle::ThinkTag,
+            open: "<think>",
+            close: "</think>",
+        }
     }
 
     /// Release every page held by `slot` back to each layer's
