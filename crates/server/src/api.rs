@@ -504,6 +504,17 @@ pub struct Usage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub total_tokens: u32,
+    /// Breakdown of the completion tokens. Emitted only when the turn
+    /// produced reasoning (so the legacy `/v1/completions` path stays
+    /// byte-identical).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completion_tokens_details: Option<CompletionTokensDetails>,
+}
+
+/// OpenAI `completion_tokens_details`. Only `reasoning_tokens` is tracked.
+#[derive(Debug, Clone, Serialize)]
+pub struct CompletionTokensDetails {
+    pub reasoning_tokens: u32,
 }
 
 // ---- Anthropic /v1/messages (P1.8a) ---------------------------------------

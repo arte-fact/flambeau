@@ -90,6 +90,7 @@ pub async fn completions(
             prompt_tokens,
             completion_tokens,
             total_tokens: prompt_tokens + completion_tokens,
+            completion_tokens_details: None,
         },
     }))
 }

@@ -317,6 +317,12 @@ pub async fn chat_completions(
         finish_reason: final_finish.clone(),
     });
 
+    // Count reasoning tokens by re-encoding the split-off chain-of-thought.
+    let reasoning_tokens = final_reasoning_content
+        .as_ref()
+        .filter(|r| !r.is_empty())
+        .map(|r| state.tokenizer.encode(r).map(|t| t.len() as u32).unwrap_or(0));
+
     Ok(Json(ChatCompletionResponse {
         id: session_id,
         object: "chat.completion",
@@ -346,6 +352,8 @@ pub async fn chat_completions(
             prompt_tokens: sum_prompt_tokens,
             completion_tokens: sum_completion_tokens,
             total_tokens: sum_prompt_tokens.saturating_add(sum_completion_tokens),
+            completion_tokens_details: reasoning_tokens
+                .map(|reasoning_tokens| crate::api::CompletionTokensDetails { reasoning_tokens }),
         },
         system_fingerprint: crate::api::SYSTEM_FINGERPRINT,
     })

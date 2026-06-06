@@ -322,6 +322,16 @@ def check_s7(resp: Any) -> list[dict]:
         "pass": r_leak is None,
         "detail": f"reasoning leak: {r_leak!r}",
     })
+    # usage.completion_tokens_details.reasoning_tokens should count the CoT.
+    ctd = getattr(resp.usage, "completion_tokens_details", None)
+    rt = getattr(ctd, "reasoning_tokens", None) if ctd else None
+    if rt is None and ctd is not None:
+        rt = (getattr(ctd, "model_extra", None) or {}).get("reasoning_tokens")
+    out.append({
+        "name": "usage.reasoning_tokens reported",
+        "pass": bool(rt and rt > 0),
+        "detail": f"reasoning_tokens={rt}",
+    })
     return out
 
 
