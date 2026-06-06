@@ -222,7 +222,11 @@ impl KvLayerShape for Gemma4V2Config {
         self.num_layers
     }
     fn kv_width_at(&self, li: usize, n_ranks: usize) -> usize {
-        (self.num_kv_heads[li] / n_ranks) * self.attn[li].head_dim
+        // Layers with fewer KV heads than ranks (e.g. 12b's 1-KV-head globals)
+        // replicate the full KV on every rank; the rest col-shard it.
+        let kvh = self.num_kv_heads[li];
+        let kvh_local = if kvh < n_ranks { kvh } else { kvh / n_ranks };
+        kvh_local * self.attn[li].head_dim
     }
     fn head_dim_at(&self, li: usize) -> usize {
         self.attn[li].head_dim

@@ -69,17 +69,29 @@ pub fn load_dense_attn_layer(
             spec.n_heads
         );
     }
-    if spec.n_kv_heads % n_ranks != 0 {
+    // GQA/MQA layers whose KV-head count is below n_ranks (e.g. gemma4-12b's
+    // global-attention layers have 1 KV head) cannot be column-split across
+    // the TP ranks; replicate the full K/V on every rank instead. Q and the
+    // output projection stay sharded, so each rank's local Q heads attend the
+    // replicated KV (the K/V projection reads the post-norm hidden, which is
+    // already identical across ranks, so each rank computes the same K/V).
+    let replicate_kv = spec.n_kv_heads < n_ranks;
+    if !replicate_kv && spec.n_kv_heads % n_ranks != 0 {
         bail!(
-            "dense_attn: n_kv_heads {} not divisible by n_ranks {n_ranks}",
+            "dense_attn: n_kv_heads {} neither divisible by nor below n_ranks {n_ranks}",
             spec.n_kv_heads
         );
     }
+    let kv_shard = if replicate_kv { ShardMode::Replicated } else { shard };
 
     let q_width = spec.n_heads * spec.head_dim;
     let kv_width = spec.n_kv_heads * spec.head_dim;
     let n_heads_local = spec.n_heads / n_ranks;
-    let n_kv_heads_local = spec.n_kv_heads / n_ranks;
+    let n_kv_heads_local = if replicate_kv {
+        spec.n_kv_heads
+    } else {
+        spec.n_kv_heads / n_ranks
+    };
 
     let attn_norm = upload_dequant_to_f16(file, device, spec.attn_norm_name, spec.hidden, allocs)?;
     let post_attn_norm = spec
@@ -108,7 +120,7 @@ pub fn load_dense_attn_layer(
         spec.attn_k_name,
         kv_width,
         spec.hidden,
-        shard,
+        kv_shard,
         allocs,
     )?;
     let attn_v = if let Some(name) = spec.attn_v_name {
@@ -118,7 +130,7 @@ pub fn load_dense_attn_layer(
             name,
             kv_width,
             spec.hidden,
-            shard,
+            kv_shard,
             allocs,
         )?)
     } else {
