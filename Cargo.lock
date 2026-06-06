@@ -640,6 +640,7 @@ dependencies = [
  "flambeau-quant",
  "half",
  "minijinja",
+ "serde_json",
  "thiserror 2.0.18",
  "tokenizers",
  "tokio",

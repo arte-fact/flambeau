@@ -9,6 +9,7 @@
 
 pub mod collective;
 pub mod json_grammar;
+pub mod json_schema;
 pub mod kv_cache;
 pub mod mesh;
 pub mod model;
