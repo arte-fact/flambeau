@@ -267,6 +267,36 @@ pub fn load_from_gguf(file: &GgufFile) -> Result<GgufTokenizer> {
             }
         }
     }
+    // Gemma's chat control tokens are `<start_of_turn>` / `<end_of_turn>`
+    // (no `|`), so the `<|...|>` sweep above misses them. They are otherwise
+    // only registered when the gguf's eos id points at one. The Unsloth QAT
+    // ggufs declare eos=`<eos>` instead of `<end_of_turn>`, so without this the
+    // rendered chat template's turn markers split into byte fragments and
+    // garble the prompt — register the gemma specials by their vocab string.
+    if is_gemma4 {
+        // This gemma4 family's turn markers are `<|turn>` (start) / `<turn|>`
+        // (end); other gemma builds use `<start_of_turn>` / `<end_of_turn>`.
+        // Register whichever exist (plus the named control tokens). Without
+        // the turn-END marker registered, a chat prompt whose eos id does not
+        // point at it (the Unsloth QAT ggufs use eos=`<eos>`) splits the turn
+        // boundary into byte fragments and the model produces garbage.
+        for needle in [
+            "<|turn>",
+            "<turn|>",
+            "<start_of_turn>",
+            "<end_of_turn>",
+            "<eos>",
+            "<bos>",
+            "<pad>",
+            "<unk>",
+        ] {
+            if let Some(id) = find_vocab_id(tokens_arr, needle) {
+                if added_ids.insert(id) {
+                    added.push(AddedToken::from(needle.to_owned(), /*special=*/ true));
+                }
+            }
+        }
+    }
     if !added.is_empty() {
         tok.add_special_tokens(&added);
     }
