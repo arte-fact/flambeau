@@ -19,7 +19,7 @@ pub struct GpuSamplerScratch;
 /// by logit value are left untouched (below the threshold any sane
 /// sampler picks from).
 pub fn apply_json_mask_to_logits(
-    state: &flambeau_runtime::json_grammar::JsonState,
+    state: &flambeau_runtime::json_schema::JsonConstraint,
     tokenizer: &flambeau_quant::GgufTokenizer,
     logits: &mut [f32],
     max_candidates: usize,
@@ -66,14 +66,20 @@ pub fn apply_json_mask_to_logits(
             logits[id as usize] = f32::NEG_INFINITY;
             continue;
         }
-        // OpenAI `response_format: json_object` requires the top-level
-        // value to be an object. Reject any candidate that doesn't
-        // start the state into an object frame.
+        // Forbid the "infinite leading whitespace" failure mode: a
+        // candidate that neither starts the value nor closes it is rejected.
         if !already_started && !probe.has_started() {
             logits[id as usize] = f32::NEG_INFINITY;
             continue;
         }
-        if !already_started && probe.has_started() && bytes.as_bytes().iter().all(|&b| b != b'{') {
+        // OpenAI `response_format: json_object` requires the top-level value
+        // to be an object — forbid non-`{` openers. Schemas gate their own
+        // top-level type in the validator, so this extra rule is skipped.
+        if state.top_must_be_object()
+            && !already_started
+            && probe.has_started()
+            && bytes.as_bytes().iter().all(|&b| b != b'{')
+        {
             logits[id as usize] = f32::NEG_INFINITY;
         }
     }

@@ -19,6 +19,65 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 
+use crate::json_grammar::JsonState;
+
+/// The active structured-output constraint for a decode: either plain
+/// `json_object` structural validation or a `json_schema` validator. Lets
+/// the sampler's token mask probe both behind one type.
+#[derive(Debug, Clone)]
+pub enum JsonConstraint {
+    /// `response_format=json_object` — structural JSON, top value must be an
+    /// object.
+    Object(JsonState),
+    /// `response_format=json_schema` — full schema enforcement.
+    Schema(SchemaState),
+}
+
+impl JsonConstraint {
+    pub fn object() -> Self {
+        Self::Object(JsonState::new())
+    }
+
+    pub fn for_schema(schema: &Value) -> Self {
+        Self::Schema(SchemaState::new(schema))
+    }
+
+    pub fn feed_slice(&mut self, bytes: &[u8]) -> bool {
+        match self {
+            Self::Object(s) => s.feed_slice(bytes),
+            Self::Schema(s) => s.feed_slice(bytes),
+        }
+    }
+
+    pub fn is_complete(&self) -> bool {
+        match self {
+            Self::Object(s) => s.is_complete(),
+            Self::Schema(s) => s.is_complete(),
+        }
+    }
+
+    pub fn has_started(&self) -> bool {
+        match self {
+            Self::Object(s) => s.has_started(),
+            Self::Schema(s) => s.has_started(),
+        }
+    }
+
+    pub fn finalize_at_eos(&mut self) {
+        match self {
+            Self::Object(s) => s.finalize_at_eos(),
+            Self::Schema(s) => s.finalize_at_eos(),
+        }
+    }
+
+    /// True only for `json_object`, where the top value must be an object so
+    /// the mask additionally forbids non-`{` openers. Schemas gate the
+    /// top-level type themselves.
+    pub fn top_must_be_object(&self) -> bool {
+        matches!(self, Self::Object(_))
+    }
+}
+
 /// A compiled schema node. `Any` is the permissive fallback for keywords we
 /// don't model — that position accepts any well-formed JSON value.
 #[derive(Debug, Clone)]
@@ -158,7 +217,10 @@ enum Frame {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ObjStage {
+    /// Just opened (`{`) — a key or an immediate `}` (empty object).
     ExpectKeyOrClose,
+    /// Just after a `,` — a key is mandatory (no trailing-comma close).
+    ExpectKey,
     InKey,
     ExpectColon,
     ExpectValue,
@@ -548,8 +610,8 @@ impl SchemaState {
             _ => return self.reject(),
         };
         match stage {
-            ObjStage::ExpectKeyOrClose => {
-                if b == b'}' {
+            ObjStage::ExpectKeyOrClose | ObjStage::ExpectKey => {
+                if b == b'}' && stage == ObjStage::ExpectKeyOrClose {
                     return self.close_object();
                 }
                 if b == b'"' {
@@ -596,6 +658,32 @@ impl SchemaState {
                     // property names never need them.
                     return self.reject();
                 }
+                // Constrain the key to remain a prefix of some allowed,
+                // not-yet-seen property — otherwise the model can run away
+                // emitting an unbounded key that only fails at the close quote.
+                let reject = match self.stack.last() {
+                    Some(Frame::Object {
+                        node_props,
+                        additional,
+                        seen,
+                        pending_key,
+                        ..
+                    }) => {
+                        if *additional {
+                            false
+                        } else {
+                            let mut cand = pending_key.clone();
+                            cand.push(b as char);
+                            !node_props
+                                .keys()
+                                .any(|k| !seen.contains(k) && k.starts_with(&cand))
+                        }
+                    }
+                    _ => true,
+                };
+                if reject {
+                    return self.reject();
+                }
                 if let Some(Frame::Object { pending_key, .. }) = self.stack.last_mut() {
                     pending_key.push(b as char);
                 }
@@ -628,8 +716,23 @@ impl SchemaState {
             }
             ObjStage::ExpectCommaOrClose => {
                 if b == b',' {
+                    // Only permit a comma if another property can still be
+                    // added — else the model paints itself into a corner with
+                    // no valid key, and the masked output drifts.
+                    let can_add = match self.stack.last() {
+                        Some(Frame::Object {
+                            node_props,
+                            additional,
+                            seen,
+                            ..
+                        }) => *additional || node_props.keys().any(|k| !seen.contains(k)),
+                        _ => false,
+                    };
+                    if !can_add {
+                        return self.reject();
+                    }
                     if let Some(Frame::Object { stage, .. }) = self.stack.last_mut() {
-                        *stage = ObjStage::ExpectKeyOrClose;
+                        *stage = ObjStage::ExpectKey;
                     }
                     return true;
                 }
@@ -838,6 +941,33 @@ mod tests {
         // "gr" still viable (green), but "gru" diverges from every member.
         assert!(s.feed_slice(br#""gr"#));
         assert!(!s.feed_slice(b"u"));
+    }
+
+    #[test]
+    fn rejects_comma_when_no_more_properties() {
+        let schema = json!({
+            "type": "object",
+            "properties": {"a": {"type": "integer"}},
+            "required": ["a"],
+            "additionalProperties": false,
+        });
+        let mut s = SchemaState::new(&schema);
+        assert!(s.feed_slice(br#"{"a":1"#));
+        // `a` is the only property and it's been used — a comma (more keys)
+        // must be rejected so the model is forced to close.
+        assert!(!s.feed_slice(b","));
+    }
+
+    #[test]
+    fn rejects_runaway_key() {
+        let schema = json!({
+            "type": "object",
+            "properties": {"items": {"type": "array"}, "label": {"type": "string"}},
+        });
+        let mut s = SchemaState::new(&schema);
+        assert!(s.feed_slice(br#"{""#));
+        // "a" is a prefix of neither "items" nor "label" → reject immediately.
+        assert!(!s.feed_slice(b"a"));
     }
 
     #[test]

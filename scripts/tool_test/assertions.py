@@ -418,9 +418,28 @@ def check_s10(resp: Any) -> list[dict]:
     return out
 
 
+def check_s11(resp: Any) -> list[dict]:
+    """`resp` is the json_schema handler dict (`{results:[{ok,...}]}`):
+    every constrained-decoding case must parse + validate."""
+    out = []
+    results = resp.get("results", [])
+    out.append({
+        "name": "all schema cases ran",
+        "pass": len(results) >= 3,
+        "detail": f"n={len(results)}",
+    })
+    for i, r in enumerate(results):
+        out.append({
+            "name": f"case {i} output validates against schema",
+            "pass": bool(r.get("ok")),
+            "detail": r.get("error") or r.get("content", ""),
+        })
+    return out
+
+
 CHECKS = {
     "S1": check_s1, "S2": check_s2, "S3": check_s3,
     "S4": check_s4, "S5": check_s5, "S6": check_s6,
     "S7": check_s7, "S8": check_s8, "S9": check_s9,
-    "S10": check_s10,
+    "S10": check_s10, "S11": check_s11,
 }

@@ -10,7 +10,7 @@ use std::time::Instant;
 use anyhow::{anyhow, bail, Context, Result};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use flambeau_backend_hip::HipCluster;
-use flambeau_runtime::json_grammar::JsonState;
+use flambeau_runtime::json_schema::JsonConstraint;
 use flambeau_runtime::Sampler;
 use serde_json::json;
 use tokio::sync::mpsc;
@@ -803,8 +803,11 @@ fn run_completion_blocking_ids(
     // state starts at `JsonState::new()`. Created here (rather than
     // post-first_next as before) so the mask can apply to the very
     // first sampled token.
-    let mut json_state: Option<JsonState> = if params.json_mode {
-        let mut js = JsonState::new();
+    let mut json_state: Option<JsonConstraint> = if params.json_mode {
+        let mut js = match params.json_schema.as_ref() {
+            Some(schema) => JsonConstraint::for_schema(schema),
+            None => JsonConstraint::object(),
+        };
         if !params.json_prime_bytes.is_empty() {
             let _ = js.feed_slice(&params.json_prime_bytes);
         }
@@ -1005,14 +1008,22 @@ fn run_completion_blocking_ids(
             next
         };
         // P0.1 — advance JSON state with the chosen token's bytes.
+        let mut json_complete = false;
         if let Some(js) = json_state.as_mut() {
             if let Ok(text) = state.tokenizer.decode(&[next]) {
                 let _ = js.feed_slice(text.as_bytes());
             }
+            json_complete = js.is_complete();
         }
         generated.push(next);
         last_token = next;
         if is_stop(next) {
+            finish_reason = "stop";
+            break;
+        }
+        // Structured-output: stop once the value is structurally complete so
+        // the model can't drift into trailing prose past a valid JSON value.
+        if json_complete {
             finish_reason = "stop";
             break;
         }

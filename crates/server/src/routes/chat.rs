@@ -131,6 +131,17 @@ pub async fn chat_completions(
         req.response_format.as_ref(),
         Some(ResponseFormat::JsonObject) | Some(ResponseFormat::JsonSchema { .. }),
     );
+    // OpenAI nests the schema under `json_schema.schema`; accept a bare
+    // schema object too. Absent when the request is plain json_object.
+    let json_schema = match req.response_format.as_ref() {
+        Some(ResponseFormat::JsonSchema { json_schema }) => Some(
+            json_schema
+                .get("schema")
+                .cloned()
+                .unwrap_or_else(|| json_schema.clone()),
+        ),
+        _ => None,
+    };
     let stop_strings = parse_stop(req.stop.as_ref());
     let collect_logprobs: Option<u32> =
         if req.logprobs.unwrap_or(false) || req.top_logprobs.is_some() {
@@ -193,6 +204,7 @@ pub async fn chat_completions(
         },
         crate::state::ResponseMode {
             json_mode,
+            json_schema,
             collect_logprobs,
             enable_thinking,
             reasoning_budget,

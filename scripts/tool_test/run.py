@@ -26,7 +26,43 @@ import scenarios  # noqa: E402
 MODELS = ["qwen3.6-27b-q4_0", "qwen3.6-35b-a3b-q4_0",
           "gemma4-31b-q4_0", "gemma4-26b-a4b-q8_0"]
 
-SCENARIOS = ["S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9", "S10"]
+SCENARIOS = ["S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9", "S10", "S11"]
+
+# response_format=json_schema cases: (schema, prompt).
+_SCHEMA_CASES = [
+    ({"type": "object",
+      "properties": {"name": {"type": "string"}, "age": {"type": "integer"}},
+      "required": ["name", "age"], "additionalProperties": False},
+     "Give a person named Alice who is 30."),
+    ({"type": "object",
+      "properties": {"items": {"type": "array", "items": {"type": "integer"}},
+                     "label": {"enum": ["a", "b"]}},
+      "required": ["items", "label"], "additionalProperties": False},
+     "Three integers and the label a."),
+    ({"enum": ["positive", "negative", "neutral"]},
+     "Sentiment of: I love this!"),
+]
+
+
+def run_json_schema(client: OpenAI, model: str) -> dict:
+    """Drive each schema case and report whether the output parses + validates
+    against the schema (the constrained-decoding guarantee)."""
+    results = []
+    for schema, prompt in _SCHEMA_CASES:
+        try:
+            resp = client.chat.completions.create(
+                model=model, temperature=0.7, max_tokens=256,
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_schema",
+                                 "json_schema": {"name": "s", "schema": schema}})
+            content = resp.choices[0].message.content or ""
+            obj = json.loads(content)
+            import jsonschema
+            jsonschema.validate(obj, schema)
+            results.append({"ok": True, "content": content[:80]})
+        except Exception as e:  # noqa: BLE001
+            results.append({"ok": False, "error": f"{type(e).__name__}: {e}"})
+    return {"results": results}
 
 
 def run_openai_negative(client: OpenAI, model: str) -> dict:
@@ -144,9 +180,11 @@ def run_one(client: OpenAI, model: str, scenario: str,
             }
             return True, fixture
         kwargs = scenarios.s3_followup(model, to_dict(s1_msg), tcs[0].id)
-    elif scenario in ("S9", "S10"):
+    elif scenario in ("S9", "S10", "S11"):
         try:
-            resp = (run_logit_bias if scenario == "S9" else run_openai_negative)(client, model)
+            handler = {"S9": run_logit_bias, "S10": run_openai_negative,
+                       "S11": run_json_schema}[scenario]
+            resp = handler(client, model)
         except Exception as e:
             print(f"REQUEST FAILED: {e}")
             return False, {"scenario": scenario, "error": str(e), "verdict": "error"}

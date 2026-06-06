@@ -15,6 +15,10 @@ pub struct SamplingParams {
     /// by the OpenAI `response_format: {"type":"json_object"}` request
     /// field. Default `false` (free-form text).
     pub json_mode: bool,
+    /// The `response_format.json_schema` value when the request asked for a
+    /// schema (not just `json_object`). `json_mode` is also true; the decode
+    /// loop builds a schema-aware constraint instead of the structural one.
+    pub json_schema: Option<serde_json::Value>,
     /// **P0.2** — caller-provided stop sequences. OpenAI accepts a
     /// string or an array of up to 4 strings; parsed at the request
     /// boundary into a `Vec<String>`. Decode loops detect each on the
@@ -119,6 +123,7 @@ pub struct GenerationLimits {
 #[derive(Debug, Clone, Default)]
 pub struct ResponseMode {
     pub json_mode: bool,
+    pub json_schema: Option<serde_json::Value>,
     pub collect_logprobs: Option<u32>,
     pub enable_thinking: bool,
     pub reasoning_budget: Option<u32>,
@@ -166,6 +171,7 @@ impl SamplingParams {
         let GenerationLimits { max_tokens, seed, stop_strings } = limits;
         let ResponseMode {
             json_mode,
+            json_schema,
             collect_logprobs,
             enable_thinking,
             reasoning_budget,
@@ -227,6 +233,7 @@ impl SamplingParams {
             seed: seed.unwrap_or_else(default_seed),
             max_tokens: max_tokens.unwrap_or(4096).min(8192),
             json_mode,
+            json_schema,
             stop_strings,
             collect_logprobs: collect_logprobs.map(|n| n.min(20)),
             enable_thinking,
