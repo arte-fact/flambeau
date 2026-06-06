@@ -529,6 +529,28 @@ pub struct AnthropicMessagesRequest {
     /// - `{"type":"none"}` — model must not use tools
     #[serde(default)]
     pub tool_choice: Option<AnthropicToolChoice>,
+    /// Extended-thinking control. `{"type":"enabled","budget_tokens":N}`
+    /// turns on the reasoning channel; `{"type":"disabled"}` or omitted
+    /// leaves it off. `budget_tokens` is accepted; the thinking-length cap
+    /// is applied alongside `reasoning_effort` in a later slice.
+    #[serde(default)]
+    pub thinking: Option<AnthropicThinking>,
+}
+
+/// Anthropic extended-thinking control block.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AnthropicThinking {
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(default)]
+    pub budget_tokens: Option<u32>,
+}
+
+impl AnthropicThinking {
+    /// True when the client asked for the reasoning channel.
+    pub fn is_enabled(&self) -> bool {
+        self.kind == "enabled"
+    }
 }
 
 /// One Anthropic tool definition. `input_schema` is opaque JSON Schema.
@@ -641,6 +663,15 @@ pub enum AnthropicContentBlock {
         #[serde(default)]
         is_error: Option<bool>,
     },
+    /// Assistant reasoning replayed on a multi-turn request. We do not
+    /// validate signatures and drop prior-turn reasoning from the prompt
+    /// (matching how OSS stacks handle replayed thinking).
+    Thinking {
+        #[serde(default)]
+        thinking: String,
+        #[serde(default)]
+        signature: String,
+    },
 }
 
 /// Anthropic /v1/messages response. `content` is always an array.
@@ -674,6 +705,13 @@ pub enum AnthropicResponseBlock {
         id: String,
         name: String,
         input: serde_json::Value,
+    },
+    /// Extended-thinking reasoning, emitted before the answer text when
+    /// thinking is enabled. `signature` is an opaque stub — flambeau does
+    /// not cryptographically sign reasoning.
+    Thinking {
+        thinking: String,
+        signature: String,
     },
 }
 

@@ -81,6 +81,7 @@ pub async fn messages_anthropic(
     };
 
     let stop_strings = req.stop_sequences.clone().unwrap_or_default();
+    let enable_thinking = req.thinking.as_ref().is_some_and(|t| t.is_enabled());
     let params = SamplingParams::from_parts(
         crate::state::SamplingKnobs {
             temperature: req.temperature,
@@ -93,7 +94,10 @@ pub async fn messages_anthropic(
             seed: None,
             stop_strings: stop_strings.clone(),
         },
-        crate::state::ResponseMode::default(),
+        crate::state::ResponseMode {
+            enable_thinking,
+            ..Default::default()
+        },
         &state.model_defaults,
     );
 
@@ -117,7 +121,7 @@ pub async fn messages_anthropic(
 
     let prompt = state
         .chat_template
-        .render_with_tools(&messages, merged_tools.as_deref(), true, Some(false))
+        .render_with_tools(&messages, merged_tools.as_deref(), true, Some(enable_thinking))
         .map_err(ApiError::internal)?;
     let has_tools = merged_tools.is_some();
     let relax_stop_mask = has_tools;
@@ -130,7 +134,7 @@ pub async fn messages_anthropic(
         );
     }
 
-    let (text, prompt_tokens, completion_tokens, finish, _, _) =
+    let (text, prompt_tokens, completion_tokens, finish, _, reasoning) =
         run_completion(state.clone(), &prompt, params, relax_stop_mask)
             .await
             .map_err(ApiError::internal)?;
@@ -160,6 +164,12 @@ pub async fn messages_anthropic(
     let stop_sequence: Option<String> = None;
 
     let mut content: Vec<AnthropicResponseBlock> = Vec::new();
+    if let Some(reasoning) = reasoning.filter(|r| !r.is_empty()) {
+        content.push(AnthropicResponseBlock::Thinking {
+            thinking: reasoning,
+            signature: String::new(),
+        });
+    }
     if !text_out.is_empty() {
         content.push(AnthropicResponseBlock::Text { text: text_out });
     }
@@ -218,6 +228,8 @@ fn translate_anthropic_message(m: &AnthropicMessage, out: &mut Vec<ChatMessage>)
         match block {
             AnthropicContentBlock::Text { text } => text_buf.push_str(text),
             AnthropicContentBlock::Image { .. } => {}
+            // Replayed assistant reasoning: dropped from the prompt context.
+            AnthropicContentBlock::Thinking { .. } => {}
             AnthropicContentBlock::ToolUse { id, name, input } => {
                 tool_calls.push(ToolCall {
                     id: id.clone(),
@@ -354,8 +366,18 @@ fn stream_messages_anthropic_sse(
     let id_clone = id.clone();
     let tx_clone = tx.clone();
     tokio::task::spawn_blocking(move || {
-        use crate::tool_call_parser::{dispatcher, ParserEvent};
-        let mut parser = match dispatcher(None, tool_call_format_default) {
+        use crate::tool_call_parser::{dispatcher_with_prompt, ParserEvent};
+        // `<think>`-style templates prime the reasoning marker in the prompt
+        // prefix when thinking is enabled, so start the parser in-think.
+        let start_in_reasoning = params.enable_thinking
+            && state_clone.model.reasoning_markers().style
+                == crate::model_handle::ReasoningStyle::ThinkTag;
+        let mut parser = match dispatcher_with_prompt(
+            None,
+            tool_call_format_default,
+            &prompt,
+            start_in_reasoning,
+        ) {
             Ok(p) => p,
             Err(e) => {
                 let err = json!({
@@ -368,82 +390,149 @@ fn stream_messages_anthropic_sse(
             }
         };
 
-        let mut text_open = false;
+        // Block layout: when present, reasoning is block 0, the answer text is
+        // the next block, tool calls follow. Indices are allocated in emission
+        // order. Reasoning always precedes text/tools, so a thinking block is
+        // closed (with a stub signature) on the first non-thinking event.
+        let mut next_block_index: u32 = 0;
+        let mut thinking_idx: Option<u32> = None;
+        let mut thinking_closed = false;
+        let mut text_idx: Option<u32> = None;
         let mut tool_open: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
-        let mut next_block_index: u32 = 1;
         let mut emitted_any = false;
         let mut has_tool_calls = false;
 
-        let emit_block_start_text =
-            |tx: &mpsc::Sender<Result<Event, Infallible>>, text_open: &mut bool| -> bool {
-                if *text_open {
-                    return true;
+        let send = |event: &str, value: serde_json::Value| -> bool {
+            tx_clone
+                .blocking_send(Ok(Event::default().event(event).data(value.to_string())))
+                .is_ok()
+        };
+
+        let close_thinking = |thinking_idx: &Option<u32>, thinking_closed: &mut bool| -> bool {
+            if let Some(ti) = *thinking_idx {
+                if !*thinking_closed {
+                    *thinking_closed = true;
+                    return send(
+                        "content_block_delta",
+                        json!({
+                            "type": "content_block_delta",
+                            "index": ti,
+                            "delta": {"type": "signature_delta", "signature": ""},
+                        }),
+                    ) && send(
+                        "content_block_stop",
+                        json!({"type": "content_block_stop", "index": ti}),
+                    );
                 }
-                *text_open = true;
-                let frame = json!({
-                    "type": "content_block_start",
-                    "index": 0,
-                    "content_block": {"type": "text", "text": ""},
-                });
-                tx.blocking_send(Ok(Event::default()
-                    .event("content_block_start")
-                    .data(frame.to_string())))
-                    .is_ok()
-            };
+            }
+            true
+        };
 
         let drain_events = |events: Vec<ParserEvent>,
-                            text_open: &mut bool,
-                            tool_open: &mut std::collections::HashMap<u32, u32>,
                             next_block_index: &mut u32,
+                            thinking_idx: &mut Option<u32>,
+                            thinking_closed: &mut bool,
+                            text_idx: &mut Option<u32>,
+                            tool_open: &mut std::collections::HashMap<u32, u32>,
                             emitted_any: &mut bool,
                             has_tool_calls: &mut bool|
          -> bool {
             for ev in events {
                 match ev {
+                    ParserEvent::ThinkDelta(s) => {
+                        if s.is_empty() {
+                            continue;
+                        }
+                        let idx = match *thinking_idx {
+                            Some(i) => i,
+                            None => {
+                                let i = *next_block_index;
+                                *next_block_index += 1;
+                                *thinking_idx = Some(i);
+                                if !send(
+                                    "content_block_start",
+                                    json!({
+                                        "type": "content_block_start",
+                                        "index": i,
+                                        "content_block": {"type": "thinking", "thinking": ""},
+                                    }),
+                                ) {
+                                    return false;
+                                }
+                                i
+                            }
+                        };
+                        *emitted_any = true;
+                        if !send(
+                            "content_block_delta",
+                            json!({
+                                "type": "content_block_delta",
+                                "index": idx,
+                                "delta": {"type": "thinking_delta", "thinking": s},
+                            }),
+                        ) {
+                            return false;
+                        }
+                    }
                     ParserEvent::TextDelta(s) => {
                         if s.is_empty() {
                             continue;
                         }
-                        if !emit_block_start_text(&tx_clone, text_open) {
+                        if !close_thinking(thinking_idx, thinking_closed) {
                             return false;
                         }
+                        let idx = match *text_idx {
+                            Some(i) => i,
+                            None => {
+                                let i = *next_block_index;
+                                *next_block_index += 1;
+                                *text_idx = Some(i);
+                                if !send(
+                                    "content_block_start",
+                                    json!({
+                                        "type": "content_block_start",
+                                        "index": i,
+                                        "content_block": {"type": "text", "text": ""},
+                                    }),
+                                ) {
+                                    return false;
+                                }
+                                i
+                            }
+                        };
                         *emitted_any = true;
-                        let frame = json!({
-                            "type": "content_block_delta",
-                            "index": 0,
-                            "delta": {"type": "text_delta", "text": s},
-                        });
-                        if tx_clone
-                            .blocking_send(Ok(Event::default()
-                                .event("content_block_delta")
-                                .data(frame.to_string())))
-                            .is_err()
-                        {
+                        if !send(
+                            "content_block_delta",
+                            json!({
+                                "type": "content_block_delta",
+                                "index": idx,
+                                "delta": {"type": "text_delta", "text": s},
+                            }),
+                        ) {
                             return false;
                         }
                     }
-                    ParserEvent::ThinkDelta(_) => {}
                     ParserEvent::ToolCallOpen { index, name } => {
                         *has_tool_calls = true;
+                        if !close_thinking(thinking_idx, thinking_closed) {
+                            return false;
+                        }
                         let block_idx = *next_block_index;
                         *next_block_index += 1;
                         tool_open.insert(index, block_idx);
-                        let frame = json!({
-                            "type": "content_block_start",
-                            "index": block_idx,
-                            "content_block": {
-                                "type": "tool_use",
-                                "id": format!("toolu_{block_idx:08x}"),
-                                "name": name,
-                                "input": {},
-                            },
-                        });
-                        if tx_clone
-                            .blocking_send(Ok(Event::default()
-                                .event("content_block_start")
-                                .data(frame.to_string())))
-                            .is_err()
-                        {
+                        if !send(
+                            "content_block_start",
+                            json!({
+                                "type": "content_block_start",
+                                "index": block_idx,
+                                "content_block": {
+                                    "type": "tool_use",
+                                    "id": format!("toolu_{block_idx:08x}"),
+                                    "name": name,
+                                    "input": {},
+                                },
+                            }),
+                        ) {
                             return false;
                         }
                     }
@@ -451,17 +540,14 @@ fn stream_messages_anthropic_sse(
                         let Some(&block_idx) = tool_open.get(&index) else {
                             continue;
                         };
-                        let frame = json!({
-                            "type": "content_block_delta",
-                            "index": block_idx,
-                            "delta": {"type": "input_json_delta", "partial_json": arguments},
-                        });
-                        if tx_clone
-                            .blocking_send(Ok(Event::default()
-                                .event("content_block_delta")
-                                .data(frame.to_string())))
-                            .is_err()
-                        {
+                        if !send(
+                            "content_block_delta",
+                            json!({
+                                "type": "content_block_delta",
+                                "index": block_idx,
+                                "delta": {"type": "input_json_delta", "partial_json": arguments},
+                            }),
+                        ) {
                             return false;
                         }
                     }
@@ -469,16 +555,10 @@ fn stream_messages_anthropic_sse(
                         let Some(block_idx) = tool_open.remove(&index) else {
                             continue;
                         };
-                        let frame = json!({
-                            "type": "content_block_stop",
-                            "index": block_idx,
-                        });
-                        if tx_clone
-                            .blocking_send(Ok(Event::default()
-                                .event("content_block_stop")
-                                .data(frame.to_string())))
-                            .is_err()
-                        {
+                        if !send(
+                            "content_block_stop",
+                            json!({"type": "content_block_stop", "index": block_idx}),
+                        ) {
                             return false;
                         }
                     }
@@ -491,9 +571,11 @@ fn stream_messages_anthropic_sse(
             let events = parser.push(text);
             drain_events(
                 events,
-                &mut text_open,
-                &mut tool_open,
                 &mut next_block_index,
+                &mut thinking_idx,
+                &mut thinking_closed,
+                &mut text_idx,
+                &mut tool_open,
                 &mut emitted_any,
                 &mut has_tool_calls,
             )
@@ -510,35 +592,40 @@ fn stream_messages_anthropic_sse(
         let tail = parser.finish();
         let _ = drain_events(
             tail,
-            &mut text_open,
-            &mut tool_open,
             &mut next_block_index,
+            &mut thinking_idx,
+            &mut thinking_closed,
+            &mut text_idx,
+            &mut tool_open,
             &mut emitted_any,
             &mut has_tool_calls,
         );
 
         for (_idx, block_idx) in tool_open.drain() {
-            let frame = json!({"type": "content_block_stop", "index": block_idx});
-            let _ = tx_clone.blocking_send(Ok(Event::default()
-                .event("content_block_stop")
-                .data(frame.to_string())));
+            let _ = send(
+                "content_block_stop",
+                json!({"type": "content_block_stop", "index": block_idx}),
+            );
         }
-        if !text_open && !emitted_any {
-            let cbs = json!({
-                "type": "content_block_start",
-                "index": 0,
-                "content_block": {"type": "text", "text": ""},
-            });
-            let _ = tx_clone.blocking_send(Ok(Event::default()
-                .event("content_block_start")
-                .data(cbs.to_string())));
-            text_open = true;
+        // Close a thinking block that never transitioned to an answer.
+        let _ = close_thinking(&thinking_idx, &mut thinking_closed);
+        if text_idx.is_none() && !emitted_any {
+            let i = next_block_index;
+            let _ = send(
+                "content_block_start",
+                json!({
+                    "type": "content_block_start",
+                    "index": i,
+                    "content_block": {"type": "text", "text": ""},
+                }),
+            );
+            text_idx = Some(i);
         }
-        if text_open {
-            let frame = json!({"type": "content_block_stop", "index": 0});
-            let _ = tx_clone.blocking_send(Ok(Event::default()
-                .event("content_block_stop")
-                .data(frame.to_string())));
+        if let Some(ti) = text_idx {
+            let _ = send(
+                "content_block_stop",
+                json!({"type": "content_block_stop", "index": ti}),
+            );
         }
 
         let (finish, _, output_tokens) = match &res {

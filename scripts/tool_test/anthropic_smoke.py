@@ -158,28 +158,68 @@ def a4_streaming(client: anthropic.Anthropic, model: str) -> list[dict]:
     return out
 
 
-def a5_thinking_probe(client: anthropic.Anthropic, model: str) -> list[dict]:
-    """Recorded-not-failed: does the Anthropic path surface a thinking block?"""
+def a5_thinking(client: anthropic.Anthropic, model: str) -> list[dict]:
+    """Extended thinking (non-stream): the response must carry a `thinking`
+    content block ahead of the answer text."""
     out = _checks()
-    try:
-        resp = client.messages.create(
-            model=model,
-            max_tokens=512,
-            temperature=1.0,
-            thinking={"type": "enabled", "budget_tokens": 1024},
-            messages=[{"role": "user",
-                       "content": "A bat and ball cost $1.10. The bat costs $1 more "
-                                  "than the ball. How much is the ball?"}],
-        )
-    except Exception as e:
-        _add(out, "thinking request accepted (recorded)", True,
-             f"server rejected thinking param: {e!r} — known gap")
-        return out
-    has_thinking = any(getattr(b, "type", "") == "thinking" for b in resp.content)
+    resp = client.messages.create(
+        model=model,
+        max_tokens=1024,
+        temperature=1.0,
+        thinking={"type": "enabled", "budget_tokens": 512},
+        messages=[{"role": "user",
+                   "content": "A bat and ball cost $1.10. The bat costs $1 more "
+                              "than the ball. How much is the ball?"}],
+    )
+    thinking_blocks = [b for b in resp.content if getattr(b, "type", "") == "thinking"]
+    _add(out, "thinking block present", len(thinking_blocks) >= 1,
+         f"n_thinking={len(thinking_blocks)}")
+    if thinking_blocks:
+        _add(out, "thinking text non-empty",
+             bool((getattr(thinking_blocks[0], "thinking", "") or "").strip()),
+             f"len={len(getattr(thinking_blocks[0], 'thinking', '') or '')}")
     txt = _text_of(resp)
-    _add(out, "thinking block present (recorded, known gap)", True,
-         f"emitted={has_thinking} (server drops reasoning on Anthropic path today)")
-    _add(out, "answer present", bool(txt.strip()), f"text={txt[:80]!r}")
+    truncated = resp.stop_reason == "max_tokens"
+    _add(out, "answer present (or truncated mid-think)",
+         bool(txt.strip()) or truncated, f"text={txt[:60]!r} truncated={truncated}")
+    return out
+
+
+def a6_streaming_thinking(client: anthropic.Anthropic, model: str) -> list[dict]:
+    """Extended thinking (streaming): `thinking_delta` events must arrive,
+    ahead of and separate from `text_delta`."""
+    out = _checks()
+    thinking_txt, answer_txt, order = "", "", []
+    final = None
+    with client.messages.stream(
+        model=model,
+        max_tokens=1024,
+        temperature=1.0,
+        thinking={"type": "enabled", "budget_tokens": 512},
+        messages=[{"role": "user",
+                   "content": "What is 17 * 23? Think step by step."}],
+    ) as stream:
+        for event in stream:
+            if getattr(event, "type", "") != "content_block_delta":
+                continue
+            delta = event.delta
+            dtype = getattr(delta, "type", "")
+            if dtype == "thinking_delta":
+                thinking_txt += getattr(delta, "thinking", "") or ""
+                order.append("t")
+            elif dtype == "text_delta":
+                answer_txt += getattr(delta, "text", "") or ""
+                order.append("a")
+        final = stream.get_final_message()
+    _add(out, "thinking_delta events streamed", bool(thinking_txt.strip()),
+         f"thinking_len={len(thinking_txt)}")
+    first_t = order.index("t") if "t" in order else len(order)
+    first_a = order.index("a") if "a" in order else len(order)
+    _add(out, "thinking precedes answer", first_t <= first_a,
+         f"first_thinking={first_t} first_answer={first_a}")
+    _add(out, "final stop_reason valid",
+         final is not None and final.stop_reason in ("end_turn", "max_tokens", "stop_sequence"),
+         f"got {getattr(final, 'stop_reason', None)!r}")
     return out
 
 
@@ -198,7 +238,8 @@ def main() -> int:
     suites.append(("A2 tool_use", a2))
     suites.append(("A3 tool_result round-trip", a3_roundtrip(client, args.model, prior)))
     suites.append(("A4 streaming", a4_streaming(client, args.model)))
-    suites.append(("A5 thinking probe", a5_thinking_probe(client, args.model)))
+    suites.append(("A5 thinking", a5_thinking(client, args.model)))
+    suites.append(("A6 streaming thinking", a6_streaming_thinking(client, args.model)))
 
     all_pass = True
     for title, checks in suites:
