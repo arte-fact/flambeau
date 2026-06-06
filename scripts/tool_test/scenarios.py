@@ -114,5 +114,21 @@ def s6(model: str) -> dict:
         model=model,
         messages=[{"role": "user",
                    "content": "What's the capital of France?"}],
-        **{**COMMON, "max_tokens": 64},
+        **{**COMMON, "max_tokens": 128},
+    )
+
+
+def s7(model: str) -> dict:
+    """Thinking: request reasoning, expect a split `reasoning_content`
+    with a clean `content` (no leaked `<think>` / channel markers).
+
+    `enable_thinking` is a flambeau request extension, passed via the
+    OpenAI SDK's `extra_body` escape hatch."""
+    return dict(
+        model=model,
+        messages=[{"role": "user",
+                   "content": "A bat and ball cost $1.10. The bat costs $1 more "
+                              "than the ball. How much is the ball? Think it through."}],
+        extra_body={"enable_thinking": True},
+        **{**COMMON, "temperature": 1.0, "max_tokens": 1024},
     )

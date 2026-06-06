@@ -248,9 +248,11 @@ def check_s6(resp: Any) -> list[dict]:
     choice = resp.choices[0]
     msg = choice.message
     content = msg.content or ""
+    # A verbose-but-correct model can legitimately hit the token cap; the
+    # signal here is "answers without tools, cleanly", not early EOS.
     out.append({
-        "name": "finish_reason=stop",
-        "pass": choice.finish_reason == "stop",
+        "name": "finish_reason in {stop,length}",
+        "pass": choice.finish_reason in ("stop", "length"),
         "detail": f"got {choice.finish_reason!r}",
     })
     out.append({
@@ -267,7 +269,64 @@ def check_s6(resp: Any) -> list[dict]:
     return out
 
 
+def _reasoning_of(msg: Any) -> str | None:
+    """`reasoning_content` is a flambeau extension field; the OpenAI SDK
+    parks unknown fields in `model_extra`."""
+    direct = getattr(msg, "reasoning_content", None)
+    if direct:
+        return direct
+    extra = getattr(msg, "model_extra", None) or {}
+    return extra.get("reasoning_content")
+
+
+def check_s7(resp: Any) -> list[dict]:
+    out = []
+    choice = resp.choices[0]
+    msg = choice.message
+    content = msg.content or ""
+    reasoning = _reasoning_of(msg)
+    truncated = choice.finish_reason == "length"
+    out.append({
+        "name": "finish_reason in {stop,length}",
+        "pass": choice.finish_reason in ("stop", "length"),
+        "detail": f"got {choice.finish_reason!r}",
+    })
+    # The split is the actual unit under test: reasoning must land in its
+    # own field, never inline.
+    out.append({
+        "name": "reasoning_content present",
+        "pass": bool(reasoning and reasoning.strip()),
+        "detail": f"len={len(reasoning or '')}",
+    })
+    # If the model was cut off mid-thought (length), an empty answer is
+    # expected and not a failure; only require a non-empty answer when it
+    # actually finished (stop).
+    out.append({
+        "name": "answer content non-empty (when not truncated)",
+        "pass": bool(content.strip()) or truncated,
+        "detail": f"truncated={truncated} content[:80]={content[:80]!r}",
+    })
+    # The split must be clean: no reasoning markers in either field.
+    c_leak = _has_leak(content)
+    r_leak = _has_leak(reasoning)
+    for marker in ("<think>", "</think>"):
+        if marker in content:
+            c_leak = marker
+    out.append({
+        "name": "no think/channel markers leak into content",
+        "pass": c_leak is None and "<think>" not in content and "</think>" not in content,
+        "detail": f"content leak: {c_leak!r}",
+    })
+    out.append({
+        "name": "reasoning field free of channel scaffolding",
+        "pass": r_leak is None,
+        "detail": f"reasoning leak: {r_leak!r}",
+    })
+    return out
+
+
 CHECKS = {
     "S1": check_s1, "S2": check_s2, "S3": check_s3,
     "S4": check_s4, "S5": check_s5, "S6": check_s6,
+    "S7": check_s7,
 }

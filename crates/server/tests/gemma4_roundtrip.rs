@@ -74,7 +74,14 @@ fn render_then_parse_recovers_tool_call() {
         .find(assistant_open)
         .expect("missing model turn header");
     let after_header = &rendered[pos + assistant_open.len()..];
-    let close_pos = after_header.find("<turn|>").expect("missing turn close");
+    // A tool-call turn flows `<|tool_call>...<tool_call|><|tool_response>`
+    // with no `<turn|>` close; a plain turn ends at `<turn|>`. Take whichever
+    // boundary comes first.
+    let close_pos = ["<turn|>", "<|tool_response>"]
+        .iter()
+        .filter_map(|m| after_header.find(m))
+        .min()
+        .unwrap_or(after_header.len());
     let assistant_body = &after_header[..close_pos];
     eprintln!(
         "=== assistant body ({} bytes) ===\n{}\n================",

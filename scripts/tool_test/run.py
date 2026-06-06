@@ -26,7 +26,7 @@ import scenarios  # noqa: E402
 MODELS = ["qwen3.6-27b-q4_0", "qwen3.6-35b-a3b-q4_0",
           "gemma4-31b-q4_0", "gemma4-26b-a4b-q8_0"]
 
-SCENARIOS = ["S1", "S2", "S3", "S4", "S5", "S6"]
+SCENARIOS = ["S1", "S2", "S3", "S4", "S5", "S6", "S7"]
 
 
 def fixture_path(model: str, scenario: str) -> pathlib.Path:
