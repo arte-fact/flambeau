@@ -120,11 +120,14 @@ pub fn qmatmul(
         return Ok(());
     }
     // Route to per-row / batched MMVQ for m < 32 (no MMQ amortization) OR
-    // whenever k is not 128-aligned (the LDS-tiled MMQ this dtype would
-    // otherwise dispatch to at m >= 32 requires k % 128 == 0; a shared-expert
-    // intermediate like 1056 is k % 128 == 32). MMVQ consumes the standard
+    // whenever k or n is not 128-aligned. The LDS-tiled MMQ this dtype would
+    // otherwise dispatch to at m >= 32 produces wrong/NaN output unless both
+    // the contraction (k) and the output width (n) are 128-aligned. The
+    // gemma4 shared expert hits both edges under TP: its down matmul has
+    // k = inter_per_rank (2112/2 = 1056, k % 128 == 32) and its gate/up have
+    // n = inter_per_rank = 1056 (n % 128 == 32). MMVQ consumes the standard
     // Q8_1 activation and only needs k % 32.
-    if (m < 32 || k % 128 != 0)
+    if (m < 32 || k % 128 != 0 || n % 128 != 0)
         && matches!(dtype_weight, QDtype::Q4_0 | QDtype::Q5_0 | QDtype::Q5_1)
     {
         // K1 — Q4_0 at m ∈ {2, 3, 4}: single-launch batched MMVQ with
