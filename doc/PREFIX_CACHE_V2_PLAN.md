@@ -343,3 +343,27 @@ general multi-slot solution.
   GDN state is overwritten in-place from `lcp` forward).
 - **Position counter**: the slot's decode position must be set to `lcp + tail`,
   not 0 — same half-restore risk as the host path.
+
+---
+
+## Strategy A tried + reverted — null result (2026-06-09)
+
+Strategy A (in-place same-slot reuse) was implemented end-to-end and **reverted**:
+empirically defeated for the chat API on the GDN hybrid. Diagnostic on
+Qwen3.6-27B-Q8_0 `/v1/chat/completions`: turn 2 `lcp = 258 < valid_len = 290`
+— chat-template re-tokenization is not prefix-stable at turn boundaries (the
+assistant response is detokenized→retokenized + generation-prompt/think-primer
+framing shifts token boundaries near the assistant header). A GDN hybrid can
+only reuse at `lcp == valid_len` (recurrent state exists only at the final
+position), so reuse never engaged (0 hits, TTFT unchanged). Full detail in
+memory `feedback_longctx_decode_splitk_cliff_2026_06_09.md`.
+
+**Consequence:** the host-snapshot cache below (B / P1–P9) is now the PRIMARY
+lever. It is robust to the same re-tokenization because it matches at **chunk
+granularity** — in a real (long) conversation the stable early chunks (system
+prompt + early turns; identical text → identical token ids) still hit even when
+a late chunk diverges. Strategy A's failure (whole prompt < 1 chunk, diverged
+at 258) is the worst case that chunked matching sidesteps. The GDN-state slice
+(P5) must therefore land **chunk-boundary (intermediate) capture**, not just
+full-prompt — that is the part that delivers the agentic win. Next concrete
+step: P1 (device snapshot/restore op + ScratchPool byte-range helper + parity).
