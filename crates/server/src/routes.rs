@@ -301,6 +301,13 @@ impl ServerState {
             .prefix_cache
             .longest_match(&keys, self.topology_tag, |_| {})
         else {
+            tracing::info!(
+                target: "server.prefix_cache",
+                prompt_tokens = prompt_ids.len(),
+                n_chain = keys.chunk_keys.len(),
+                first_key = keys.chunk_keys.first().map(|k| k.0).unwrap_or(0),
+                "prefix cache MISS (no chain match)"
+            );
             return Ok(PrefixCacheRestore::Miss);
         };
         // A full-prompt match is only usable with cached first-token
