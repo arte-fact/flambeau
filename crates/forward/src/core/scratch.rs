@@ -1570,6 +1570,195 @@ impl ScratchPool {
         flambeau_core::Stream::synchronize(stream).context("sync gdn reset slot")?;
         Ok(())
     }
+
+    /// Sum of every per-layer section copied by
+    /// [`snapshot_slot_bytes`](Self::snapshot_slot_bytes) for `n_tokens`
+    /// rows: K+V rows `[0..n_tokens)` per contiguous KV layer, plus the
+    /// fixed-size GDN state + conv history per GDN layer.
+    fn slot_snapshot_payload_bytes(&self, n_tokens: usize) -> Result<usize> {
+        if !self.page_pools.is_empty() {
+            anyhow::bail!("slot snapshot: paged KV is unsupported");
+        }
+        let mut total = 0usize;
+        for (li, kv) in self.kv_caches.iter().enumerate() {
+            let row_bytes = kv.bytes_per_row;
+            if kv.kv_width == 0 || row_bytes == 0 {
+                continue;
+            }
+            if n_tokens > kv.depth {
+                anyhow::bail!(
+                    "slot snapshot: layer {li} depth {} < n_tokens {n_tokens} \
+                     (ring/SWA slabs are unsupported)",
+                    kv.depth
+                );
+            }
+            total += 2 * n_tokens * row_bytes;
+        }
+        if let Some(g) = self.config.gdn {
+            if !self.gdn_state.is_empty() {
+                let state = g.num_v_heads * g.head_k_dim * g.head_v_dim * 4;
+                let hist = (g.conv_kernel - 1) * g.conv_channels * 4;
+                total += self.gdn_state.len() * (state + hist);
+            }
+        }
+        Ok(total)
+    }
+
+    /// Copy one slot's resident attention state to host: per contiguous KV
+    /// layer the K then V rows `[0..n_tokens)`, then per GDN layer the
+    /// recurrent state then conv history (fixed size — the exact
+    /// post-position-`n_tokens` state). Layout-agnostic byte copy
+    /// (F16Contig and Q8Contig differ only in `bytes_per_row`). The
+    /// 16-byte header (magic, version, n_tokens) lets
+    /// [`restore_slot_bytes`](Self::restore_slot_bytes) reject mismatched
+    /// snapshots; section sizes are re-derived from the pool config, which
+    /// is identical by construction on the same model + topology.
+    pub fn snapshot_slot_bytes(
+        &self,
+        slot_id: usize,
+        n_tokens: usize,
+        device: &HipDevice,
+    ) -> Result<Vec<u8>> {
+        const MAGIC: u32 = 0x4B56_5331; // "KVS1"
+        let n_slots = self.config.max_slots.max(1);
+        if slot_id >= n_slots {
+            anyhow::bail!("snapshot_slot_bytes: slot_id {slot_id} >= max_slots {n_slots}");
+        }
+        let payload = self.slot_snapshot_payload_bytes(n_tokens)?;
+        let mut buf = vec![0u8; 16 + payload];
+        buf[0..4].copy_from_slice(&MAGIC.to_le_bytes());
+        buf[4..8].copy_from_slice(&1u32.to_le_bytes());
+        buf[8..16].copy_from_slice(&(n_tokens as u64).to_le_bytes());
+        let stream = device.default_stream();
+        let mut off = 16usize;
+        let buf_ptr = buf.as_mut_ptr() as usize;
+        let copy_d2h = |dst_off: usize, src: DevicePtr, len: usize| -> Result<()> {
+            unsafe {
+                device.memcpy_async(
+                    stream,
+                    CopyDirection::DeviceToHost,
+                    DevicePtr(buf_ptr + dst_off),
+                    src,
+                    len,
+                )?;
+            }
+            Ok(())
+        };
+        for kv in &self.kv_caches {
+            let row_bytes = kv.bytes_per_row;
+            if kv.kv_width == 0 || row_bytes == 0 {
+                continue;
+            }
+            let slot_base = slot_id * kv.depth * row_bytes;
+            let len = n_tokens * row_bytes;
+            copy_d2h(off, kv.k.offset_bytes(slot_base), len).context("snapshot K rows")?;
+            off += len;
+            copy_d2h(off, kv.v.offset_bytes(slot_base), len).context("snapshot V rows")?;
+            off += len;
+        }
+        if let Some(g) = self.config.gdn {
+            let state = g.num_v_heads * g.head_k_dim * g.head_v_dim * 4;
+            let hist = (g.conv_kernel - 1) * g.conv_channels * 4;
+            for ls in &self.gdn_state {
+                copy_d2h(off, ls.state.offset_bytes(slot_id * state), state)
+                    .context("snapshot gdn state")?;
+                off += state;
+                copy_d2h(off, ls.conv_history.offset_bytes(slot_id * hist), hist)
+                    .context("snapshot gdn conv_history")?;
+                off += hist;
+            }
+        }
+        debug_assert_eq!(off, buf.len());
+        flambeau_core::Stream::synchronize(stream).context("sync slot snapshot")?;
+        Ok(buf)
+    }
+
+    /// Inverse of [`snapshot_slot_bytes`](Self::snapshot_slot_bytes):
+    /// write the snapshot's K/V rows `[0..n_tokens)` and GDN state back
+    /// into `slot_id`. Rows past `n_tokens` are left as-is — they are
+    /// never read before being re-appended. The caller must continue the
+    /// slot from position `n_tokens` (a half-restored position is silent
+    /// corruption; parity tests decode ≥ 8 steps to catch it).
+    pub fn restore_slot_bytes(
+        &self,
+        slot_id: usize,
+        n_tokens: usize,
+        bytes: &[u8],
+        device: &HipDevice,
+    ) -> Result<()> {
+        const MAGIC: u32 = 0x4B56_5331;
+        let n_slots = self.config.max_slots.max(1);
+        if slot_id >= n_slots {
+            anyhow::bail!("restore_slot_bytes: slot_id {slot_id} >= max_slots {n_slots}");
+        }
+        if bytes.len() < 16 {
+            anyhow::bail!(
+                "restore_slot_bytes: truncated snapshot ({} bytes)",
+                bytes.len()
+            );
+        }
+        let magic = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
+        let version = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+        let snap_tokens = u64::from_le_bytes(bytes[8..16].try_into().unwrap()) as usize;
+        if magic != MAGIC || version != 1 {
+            anyhow::bail!("restore_slot_bytes: bad header (magic {magic:#x} version {version})");
+        }
+        if snap_tokens != n_tokens {
+            anyhow::bail!(
+                "restore_slot_bytes: snapshot holds {snap_tokens} tokens, caller asked {n_tokens}"
+            );
+        }
+        let payload = self.slot_snapshot_payload_bytes(n_tokens)?;
+        if bytes.len() != 16 + payload {
+            anyhow::bail!(
+                "restore_slot_bytes: snapshot is {} bytes, this pool expects {} \
+                 (model/topology/layout mismatch)",
+                bytes.len(),
+                16 + payload
+            );
+        }
+        let stream = device.default_stream();
+        let mut off = 16usize;
+        let copy_h2d = |src_off: usize, dst: DevicePtr, len: usize| -> Result<()> {
+            unsafe {
+                device.memcpy_async(
+                    stream,
+                    CopyDirection::HostToDevice,
+                    dst,
+                    DevicePtr(bytes.as_ptr() as usize + src_off),
+                    len,
+                )?;
+            }
+            Ok(())
+        };
+        for kv in &self.kv_caches {
+            let row_bytes = kv.bytes_per_row;
+            if kv.kv_width == 0 || row_bytes == 0 {
+                continue;
+            }
+            let slot_base = slot_id * kv.depth * row_bytes;
+            let len = n_tokens * row_bytes;
+            copy_h2d(off, kv.k.offset_bytes(slot_base), len).context("restore K rows")?;
+            off += len;
+            copy_h2d(off, kv.v.offset_bytes(slot_base), len).context("restore V rows")?;
+            off += len;
+        }
+        if let Some(g) = self.config.gdn {
+            let state = g.num_v_heads * g.head_k_dim * g.head_v_dim * 4;
+            let hist = (g.conv_kernel - 1) * g.conv_channels * 4;
+            for ls in &self.gdn_state {
+                copy_h2d(off, ls.state.offset_bytes(slot_id * state), state)
+                    .context("restore gdn state")?;
+                off += state;
+                copy_h2d(off, ls.conv_history.offset_bytes(slot_id * hist), hist)
+                    .context("restore gdn conv_history")?;
+                off += hist;
+            }
+        }
+        debug_assert_eq!(off, bytes.len());
+        flambeau_core::Stream::synchronize(stream).context("sync slot restore")?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
