@@ -351,12 +351,15 @@ fn scheduler_can_engage(state: &ServerState, params: &SamplingParams) -> bool {
 ///
 /// `logits_out` is populated with the LAST chunk's final-row logits
 /// — the prefill-side input for first-token sampling.
+/// Returns `true` when a full-prompt prefix-cache hit served the logits
+/// (the caller must skip the post-prefill capture — the entry it would
+/// write is the one that was just hit).
 fn chunked_prefill_pp(
     state: &ServerState,
     slot_idx: usize,
     prompt_ids: &[u32],
     logits_out: &mut Vec<f32>,
-) -> Result<()> {
+) -> Result<bool> {
     let prefill_chunk = state.prefill_chunk_tokens.max(1);
     // Phase K4c — mixed-batch engagement on every arch that
     // implements `Model::supports_mixed_batch` (qwen35 / qwen35moe /
@@ -384,7 +387,7 @@ fn chunked_prefill_pp(
             crate::routes::PrefixCacheRestore::FullHit { logits } => {
                 logits_out.clear();
                 logits_out.extend_from_slice(&logits);
-                return Ok(());
+                return Ok(true);
             }
             crate::routes::PrefixCacheRestore::PrefixHit { n_matched } => {
                 prefill_start = n_matched;
@@ -505,11 +508,7 @@ fn chunked_prefill_pp(
             })?;
         prefill_start = end;
     }
-    {
-        let mut guard = state.inflight_pool[slot_idx].blocking_lock();
-        state.prefix_cache_try_capture_full(&mut **guard, prompt_ids, logits_out);
-    }
-    Ok(())
+    Ok(false)
 }
 
 fn run_completion_scheduler_pp_blocking(
@@ -552,7 +551,11 @@ fn run_completion_scheduler_pp_blocking(
         let mut logits_buf: Vec<f32> = Vec::with_capacity(vocab);
         let _ = cluster;
         let _ = model;
-        chunked_prefill_pp(&state, slot_idx, &prompt_ids, &mut logits_buf)?;
+        let full_hit = chunked_prefill_pp(&state, slot_idx, &prompt_ids, &mut logits_buf)?;
+        if !full_hit {
+            let mut guard = state.inflight_pool[slot_idx].blocking_lock();
+            state.prefix_cache_try_capture_full(&mut **guard, &prompt_ids, &logits_buf);
+        }
         if !relax_stop_mask {
             for &sid in stop_ids {
                 if (sid as usize) < logits_buf.len() {
@@ -808,9 +811,12 @@ fn run_completion_blocking_ids(
     // (bounds the per-step stall a long prompt inflicts on peers).
     // Reset for new request happens inside `chunked_prefill_pp` on the
     // first chunk's lock scope. Decode reacquires the guard below.
-    chunked_prefill_pp(&state, slot_idx, &prompt_ids, &mut logits_buf)?;
+    let full_hit = chunked_prefill_pp(&state, slot_idx, &prompt_ids, &mut logits_buf)?;
     let mut inflight_guard = state.inflight_pool[slot_idx].blocking_lock();
     let inflight: &mut dyn crate::Session = &mut **inflight_guard;
+    if !full_hit {
+        state.prefix_cache_try_capture_full(inflight, &prompt_ids, &logits_buf);
+    }
     for &sid in stop_ids {
         if (sid as usize) < logits_buf.len() {
             logits_buf[sid as usize] = f32::NEG_INFINITY;
@@ -1213,7 +1219,17 @@ pub(crate) fn run_completion_blocking_streaming(
     // **Phase 5 S2** — chunked prefill on the streaming path. Same
     // mutex-release-between-chunks shape as the legacy path; decode
     // reacquires once below for the SSE-emit loop.
-    chunked_prefill_pp(&state, slot_idx, &prompt_ids, &mut logits_buf)?;
+    let full_hit = chunked_prefill_pp(&state, slot_idx, &prompt_ids, &mut logits_buf)?;
+    // Captured AFTER the first token is emitted (the snapshot DtoH costs
+    // 0.1-2.2 s and would otherwise sit inside TTFT) but BEFORE the first
+    // decode forward (which advances the GDN state past the prompt). The
+    // copy keeps the cached logits unmasked — the stop-mask below mutates
+    // `logits_buf` in place.
+    let prefill_logits_for_cache = if full_hit {
+        Vec::new()
+    } else {
+        logits_buf.clone()
+    };
     let mut inflight_guard = state.inflight_pool[slot_idx].blocking_lock();
     let inflight: &mut dyn crate::Session = &mut **inflight_guard;
     for &sid in stop_ids {
@@ -1296,6 +1312,9 @@ pub(crate) fn run_completion_blocking_streaming(
     if !alive {
         // Slot stays pooled; mutex releases on function return.
         return Ok(("stop".into(), prompt_tokens, generated.len() as u32));
+    }
+    if !full_hit {
+        state.prefix_cache_try_capture_full(inflight, &prompt_ids, &prefill_logits_for_cache);
     }
 
     let mut finish_reason: &str = "length";
