@@ -277,3 +277,69 @@ the dead flag isn't silently misleading while P1–P9 cook.)
   at-chunk-boundary flagged as V2.
 - #219 — **this plan**: the v2 device-side snapshot/restore that makes
   the index do work again.
+
+---
+
+## Revised priority — agentic-first (2026-06-09)
+
+Triggered by the `perf/long-context-speed` investigation: the user's pain is
+**single-stream agentic context growth** (each turn re-sends the whole
+conversation, `--inflight-slots 1`). Two scoping findings change the priority:
+
+### Finding 1 — full-prompt-only capture (P5 "V1") will not hit a growing chat
+Turn N's prompt = turn N-1's prompt + assistant reply + new user message. The
+P1 cache entry is keyed by turn N-1's *partial-tail* chunk; turn N re-chunks
+across that boundary so the tail chunk key never reappears in turn N's chain →
+`longest_match` MISSES. Agentic hits require **chunk-boundary (intermediate)
+capture** (entries keyed at each `chunk_tokens` boundary). This is NOT the "V2
+hard" GDN-at-arbitrary-position problem the original plan feared: the
+chunked-prefill loop already stops at clean chunk boundaries (it releases the
+inflight mutex between chunks), and `gdn_state[li].state` holds the post-chunk
+state there — capture = a DtoH at each boundary. So intermediate capture is
+tractable and is the part that delivers the host-cache agentic win; it should
+be pulled forward, not deferred.
+
+### Finding 2 — in-place same-slot reuse is a cheaper lever for single-stream
+With `--inflight-slots 1` and a growing conversation, consecutive requests land
+on the SAME slot whose KV + GDN state from the prior turn is still ON-DEVICE.
+If the server (a) skips the per-request slot reset and (b) tracks the slot's
+current token sequence, then a new request computes
+`lcp = longest_common_prefix(prompt, slot_sequence)` and prefills only
+`prompt[lcp..]` from `position = lcp`. **Zero DtoH/HtoD, zero GDN host
+snapshot, no worker commands** — it sidesteps the entire hard part of the
+host-snapshot design. Trade-off: single-stream only (breaks under
+concurrency / slot eviction); the host-snapshot cache (P1–P9) remains the
+general multi-slot solution.
+
+### Revised slice order
+- **P0** — honest no-op startup warning (unchanged, ship first).
+- **Strategy A — in-place same-slot continuation** (NEW, highest ROI for the
+  reported scenario): per-slot token-sequence tracking + skip-reset-on-extend +
+  tail-only prefill from `position = lcp`. Parity (≥8 decode steps
+  bit-identical vs cold) + before/after TTFT gate on Qwen3.6-27B pp2tp2.
+  Independent of the host-snapshot machinery. ~1 session.
+  - A1: per-slot `Vec<u32>` token history + `valid_len` on the inflight/slot
+    state; populated after each prefill+decode.
+  - A2: request path computes `lcp` vs the claimed slot's history; gate the
+    `reset_kv_slot`/`reset_gdn_state_slot` calls on `lcp == 0`; prefill
+    `prompt[lcp..]` at `start_position = lcp`. Decode appends generated tokens
+    to the history.
+  - A3: correctness guards — only reuse when the SAME slot is re-claimed (slot
+    affinity for the stream), invalidate history on any divergence, cap
+    history to `ctx_cap`. Parity + TTFT cert.
+- **B1–B3** — the host-snapshot cache (existing P1–P9), with **intermediate
+  chunk-boundary capture promoted from "follow-up" to in-scope for the GDN
+  slice** (Finding 1). General multi-slot/concurrent solution.
+
+### Correctness deltas specific to Strategy A
+- **Slot affinity**: in-place reuse is only valid if the new request re-claims
+  the slot whose history we matched against. Under `inflight-slots 1` this is
+  automatic; with >1 slot, only reuse when the scheduler hands back the same
+  slot, else `lcp = 0` (cold). Never match against a different slot's history.
+- **Divergence invalidation**: if `lcp < slot.valid_len` (the new prompt
+  diverges mid-history — e.g. an edited/regenerated turn), the KV/state past
+  `lcp` is stale; set `valid_len = lcp` and prefill the tail (the slab past
+  `lcp` is simply overwritten — no explicit clear needed for full-attention;
+  GDN state is overwritten in-place from `lcp` forward).
+- **Position counter**: the slot's decode position must be set to `lcp + tail`,
+  not 0 — same half-restore risk as the host path.
