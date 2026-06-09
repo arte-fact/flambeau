@@ -346,18 +346,65 @@ impl ServerState {
         })
     }
 
-    /// **#229 insert an intermediate (chunk-boundary) cache
-    /// entry produced during a fresh prefill's per-chunk loop. No
-    /// logits are stored (callers can't sample mid-prefill); future
-    /// requests that hit this entry restore at the boundary and
-    /// proceed with a partial-tail prefill via `prefill_logits`.
+    /// Insert an intermediate (full-chunk-boundary) cache entry during a
+    /// prefill's per-chunk loop. The slot's state at a boundary is exactly
+    /// the post-position state (each chunk runs the full layer stack, so
+    /// GDN state is committed between chunks). No logits are stored —
+    /// callers can't sample mid-prefill; a future request hitting this
+    /// entry restores at the boundary and prefills its own tail. This is
+    /// what makes a GROWN conversation hit: its prompt diverges from the
+    /// previous turn only near that turn's end, so the full-chunk chain
+    /// up to the boundary still matches while the previous full-prompt
+    /// entry (whose partial-tail key never reappears) cannot.
     pub fn prefix_cache_insert_intermediate(
         &self,
-        _prompt_ids: &[u32],
-        _n_tokens_completed: usize,
-        _snap: Vec<crate::prefix_cache::RankSnapshot>,
+        inflight: &mut dyn crate::Session,
+        prompt_ids: &[u32],
+        n_tokens_completed: usize,
     ) {
-        // Pending #219: v2 prefix-cache snapshot path.
+        use crate::prefix_cache::{PrefixCacheInsert, PrefixKeys};
+        let chunk = self.prefix_cache_chunk_tokens;
+        if !self.prefix_cache.enabled()
+            || n_tokens_completed == 0
+            || n_tokens_completed % chunk != 0
+            || n_tokens_completed >= prompt_ids.len()
+        {
+            return;
+        }
+        let Some(driver) = inflight.as_model_driver_mut() else {
+            return;
+        };
+        let snaps = match driver.snapshot_slot(n_tokens_completed) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    target: "server.prefix_cache",
+                    error = %e,
+                    "intermediate snapshot failed; entry skipped"
+                );
+                return;
+            }
+        };
+        let bytes: usize = snaps.iter().map(Vec::len).sum();
+        let keys = PrefixKeys::from_prompt(&prompt_ids[..n_tokens_completed], chunk);
+        self.prefix_cache.insert_with_kv(
+            keys.chunk_keys,
+            PrefixCacheInsert {
+                topology: self.topology_tag,
+                chunk_tokens: chunk,
+                n_tokens: n_tokens_completed,
+                bytes,
+            },
+            std::sync::Arc::new(snaps),
+            None,
+        );
+        tracing::info!(
+            target: "server.prefix_cache",
+            boundary = n_tokens_completed,
+            prompt_tokens = prompt_ids.len(),
+            bytes,
+            "prefix cache captured chunk boundary"
+        );
     }
 
     /// Best-effort capture of the post-prefill KV+GDN state plus the

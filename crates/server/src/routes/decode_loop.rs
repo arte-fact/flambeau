@@ -392,10 +392,29 @@ fn chunked_prefill_pp(
             crate::routes::PrefixCacheRestore::Miss => {}
         }
     }
+    // Intermediate capture targets: the last two full-chunk boundaries
+    // strictly inside the prompt. A grown conversation diverges from this
+    // prompt only near its end, so these are the chains its next turn can
+    // hit; earlier boundaries are shadowed by them, and capturing every
+    // boundary would multiply host-RAM cost for no extra hit coverage.
+    let capture_boundaries: Vec<usize> = (1..=prompt_ids.len() / prefill_chunk)
+        .map(|i| i * prefill_chunk)
+        .filter(|&b| b < prompt_ids.len())
+        .rev()
+        .take(2)
+        .collect();
+    let restored_at = prefill_start;
     while prefill_start < prompt_ids.len() {
         let end = (prefill_start + prefill_chunk).min(prompt_ids.len());
         let chunk = &prompt_ids[prefill_start..end];
         let mut guard = state.inflight_pool[slot_idx].blocking_lock();
+        // The previous chunk ran the full layer stack, so the slot state at
+        // `prefill_start` is committed — snapshot it here, under the same
+        // freshly-acquired guard the chunk forward uses. Skip the restored
+        // boundary itself (its entry is the one we just hit).
+        if prefill_start > restored_at && capture_boundaries.contains(&prefill_start) {
+            state.prefix_cache_insert_intermediate(&mut **guard, prompt_ids, prefill_start);
+        }
         if mixed_on {
             // Become the dispatch leader for this chunk. `lock()`
             // (blocking) — we wait for the current decode tick to

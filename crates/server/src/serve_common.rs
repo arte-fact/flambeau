@@ -146,7 +146,7 @@ pub fn build_prefix_cache(cfg: &ServeConfig, mesh_kind: &'static str) -> Arc<Pre
     ));
     if prefix_cache.enabled() {
         info!(
-            chunk_tokens = cfg.prefill_ubatch.max(128),
+            chunk_tokens = cfg.prefill_chunk_tokens.max(1),
             budget_bytes = prefix_cache.vram_budget_bytes,
             mesh = mesh_kind,
             "prefix cache ENABLED (FLAMBEAU_PREFIX_CACHE=1)"
@@ -222,7 +222,12 @@ pub fn build_server_state(inputs: ServerStateInputs) -> SharedState {
         batched_pending: std::sync::Mutex::new(Vec::new()),
         batched_dispatcher: std::sync::Mutex::new(()),
         prefix_cache,
-        prefix_cache_chunk_tokens: prefill_ubatch,
+        // Cache chunk size must equal the prefill LOOP granularity
+        // (`chunked_prefill_pp` iterates in `prefill_chunk_tokens` steps and
+        // captures at its boundaries) — NOT `prefill_ubatch`, which is a
+        // scratch-sizing knob that gets bumped to chunk+slots for
+        // mixed-batch and would misalign every intermediate boundary.
+        prefix_cache_chunk_tokens: prefill_chunk_tokens,
         topology_tag,
         embedding_model,
         embedding_tokenizer,
