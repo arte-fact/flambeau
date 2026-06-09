@@ -13,7 +13,7 @@
 // Each kernel TU gets its own copy via the `__device__ static constexpr`
 // declarations; HIP places them in constant memory (per-CU 16 KB cache).
 
-#include <hip/hip_runtime.h>
+#include "backend_compat.cuh"
 #include <stdint.h>
 
 // IQ3_XXS codebook — 256 entries, each entry packs 4 unsigned i8 magnitudes

@@ -4,7 +4,7 @@
 //! partition; pick via `splitk_chunk_size(n_tokens_kv)`. F16 KV only.
 
 use anyhow::bail;
-use flambeau_ops::{HipOps, Ops};
+use flambeau_ops::Ops;
 
 use crate::dtype::{F16, F32};
 use crate::error::Result;
@@ -30,7 +30,7 @@ pub fn attn_decode_f16_splitk(
     outputs: SplitkOutputs<'_>,
     shape: flambeau_ops::AttnSplitkShape,
     knobs: flambeau_ops::AttnKnobs,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     let SplitkOutputs { out, m: partials_m, s: partials_s, o: partials_o } = outputs;
     let flambeau_ops::AttnSplitkShape {
@@ -139,6 +139,7 @@ pub fn splitk_chunk_size(n_tokens_kv: usize) -> usize {
 #[cfg(test)]
 mod attn_microbench {
     use super::*;
+    use flambeau_ops::HipOps;
     use crate::testing::{test_device, test_ops_registry};
     use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
     use half::f16;

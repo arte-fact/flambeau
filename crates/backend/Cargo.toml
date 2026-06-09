@@ -1,0 +1,20 @@
+[package]
+name = "flambeau-backend"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Backend-binding layer: the `Backend` bundle trait the topology executor is generic over, plus the per-vendor impls (HipBackend, later CudaBackend). Ties the seam traits (Device/Event in core, Cluster in runtime, Ops in ops) into one type set so forward/models name no GPU vendor."
+
+[features]
+default = []
+hip = ["dep:flambeau-backend-hip", "flambeau-ops/hip"]
+
+[dependencies]
+flambeau-core = { path = "../core" }
+flambeau-runtime = { path = "../runtime" }
+flambeau-ops = { path = "../ops" }
+flambeau-backend-hip = { path = "../backend-hip", optional = true }
+
+[lints]
+workspace = true

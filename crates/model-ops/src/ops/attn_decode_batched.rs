@@ -8,7 +8,7 @@
 //! filled host-side and uploaded once per forward call.
 
 use anyhow::bail;
-use flambeau_ops::{HipOps, Ops};
+use flambeau_ops::Ops;
 
 use crate::error::Result;
 
@@ -22,7 +22,7 @@ use crate::error::Result;
 pub fn kv_append_f16_batched_slots(
     buffers: flambeau_ops::KvAppendBatchedSlotsBuffers,
     shape: flambeau_ops::KvAppendBatchedSlotsShape,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     if shape.n_slots == 0 {
         bail!("kv_append_f16_batched_slots: n_slots must be > 0");
@@ -39,7 +39,7 @@ pub fn attn_decode_f16_batched(
     buffers: flambeau_ops::AttnBatchedBuffers,
     shape: flambeau_ops::AttnDecodeBatchedShape,
     knobs: flambeau_ops::AttnKnobs,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     if !matches!(shape.head_dim, 64 | 128 | 256 | 512) {
         bail!(
@@ -71,7 +71,7 @@ pub fn attn_prefill_f16_paged(
     buffers: flambeau_ops::AttnPagedPrefillBuffers,
     shape: flambeau_ops::AttnPrefillPagedShape,
     knobs: flambeau_ops::AttnKnobs,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     if !matches!(shape.head_dim, 64 | 128 | 256 | 512) {
         bail!(
@@ -109,7 +109,7 @@ pub fn attn_prefill_f16_paged(
 pub fn kv_append_f16_paged_prefill(
     buffers: flambeau_ops::KvAppendPagedPrefillBuffers,
     shape: flambeau_ops::KvAppendPagedPrefillShape,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     if shape.n_tokens == 0 {
         return Ok(());
@@ -135,7 +135,7 @@ pub fn kv_append_f16_paged_prefill(
 pub fn kv_append_f16_paged_slots(
     buffers: flambeau_ops::KvAppendPagedSlotsBuffers,
     shape: flambeau_ops::KvAppendPagedSlotsShape,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     if shape.n_slots == 0 {
         bail!("kv_append_f16_paged_slots: n_slots must be > 0");
@@ -159,7 +159,7 @@ pub fn attn_decode_f16_paged(
     buffers: flambeau_ops::AttnPagedDecodeBuffers,
     shape: flambeau_ops::AttnDecodePagedShape,
     scale: f32,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     if !matches!(shape.head_dim, 64 | 128 | 256 | 512) {
         bail!(

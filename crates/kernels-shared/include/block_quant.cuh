@@ -3,7 +3,7 @@
 // Byte-identical to ggml-common.h + candle k_quants.rs so pointer-casts
 // from mmap'd GGUF data work on GPU without repacking.
 
-#include <hip/hip_runtime.h>
+#include "backend_compat.cuh"
 
 #ifndef QK8_0
 #define QK8_0 32
@@ -21,10 +21,7 @@
 #define K_SCALE_SIZE 12
 #endif
 
-// fp16 — `_Float16` is the HIP/clang built-in half type; ggml calls this
-// `ggml_fp16_t` (a typedef of `__half`). Using the built-in keeps us away
-// from hip/amd_hip_fp16.h's heavier wrapper class for pointer casts.
-typedef _Float16 fb_fp16_t;
+// fb_fp16_t is defined in backend_compat.cuh (_Float16 on HIP, __half on CUDA).
 
 // bf16 — Brain Float 16: 1 sign + 8 exponent + 7 mantissa bits, byte-
 // compatible with the upper half of an IEEE-754 F32. gfx906 has no

@@ -7,6 +7,7 @@
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 
+pub mod cluster;
 pub mod collective;
 pub mod json_grammar;
 pub mod json_schema;
@@ -18,6 +19,7 @@ pub mod sampling;
 pub mod tp_layout;
 pub mod tp_slice;
 
+pub use cluster::Cluster;
 pub use collective::{
     AllGather, AllReduce, AllToAll, Broadcast, CollectiveError, CollectiveResult, RefMesh,
     RefRankHandle,

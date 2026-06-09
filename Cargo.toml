@@ -6,6 +6,7 @@ members = [
   "crates/kernels-shared",
   "crates/kernels-hip",
   "crates/backend-hip",
+  "crates/backend",
   "crates/ops",
   "crates/model-ops",
   "crates/forward",

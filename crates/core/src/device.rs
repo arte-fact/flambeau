@@ -91,11 +91,47 @@ pub trait Stream: Send + Sync {
     fn synchronize(&self) -> DeviceResult<()>;
 }
 
+/// A cross-stream ordering primitive. Recorded on one stream, waited on
+/// another, so a consumer stream does not start work before a producer
+/// stream's recorded point retires (PP / Hybrid stage hand-off). Backends
+/// wrap their native event handle (`HipEvent`, `cudaEvent_t`).
+pub trait Event<S: Stream>: Send + Sync {
+    /// Record this event on `stream`. The event transitions to the recorded
+    /// state once all work enqueued on `stream` before this call retires.
+    /// # Errors
+    /// Returns `DeviceError::Backend` if the backend record call fails.
+    fn record(&self, stream: &S) -> DeviceResult<()>;
+
+    /// Insert a driver-side wait on `stream`: work enqueued on `stream` after
+    /// this call does not start until the event is recorded. Non-blocking on
+    /// the host.
+    /// # Errors
+    /// Returns `DeviceError::Backend` if the backend wait call fails.
+    fn stream_wait(&self, stream: &S) -> DeviceResult<()>;
+
+    /// Block the calling thread until this event is recorded. Profiling /
+    /// teardown only; the hot path uses `stream_wait`.
+    /// # Errors
+    /// Returns `DeviceError::Backend` if the backend sync call fails.
+    fn synchronize(&self) -> DeviceResult<()>;
+
+    /// Milliseconds between `start`'s recorded point and this event's. Both
+    /// events must be timing-enabled (`Device::new_timing_event`) and already
+    /// recorded + synced.
+    /// # Errors
+    /// Returns `DeviceError::Backend` if the events are not timing-enabled or
+    /// the backend query fails.
+    fn elapsed_ms_since(&self, start: &Self) -> DeviceResult<f32>;
+}
+
 /// A compute device (one GPU). `Device` is the root of the trait hierarchy —
 /// everything else (allocators, streams, kernel impls) flows from a concrete
 /// device type.
 pub trait Device: Send + Sync + 'static {
     type Stream: Stream;
+
+    /// Cross-stream ordering event for this backend (see [`Event`]).
+    type Event: Event<Self::Stream>;
 
     /// Backend identifier (`"hip"`, `"cuda"`, `"cpu"`). Used in error messages
     /// and dispatch keys.
@@ -153,4 +189,16 @@ pub trait Device: Send + Sync + 'static {
     /// # Errors
     /// Returns `DeviceError::Backend` if the device-sync call fails.
     fn synchronize(&self) -> DeviceResult<()>;
+
+    /// Create a timing-disabled ordering event on this device (cheap; the
+    /// production hot-path choice for stage hand-off).
+    /// # Errors
+    /// Returns `DeviceError::Backend` if the backend event-create call fails.
+    fn new_event(&self) -> DeviceResult<Self::Event>;
+
+    /// Create a timing-enabled event (for `Event::elapsed_ms_since`). Use only
+    /// for profiling instrumentation.
+    /// # Errors
+    /// Returns `DeviceError::Backend` if the backend event-create call fails.
+    fn new_timing_event(&self) -> DeviceResult<Self::Event>;
 }

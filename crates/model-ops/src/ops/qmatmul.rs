@@ -8,7 +8,7 @@
 
 use anyhow::bail;
 use flambeau_core::op::QDtype;
-use flambeau_ops::{HipOps, Ops};
+use flambeau_ops::Ops;
 
 use crate::dtype::{F16, F32, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q8_1};
 use crate::error::Result;
@@ -21,7 +21,7 @@ pub fn qmatmul_q8_0(
     act_q8_1_mmq: &Tensor<Q8_1>,
     output: &mut Tensor<F32>,
     shape: flambeau_ops::MatmulShape,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     qmatmul_dispatch(
         weight.ptr,
@@ -41,7 +41,7 @@ pub fn qmatmul_q4_0(
     act_q8_1_mmq: &Tensor<Q8_1>,
     output: &mut Tensor<F32>,
     shape: flambeau_ops::MatmulShape,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     qmatmul_dispatch(
         weight.ptr,
@@ -61,7 +61,7 @@ pub fn qmatmul_q4_1(
     act_q8_1_mmq: &Tensor<Q8_1>,
     output: &mut Tensor<F32>,
     shape: flambeau_ops::MatmulShape,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     qmatmul_dispatch(
         weight.ptr,
@@ -81,7 +81,7 @@ pub fn qmatmul_q5_0(
     act_q8_1_mmq: &Tensor<Q8_1>,
     output: &mut Tensor<F32>,
     shape: flambeau_ops::MatmulShape,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     qmatmul_dispatch(
         weight.ptr,
@@ -101,7 +101,7 @@ pub fn qmatmul_q5_1(
     act_q8_1_mmq: &Tensor<Q8_1>,
     output: &mut Tensor<F32>,
     shape: flambeau_ops::MatmulShape,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     qmatmul_dispatch(
         weight.ptr,
@@ -124,7 +124,7 @@ pub fn mmvq_q4_0_gate_up_t128_decode(
     gate_out: &mut Tensor<F32>,
     up_out: &mut Tensor<F32>,
     shape: flambeau_ops::MmvqShape,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     let flambeau_ops::MmvqShape { n_rows: n, k } = shape;
     if gate_out.n_elems < n || up_out.n_elems < n {
@@ -157,7 +157,7 @@ pub fn mmvq_q8_0_gate_up_t128_decode(
     gate_out: &mut Tensor<F32>,
     up_out: &mut Tensor<F32>,
     shape: flambeau_ops::MmvqShape,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     let flambeau_ops::MmvqShape { n_rows: n, k } = shape;
     if gate_out.n_elems < n || up_out.n_elems < n {
@@ -189,7 +189,7 @@ pub fn mmvq_q4_0_kv_decode_f16(
     k_out: &mut Tensor<F16>,
     v_out: &mut Tensor<F16>,
     shape: flambeau_ops::MmvqShape,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     let flambeau_ops::MmvqShape { n_rows: n, k } = shape;
     if k_out.n_elems < n || v_out.n_elems < n {
@@ -219,7 +219,7 @@ fn qmatmul_dispatch(
     output: &mut Tensor<F32>,
     shape: flambeau_ops::MatmulShape,
     dtype: QDtype,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     if output.n_elems < shape.m * shape.n {
         bail!(
@@ -245,6 +245,7 @@ fn qmatmul_dispatch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flambeau_ops::HipOps;
     use crate::ops::quantize::quantize_f32_to_q8_1;
     use crate::testing::{
         alloc, assert_close_f32, download, free, test_device, test_ops_registry, upload,

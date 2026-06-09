@@ -5,7 +5,7 @@
 //! at long context. `head_dim ∈ {64, 128, 256}`; no SWA.
 
 use anyhow::bail;
-use flambeau_ops::{HipOps, Ops};
+use flambeau_ops::Ops;
 
 use crate::dtype::{F16, Q8_0};
 use crate::error::Result;
@@ -18,7 +18,7 @@ pub fn attn_decode_q8_kv_splitk(
     outputs: crate::ops::attn_decode_splitk::SplitkOutputs<'_>,
     shape: flambeau_ops::AttnSplitkShape,
     knobs: flambeau_ops::AttnKnobs,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     let crate::ops::attn_decode_splitk::SplitkOutputs {
         out,

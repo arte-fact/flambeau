@@ -5,7 +5,7 @@
 //! `k ≤ SAMPLER_K_OUT_MAX` (single-block 4096-candidate cap).
 
 use anyhow::bail;
-use flambeau_ops::{HipOps, Ops};
+use flambeau_ops::Ops;
 
 pub use flambeau_ops::hip::sampling::SAMPLER_K_OUT_MAX;
 
@@ -21,7 +21,7 @@ pub fn topk_softmax_f32(
     vocab: usize,
     k: usize,
     inv_temp: f32,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     if k == 0 {
         bail!("topk_softmax_f32: k must be >= 1");
@@ -70,6 +70,7 @@ fn cpu_topk_softmax(logits: &[f32], k: usize, inv_temp: f32) -> (Vec<i32>, Vec<f
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flambeau_ops::HipOps;
     use crate::testing::{
         alloc, assert_close_f32, download, free, test_device, test_ops_registry, upload,
     };

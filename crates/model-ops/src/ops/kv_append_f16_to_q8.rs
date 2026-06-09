@@ -13,7 +13,7 @@
 
 use anyhow::bail;
 use flambeau_core::DevicePtr;
-use flambeau_ops::{HipOps, Ops};
+use flambeau_ops::Ops;
 
 use crate::dtype::{F16, Q8_0};
 use crate::error::Result;
@@ -28,7 +28,7 @@ pub fn kv_append_f16_to_q8(
     k_cache: &mut Tensor<Q8_0>,
     v_cache: &mut Tensor<Q8_0>,
     spec: crate::ops::kv_append::KvAppendSpec,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     let crate::ops::kv_append::KvAppendSpec { n_tokens, kv_width, write_pos, max_seq_len, ring_depth } =
         spec;
@@ -106,6 +106,7 @@ pub fn kv_append_f16_to_q8(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flambeau_ops::HipOps;
     use crate::testing::{alloc, download, free, test_device, test_ops_registry, upload};
     use flambeau_core::{Device, Stream};
     use half::f16;

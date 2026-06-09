@@ -2,7 +2,7 @@
 //! `[d (fp16), s (fp16), qs[32] (i8)]`, 36 B / 32 elems.
 
 use anyhow::bail;
-use flambeau_ops::{HipOps, Ops};
+use flambeau_ops::Ops;
 
 use crate::dtype::{F16, F32, Q8_1};
 use crate::error::Result;
@@ -12,7 +12,7 @@ pub fn quantize_f32_to_q8_1(
     input: &Tensor<F32>,
     output: &mut Tensor<Q8_1>,
     n_elems: usize,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     if input.n_elems < n_elems {
         bail!(
@@ -30,7 +30,7 @@ pub fn quantize_f16_to_q8_1(
     input: &Tensor<F16>,
     output: &mut Tensor<Q8_1>,
     n_elems: usize,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     if input.n_elems < n_elems {
         bail!(
@@ -52,7 +52,7 @@ pub fn quantize_f16_to_q8_1_mmq(
     output: &mut Tensor<Q8_1>,
     ncols: usize,
     total_b: usize,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     if input.n_elems < ncols * total_b {
         bail!(
@@ -70,6 +70,7 @@ pub fn quantize_f16_to_q8_1_mmq(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flambeau_ops::HipOps;
     use crate::testing::{
         alloc, assert_close_f32, download, free, test_device, test_ops_registry, upload,
     };

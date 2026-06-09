@@ -25,13 +25,15 @@
 #[cfg(feature = "hip")]
 pub mod hip;
 
-#[cfg(feature = "hip")]
+// `sig` is the backend-portable op-signature surface (POD buffers / shapes /
+// knobs over `DevicePtr` + `core::ScalarSlot`). Always compiled so the `Ops`
+// trait and a future `CudaOps` impl share it. The one HIP-specific member —
+// `OpCtx` (holds `&HipStream`) — is gated within the module.
 pub mod sig;
 
 #[cfg(feature = "hip")]
 pub use hip::{OpsRegistry, OpsRegistryError};
 
-#[cfg(feature = "hip")]
 pub use sig::{
     AttnBatchedBuffers, AttnBuffers, AttnDecodeBatchedShape, AttnDecodePagedShape,
     AttnDecodeShape, AttnDecodeSlots, AttnKnobs, AttnPagedDecodeBuffers, AttnPagedPrefillBuffers,
@@ -44,7 +46,7 @@ pub use sig::{
     KvAppendPagedSlotsShape, KvAppendVUnitShape, MoeCombineBuffers,
     MoeCombineNoResidualBuffers, MoeCombineShape, MoeCombineTwoResidualsBuffers,
     MoeMmvqSortedBuffers, MoeSortBuffers, MoeSortPaddedBuffers, MoeSortPaddedShape, MoeSortShape,
-    MmvqKvF16Buffers, NormBuffers, NormFusedAddBuffers, NormResidualBuffers, NormShape, OpCtx,
+    MmvqKvF16Buffers, MoeShape, NormBuffers, NormFusedAddBuffers, NormResidualBuffers, NormShape,
     QmatmulBuffers, RopeBuffers, RopeFusedBuffers, RopePartialShape, RopeShape,
     GdnStepBuffers, GdnStepAlphaBetaBuffers, GdnStepAlphaBetaBatchedSlotsBuffers, GdnStepShape,
     GdnAlphaBetaBuffers, GdnAlphaBetaShape, GdnConvTrioBatchedSlotsBuffers, GdnConvTrioShape,
@@ -61,20 +63,15 @@ pub use sig::{
 };
 
 #[cfg(feature = "hip")]
+pub use sig::OpCtx;
+
+#[cfg(feature = "hip")]
 pub use hip::{attention, conv, mlp, moe, norm, pe, qmatmul, softmax};
 
-// Backend-portable shape used by every `indexed_moe_mmq_*` method on
-// the `Ops` trait. Lifted out of `hip::moe` so CUDA can implement the
-// trait without depending on the HIP module path.
-#[cfg(feature = "hip")]
-pub use hip::moe::MoeShape;
-
-// `Ops` references `MoeShape`, which today only exists under the `hip`
-// feature. Gate the trait the same way; CUDA will pull `MoeShape` to a
-// backend-neutral home at the point where it grows a second impl.
-#[cfg(feature = "hip")]
+// The portable op contract. Backend-neutral: every method takes `sig` POD +
+// `core` types only (the `Ops` impls — `HipOps`, future `CudaOps` — hold the
+// backend `(registry, stream)` pair internally). Always compiled.
 mod ops_trait;
-#[cfg(feature = "hip")]
 pub use ops_trait::Ops;
 
 #[cfg(feature = "hip")]

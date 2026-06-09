@@ -4,7 +4,7 @@
 //! (softmax-over-all then top-k then renormalise).
 
 use anyhow::bail;
-use flambeau_ops::{HipOps, Ops};
+use flambeau_ops::Ops;
 
 use crate::dtype::{F32, I32};
 use crate::error::Result;
@@ -23,7 +23,7 @@ pub fn topk_f32(
     n_tokens: usize,
     n_experts: usize,
     k: usize,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     if k == 0 || k > n_experts {
         bail!("moe_router::topk_f32: k {k} invalid for n_experts {n_experts}");

@@ -8,9 +8,11 @@
 pub mod device;
 pub mod kernel_limits;
 pub mod op;
+pub mod slot;
 
-pub use device::{CopyDirection, Device, DeviceError, DevicePtr, DeviceResult, Stream};
+pub use device::{CopyDirection, Device, DeviceError, DevicePtr, DeviceResult, Event, Stream};
 pub use kernel_limits::{MOE_SORT_MAX_EXPERTS, TOPK_MAX_EXPERTS};
+pub use slot::{MemcpySlot, ScalarSlot};
 pub use op::{
     DirectCallKernel, KernelDescriptor, KernelImpl, Op, OpContract, QDtype, QMatMul, QMatMulCfg,
     QMatMulInput, QMatMulOutput, RmsNorm, RmsNormCfg, RmsNormInput, RmsNormOutput, SwiGLU,

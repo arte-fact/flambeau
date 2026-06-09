@@ -1,9 +1,8 @@
 //! DtoD memcpy of `[n_tokens, kv_width]` K + V into the per-layer
-//! cache at row `write_pos`. Takes `&HipDevice + &HipStream` (not
-//! `&HipOps`) because it's a memcpy, not a kernel launch.
+//! cache at row `write_pos`. Takes `&D + &D::Stream` (not an `Ops`)
+//! because it's a memcpy, not a kernel launch.
 
 use anyhow::bail;
-use flambeau_backend_hip::{HipDevice, HipStream};
 use flambeau_core::{CopyDirection, Device};
 
 use crate::dtype::F16;
@@ -56,14 +55,14 @@ pub(crate) fn ring_cache_rows(n_tokens: usize, ring_depth: usize) -> usize {
 }
 
 /// Two stream-ordered DtoD memcpys (K and V) into per-layer caches.
-pub fn kv_append_f16(
+pub fn kv_append_f16<D: Device>(
     k_src: &Tensor<F16>,
     v_src: &Tensor<F16>,
     k_cache: &mut Tensor<F16>,
     v_cache: &mut Tensor<F16>,
     spec: KvAppendSpec,
-    device: &HipDevice,
-    stream: &HipStream,
+    device: &D,
+    stream: &D::Stream,
 ) -> Result<()> {
     let KvAppendSpec { n_tokens, kv_width, write_pos, max_seq_len, ring_depth } = spec;
     if n_tokens == 0 {

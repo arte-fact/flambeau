@@ -17,6 +17,7 @@ use flambeau_backend_hip::{HipStream, KernelArgs, LaunchCfg};
 use flambeau_core::{DevicePtr, MOE_SORT_MAX_EXPERTS, TOPK_MAX_EXPERTS};
 
 use super::OpsRegistry;
+pub use crate::sig::MoeShape;
 
 /// `MMQ_X` for `indexed_moe_mmq_q4_k` — bucket width. Fixed in the kernel
 /// source.
@@ -24,30 +25,6 @@ pub const INDEXED_MOE_MMQ_X: usize = 8;
 
 /// `MMQ_Y` for `indexed_moe_mmq_q4_k` — output rows per block.
 pub const INDEXED_MOE_MMQ_Y: usize = 16;
-
-/// Shape scalars for indexed-MoE MMQ launchers. All five tile8/turbo
-/// kernels take this identical tuple; grouping it gives named fields at
-/// call sites and one-point change for future additions.
-/// For the `down` kernels (which process per-pair activations as effective
-/// tokens) `n_tokens` is set to `n_pairs = original_n_tokens * top_k` and
-/// `top_k` is set to `1` — the kernel's Y indexing collapses correctly.
-#[derive(Debug, Clone, Copy)]
-pub struct MoeShape {
-    /// Output row count (gate/up: `inter`; down: `hidden`).
-    pub n_rows: usize,
-    /// Y activation row axis.
-    pub n_tokens: usize,
-    /// Experts per token; 1 for the down kernels.
-    pub top_k: usize,
-    /// Super-blocks per weight row (= K / QK_K).
-    pub n_sb_per_row: usize,
-    /// Total experts across the MoE layer.
-    pub n_experts: usize,
-    /// Upper bound on `padded_total` (= `total_pairs + n_experts * 8` for
-    /// the pad-to-8 sort). Kernel early-exits past the on-device
-    /// actual padded_total.
-    pub padded_total_upper_bound: usize,
-}
 
 /// TopK router over per-token logits. Emits `(token, slot)` → expert index
 /// plus normalised softmax weights over the k selected experts per token.

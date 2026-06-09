@@ -8,18 +8,45 @@
 //!
 //! See `doc/CLIPPY_STRUCT_REFACTOR_PLAN.md` for the phased migration.
 
-use crate::OpsRegistry;
-use flambeau_backend_hip::HipStream;
 use flambeau_core::device::DevicePtr;
 
 /// Launch context handed to every `crates/ops/src/hip/*` free-fn wrapper.
 /// Both fields are short-lived borrows shared across every kernel launch
 /// in a forward pass — the registry owns the loaded modules, the stream
-/// is the queue the launch enqueues onto.
+/// is the queue the launch enqueues onto. HIP-specific (names `HipStream` +
+/// `OpsRegistry`); the portable `Ops` trait does not take it — impls hold
+/// the `(registry, stream)` pair internally.
+#[cfg(feature = "hip")]
+use crate::OpsRegistry;
+#[cfg(feature = "hip")]
+use flambeau_backend_hip::HipStream;
+
+#[cfg(feature = "hip")]
 #[derive(Copy, Clone)]
 pub struct OpCtx<'a> {
     pub reg: &'a OpsRegistry,
     pub stream: &'a HipStream,
+}
+
+/// Backend-portable shape for every `indexed_moe_mmq_*` / `indexed_moe_mmvq_*`
+/// method on the [`crate::Ops`] trait. Pure `usize` POD — lives here so a CUDA
+/// `Ops` impl needs no HIP module path.
+#[derive(Copy, Clone, Debug)]
+pub struct MoeShape {
+    /// Output row count (gate/up: `inter`; down: `hidden`).
+    pub n_rows: usize,
+    /// Y activation row axis.
+    pub n_tokens: usize,
+    /// Experts per token; 1 for the down kernels.
+    pub top_k: usize,
+    /// Super-blocks per weight row (= K / QK_K).
+    pub n_sb_per_row: usize,
+    /// Total experts across the MoE layer.
+    pub n_experts: usize,
+    /// Upper bound on `padded_total` (= `total_pairs + n_experts * 8` for
+    /// the pad-to-8 sort). Kernel early-exits past the on-device
+    /// actual padded_total.
+    pub padded_total_upper_bound: usize,
 }
 
 // --- matmul / mmvq families -------------------------------------------------
@@ -101,7 +128,7 @@ pub struct MmvqGateUpBatchShape {
 
 // --- attention family -------------------------------------------------------
 
-use flambeau_backend_hip::ScalarSlot;
+use flambeau_core::ScalarSlot;
 
 #[derive(Copy, Clone, Debug)]
 pub struct AttnBuffers {

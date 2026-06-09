@@ -6,7 +6,7 @@
 //! kernel is extended.
 
 use anyhow::bail;
-use flambeau_ops::{HipOps, Ops};
+use flambeau_ops::Ops;
 
 use crate::dtype::{F16, Q8_0};
 use crate::error::Result;
@@ -19,7 +19,7 @@ pub fn attn_decode_q8_kv(
     out: &mut Tensor<F16>,
     shape: flambeau_ops::AttnDecodeShape,
     knobs: flambeau_ops::AttnKnobs,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     let flambeau_ops::AttnDecodeShape { n_heads_q, n_heads_kv, head_dim, n_tokens_kv } = shape;
     if !matches!(head_dim, 64 | 128 | 256 | 512) {
@@ -75,6 +75,7 @@ pub fn attn_decode_q8_kv(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flambeau_ops::HipOps;
     use crate::ops::attn_decode::attn_decode_f16;
     use crate::ops::kv_append_f16_to_q8::kv_append_f16_to_q8;
     use crate::ops::kv_append::kv_append_f16;

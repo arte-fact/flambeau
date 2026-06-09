@@ -12,7 +12,7 @@
 use std::os::raw::c_int;
 use std::ptr;
 
-use flambeau_core::{CopyDirection, Device, DeviceError, DevicePtr, DeviceResult, Stream};
+use flambeau_core::{CopyDirection, Device, DeviceError, DevicePtr, DeviceResult, Event, Stream};
 
 use crate::sys::{
     self, error_string, hipFree, hipGetDevice, hipGetDeviceCount, hipMalloc, hipMemcpyAsync,
@@ -266,6 +266,24 @@ impl HipEvent {
             "hipEventElapsedTime",
         )?;
         Ok(ms)
+    }
+}
+
+impl Event<HipStream> for HipEvent {
+    fn record(&self, stream: &HipStream) -> DeviceResult<()> {
+        HipEvent::record(self, stream)
+    }
+
+    fn stream_wait(&self, stream: &HipStream) -> DeviceResult<()> {
+        HipEvent::stream_wait(self, stream)
+    }
+
+    fn synchronize(&self) -> DeviceResult<()> {
+        HipEvent::synchronize(self)
+    }
+
+    fn elapsed_ms_since(&self, start: &Self) -> DeviceResult<f32> {
+        HipEvent::elapsed_ms_since(self, start)
     }
 }
 
@@ -1060,6 +1078,7 @@ impl HipDevice {
 
 impl Device for HipDevice {
     type Stream = HipStream;
+    type Event = HipEvent;
 
     fn backend(&self) -> &'static str {
         BACKEND
@@ -1157,6 +1176,16 @@ impl Device for HipDevice {
             unsafe { sys::hipDeviceSynchronize() },
             "hipDeviceSynchronize",
         )
+    }
+
+    fn new_event(&self) -> DeviceResult<Self::Event> {
+        self.bind()?;
+        HipEvent::new(self.id)
+    }
+
+    fn new_timing_event(&self) -> DeviceResult<Self::Event> {
+        self.bind()?;
+        HipEvent::new_timing(self.id)
     }
 }
 

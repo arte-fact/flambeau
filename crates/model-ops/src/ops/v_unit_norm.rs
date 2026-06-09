@@ -7,7 +7,7 @@
 //! prefill_shape branch cannot fan out to N distinct slots.
 
 use anyhow::bail;
-use flambeau_ops::{HipOps, Ops};
+use flambeau_ops::Ops;
 
 use crate::dtype::F16;
 use crate::error::Result;
@@ -29,7 +29,7 @@ pub fn v_unit_norm_per_head_f16(
     n_kv_heads: usize,
     head_dim: usize,
     eps: f32,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     let need = n_tokens * n_kv_heads * head_dim;
     if v.n_elems < need {

@@ -13,68 +13,13 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
 
-/// A logical handle to an updateable scalar kernel parameter. Obtained
-/// via [`ScalarSlot::new`] and passed to [`super::module::KernelArgs::push_slot`]
-/// at capture time to tag the arg as updateable.
-/// The numeric id is process-global and monotonically increasing. Scopes
-/// can reset by using a fresh HipGraphExec — slots from an old exec are
-/// meaningless to a new one.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct ScalarSlot {
-    id: u32,
-}
-
-/// 6.a-i5b — handle to an updateable memcpy-node's parameters
-/// (typically the dst pointer, since src + count are usually fixed in
-/// our KV-cache-append use case). Obtained via [`MemcpySlot::new`];
-/// tagged at capture time by passing it to
-/// [`super::HipDevice::memcpy_async_slot`] or equivalent helper.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct MemcpySlot {
-    id: u32,
-}
-
-// Slot ids share one namespace — ScalarSlot and MemcpySlot can never
-// collide because they're type-distinct at compile time, but drawing
-// from one counter keeps IDs unique across a process.
-static NEXT_SLOT_ID: AtomicU32 = AtomicU32::new(1);
-
-impl ScalarSlot {
-    /// Allocate a fresh slot id. Cheap — just an atomic fetch-add.
-    pub fn new() -> Self {
-        let id = NEXT_SLOT_ID.fetch_add(1, Ordering::Relaxed);
-        Self { id }
-    }
-
-    pub fn id(&self) -> u32 {
-        self.id
-    }
-}
-
-impl Default for ScalarSlot {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl MemcpySlot {
-    pub fn new() -> Self {
-        let id = NEXT_SLOT_ID.fetch_add(1, Ordering::Relaxed);
-        Self { id }
-    }
-
-    pub fn id(&self) -> u32 {
-        self.id
-    }
-}
-
-impl Default for MemcpySlot {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// The slot id types are backend-neutral (a process-unique id); they live in
+// `core` so the portable op surface and both backends' graph executors share
+// one definition. Re-exported here so existing `graph_capture::ScalarSlot` /
+// `flambeau_backend_hip::ScalarSlot` paths keep resolving. The HIP-specific
+// capture machinery (records, SlotMap) stays below.
+pub use flambeau_core::{MemcpySlot, ScalarSlot};
 
 /// Per-launch record captured during an active graph capture. Indexes
 /// in `tagged_slots` are into this launch's own `KernelArgs` slots.

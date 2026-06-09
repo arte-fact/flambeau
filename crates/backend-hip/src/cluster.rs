@@ -920,6 +920,22 @@ impl HipCluster {
     }
 }
 
+impl flambeau_runtime::Cluster for HipCluster {
+    type Device = HipDevice;
+
+    fn ranks(&self) -> usize {
+        HipCluster::ranks(self)
+    }
+
+    fn device(&self, rank: usize) -> &HipDevice {
+        HipCluster::device(self, rank)
+    }
+
+    fn peer_access_full(&self) -> bool {
+        HipCluster::peer_access_full(self)
+    }
+}
+
 impl Drop for HipCluster {
     fn drop(&mut self) {
         for bounce in &self.bounces {

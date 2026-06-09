@@ -1,7 +1,7 @@
 //! Row-wise RMSNorm: `y[r,c] = x[r,c] / sqrt(mean(x[r,·]²) + eps) * weight[c]`.
 
 use anyhow::bail;
-use flambeau_ops::{HipOps, Ops};
+use flambeau_ops::Ops;
 
 use crate::dtype::{F16, F32, Q8_1};
 use crate::error::Result;
@@ -15,7 +15,7 @@ pub fn rmsnorm_f16(
     n_rows: usize,
     hidden: usize,
     eps: f32,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     let need = n_rows * hidden;
     if input.n_elems < need {
@@ -62,7 +62,7 @@ pub fn rmsnorm_f32_to_f16(
     n_rows: usize,
     hidden: usize,
     eps: f32,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     let need = n_rows * hidden;
     if input.n_elems < need {
@@ -109,7 +109,7 @@ pub fn rmsnorm_f32(
     n_rows: usize,
     hidden: usize,
     eps: f32,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     let need = n_rows * hidden;
     if input.n_elems < need {
@@ -155,7 +155,7 @@ pub fn rmsnorm_quant_q8_1(
     n_rows: usize,
     hidden: usize,
     eps: f32,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     let need_in = n_rows * hidden;
     if input.n_elems < need_in {
@@ -242,6 +242,7 @@ fn cpu_rmsnorm_f32(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flambeau_ops::HipOps;
     use crate::testing::{
         alloc, assert_close_f16, assert_close_f32, download, free, test_device, test_ops_registry,
         upload,

@@ -1,7 +1,7 @@
 //! Elementwise `y[i] = a[i] + b[i]`. F16 / F32 variants.
 
 use anyhow::bail;
-use flambeau_ops::{HipOps, Ops};
+use flambeau_ops::Ops;
 
 use crate::dtype::{F16, F32};
 use crate::error::Result;
@@ -12,7 +12,7 @@ pub fn add_f16(
     b: &Tensor<F16>,
     output: &mut Tensor<F16>,
     n: usize,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     if a.n_elems < n {
         bail!("add_f16: a has {} elems, need >= {n}", a.n_elems);
@@ -31,7 +31,7 @@ pub fn add_f32(
     b: &Tensor<F32>,
     output: &mut Tensor<F32>,
     n: usize,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     if a.n_elems < n {
         bail!("add_f32: a has {} elems, need >= {n}", a.n_elems);
@@ -61,6 +61,7 @@ fn cpu_add_f32(a: &[f32], b: &[f32]) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flambeau_ops::HipOps;
     use crate::testing::{
         alloc, assert_close_f16, assert_close_f32, download, free, test_device, test_ops_registry,
         upload,

@@ -2,7 +2,7 @@
 //! (Gemma4) for FFN paths.
 
 use anyhow::bail;
-use flambeau_ops::{HipOps, Ops};
+use flambeau_ops::Ops;
 
 use crate::dtype::{F16, F32};
 use crate::error::Result;
@@ -14,7 +14,7 @@ pub fn swiglu_f16(
     up: &Tensor<F16>,
     output: &mut Tensor<F16>,
     n: usize,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     if gate.n_elems < n {
         bail!("swiglu_f16: gate has {} elems, need >= {n}", gate.n_elems);
@@ -37,7 +37,7 @@ pub fn swiglu_f32_to_f16(
     up: &Tensor<F32>,
     output: &mut Tensor<F16>,
     n: usize,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     if gate.n_elems < n {
         bail!(
@@ -67,7 +67,7 @@ pub fn gelu_mul_f32_to_f16(
     up: &Tensor<F32>,
     output: &mut Tensor<F16>,
     n: usize,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     if gate.n_elems < n {
         bail!(
@@ -128,6 +128,7 @@ fn cpu_gelu_mul_f32(gate: &[f32], up: &[f32]) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flambeau_ops::HipOps;
     use crate::testing::{
         alloc, assert_close_f16, download, free, test_device, test_ops_registry, upload,
     };
