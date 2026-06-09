@@ -370,17 +370,32 @@ fn chunked_prefill_pp(
     // empty drain costs one batch-window sleep per chunk, ~1.5 ms).
     let mixed_on = state.model.supports_mixed_batch();
     let mut prefill_start = 0usize;
-    let mut reset_done = false;
+    {
+        let mut guard = state.inflight_pool[slot_idx].blocking_lock();
+        guard
+            .reset_for_next_request()
+            .context("reset inflight for new request")?;
+        // Prefix-cache restore replaces the prefix's prefill: a FULL hit
+        // returns the cached first-token logits with no forward at all; a
+        // PREFIX hit advances the loop to the matched boundary (the
+        // restored GDN state is exactly at that position, so the tail
+        // MUST start there).
+        match state.prefix_cache_try_restore(&mut **guard, prompt_ids)? {
+            crate::routes::PrefixCacheRestore::FullHit { logits } => {
+                logits_out.clear();
+                logits_out.extend_from_slice(&logits);
+                return Ok(());
+            }
+            crate::routes::PrefixCacheRestore::PrefixHit { n_matched } => {
+                prefill_start = n_matched;
+            }
+            crate::routes::PrefixCacheRestore::Miss => {}
+        }
+    }
     while prefill_start < prompt_ids.len() {
         let end = (prefill_start + prefill_chunk).min(prompt_ids.len());
         let chunk = &prompt_ids[prefill_start..end];
         let mut guard = state.inflight_pool[slot_idx].blocking_lock();
-        if !reset_done {
-            guard
-                .reset_for_next_request()
-                .context("reset inflight for new request")?;
-            reset_done = true;
-        }
         if mixed_on {
             // Become the dispatch leader for this chunk. `lock()`
             // (blocking) — we wait for the current decode tick to
@@ -470,6 +485,10 @@ fn chunked_prefill_pp(
                 )
             })?;
         prefill_start = end;
+    }
+    {
+        let mut guard = state.inflight_pool[slot_idx].blocking_lock();
+        state.prefix_cache_try_capture_full(&mut **guard, prompt_ids, logits_out);
     }
     Ok(())
 }
