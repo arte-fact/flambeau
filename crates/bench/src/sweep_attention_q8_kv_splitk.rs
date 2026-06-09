@@ -32,13 +32,21 @@ const SHAPES: &[(usize, usize, usize)] = &[
 ];
 const QK: usize = QK8_0;
 
+// Mirror of `flambeau_ops::hip::attention::splitk_chunk_size(n_tokens, 32)`
+// (the bench crate does not depend on flambeau-ops). Keep in sync: the chunk
+// grows past 16384 tokens so n_chunks stays <= MAX_SPLITK_CHUNKS (32).
 fn pick_chunk(n_tokens: usize) -> usize {
-    if n_tokens <= 1024 {
+    let base = if n_tokens <= 1024 {
         128
     } else if n_tokens <= 2048 {
         256
     } else {
         512
+    };
+    if n_tokens.div_ceil(base) <= 32 {
+        base
+    } else {
+        n_tokens.div_ceil(32).next_multiple_of(32)
     }
 }
 
@@ -56,8 +64,10 @@ pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
         module.kernel("flambeau_attention_decode_q8_kv_splitk_combine")?;
     let attrs_chunk: FuncAttributes = k_chunk.attributes()?;
 
-    // 16 covers the single-chunk fallback; 1024 / 4096 split into multiple chunks.
-    let contexts = [16usize, 128, 1024, 4096];
+    // 16 covers the single-chunk fallback; 1024 / 4096 split into multiple
+    // chunks; 32768 exercises the grown-chunk regime (chunk=1024, 32 chunks)
+    // that keeps split-K engaged above 16384 tokens.
+    let contexts = [16usize, 128, 1024, 4096, 32768];
     let mut results = Vec::new();
     for &(head_dim, n_heads_q, n_heads_kv) in SHAPES {
         for n_tokens in contexts {

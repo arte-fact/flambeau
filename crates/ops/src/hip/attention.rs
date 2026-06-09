@@ -758,18 +758,28 @@ pub fn attention_decode_f16_splitk_h2(
 /// Returns the single-pass fallback `chunk_size = n_tokens` when the
 /// context is short enough that split-K overhead (the combine kernel +
 /// partials write/read) costs more than the occupancy win.
-pub fn splitk_chunk_size(n_tokens_kv: usize) -> usize {
+pub fn splitk_chunk_size(n_tokens_kv: usize, max_chunks: usize) -> usize {
     // Threshold tuned per the 9.b A/B: at n_tokens=128 split-K already
     // ties the single-pass (1.10×) and every larger shape wins hard, so
     // default to split-K whenever it gives ≥ 4 chunks.
-    if n_tokens_kv <= 256 {
-        n_tokens_kv // one chunk; caller should just use single-pass
+    let base = if n_tokens_kv <= 256 {
+        return n_tokens_kv; // one chunk; caller should just use single-pass
     } else if n_tokens_kv <= 1024 {
         128
     } else if n_tokens_kv <= 2048 {
         256
     } else {
         512
+    };
+    // Grow the chunk for long contexts so ceil(n_tokens_kv / chunk) never
+    // exceeds `max_chunks` (the split-K partials-buffer capacity). With the
+    // fixed 512-token chunk the count crosses `max_chunks` above
+    // 512 * max_chunks tokens, where the caller would otherwise fall back to
+    // the single-block decode kernel — an O(KV) latency cliff at long ctx.
+    if n_tokens_kv.div_ceil(base) <= max_chunks {
+        base
+    } else {
+        n_tokens_kv.div_ceil(max_chunks).next_multiple_of(32)
     }
 }
 
