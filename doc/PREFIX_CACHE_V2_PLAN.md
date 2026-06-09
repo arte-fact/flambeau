@@ -367,3 +367,43 @@ at 258) is the worst case that chunked matching sidesteps. The GDN-state slice
 (P5) must therefore land **chunk-boundary (intermediate) capture**, not just
 full-prompt — that is the part that delivers the agentic win. Next concrete
 step: P1 (device snapshot/restore op + ScratchPool byte-range helper + parity).
+
+---
+
+## Review findings → revised slice order (2026-06-09, executing)
+
+1. **Hybrid moves into P1.** The user's production topology is pp2tp2
+   (`--mesh-mode pp+tp`); as ordered, P1–P5 deliver nothing there until P6.
+   Unnecessary deferral: `reset_kv_slot`'s fanout (`runtime/mod.rs:323`)
+   already iterates all rank handles topology-agnostically and runs on
+   pp2tp2 today. Snapshot/restore mirrors it → hybrid-correct by
+   construction; `TopologyTag` already blocks cross-topology restores.
+   Same logic applies to Q8Contig: the user runs `--kv q8`, so the byte-range
+   helper covers F16Contig + Q8Contig from the start (P3 folded into P1).
+2. **Intermediate capture must not be one-full-snapshot-per-boundary** —
+   that is O(n²) host RAM (a 32k prompt ≈ 36 GB). Fix: KV rows are
+   positional and contiguous per layer, so ONE full-length KV buffer per
+   request serves every boundary (entry at boundary b restores tokens
+   [0..b) of each layer's range; entries share the buffer via the existing
+   `Arc<KvSnapshot>`). Only the GDN state is per-boundary (fixed size);
+   capture the **last K=2 full-chunk boundaries** per request — the next
+   turn's divergence sits near the end of the previous prompt (Strategy A
+   diagnostic: lcp 258/290), so last-2 covers the realistic hit set.
+   Follow-ons: `used_bytes` must not double-count Arc-shared buffers;
+   `vram_budget_bytes` is host RAM (misnomer).
+3. **Chunk-boundary GDN capture is well-defined, not "V2 hard".**
+   `chunked_prefill_pp` runs the full layer stack per chunk, so every GDN
+   layer's state is committed at each boundary (the next chunk's forward
+   depends on it). The snapshot point is exactly between
+   `forward_prefill_logits` calls — where the loop already pauses and
+   releases the mutex. Supersedes the "GDN-at-position" caveat above.
+4. **The P2 exact-retry gate does not validate the agentic case** (a
+   full-prompt terminal entry never matches the next turn — Strategy A null
+   result). The agentic gate lands with the intermediate-capture slice: a
+   real multi-turn growing conversation showing turn-N prefill ≈ tail-only.
+
+Execution order: **P1′** (snapshot/restore op, all-rank fanout, F16+Q8 KV +
+GDN state byte copy, pp2tp2 parity) → **P2′** (request wiring + full-prompt
+capture, exact-retry gate) → **P5′** (last-K chunk-boundary capture +
+shared-KV-buffer entries, agentic gate) → **P8/P9** (Arc-aware accounting,
+eviction under load, cert). P4 (SWA) and P7 (paged) stay deferred.
