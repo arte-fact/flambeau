@@ -91,10 +91,15 @@ pub trait ModelDriver: Send + 'static {
     /// Inverse of [`Self::snapshot_slot`]. After a successful restore the
     /// slot's state is exactly the post-position-`n_tokens` state; the
     /// caller must continue from position `n_tokens` — recurrent (GDN)
-    /// layers cannot re-run earlier tokens.
+    /// layers cannot re-run earlier tokens. The snapshot is shared via
+    /// `Arc` (multi-hundred-MB buffers; no caller-side copy).
     ///
     /// Default impl bails — see [`Self::forward_prefill_logits`].
-    fn restore_slot(&mut self, _n_tokens: usize, _snaps: Vec<Vec<u8>>) -> anyhow::Result<()> {
+    fn restore_slot(
+        &mut self,
+        _n_tokens: usize,
+        _snaps: std::sync::Arc<Vec<Vec<u8>>>,
+    ) -> anyhow::Result<()> {
         anyhow::bail!("ModelDriver: restore_slot not implemented by this driver")
     }
 

@@ -329,7 +329,7 @@ impl ServerState {
         let Some(driver) = inflight.as_model_driver_mut() else {
             return Ok(PrefixCacheRestore::Miss);
         };
-        if let Err(e) = driver.restore_slot(m.n_tokens, (*kv).clone()) {
+        if let Err(e) = driver.restore_slot(m.n_tokens, kv) {
             tracing::warn!(
                 target: "server.prefix_cache",
                 error = %e,
@@ -345,6 +345,7 @@ impl ServerState {
             full,
             "prefix cache hit restored"
         );
+        self.prefix_cache.touch(m.terminal);
         Ok(match logits {
             Some(l) => PrefixCacheRestore::FullHit { logits: l },
             None => PrefixCacheRestore::PrefixHit {

@@ -355,13 +355,14 @@ impl<A: Arch> Session<A> {
     }
 
     /// HtoD-copy a [`snapshot_kv_slot`](Self::snapshot_kv_slot) result back
-    /// into `slot_id`, one buffer per rank in rank order. The caller must
-    /// continue the slot from position `n_tokens`.
+    /// into `slot_id`, one buffer per rank in rank order. The snapshot is
+    /// shared with the workers via `Arc` (each reads only its rank's
+    /// buffer). The caller must continue the slot from position `n_tokens`.
     pub fn restore_kv_slot(
         &mut self,
         slot_id: usize,
         n_tokens: usize,
-        snaps: Vec<Vec<u8>>,
+        snaps: std::sync::Arc<Vec<Vec<u8>>>,
     ) -> Result<()> {
         if snaps.len() != self.handles.len() {
             anyhow::bail!(
@@ -373,8 +374,10 @@ impl<A: Arch> Session<A> {
         let rxs: Vec<_> = self
             .handles
             .iter()
-            .zip(snaps)
-            .map(|(h, bytes)| h.send_restore_kv_slot(slot_id, n_tokens, bytes))
+            .enumerate()
+            .map(|(rank, h)| {
+                h.send_restore_kv_slot(slot_id, n_tokens, std::sync::Arc::clone(&snaps), rank)
+            })
             .collect::<Result<_>>()?;
         for rx in rxs {
             rx.recv()

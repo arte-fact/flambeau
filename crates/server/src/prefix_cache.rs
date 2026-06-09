@@ -389,6 +389,21 @@ impl PrefixCache {
             .find_map(|e| e.last_logits.as_ref().map(std::sync::Arc::clone))
     }
 
+    /// Move `terminal` to MRU. Called by the hit path after
+    /// [`longest_match`](Self::longest_match) returns — the match itself
+    /// holds only the read lock, so the LRU bump happens here. Without
+    /// it a frequently-hit old entry would be evicted before a never-hit
+    /// newer one.
+    #[cfg(feature = "hip")]
+    pub fn touch(&self, terminal: ChunkKey) {
+        if !self.enabled() {
+            return;
+        }
+        let mut inner = self.inner.write().unwrap();
+        inner.lru_order.retain(|k| *k != terminal);
+        inner.lru_order.push_front(terminal);
+    }
+
     /// **#229 P2.10c** — insert an entry with its KV snapshot, account
     /// the bytes against the budget, evict LRU until under cap.
     /// Caller passes `bytes` (size of the snapshot in host RAM).

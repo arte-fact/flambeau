@@ -71,7 +71,7 @@ pub trait V2BatchableSession: Send {
         &mut self,
         slot_id: usize,
         n_tokens: usize,
-        snaps: Vec<Vec<u8>>,
+        snaps: std::sync::Arc<Vec<Vec<u8>>>,
     ) -> Result<()>;
 
     fn release_paged_slot(&mut self, slot_id: usize) -> Result<()>;
@@ -151,7 +151,7 @@ impl<A: Arch> V2BatchableSession for Session<A> {
         &mut self,
         slot_id: usize,
         n_tokens: usize,
-        snaps: Vec<Vec<u8>>,
+        snaps: std::sync::Arc<Vec<Vec<u8>>>,
     ) -> Result<()> {
         Session::restore_kv_slot(self, slot_id, n_tokens, snaps)
     }
@@ -459,7 +459,11 @@ impl ModelDriver for V2Conv {
         shared.snapshot_kv_slot(self.slot_id, n_tokens)
     }
 
-    fn restore_slot(&mut self, n_tokens: usize, snaps: Vec<Vec<u8>>) -> Result<()> {
+    fn restore_slot(
+        &mut self,
+        n_tokens: usize,
+        snaps: std::sync::Arc<Vec<Vec<u8>>>,
+    ) -> Result<()> {
         let mut shared = self.shared.blocking_lock();
         shared.restore_kv_slot(self.slot_id, n_tokens, snaps)
     }
