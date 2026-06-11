@@ -135,23 +135,45 @@ impl QwenCoderXmlParser {
     }
 
     fn step_text(&mut self, out: &mut Vec<ParserEvent>, is_finish: bool) -> bool {
-        // Earliest of any watched open-tag. Handles both `<tool_call>`
-        // (enters tool-call state machine) and `<think>` (enters
-        // InThink — tool syntax inside stays think content, #20837).
-        let earliest = TEXT_STATE_OPEN_TAGS
+        // Earliest tool-call entry: a watched open tag (`<tool_call>` /
+        // `<think>`) OR a function open. The latter covers the model's
+        // lenient variants — a wrapperless `<function=NAME>` and the bare
+        // `<NAME>` it emits when it drops both the `function=` prefix and
+        // the `<tool_call>` wrapper (confirmed raw output: `<bash>\n
+        // <parameter=…`). A bare open routes straight into the function
+        // body (its name is already known).
+        let tag = TEXT_STATE_OPEN_TAGS
             .iter()
-            .filter_map(|tag| self.buf.find(tag).map(|p| (p, *tag)))
+            .filter_map(|t| self.buf.find(t).map(|p| (p, *t)))
             .min_by_key(|(p, _)| *p);
-        if let Some((pos, tag)) = earliest {
+        let func = find_function_open(&self.buf);
+        let func_first = match (tag.map(|(p, _)| p), func.as_ref().map(|f| f.0)) {
+            (Some(t), Some(f)) => f < t,
+            (None, Some(_)) => true,
+            _ => false,
+        };
+        if func_first {
+            let (pos, tag_len, name) = func.expect("func_first implies Some");
+            if pos > 0 {
+                emit_text(out, &self.buf[..pos]);
+            }
+            self.buf.drain(..pos + tag_len);
+            self.current_name = name.clone();
+            self.current_params.clear();
+            out.push(ParserEvent::ToolCallOpen {
+                index: self.next_index,
+                name,
+            });
+            self.state = State::InFunctionBody;
+            return true;
+        }
+        if let Some((pos, tag)) = tag {
             if pos > 0 {
                 emit_text(out, &self.buf[..pos]);
             }
             // Do NOT speculatively drain a trailing `\n` here: in
             // char-by-char streaming that newline may not be in buf yet,
             // and the one-shot-vs-streaming equivalence is load-bearing.
-            // Any `\n` immediately after `<tool_call>` is consumed
-            // inside step_in_tool_call (which drains leading whitespace
-            // before `<function=`). Ditto `<think>` + step_in_think.
             self.buf.drain(..pos + tag.len());
             self.state = match tag {
                 "<tool_call>" => State::InToolCall,
@@ -160,15 +182,14 @@ impl QwenCoderXmlParser {
             };
             return true;
         }
-        // No full open-tag yet. Emit everything whose tail is NOT a
-        // prefix of any watched tag. This is tighter than a blind
-        // `MAX_TAG_LEN` tail-holdback — an unambiguous `<foo` chunk in
-        // free text goes out immediately, reducing streaming latency.
+        // No entry yet. Emit everything up to a tail that could still grow
+        // into one (a watched-tag prefix or a bare-function-open in
+        // progress), holding that tail back for the next push.
         let total = self.buf.len();
         let emit_upto = if is_finish {
             total
         } else {
-            ambiguous_tail_start(&self.buf, TEXT_STATE_OPEN_TAGS)
+            pending_tool_tail_start(&self.buf)
         };
         let emit_upto = align_down_char_boundary(&self.buf, emit_upto);
         if emit_upto > 0 {
@@ -211,28 +232,15 @@ impl QwenCoderXmlParser {
     }
 
     fn step_in_tool_call(&mut self, out: &mut Vec<ParserEvent>) -> bool {
-        // Expect <function=NAME>. Silently swallow any leading
-        // whitespace — chunk boundaries can split the `\n` between
-        // `<tool_call>` and `<function=`, and emitting it as stray
-        // TextDelta would break one-shot-vs-streaming equivalence.
-        let Some(rel_start) = self.buf.find("<function=") else {
+        // Expect `<function=NAME>` (canonical) or a bare `<NAME>` (the
+        // model sometimes drops `function=` even inside the wrapper). Any
+        // leading whitespace before the open tag is template formatting and
+        // is swallowed by the `..pos + tag_len` drain (emitting it as stray
+        // TextDelta would break one-shot-vs-streaming equivalence).
+        let Some((pos, tag_len, name)) = find_function_open(&self.buf) else {
             return false;
         };
-        if rel_start > 0 {
-            self.buf.drain(..rel_start);
-        }
-        // Find the closing `>` of `<function=NAME>`.
-        let after_prefix = "<function=".len();
-        let Some(close_rel) = self.buf[after_prefix..].find('>') else {
-            return false;
-        };
-        let name = self.buf[after_prefix..after_prefix + close_rel].to_owned();
-        // Don't speculatively drain the `\n` after `<function=NAME>`
-        // (chunk boundary may not have it yet). step_in_function_body
-        // drains leading whitespace before `<parameter=`/`</function>`
-        // so this is safe.
-        let cursor = after_prefix + close_rel + 1;
-        self.buf.drain(..cursor);
+        self.buf.drain(..pos + tag_len);
         self.current_name = name.clone();
         self.current_params.clear();
         out.push(ParserEvent::ToolCallOpen {
@@ -481,6 +489,117 @@ fn ambiguous_tail_start(s: &str, tags: &[&str]) -> usize {
     s.len()
 }
 
+/// True if `inner` (a `<…>` tag body, without the angle brackets) is a
+/// plausible tool/function name — an identifier, not a reserved structural
+/// tag. Used to recognise the bare-`<NAME>` function open the model emits
+/// when it drops the `function=` prefix.
+fn is_function_name(inner: &str) -> bool {
+    !inner.is_empty()
+        && inner
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+        && inner != "tool_call"
+        && inner != "think"
+}
+
+/// True if `part` (`<` + the bytes so far, no `>`) could still grow into a
+/// bare `<NAME>` function tag — `<` then only identifier chars. A lone `<`
+/// qualifies (it could become anything); a `<` followed by whitespace or
+/// punctuation is prose (`a < b`), not a tag start.
+fn is_partial_bare_name(part: &str) -> bool {
+    part.starts_with('<')
+        && part[1..]
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+}
+
+/// Find the earliest function-open in `buf`, in either the canonical
+/// `<function=NAME>` form or the bare `<NAME>` form qwen3.x emits when it
+/// drops the `function=` prefix (and usually the `<tool_call>` wrapper). A
+/// bare tag counts only when immediately followed (after whitespace) by
+/// `<parameter=` or `</function>` — the unambiguous tool anchors — so
+/// prose `<word>` never false-triggers. Returns `(start, tag_len, name)`
+/// covering only the opening tag; the body follows.
+fn find_function_open(buf: &str) -> Option<(usize, usize, String)> {
+    let mut best: Option<(usize, usize, String)> = None;
+    let mut consider = |cand: (usize, usize, String)| {
+        if best.as_ref().is_none_or(|b| cand.0 < b.0) {
+            best = Some(cand);
+        }
+    };
+    if let Some(p) = buf.find("<function=") {
+        let after = p + "<function=".len();
+        if let Some(gt) = buf[after..].find('>') {
+            consider((p, after + gt + 1 - p, buf[after..after + gt].to_owned()));
+        }
+    }
+    let mut i = 0;
+    while let Some(rel) = buf[i..].find('<') {
+        let lt = i + rel;
+        let Some(gtr) = buf[lt..].find('>') else { break };
+        let gt = lt + gtr;
+        let inner = &buf[lt + 1..gt];
+        if is_function_name(inner) {
+            let after = buf[gt + 1..].trim_start();
+            if after.starts_with("<parameter=") || after.starts_with("</function>") {
+                consider((lt, gt + 1 - lt, inner.to_owned()));
+                break;
+            }
+        }
+        i = gt + 1;
+    }
+    best
+}
+
+/// Earliest byte from which the buffer tail could still become a tool
+/// entry, so the streamer holds it back rather than leaking a partial
+/// marker as text. Held tails are the earlier of: a prefix of a watched
+/// open tag or `<function=…>` (covers a lone `<`, `<tool_cal`, `<func`),
+/// via [`ambiguous_tail_start`]; and a trailing bare `<NAME>` function
+/// open in progress (a complete `<NAME>` awaiting `<parameter=`, a
+/// `<NAME>` + ws + partial `<parameter=`/`</function>`, or a partial
+/// `<NAM` at the tail). Closing tags and a `<NAME>` already followed by
+/// prose are NOT held, so `</a>` and `<div>hello` pass straight through.
+fn pending_tool_tail_start(buf: &str) -> usize {
+    let by_tag = ambiguous_tail_start(buf, &["<tool_call>", "<think>", "<function="]);
+    by_tag.min(bare_open_holdback(buf))
+}
+
+fn bare_open_holdback(buf: &str) -> usize {
+    let n = buf.len();
+    let mut end = buf.trim_end().len();
+    if end == 0 {
+        return n;
+    }
+    // A trailing partial anchor (`<param…` / `</func…`, no `>`): the bare
+    // `<NAME>` it confirms precedes it.
+    if buf.as_bytes()[end - 1] != b'>' {
+        let Some(lt) = buf[..end].rfind('<') else {
+            return n;
+        };
+        let part = &buf[lt..end];
+        if "<parameter=".starts_with(part) || "</function>".starts_with(part) {
+            end = buf[..lt].trim_end().len();
+            if end == 0 {
+                return lt;
+            }
+        } else if is_partial_bare_name(part) {
+            return lt;
+        } else {
+            return n;
+        }
+    }
+    // `end` ends in `>`; hold from a complete bare `<NAME>`.
+    if buf.as_bytes()[end - 1] == b'>' {
+        if let Some(lt) = buf[..end].rfind('<') {
+            if is_function_name(&buf[lt + 1..end - 1]) {
+                return lt;
+            }
+        }
+    }
+    n
+}
+
 impl ToolCallParser for QwenCoderXmlParser {
     fn push(&mut self, chunk: &str) -> Vec<ParserEvent> {
         if chunk.is_empty() {
@@ -562,6 +681,81 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .concat()
+    }
+
+    fn parse_streaming(input: &str) -> Vec<ParserEvent> {
+        let mut p = QwenCoderXmlParser::new();
+        let mut evts = Vec::new();
+        for ch in input.chars() {
+            evts.extend(p.push(&ch.to_string()));
+        }
+        evts.extend(p.finish());
+        evts
+    }
+
+    // Real Qwen3.6-27B auto-mode capture: the model drops the `<tool_call>`
+    // wrapper AND the `function=` prefix, emitting a bare `<bash>` tag,
+    // while `<parameter=`/`</function>`/`</tool_call>` come out correct.
+    const BARE_TAG: &str =
+        "<bash>\n<parameter=command>\nls -la\n</parameter>\n</function>\n</tool_call>";
+
+    #[test]
+    fn lenient_bare_tag_no_wrapper() {
+        let evts = parse_all(BARE_TAG);
+        assert_eq!(collect_opens(&evts), vec![(0, "bash".into())]);
+        assert_eq!(collect_closes(&evts), vec![0]);
+        let args = collect_args_strings(&evts);
+        let v: serde_json::Value = serde_json::from_str(&args[0].1).unwrap();
+        assert_eq!(v["command"], "ls -la");
+        assert!(collect_text(&evts).is_empty(), "leak: {:?}", collect_text(&evts));
+    }
+
+    #[test]
+    fn lenient_bare_tag_streaming_equiv() {
+        assert_eq!(
+            ParserEvent::coalesce(parse_streaming(BARE_TAG)),
+            ParserEvent::coalesce(parse_all(BARE_TAG))
+        );
+    }
+
+    #[test]
+    fn lenient_bare_tag_with_text_preamble() {
+        let evts = parse_all(&format!("I'll list it.\n\n{BARE_TAG}"));
+        assert_eq!(collect_opens(&evts), vec![(0, "bash".into())]);
+        assert_eq!(collect_text(&evts), "I'll list it.\n\n");
+    }
+
+    #[test]
+    fn lenient_wrapperless_canonical() {
+        let evts = parse_all(
+            "<function=bash>\n<parameter=command>\nls\n</parameter>\n</function>\n</tool_call>",
+        );
+        assert_eq!(collect_opens(&evts), vec![(0, "bash".into())]);
+        assert!(collect_text(&evts).is_empty());
+    }
+
+    #[test]
+    fn lenient_bare_tag_inside_wrapper() {
+        let evts = parse_all(
+            "<tool_call>\n<bash>\n<parameter=command>\nls\n</parameter>\n</function>\n</tool_call>",
+        );
+        assert_eq!(collect_opens(&evts), vec![(0, "bash".into())]);
+        assert!(collect_text(&evts).is_empty());
+    }
+
+    #[test]
+    fn prose_angle_bracket_is_not_a_call() {
+        // `<word>` not followed by `<parameter=` must stay text.
+        for s in ["Use the <Foo> widget.", "compare a<b and c>d here", "<div>hello</div>"] {
+            let evts = parse_all(s);
+            assert!(collect_opens(&evts).is_empty(), "false tool call from {s:?}");
+            assert_eq!(collect_text(&evts), s, "text mangled for {s:?}");
+            assert_eq!(
+                ParserEvent::coalesce(parse_streaming(s)),
+                ParserEvent::coalesce(evts),
+                "stream≠oneshot for {s:?}"
+            );
+        }
     }
 
     #[test]
