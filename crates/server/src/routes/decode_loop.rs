@@ -23,6 +23,7 @@ use crate::state::SamplingParams;
 
 use super::finalise::{build_logprob_entry, finalise, preview_text, CompletionOutput};
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn stream_completion_sse(
     state: SharedState,
     prompt: String,
@@ -31,6 +32,7 @@ pub(crate) fn stream_completion_sse(
     parallel_tool_calls: bool,
     relax_stop_mask: bool,
     include_usage: bool,
+    tool_force_prefix: Option<String>,
 ) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
     use crate::model_handle::ReasoningStyle;
     use crate::tool_call_parser::{dispatcher_with_prompt, ParserEvent};
@@ -165,6 +167,12 @@ pub(crate) fn stream_completion_sse(
             let sent = emit_events(events, &mut has_tool_calls, &mut abort_after_close);
             sent && !abort_after_close
         };
+
+        // B1: feed the forced tool-call opening to the parser first so the
+        // model's continuation reconstructs a complete call.
+        if let Some(pfx) = &tool_force_prefix {
+            emit_delta(pfx);
+        }
 
         let res = run_completion_blocking_streaming(
             state_clone.clone(),

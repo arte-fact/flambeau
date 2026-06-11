@@ -197,6 +197,34 @@ impl ToolCallFormat {
             )),
         }
     }
+
+    /// The opening fragment of a tool call in this format, used to force a
+    /// call when `tool_choice` requires one (B1 prefix-forcing). The
+    /// fragment is appended to the rendered prompt so the model *continues*
+    /// from a guaranteed-valid opening, and fed to the parser ahead of the
+    /// model's output so the reconstructed call parses. `forced_name`
+    /// pins the function (named `tool_choice`); `None` forces *some* call
+    /// and lets the model choose the name.
+    ///
+    /// Each fragment stops at the first point the model must supply content
+    /// (the name, or the arguments), so the model's own decode produces a
+    /// well-formed remainder.
+    pub fn force_prefix(&self, forced_name: Option<&str>) -> String {
+        match self {
+            Self::Hermes => match forced_name {
+                Some(n) => format!("<tool_call>\n{{\"name\": \"{n}\", \"arguments\": "),
+                None => "<tool_call>\n{\"name\": \"".to_owned(),
+            },
+            Self::QwenCoder => match forced_name {
+                Some(n) => format!("<tool_call>\n<function={n}>\n"),
+                None => "<tool_call>\n<function=".to_owned(),
+            },
+            Self::Gemma4 => match forced_name {
+                Some(n) => format!("<|tool_call>call:{n}{{"),
+                None => "<|tool_call>call:".to_owned(),
+            },
+        }
+    }
 }
 
 /// Choose a parser format, honouring (in precedence order):
@@ -309,6 +337,74 @@ pub fn dispatcher_with_prompt(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn force_prefix_required_per_format() {
+        assert_eq!(
+            ToolCallFormat::QwenCoder.force_prefix(None),
+            "<tool_call>\n<function="
+        );
+        assert_eq!(ToolCallFormat::Gemma4.force_prefix(None), "<|tool_call>call:");
+        assert_eq!(
+            ToolCallFormat::Hermes.force_prefix(None),
+            "<tool_call>\n{\"name\": \""
+        );
+    }
+
+    #[test]
+    fn force_prefix_named_pins_function() {
+        assert_eq!(
+            ToolCallFormat::QwenCoder.force_prefix(Some("bash")),
+            "<tool_call>\n<function=bash>\n"
+        );
+        assert_eq!(
+            ToolCallFormat::Gemma4.force_prefix(Some("bash")),
+            "<|tool_call>call:bash{"
+        );
+        assert_eq!(
+            ToolCallFormat::Hermes.force_prefix(Some("bash")),
+            "<tool_call>\n{\"name\": \"bash\", \"arguments\": "
+        );
+    }
+
+    /// The forced prefix + a plausible model continuation must reconstruct a
+    /// call the matching parser lifts to a `ToolCallOpen`.
+    #[test]
+    fn force_prefix_plus_continuation_parses() {
+        use crate::tool_call_parser::ParserEvent;
+        let cases = [
+            (
+                ToolCallFormat::QwenCoder,
+                "<tool_call>\n<function=",
+                "bash>\n<parameter=command>\nls -la\n</parameter>\n</function>\n</tool_call>",
+                "bash",
+            ),
+            (
+                ToolCallFormat::Hermes,
+                "<tool_call>\n{\"name\": \"",
+                "bash\", \"arguments\": {\"command\": \"ls -la\"}}\n</tool_call>",
+                "bash",
+            ),
+            (
+                ToolCallFormat::Gemma4,
+                "<|tool_call>call:",
+                "bash{command:<|\"|>ls -la<|\"|>}<tool_call|>",
+                "bash",
+            ),
+        ];
+        for (fmt, prefix, cont, want) in cases {
+            let mut p =
+                dispatcher(None, fmt).unwrap_or_else(|_| panic!("dispatcher for {fmt:?}"));
+            let mut ev = p.push(prefix);
+            ev.extend(p.push(cont));
+            ev.extend(p.finish());
+            let opened = ev.iter().find_map(|e| match e {
+                ParserEvent::ToolCallOpen { name, .. } => Some(name.clone()),
+                _ => None,
+            });
+            assert_eq!(opened.as_deref(), Some(want), "format {fmt:?} did not parse");
+        }
+    }
 
     #[test]
     fn explicit_hermes() {

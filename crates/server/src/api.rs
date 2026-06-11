@@ -311,12 +311,33 @@ impl ToolChoice {
     pub fn forbids_tools(&self) -> bool {
         matches!(self, ToolChoice::Mode(s) if s.eq_ignore_ascii_case("none"))
     }
+
+    /// Whether the model must be forced to emit a tool call, and which.
+    /// `None` = don't force (`auto`/`none`). `Some(None)` = force *some*
+    /// call (`required`). `Some(Some(name))` = force the named function.
+    pub fn force_target(&self) -> Option<Option<&str>> {
+        match self {
+            ToolChoice::Mode(s) if s.eq_ignore_ascii_case("required") => Some(None),
+            ToolChoice::Named(n) => Some(Some(n.function.name.as_str())),
+            _ => None,
+        }
+    }
 }
 
 impl AnthropicToolChoice {
     /// Anthropic counterpart of [`ToolChoice::forbids_tools`].
     pub fn forbids_tools(&self) -> bool {
         matches!(self, AnthropicToolChoice::None)
+    }
+
+    /// Anthropic counterpart of [`ToolChoice::force_target`]. `any` forces
+    /// some call; `tool` forces the named one.
+    pub fn force_target(&self) -> Option<Option<&str>> {
+        match self {
+            AnthropicToolChoice::Any => Some(None),
+            AnthropicToolChoice::Tool { name } => Some(Some(name.as_str())),
+            _ => None,
+        }
     }
 }
 
