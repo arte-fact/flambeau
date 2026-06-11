@@ -46,7 +46,7 @@ fn assert_logits_identical(reference: &[Vec<f32>], replay: &[Vec<f32>], tag: &st
     }
 }
 
-fn dense_parity_for_layout(layout: KvLayout) {
+fn kv_parity(layout: KvLayout, swa: bool) {
     const VOCAB: usize = 64;
     const HIDDEN: usize = 128;
     const INTERMEDIATE: usize = 256;
@@ -54,7 +54,16 @@ fn dense_parity_for_layout(layout: KvLayout) {
     const N_HEADS: usize = 4;
     const N_KV_HEADS: usize = 2;
     const HEAD_DIM: usize = 64;
-    const MAX_SEQ_LEN: usize = 32;
+    const MAX_SEQ_LEN: usize = 64;
+    const WINDOW: usize = 8;
+    const RING_DEPTH: usize = WINDOW + 1; // window + max_prefill_tokens (1)
+
+    // SWA: a prompt longer than the ring so layer 0 WRAPS — the case the
+    // old snapshot bailed on; the resident window is captured whole.
+    // Dense: the short shared PROMPT, no wrap. Both stay < MAX_SEQ_LEN so
+    // the global layer (layer 1) keeps full context.
+    let swa_prompt: Vec<u32> = (0..20u32).map(|i| (i * 7 + 3) % VOCAB as u32).collect();
+    let prompt: &[u32] = if swa { &swa_prompt } else { &PROMPT };
 
     let q_width = N_HEADS * HEAD_DIM;
     let kv_width = N_KV_HEADS * HEAD_DIM;
@@ -107,7 +116,7 @@ fn dense_parity_for_layout(layout: KvLayout) {
             rotated_dims: HEAD_DIM,
             rope_theta: 10000.0,
             rope_variant: flambeau_forward::ctx::RopeVariant::NeoxSplit,
-            window_size: 0,
+            window_size: if swa && li == 0 { WINDOW as i32 } else { 0 },
             rms_eps: RMS_EPS,
             softmax_scale: None,
             attn_q_gated: false,
@@ -157,7 +166,13 @@ fn dense_parity_for_layout(layout: KvLayout) {
         paged_kv: None,
         kv_layout: layout,
         per_layer_kv_layouts: None,
-        per_layer_kv_depths: None,
+        // SWA: layer 0 is a window-sized ring (depth = window + ubatch),
+        // layer 1 stays full-context. Dense: both full-context.
+        per_layer_kv_depths: if swa {
+            Some(vec![RING_DEPTH, MAX_SEQ_LEN])
+        } else {
+            None
+        },
     };
     let mut pool = ScratchPool::new(&device, cfg).expect("ScratchPool::new");
 
@@ -188,18 +203,18 @@ fn dense_parity_for_layout(layout: KvLayout) {
     };
 
     let mut last_logits = Vec::new();
-    for (p, &t) in PROMPT.iter().enumerate() {
+    for (p, &t) in prompt.iter().enumerate() {
         last_logits = fwd(&mut pool, t, p);
     }
     let snap = pool
-        .snapshot_slot_bytes(0, PROMPT.len(), &device)
+        .snapshot_slot_bytes(0, prompt.len(), &device)
         .expect("snapshot");
 
     let decode = |pool: &mut ScratchPool, seed_logits: &[f32]| -> Vec<Vec<f32>> {
         let mut out = Vec::with_capacity(DECODE_STEPS);
         let mut token = argmax(seed_logits);
         for step in 0..DECODE_STEPS {
-            let logits = fwd(pool, token, PROMPT.len() + step);
+            let logits = fwd(pool, token, prompt.len() + step);
             token = argmax(&logits);
             out.push(logits);
         }
@@ -210,25 +225,36 @@ fn dense_parity_for_layout(layout: KvLayout) {
 
     // Wrong-token-count restores must be rejected, not silently applied.
     assert!(pool
-        .restore_slot_bytes(0, PROMPT.len() + 1, &snap, &device)
+        .restore_slot_bytes(0, prompt.len() + 1, &snap, &device)
         .is_err());
 
-    pool.restore_slot_bytes(0, PROMPT.len(), &snap, &device)
+    pool.restore_slot_bytes(0, prompt.len(), &snap, &device)
         .expect("restore");
     let replay = decode(&mut pool, &last_logits);
 
-    assert_logits_identical(&reference, &replay, &format!("dense {layout:?}"));
+    let tag = if swa { "swa" } else { "dense" };
+    assert_logits_identical(&reference, &replay, &format!("{tag} {layout:?}"));
     pool.dispose(&device).expect("pool dispose");
 }
 
 #[test]
 fn dense_kv_snapshot_restore_decode_parity_f16() {
-    dense_parity_for_layout(KvLayout::F16Contig);
+    kv_parity(KvLayout::F16Contig, false);
+}
+
+#[test]
+fn swa_kv_snapshot_restore_decode_parity_f16() {
+    kv_parity(KvLayout::F16Contig, true);
+}
+
+#[test]
+fn swa_kv_snapshot_restore_decode_parity_q8() {
+    kv_parity(KvLayout::Q8Contig, true);
 }
 
 #[test]
 fn dense_kv_snapshot_restore_decode_parity_q8() {
-    dense_parity_for_layout(KvLayout::Q8Contig);
+    kv_parity(KvLayout::Q8Contig, false);
 }
 
 #[test]

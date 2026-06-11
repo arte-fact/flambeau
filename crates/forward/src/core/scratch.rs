@@ -1572,27 +1572,27 @@ impl ScratchPool {
     }
 
     /// Sum of every per-layer section copied by
-    /// [`snapshot_slot_bytes`](Self::snapshot_slot_bytes) for `n_tokens`
-    /// rows: K+V rows `[0..n_tokens)` per contiguous KV layer, plus the
-    /// fixed-size GDN state + conv history per GDN layer.
+    /// [`snapshot_slot_bytes`](Self::snapshot_slot_bytes): K+V rows for the
+    /// resident-row count per contiguous KV layer, plus the fixed-size GDN
+    /// state + conv history per GDN layer.
+    ///
+    /// The resident-row count is `min(n_tokens, kv.depth)`. Full-context
+    /// (global) layers have `depth >= n_tokens` so this is `n_tokens`; ring
+    /// / sliding-window layers are window-sized (`depth = window +
+    /// prefill_ubatch`) and address positions modulo `depth`, so only the
+    /// `depth` physical rows hold state — capturing them whole reproduces
+    /// the exact ring (positions wrap back to the same physical rows).
     fn slot_snapshot_payload_bytes(&self, n_tokens: usize) -> Result<usize> {
         if !self.page_pools.is_empty() {
             anyhow::bail!("slot snapshot: paged KV is unsupported");
         }
         let mut total = 0usize;
-        for (li, kv) in self.kv_caches.iter().enumerate() {
+        for kv in &self.kv_caches {
             let row_bytes = kv.bytes_per_row;
             if kv.kv_width == 0 || row_bytes == 0 {
                 continue;
             }
-            if n_tokens > kv.depth {
-                anyhow::bail!(
-                    "slot snapshot: layer {li} depth {} < n_tokens {n_tokens} \
-                     (ring/SWA slabs are unsupported)",
-                    kv.depth
-                );
-            }
-            total += 2 * n_tokens * row_bytes;
+            total += 2 * n_tokens.min(kv.depth) * row_bytes;
         }
         if let Some(g) = self.config.gdn {
             if !self.gdn_state.is_empty() {
@@ -1605,7 +1605,8 @@ impl ScratchPool {
     }
 
     /// Copy one slot's resident attention state to host: per contiguous KV
-    /// layer the K then V rows `[0..n_tokens)`, then per GDN layer the
+    /// layer the K then V resident rows (`[0..min(n_tokens, depth))` — the
+    /// whole window slab for ring/SWA layers), then per GDN layer the
     /// recurrent state then conv history (fixed size — the exact
     /// post-position-`n_tokens` state). Layout-agnostic byte copy
     /// (F16Contig and Q8Contig differ only in `bytes_per_row`). The
@@ -1650,7 +1651,11 @@ impl ScratchPool {
                 continue;
             }
             let slot_base = slot_id * kv.depth * row_bytes;
-            let len = n_tokens * row_bytes;
+            // Resident physical rows: `min(n_tokens, depth)`. For ring/SWA
+            // layers (`depth < n_tokens`) this captures the whole window
+            // slab in physical order; restoring it verbatim reproduces the
+            // ring exactly (the slot's position counter drives the wrap).
+            let len = n_tokens.min(kv.depth) * row_bytes;
             copy_d2h(off, kv.k.offset_bytes(slot_base), len).context("snapshot K rows")?;
             off += len;
             copy_d2h(off, kv.v.offset_bytes(slot_base), len).context("snapshot V rows")?;
@@ -1737,7 +1742,7 @@ impl ScratchPool {
                 continue;
             }
             let slot_base = slot_id * kv.depth * row_bytes;
-            let len = n_tokens * row_bytes;
+            let len = n_tokens.min(kv.depth) * row_bytes;
             copy_h2d(off, kv.k.offset_bytes(slot_base), len).context("restore K rows")?;
             off += len;
             copy_h2d(off, kv.v.offset_bytes(slot_base), len).context("restore V rows")?;
