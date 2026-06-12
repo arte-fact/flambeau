@@ -22,7 +22,6 @@
 //! See `doc/MIXED_BATCH_V2_PLAN.md`.
 
 use anyhow::{bail, Result};
-use flambeau_backend_hip::{HipDevice, HipStream};
 use flambeau_core::{Device, DevicePtr};
 use flambeau_model_ops::delta_net::DeltaNetLayer;
 use flambeau_model_ops::WeightHandle;
@@ -39,8 +38,8 @@ fn quant_handle(qw: &QuantWeight, dims: [usize; 2]) -> WeightHandle {
     }
 }
 
-pub fn gdn_layer_mixed_local<H: TopologyHooks>(
-    state: &mut CoreState<'_>,
+pub fn gdn_layer_mixed_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
+    state: &mut CoreState<'_, B>,
     hooks: &mut H,
     input: &Tensor<F16>,
     weights: &GdnWeights,
@@ -164,7 +163,7 @@ pub fn gdn_layer_mixed_local<H: TopologyHooks>(
             .conv_history
             .offset_bytes(slot_p * hist_bytes_per_slot);
         let mut ar_cb =
-            |buf: DevicePtr, n_elems: usize, dev: &HipDevice, stm: &HipStream| -> Result<()> {
+            |buf: DevicePtr, n_elems: usize, dev: &B::Device, stm: &B::Stream| -> Result<()> {
                 hooks.ar_sum_f32(buf, n_elems, dev, stm)
             };
         block.forward_prefill_with_ar_hook(
@@ -231,7 +230,7 @@ pub fn gdn_layer_mixed_local<H: TopologyHooks>(
         }
         flambeau_core::Stream::synchronize(state.stream)?;
         let mut ar_cb =
-            |buf: DevicePtr, n_elems: usize, dev: &HipDevice, stm: &HipStream| -> Result<()> {
+            |buf: DevicePtr, n_elems: usize, dev: &B::Device, stm: &B::Stream| -> Result<()> {
                 hooks.ar_sum_f32(buf, n_elems, dev, stm)
             };
         block.forward_decode_with_ar_hook_batched_slots(

@@ -12,7 +12,6 @@
 //!   wall stays ~1× even after the full port.
 
 use anyhow::{bail, Result};
-use flambeau_backend_hip::{HipDevice, HipStream};
 use flambeau_core::{Device, DevicePtr};
 use flambeau_model_ops::delta_net::DeltaNetLayer;
 use flambeau_model_ops::WeightHandle;
@@ -29,8 +28,8 @@ fn quant_handle(qw: &QuantWeight, dims: [usize; 2]) -> WeightHandle {
     }
 }
 
-pub fn gdn_layer_local<H: TopologyHooks>(
-    state: &mut CoreState<'_>,
+pub fn gdn_layer_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
+    state: &mut CoreState<'_, B>,
     hooks: &mut H,
     input: &Tensor<F16>,
     weights: &GdnWeights,
@@ -121,7 +120,7 @@ pub fn gdn_layer_local<H: TopologyHooks>(
             .conv_history
             .offset_bytes(slot * hist_bytes_per_slot);
         let mut ar_cb =
-            |buf: DevicePtr, n_elems: usize, dev: &HipDevice, stm: &HipStream| -> Result<()> {
+            |buf: DevicePtr, n_elems: usize, dev: &B::Device, stm: &B::Stream| -> Result<()> {
                 hooks.ar_sum_f32(buf, n_elems, dev, stm)
             };
         block.forward_prefill_with_ar_hook(
@@ -194,7 +193,7 @@ pub fn gdn_layer_local<H: TopologyHooks>(
             return Ok(None);
         }
         let mut ar_cb =
-            |buf: DevicePtr, n_elems: usize, dev: &HipDevice, stm: &HipStream| -> Result<()> {
+            |buf: DevicePtr, n_elems: usize, dev: &B::Device, stm: &B::Stream| -> Result<()> {
                 hooks.ar_sum_f32(buf, n_elems, dev, stm)
             };
         if let Some(batched_scratch) = state.pool.gdn_decode_batched_scratch.as_ref() {
