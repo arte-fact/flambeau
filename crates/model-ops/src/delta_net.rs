@@ -40,9 +40,9 @@
 //!    MMQ at L≥128).
 
 use anyhow::{bail, Context, Result};
-use flambeau_backend_hip::{HipDevice, HipEvent, HipStream};
+use flambeau_backend_hip::HipDevice;
 use flambeau_core::op::QDtype;
-use flambeau_core::{CopyDirection, Device, DevicePtr};
+use flambeau_core::{CopyDirection, Device, DevicePtr, Event};
 use flambeau_ops::Ops;
 
 use crate::driver_utils::RawAllocTracker;
@@ -53,8 +53,8 @@ use crate::weight_handle::WeightHandle;
 /// partial into a row-parallel AR + residual-add. The four args are
 /// `(partial_f32_ptr, n_elems, device, stream)` — same shape as the
 /// engine's `ar_sum_f32` hook.
-pub type GdnArPartialCallback<'a> =
-    &'a mut dyn FnMut(DevicePtr, usize, &HipDevice, &HipStream) -> Result<()>;
+pub type GdnArPartialCallback<'a, D = HipDevice> =
+    &'a mut dyn FnMut(DevicePtr, usize, &D, &<D as Device>::Stream) -> Result<()>;
 
 /// Borrowed-by-value view over a caller-owned GDN decode scratch.
 #[derive(Copy, Clone)]
@@ -329,13 +329,22 @@ pub struct DeltaNetDims {
     pub conv_kernel: usize,
 }
 
-/// Per-call HIP context (device + stream) shared by every GDN driver
-/// method. Lifetime-borrowed; not Copy because `&HipDevice` references
-/// the cluster-owned device handle.
-#[derive(Copy, Clone)]
-pub struct BackendCtx<'a> {
-    pub device: &'a HipDevice,
-    pub stream: &'a HipStream,
+/// Per-call backend context (device + stream) shared by every GDN
+/// driver method. Generic over the `Device` seam; defaults to
+/// `HipDevice` so existing callers stay green. `Copy`/`Clone` are
+/// hand-written — deriving would impose a spurious `D: Copy` bound and
+/// the fields are shared references, always copyable.
+pub struct BackendCtx<'a, D: Device = HipDevice> {
+    pub device: &'a D,
+    pub stream: &'a D::Stream,
+}
+
+impl<D: Device> Copy for BackendCtx<'_, D> {}
+
+impl<D: Device> Clone for BackendCtx<'_, D> {
+    fn clone(&self) -> Self {
+        *self
+    }
 }
 
 /// Single-slot decode I/O pointers consumed by
@@ -361,11 +370,21 @@ pub struct GdnDecodeBatchedBuffers {
 }
 
 /// Prefill-only sequence handle: token count + optional state event
-/// the state-step kernel waits on before reading `state`.
-#[derive(Copy, Clone)]
-pub struct GdnPrefillSeq<'a> {
+/// the state-step kernel waits on before reading `state`. Generic over
+/// the `Device` seam (for the `Event` assoc type); defaults to
+/// `HipDevice`. `Copy`/`Clone` hand-written for the same reason as
+/// [`BackendCtx`].
+pub struct GdnPrefillSeq<'a, D: Device = HipDevice> {
     pub n_tokens: usize,
-    pub state_event: Option<&'a HipEvent>,
+    pub state_event: Option<&'a D::Event>,
+}
+
+impl<D: Device> Copy for GdnPrefillSeq<'_, D> {}
+
+impl<D: Device> Clone for GdnPrefillSeq<'_, D> {
+    fn clone(&self) -> Self {
+        *self
+    }
 }
 
 impl DeltaNetLayer {
@@ -624,13 +643,13 @@ impl DeltaNetLayer {
     /// ssm_out mmvq and the F16 cast. Under TP the v2 composite
     /// supplies a callback that AR-sums across ranks; under non-TP
     /// topologies pass `None` (equivalent to `forward_decode`).
-    pub fn forward_decode_with_ar_hook<O: Ops>(
+    pub fn forward_decode_with_ar_hook<D: Device, O: Ops>(
         &self,
         ops: &O,
-        ctx: BackendCtx<'_>,
+        ctx: BackendCtx<'_, D>,
         buf: GdnDecodeBuffers,
         scratch: DeltaNetLayerDecodeScratch,
-        ar_partial_callback: Option<GdnArPartialCallback<'_>>,
+        ar_partial_callback: Option<GdnArPartialCallback<'_, D>>,
     ) -> Result<()> {
         let BackendCtx { device, stream } = ctx;
         let GdnDecodeBuffers {
@@ -907,14 +926,14 @@ impl DeltaNetLayer {
     /// Activation inputs/outputs `x_in_base` and `delta_out_base` are
     /// slot-major `[n_slots, hidden]` F16. The AR callback fires once
     /// per slot on its `ssm_out_f32[slot]` partial.
-    pub fn forward_decode_with_ar_hook_batched_slots<O: Ops>(
+    pub fn forward_decode_with_ar_hook_batched_slots<D: Device, O: Ops>(
         &self,
         ops: &O,
-        ctx: BackendCtx<'_>,
+        ctx: BackendCtx<'_, D>,
         buf: GdnDecodeBatchedBuffers,
         scratch: DeltaNetLayerDecodeBatchedScratch,
         n_slots: usize,
-        ar_partial_callback: Option<GdnArPartialCallback<'_>>,
+        ar_partial_callback: Option<GdnArPartialCallback<'_, D>>,
     ) -> Result<()> {
         let BackendCtx { device, stream } = ctx;
         let GdnDecodeBatchedBuffers {
@@ -1348,14 +1367,14 @@ impl DeltaNetLayer {
     /// Like `forward_prefill` but with an AR hook on the `ssm_out_f32`
     /// partial buffer between the row-parallel ssm_out qmatmul and the
     /// F32→F16 cast. Mirrors [`Self::forward_decode_with_ar_hook`].
-    pub fn forward_prefill_with_ar_hook<O: Ops>(
+    pub fn forward_prefill_with_ar_hook<D: Device, O: Ops>(
         &self,
         ops: &O,
-        ctx: BackendCtx<'_>,
+        ctx: BackendCtx<'_, D>,
         buf: GdnDecodeBuffers,
         scratch: DeltaNetLayerPrefillScratch,
-        seq: GdnPrefillSeq<'_>,
-        ar_partial_callback: Option<GdnArPartialCallback<'_>>,
+        seq: GdnPrefillSeq<'_, D>,
+        ar_partial_callback: Option<GdnArPartialCallback<'_, D>>,
     ) -> Result<()> {
         let BackendCtx { device, stream } = ctx;
         let GdnDecodeBuffers {
