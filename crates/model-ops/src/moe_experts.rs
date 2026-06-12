@@ -25,8 +25,7 @@
 //!   Q8_0, Q4_1, Q5_K, Q6_K), each with its own super-block stride.
 
 use anyhow::{bail, Context, Result};
-use flambeau_backend_hip::HipDevice;
-use flambeau_core::device::DevicePtr;
+use flambeau_core::device::{Device, DevicePtr};
 use flambeau_core::op::QDtype;
 use flambeau_ops::Ops;
 
@@ -350,7 +349,7 @@ impl MoeExperts {
     /// Allocate an [`OwnedMoeExpertsPrefillScratch`] sized for `dims`
     /// × `max_tokens`.
     pub fn alloc_prefill_scratch(
-        device: &HipDevice,
+        device: &impl Device,
         tracker: &mut RawAllocTracker,
         dims: MoeExpertsScratchDims,
         max_tokens: usize,
@@ -407,7 +406,7 @@ impl MoeExperts {
     /// per-slot buffers are sized `top_k * intermediate` / `top_k *
     /// hidden`.
     pub fn alloc_decode_scratch(
-        device: &HipDevice,
+        device: &impl Device,
         tracker: &mut RawAllocTracker,
         dims: MoeExpertsScratchDims,
     ) -> Result<OwnedMoeExpertsDecodeScratch> {

@@ -428,7 +428,7 @@ impl DeltaNetLayer {
 
     /// Allocate an [`OwnedDeltaNetLayerDecodeScratch`] sized for `dims`.
     pub fn alloc_decode_scratch(
-        device: &HipDevice,
+        device: &impl Device,
         tracker: &mut RawAllocTracker,
         dims: DeltaNetScratchDims,
     ) -> Result<OwnedDeltaNetLayerDecodeScratch> {
@@ -483,7 +483,7 @@ impl DeltaNetLayer {
     /// (per-slot state and conv-history base ptrs) live separately —
     /// owned by the caller's pool because they index per-layer state.
     pub fn alloc_decode_batched_scratch(
-        device: &HipDevice,
+        device: &impl Device,
         tracker: &mut RawAllocTracker,
         dims: DeltaNetScratchDims,
         max_slots: usize,
@@ -542,7 +542,7 @@ impl DeltaNetLayer {
     /// `(K-1) + max_tokens` rows so that one prefill chunk plus the
     /// trailing history fits in `conv_input`.
     pub fn alloc_prefill_scratch(
-        device: &HipDevice,
+        device: &impl Device,
         tracker: &mut RawAllocTracker,
         dims: DeltaNetScratchDims,
         max_tokens: usize,
