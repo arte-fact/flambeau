@@ -209,6 +209,28 @@ impl<'a> Ops for HipOps<'a> {
         super::qmatmul::mmvq(self.ctx(), buf, shape, dtype_weight)
     }
 
+    fn mmvq_q4_k_r4(
+        &self,
+        buf: crate::MmvqBuffers,
+        n_rows: usize,
+        n_superblocks: usize,
+    ) -> Result<()> {
+        super::qmatmul::mmvq_simple_launch(
+            self.ctx(),
+            super::qmatmul::KernelEntry {
+                stem: "mmvq_q4_k_r4",
+                entry: "flambeau_mmvq_q4_k_r4_q8_1",
+            },
+            buf,
+            n_rows,
+            n_superblocks,
+            super::qmatmul::MmvqLaunchTune {
+                threads: 64,
+                rows_per_block: 4,
+            },
+        )
+    }
+
     fn mmvq_f16_direct(
         &self,
         buf: crate::MmvqBuffers,

@@ -5,12 +5,13 @@
 use anyhow::{bail, Context, Result};
 use flambeau_core::{CopyDirection, Device, DevicePtr};
 use flambeau_model_ops::{Tensor, F16, F32, Q8_1};
+use flambeau_ops::Ops;
 
 use crate::core::{CoreState, TopologyHooks};
 use crate::ctx::LmHeadWeights;
 
-pub fn output_head_local<H: TopologyHooks>(
-    state: &mut CoreState<'_>,
+pub fn output_head_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
+    state: &mut CoreState<'_, B>,
     _hooks: &mut H,
     input: &Tensor<F16>,
     lm_head: &LmHeadWeights,
@@ -71,12 +72,7 @@ pub fn output_head_local<H: TopologyHooks>(
         && hidden % 256 == 0;
     if use_r4_lmhead {
         let n_superblocks = hidden / 256;
-        flambeau_ops::hip::qmatmul::mmvq_simple_launch(
-            flambeau_ops::OpCtx { reg: state.reg, stream: state.stream },
-            flambeau_ops::hip::qmatmul::KernelEntry {
-                stem: "mmvq_q4_k_r4",
-                entry: "flambeau_mmvq_q4_k_r4_q8_1",
-            },
+        ops.mmvq_q4_k_r4(
             flambeau_ops::MmvqBuffers {
                 weights: lm_head.lm_head.ptr,
                 act_q8_1: state.pool.norm_q8_1,
@@ -84,7 +80,6 @@ pub fn output_head_local<H: TopologyHooks>(
             },
             vocab,
             n_superblocks,
-            flambeau_ops::hip::qmatmul::MmvqLaunchTune { threads: 64, rows_per_block: 4 },
         )?;
     } else {
         lm_head.lm_head.qmatmul(

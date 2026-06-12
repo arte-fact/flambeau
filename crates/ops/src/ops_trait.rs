@@ -128,6 +128,18 @@ pub trait Ops {
         dtype_weight: QDtype,
     ) -> Result<()>;
 
+    /// Q4_K r4 MMVQ for the wide-vocab LM head at decode: each block
+    /// owns 4 output rows, halving the block count over r2. `n_rows` is
+    /// the vocab; `n_superblocks` is `k / 256`. The 4-row amortisation
+    /// only pays off at vocab ≥ 131072 with `k % 256 == 0` — the caller
+    /// gates on that and falls back to `qmatmul` otherwise.
+    fn mmvq_q4_k_r4(
+        &self,
+        buf: crate::MmvqBuffers,
+        n_rows: usize,
+        n_superblocks: usize,
+    ) -> Result<()>;
+
     /// Weight × Q8_1 MMVQ writing directly into an F16 destination
     /// (saturating at ±65504). Skips the F32 scratch + `cast_f32_to_f16`
     /// two-step path for consumers whose downstream kernel expects F16
