@@ -16,10 +16,8 @@ use crate::core::{composites, CoreState, NoopHooks, ScratchPool, TopologyHooks};
 use crate::ctx::{
     AttnWeights, EmbeddingWeights, FfnWeights, ForwardCtx, LmHeadWeights, ModelLayout, MoeWeights,
 };
-use crate::runtime::ar::{
-    bar_ar_postattn_residual_rmsnorm_f32_to_f16, bar_ar_residual_f16, bar_ar_residual_rmsnorm_f16,
-    bar_ar_sum_f16, BarArCoordinator,
-};
+use crate::runtime::ar::{BarArCoordinator, BarArRank};
+use flambeau_runtime::FusedAllReduce;
 
 pub type ArCallback =
     Box<dyn FnMut(usize, usize, DevicePtr, usize, &HipDevice, &HipStream) -> Result<()> + Send>;
@@ -61,15 +59,12 @@ impl TopologyHooks for TpHooks {
             .bar
             .as_ref()
             .ok_or_else(|| anyhow!("TpHooks::ar_residual_f16: bar coordinator not configured"))?;
-        bar_ar_residual_f16(
-            bar,
-            self.rank,
-            residual_inout,
-            partial_f16,
-            n_elems,
-            device,
-            stream,
-        )
+        BarArRank {
+            coord: Arc::clone(bar),
+            rank: self.rank,
+        }
+        .ar_residual_f16(residual_inout, partial_f16, n_elems, device, stream)
+        .map_err(|e| anyhow!("{e}"))
     }
 
     fn supports_ar_residual_rmsnorm_f16(&self) -> bool {
@@ -87,7 +82,12 @@ impl TopologyHooks for TpHooks {
         let bar = self.bar.as_ref().ok_or_else(|| {
             anyhow!("TpHooks::ar_residual_rmsnorm_f16: bar coordinator not configured")
         })?;
-        bar_ar_residual_rmsnorm_f16(bar, self.rank, bufs, n_elems, eps, device, stream)
+        BarArRank {
+            coord: Arc::clone(bar),
+            rank: self.rank,
+        }
+        .ar_residual_rmsnorm_f16(bufs, n_elems, eps, device, stream)
+        .map_err(|e| anyhow!("{e}"))
     }
 
     fn supports_ar_sum_f16(&self) -> bool {
@@ -105,7 +105,12 @@ impl TopologyHooks for TpHooks {
             .bar
             .as_ref()
             .ok_or_else(|| anyhow!("TpHooks::ar_sum_f16: bar coordinator not configured"))?;
-        bar_ar_sum_f16(bar, self.rank, buf, n_elems, device, stream)
+        BarArRank {
+            coord: Arc::clone(bar),
+            rank: self.rank,
+        }
+        .ar_sum_f16(buf, n_elems, device, stream)
+        .map_err(|e| anyhow!("{e}"))
     }
 
     fn supports_ar_postattn_residual_rmsnorm_f32_to_f16(&self) -> bool {
@@ -124,14 +129,12 @@ impl TopologyHooks for TpHooks {
         let bar = self.bar.as_ref().ok_or_else(|| {
             anyhow!("TpHooks::ar_postattn_residual_rmsnorm_f32_to_f16: bar coordinator not configured")
         })?;
-        bar_ar_postattn_residual_rmsnorm_f32_to_f16(
-            bar,
-            self.rank,
-            bufs,
-            crate::runtime::ar::BarArPostAttnNormParams { n_rows, n, eps },
-            device,
-            stream,
-        )
+        BarArRank {
+            coord: Arc::clone(bar),
+            rank: self.rank,
+        }
+        .ar_postattn_residual_rmsnorm_f32_to_f16(bufs, n_rows, n, eps, device, stream)
+        .map_err(|e| anyhow!("{e}"))
     }
 }
 
@@ -178,15 +181,12 @@ impl TopologyHooks for HybridHooks {
         let bar = self.bar.as_ref().ok_or_else(|| {
             anyhow!("HybridHooks::ar_residual_f16: bar coordinator not configured")
         })?;
-        bar_ar_residual_f16(
-            bar,
-            self.rank_in_stage,
-            residual_inout,
-            partial_f16,
-            n_elems,
-            device,
-            stream,
-        )
+        BarArRank {
+            coord: Arc::clone(bar),
+            rank: self.rank_in_stage,
+        }
+        .ar_residual_f16(residual_inout, partial_f16, n_elems, device, stream)
+        .map_err(|e| anyhow!("{e}"))
     }
 
     fn supports_ar_residual_rmsnorm_f16(&self) -> bool {
@@ -204,7 +204,12 @@ impl TopologyHooks for HybridHooks {
         let bar = self.bar.as_ref().ok_or_else(|| {
             anyhow!("HybridHooks::ar_residual_rmsnorm_f16: bar coordinator not configured")
         })?;
-        bar_ar_residual_rmsnorm_f16(bar, self.rank_in_stage, bufs, n_elems, eps, device, stream)
+        BarArRank {
+            coord: Arc::clone(bar),
+            rank: self.rank_in_stage,
+        }
+        .ar_residual_rmsnorm_f16(bufs, n_elems, eps, device, stream)
+        .map_err(|e| anyhow!("{e}"))
     }
 
     fn supports_ar_sum_f16(&self) -> bool {
@@ -222,7 +227,12 @@ impl TopologyHooks for HybridHooks {
             .bar
             .as_ref()
             .ok_or_else(|| anyhow!("HybridHooks::ar_sum_f16: bar coordinator not configured"))?;
-        bar_ar_sum_f16(bar, self.rank_in_stage, buf, n_elems, device, stream)
+        BarArRank {
+            coord: Arc::clone(bar),
+            rank: self.rank_in_stage,
+        }
+        .ar_sum_f16(buf, n_elems, device, stream)
+        .map_err(|e| anyhow!("{e}"))
     }
 
     fn supports_ar_postattn_residual_rmsnorm_f32_to_f16(&self) -> bool {
@@ -241,14 +251,12 @@ impl TopologyHooks for HybridHooks {
         let bar = self.bar.as_ref().ok_or_else(|| {
             anyhow!("HybridHooks::ar_postattn_residual_rmsnorm_f32_to_f16: bar coordinator not configured")
         })?;
-        bar_ar_postattn_residual_rmsnorm_f32_to_f16(
-            bar,
-            self.rank_in_stage,
-            bufs,
-            crate::runtime::ar::BarArPostAttnNormParams { n_rows, n, eps },
-            device,
-            stream,
-        )
+        BarArRank {
+            coord: Arc::clone(bar),
+            rank: self.rank_in_stage,
+        }
+        .ar_postattn_residual_rmsnorm_f32_to_f16(bufs, n_rows, n, eps, device, stream)
+        .map_err(|e| anyhow!("{e}"))
     }
 }
 
