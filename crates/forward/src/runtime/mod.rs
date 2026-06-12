@@ -333,6 +333,59 @@ impl<A: Arch> Session<A> {
         Ok(())
     }
 
+    /// DtoH-copy one slot's resident attention state (per-rank KV rows
+    /// `[0..n_tokens)` + GDN state) into per-rank byte buffers, in rank
+    /// order. Restorable only via [`restore_kv_slot`](Self::restore_kv_slot)
+    /// on an identically-configured runtime (same model, topology, KV
+    /// layout) — the server's `TopologyTag` enforces that at the cache layer.
+    pub fn snapshot_kv_slot(&self, slot_id: usize, n_tokens: usize) -> Result<Vec<Vec<u8>>> {
+        let rxs: Vec<_> = self
+            .handles
+            .iter()
+            .map(|h| h.send_snapshot_kv_slot(slot_id, n_tokens))
+            .collect::<Result<_>>()?;
+        let mut snaps = Vec::with_capacity(rxs.len());
+        for rx in rxs {
+            snaps.push(
+                rx.recv()
+                    .map_err(|e| anyhow!("snapshot_kv_slot reply channel closed: {e}"))??,
+            );
+        }
+        Ok(snaps)
+    }
+
+    /// HtoD-copy a [`snapshot_kv_slot`](Self::snapshot_kv_slot) result back
+    /// into `slot_id`, one buffer per rank in rank order. The snapshot is
+    /// shared with the workers via `Arc` (each reads only its rank's
+    /// buffer). The caller must continue the slot from position `n_tokens`.
+    pub fn restore_kv_slot(
+        &mut self,
+        slot_id: usize,
+        n_tokens: usize,
+        snaps: std::sync::Arc<Vec<Vec<u8>>>,
+    ) -> Result<()> {
+        if snaps.len() != self.handles.len() {
+            anyhow::bail!(
+                "restore_kv_slot: snapshot has {} rank buffers, runtime has {} ranks",
+                snaps.len(),
+                self.handles.len()
+            );
+        }
+        let rxs: Vec<_> = self
+            .handles
+            .iter()
+            .enumerate()
+            .map(|(rank, h)| {
+                h.send_restore_kv_slot(slot_id, n_tokens, std::sync::Arc::clone(&snaps), rank)
+            })
+            .collect::<Result<_>>()?;
+        for rx in rxs {
+            rx.recv()
+                .map_err(|e| anyhow!("restore_kv_slot reply channel closed: {e}"))??;
+        }
+        Ok(())
+    }
+
     /// Recycle every page held by `slot_id` across every layer's
     /// `PagePool` back into the free list. No-op on non-paged ranks.
     /// Called by the server when a slot is released.

@@ -65,6 +65,15 @@ pub trait V2BatchableSession: Send {
 
     fn reset_kv_slot(&mut self, slot_id: usize) -> Result<()>;
 
+    fn snapshot_kv_slot(&mut self, slot_id: usize, n_tokens: usize) -> Result<Vec<Vec<u8>>>;
+
+    fn restore_kv_slot(
+        &mut self,
+        slot_id: usize,
+        n_tokens: usize,
+        snaps: std::sync::Arc<Vec<Vec<u8>>>,
+    ) -> Result<()>;
+
     fn release_paged_slot(&mut self, slot_id: usize) -> Result<()>;
 
     fn dispose_in_place(&mut self) -> Result<()>;
@@ -132,6 +141,19 @@ impl<A: Arch> V2BatchableSession for Session<A> {
 
     fn reset_kv_slot(&mut self, slot_id: usize) -> Result<()> {
         Session::reset_kv_slot(self, slot_id)
+    }
+
+    fn snapshot_kv_slot(&mut self, slot_id: usize, n_tokens: usize) -> Result<Vec<Vec<u8>>> {
+        Session::snapshot_kv_slot(self, slot_id, n_tokens)
+    }
+
+    fn restore_kv_slot(
+        &mut self,
+        slot_id: usize,
+        n_tokens: usize,
+        snaps: std::sync::Arc<Vec<Vec<u8>>>,
+    ) -> Result<()> {
+        Session::restore_kv_slot(self, slot_id, n_tokens, snaps)
     }
 
     fn release_paged_slot(&mut self, slot_id: usize) -> Result<()> {
@@ -430,6 +452,20 @@ impl ModelDriver for V2Conv {
 
     fn vocab_size(&self) -> usize {
         0
+    }
+
+    fn snapshot_slot(&mut self, n_tokens: usize) -> Result<Vec<Vec<u8>>> {
+        let mut shared = self.shared.blocking_lock();
+        shared.snapshot_kv_slot(self.slot_id, n_tokens)
+    }
+
+    fn restore_slot(
+        &mut self,
+        n_tokens: usize,
+        snaps: std::sync::Arc<Vec<Vec<u8>>>,
+    ) -> Result<()> {
+        let mut shared = self.shared.blocking_lock();
+        shared.restore_kv_slot(self.slot_id, n_tokens, snaps)
     }
 
     fn reset_kv(&mut self) -> Result<()> {

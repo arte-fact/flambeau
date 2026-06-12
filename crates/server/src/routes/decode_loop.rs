@@ -23,6 +23,7 @@ use crate::state::SamplingParams;
 
 use super::finalise::{build_logprob_entry, finalise, preview_text, CompletionOutput};
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn stream_completion_sse(
     state: SharedState,
     prompt: String,
@@ -31,6 +32,7 @@ pub(crate) fn stream_completion_sse(
     parallel_tool_calls: bool,
     relax_stop_mask: bool,
     include_usage: bool,
+    tool_force_prefix: Option<String>,
 ) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
     use crate::model_handle::ReasoningStyle;
     use crate::tool_call_parser::{dispatcher_with_prompt, ParserEvent};
@@ -165,6 +167,12 @@ pub(crate) fn stream_completion_sse(
             let sent = emit_events(events, &mut has_tool_calls, &mut abort_after_close);
             sent && !abort_after_close
         };
+
+        // B1: feed the forced tool-call opening to the parser first so the
+        // model's continuation reconstructs a complete call.
+        if let Some(pfx) = &tool_force_prefix {
+            emit_delta(pfx);
+        }
 
         let res = run_completion_blocking_streaming(
             state_clone.clone(),
@@ -351,12 +359,15 @@ fn scheduler_can_engage(state: &ServerState, params: &SamplingParams) -> bool {
 ///
 /// `logits_out` is populated with the LAST chunk's final-row logits
 /// — the prefill-side input for first-token sampling.
+/// Returns `true` when a full-prompt prefix-cache hit served the logits
+/// (the caller must skip the post-prefill capture — the entry it would
+/// write is the one that was just hit).
 fn chunked_prefill_pp(
     state: &ServerState,
     slot_idx: usize,
     prompt_ids: &[u32],
     logits_out: &mut Vec<f32>,
-) -> Result<()> {
+) -> Result<bool> {
     let prefill_chunk = state.prefill_chunk_tokens.max(1);
     // Phase K4c — mixed-batch engagement on every arch that
     // implements `Model::supports_mixed_batch` (qwen35 / qwen35moe /
@@ -370,16 +381,50 @@ fn chunked_prefill_pp(
     // empty drain costs one batch-window sleep per chunk, ~1.5 ms).
     let mixed_on = state.model.supports_mixed_batch();
     let mut prefill_start = 0usize;
-    let mut reset_done = false;
+    {
+        let mut guard = state.inflight_pool[slot_idx].blocking_lock();
+        guard
+            .reset_for_next_request()
+            .context("reset inflight for new request")?;
+        // Prefix-cache restore replaces the prefix's prefill: a FULL hit
+        // returns the cached first-token logits with no forward at all; a
+        // PREFIX hit advances the loop to the matched boundary (the
+        // restored GDN state is exactly at that position, so the tail
+        // MUST start there).
+        match state.prefix_cache_try_restore(&mut **guard, prompt_ids)? {
+            crate::routes::PrefixCacheRestore::FullHit { logits } => {
+                logits_out.clear();
+                logits_out.extend_from_slice(&logits);
+                return Ok(true);
+            }
+            crate::routes::PrefixCacheRestore::PrefixHit { n_matched } => {
+                prefill_start = n_matched;
+            }
+            crate::routes::PrefixCacheRestore::Miss => {}
+        }
+    }
+    // Intermediate capture targets: the last two full-chunk boundaries
+    // strictly inside the prompt. A grown conversation diverges from this
+    // prompt only near its end, so these are the chains its next turn can
+    // hit; earlier boundaries are shadowed by them, and capturing every
+    // boundary would multiply host-RAM cost for no extra hit coverage.
+    let capture_boundaries: Vec<usize> = (1..=prompt_ids.len() / prefill_chunk)
+        .map(|i| i * prefill_chunk)
+        .filter(|&b| b < prompt_ids.len())
+        .rev()
+        .take(2)
+        .collect();
+    let restored_at = prefill_start;
     while prefill_start < prompt_ids.len() {
         let end = (prefill_start + prefill_chunk).min(prompt_ids.len());
         let chunk = &prompt_ids[prefill_start..end];
         let mut guard = state.inflight_pool[slot_idx].blocking_lock();
-        if !reset_done {
-            guard
-                .reset_for_next_request()
-                .context("reset inflight for new request")?;
-            reset_done = true;
+        // The previous chunk ran the full layer stack, so the slot state at
+        // `prefill_start` is committed — snapshot it here, under the same
+        // freshly-acquired guard the chunk forward uses. Skip the restored
+        // boundary itself (its entry is the one we just hit).
+        if prefill_start > restored_at && capture_boundaries.contains(&prefill_start) {
+            state.prefix_cache_insert_intermediate(&mut **guard, prompt_ids, prefill_start);
         }
         if mixed_on {
             // Become the dispatch leader for this chunk. `lock()`
@@ -471,7 +516,7 @@ fn chunked_prefill_pp(
             })?;
         prefill_start = end;
     }
-    Ok(())
+    Ok(false)
 }
 
 fn run_completion_scheduler_pp_blocking(
@@ -514,7 +559,11 @@ fn run_completion_scheduler_pp_blocking(
         let mut logits_buf: Vec<f32> = Vec::with_capacity(vocab);
         let _ = cluster;
         let _ = model;
-        chunked_prefill_pp(&state, slot_idx, &prompt_ids, &mut logits_buf)?;
+        let full_hit = chunked_prefill_pp(&state, slot_idx, &prompt_ids, &mut logits_buf)?;
+        if !full_hit {
+            let mut guard = state.inflight_pool[slot_idx].blocking_lock();
+            state.prefix_cache_try_capture_full(&mut **guard, &prompt_ids, &logits_buf);
+        }
         if !relax_stop_mask {
             for &sid in stop_ids {
                 if (sid as usize) < logits_buf.len() {
@@ -770,9 +819,12 @@ fn run_completion_blocking_ids(
     // (bounds the per-step stall a long prompt inflicts on peers).
     // Reset for new request happens inside `chunked_prefill_pp` on the
     // first chunk's lock scope. Decode reacquires the guard below.
-    chunked_prefill_pp(&state, slot_idx, &prompt_ids, &mut logits_buf)?;
+    let full_hit = chunked_prefill_pp(&state, slot_idx, &prompt_ids, &mut logits_buf)?;
     let mut inflight_guard = state.inflight_pool[slot_idx].blocking_lock();
     let inflight: &mut dyn crate::Session = &mut **inflight_guard;
+    if !full_hit {
+        state.prefix_cache_try_capture_full(inflight, &prompt_ids, &logits_buf);
+    }
     for &sid in stop_ids {
         if (sid as usize) < logits_buf.len() {
             logits_buf[sid as usize] = f32::NEG_INFINITY;
@@ -1175,7 +1227,17 @@ pub(crate) fn run_completion_blocking_streaming(
     // **Phase 5 S2** — chunked prefill on the streaming path. Same
     // mutex-release-between-chunks shape as the legacy path; decode
     // reacquires once below for the SSE-emit loop.
-    chunked_prefill_pp(&state, slot_idx, &prompt_ids, &mut logits_buf)?;
+    let full_hit = chunked_prefill_pp(&state, slot_idx, &prompt_ids, &mut logits_buf)?;
+    // Captured AFTER the first token is emitted (the snapshot DtoH costs
+    // 0.1-2.2 s and would otherwise sit inside TTFT) but BEFORE the first
+    // decode forward (which advances the GDN state past the prompt). The
+    // copy keeps the cached logits unmasked — the stop-mask below mutates
+    // `logits_buf` in place.
+    let prefill_logits_for_cache = if full_hit {
+        Vec::new()
+    } else {
+        logits_buf.clone()
+    };
     let mut inflight_guard = state.inflight_pool[slot_idx].blocking_lock();
     let inflight: &mut dyn crate::Session = &mut **inflight_guard;
     for &sid in stop_ids {
@@ -1258,6 +1320,9 @@ pub(crate) fn run_completion_blocking_streaming(
     if !alive {
         // Slot stays pooled; mutex releases on function return.
         return Ok(("stop".into(), prompt_tokens, generated.len() as u32));
+    }
+    if !full_hit {
+        state.prefix_cache_try_capture_full(inflight, &prompt_ids, &prefill_logits_for_cache);
     }
 
     let mut finish_reason: &str = "length";

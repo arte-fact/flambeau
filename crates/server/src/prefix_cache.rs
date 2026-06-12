@@ -260,6 +260,33 @@ struct PrefixCacheInner {
     used_bytes: usize,
 }
 
+/// Floor the clamp never drops below, so a model that nearly fills host
+/// RAM still gets a usable cache. A smaller *requested* cap is honored.
+const HOST_CACHE_FLOOR_BYTES: usize = 2 * 1024 * 1024 * 1024;
+
+/// Host RAM held back above the resident weights for the OS, request
+/// scratch, and the decode working set.
+const HOST_CACHE_RESERVE_BYTES: usize = 2 * 1024 * 1024 * 1024;
+
+/// Clamp a requested host-snapshot-cache budget so the live cache plus the
+/// resident model weights don't oversubscribe host RAM.
+///
+/// Returns the effective budget: never above `requested_bytes`, and never
+/// below [`HOST_CACHE_FLOOR_BYTES`] unless the request itself is lower.
+/// `resident_weight_bytes` is the GGUF size for TP/hybrid (the mmap stays
+/// mapped after upload) and 0 for PP (the loader drops it post-upload).
+pub(crate) fn clamp_host_cache_budget(
+    requested_bytes: usize,
+    mem_total_bytes: usize,
+    resident_weight_bytes: usize,
+) -> usize {
+    let headroom = mem_total_bytes
+        .saturating_sub(resident_weight_bytes)
+        .saturating_sub(HOST_CACHE_RESERVE_BYTES);
+    let ceiling = headroom.max(HOST_CACHE_FLOOR_BYTES);
+    requested_bytes.min(ceiling)
+}
+
 impl PrefixCache {
     /// Construct an empty cache with the given VRAM budget and enabled flag.
     pub fn new(vram_budget_bytes: usize, enabled: bool) -> PrefixCache {
@@ -389,6 +416,18 @@ impl PrefixCache {
             .find_map(|e| e.last_logits.as_ref().map(std::sync::Arc::clone))
     }
 
+    /// Move `terminal` to MRU after a hit. `longest_match` holds only the
+    /// read lock, so the LRU bump is a separate write-locked step.
+    #[cfg(feature = "hip")]
+    pub fn touch(&self, terminal: ChunkKey) {
+        if !self.enabled() {
+            return;
+        }
+        let mut inner = self.inner.write().unwrap();
+        inner.lru_order.retain(|k| *k != terminal);
+        inner.lru_order.push_front(terminal);
+    }
+
     /// **#229 P2.10c** — insert an entry with its KV snapshot, account
     /// the bytes against the budget, evict LRU until under cap.
     /// Caller passes `bytes` (size of the snapshot in host RAM).
@@ -513,6 +552,33 @@ mod tests {
             pp_size: 1,
             tp_size: 2,
         }
+    }
+
+    const GIB: usize = 1024 * 1024 * 1024;
+
+    #[test]
+    fn clamp_honors_request_when_ram_is_ample() {
+        let eff = clamp_host_cache_budget(12 * GIB, 128 * GIB, 32 * GIB);
+        assert_eq!(eff, 12 * GIB);
+    }
+
+    #[test]
+    fn clamp_drops_to_floor_when_model_nearly_fills_ram() {
+        // weights (32.6 GB) exceed RAM (31 GB) → clamp to the floor.
+        let eff = clamp_host_cache_budget(12 * GIB, 31 * GIB, 32 * GIB + 600 * 1024 * 1024);
+        assert_eq!(eff, HOST_CACHE_FLOOR_BYTES);
+    }
+
+    #[test]
+    fn clamp_never_raises_a_smaller_request() {
+        let eff = clamp_host_cache_budget(GIB, 31 * GIB, 32 * GIB);
+        assert_eq!(eff, GIB);
+    }
+
+    #[test]
+    fn clamp_leaves_headroom_above_the_floor_intact() {
+        let eff = clamp_host_cache_budget(4 * GIB, 64 * GIB, 28 * GIB);
+        assert_eq!(eff, 4 * GIB);
     }
 
     #[test]

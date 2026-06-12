@@ -117,6 +117,20 @@ enum Command {
         slot_id: usize,
         reply: SyncSender<Result<()>>,
     },
+    SnapshotKvSlot {
+        slot_id: usize,
+        n_tokens: usize,
+        reply: SyncSender<Result<Vec<u8>>>,
+    },
+    RestoreKvSlot {
+        slot_id: usize,
+        n_tokens: usize,
+        /// Shared across all rank workers — each reads only `snaps[rank]`.
+        /// Avoids cloning the multi-hundred-MB snapshot per restore.
+        snaps: std::sync::Arc<Vec<Vec<u8>>>,
+        rank: usize,
+        reply: SyncSender<Result<()>>,
+    },
     ForwardMixed {
         tokens: Vec<u32>,
         positions: Vec<usize>,
@@ -185,6 +199,37 @@ impl<A: Arch> WorkerHandle<A> {
                     }
                     Command::ResetKvSlot { slot_id, reply } => {
                         let res = state.pool.reset_gdn_state_slot(slot_id, &state.device);
+                        let _ = reply.send(res);
+                    }
+                    Command::SnapshotKvSlot {
+                        slot_id,
+                        n_tokens,
+                        reply,
+                    } => {
+                        let res = state
+                            .pool
+                            .snapshot_slot_bytes(slot_id, n_tokens, &state.device);
+                        let _ = reply.send(res);
+                    }
+                    Command::RestoreKvSlot {
+                        slot_id,
+                        n_tokens,
+                        snaps,
+                        rank,
+                        reply,
+                    } => {
+                        let res = match snaps.get(rank) {
+                            Some(bytes) => state.pool.restore_slot_bytes(
+                                slot_id,
+                                n_tokens,
+                                bytes,
+                                &state.device,
+                            ),
+                            None => Err(anyhow::anyhow!(
+                                "RestoreKvSlot: snapshot has {} rank buffers, rank {rank} missing",
+                                snaps.len()
+                            )),
+                        };
                         let _ = reply.send(res);
                     }
                     Command::ReleasePagedSlot { slot_id, reply } => {
@@ -295,6 +340,47 @@ impl<A: Arch> WorkerHandle<A> {
         self.cmd_tx
             .send(Command::ResetKvSlot {
                 slot_id,
+                reply: reply_tx,
+            })
+            .map_err(|e| anyhow::anyhow!("worker channel closed: {e}"))?;
+        Ok(reply_rx)
+    }
+
+    /// Queue a SnapshotKvSlot command: DtoH-copy the rank's shard of one
+    /// slot's KV rows `[0..n_tokens)` + GDN state into a byte buffer.
+    pub fn send_snapshot_kv_slot(
+        &self,
+        slot_id: usize,
+        n_tokens: usize,
+    ) -> Result<Receiver<Result<Vec<u8>>>> {
+        let (reply_tx, reply_rx) = mpsc::sync_channel::<Result<Vec<u8>>>(1);
+        self.cmd_tx
+            .send(Command::SnapshotKvSlot {
+                slot_id,
+                n_tokens,
+                reply: reply_tx,
+            })
+            .map_err(|e| anyhow::anyhow!("worker channel closed: {e}"))?;
+        Ok(reply_rx)
+    }
+
+    /// Queue a RestoreKvSlot command: HtoD-copy this rank's buffer
+    /// (`snaps[rank]`) of a `send_snapshot_kv_slot` result back into
+    /// `slot_id`. The snapshot is shared via `Arc` — no per-rank copy.
+    pub fn send_restore_kv_slot(
+        &self,
+        slot_id: usize,
+        n_tokens: usize,
+        snaps: std::sync::Arc<Vec<Vec<u8>>>,
+        rank: usize,
+    ) -> Result<Receiver<Result<()>>> {
+        let (reply_tx, reply_rx) = mpsc::sync_channel::<Result<()>>(1);
+        self.cmd_tx
+            .send(Command::RestoreKvSlot {
+                slot_id,
+                n_tokens,
+                snaps,
+                rank,
                 reply: reply_tx,
             })
             .map_err(|e| anyhow::anyhow!("worker channel closed: {e}"))?;
