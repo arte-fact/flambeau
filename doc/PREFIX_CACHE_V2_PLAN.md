@@ -407,3 +407,65 @@ GDN state byte copy, pp2tp2 parity) → **P2′** (request wiring + full-prompt
 capture, exact-retry gate) → **P5′** (last-K chunk-boundary capture +
 shared-KV-buffer entries, agentic gate) → **P8/P9** (Arc-aware accounting,
 eviction under load, cert). P4 (SWA) and P7 (paged) stay deferred.
+
+---
+
+## P8 finding — host budget must be clamped to RAM headroom (2026-06-12, fixed `4caf12f`)
+
+P5′ (gemma4 SWA chunk-boundary capture, shipped `e6df3fd`) was validated by a
+live growing-context A/B, which surfaced a budget bug, not a snapshot bug.
+
+**Symptom.** gemma-4-31B-it-Q8_0 pp2tp2 `--kv q8 --prefix-cache
+--prefix-cache-max-gb 12` died at ~3k ctx with
+`HybStage::peer_recv: timed out waiting for producer event (10s)`, then wedged
+(GPUs idle). The 10 s pipeline-handoff timeout is a **symptom**, not the cause.
+
+**Root cause — host-RAM oversubscription.** The snapshot cache (anonymous
+`Vec<u8>`, LRU-capped at `vram_budget_bytes`, the host-RAM misnomer in §P8)
+competes with the resident model weights. The rig has **31 GB RAM**; the gemma
+GGUF is **32.6 GB** — the model alone exceeds RAM. Under TP/hybrid the loader
+cannot `advise_drop` the mmap after upload (every rank reads the shared region;
+see memory `feedback_tp_no_advise_drop`), so 32.6 GB stays mapped. A 12 GB live
+cache on top tips the box onto the direct-reclaim cliff; the large per-capture
+snapshots (gemma is full-attention every layer, SWA+global → ~800 MB KV) stall,
+the process slows, and the PP `peer_recv` spin trips its 10 s budget.
+
+**Decisive probe (single variable = the cap).** Same workload, 7-turn growing
+chat to 3478 tok:
+- `--prefix-cache-max-gb 2` → CLEAN, TTFT flat ~7 s, restores cross the SWA
+  window (P5′ correctness holds).
+- `--prefix-cache-max-gb 12` → deterministic timeout at ~3k.
+
+So it is the **total live cache bytes**, not per-capture size. The first
+hot-stream-contention hypothesis was wrong (snapshot and forward share
+`device.default_stream()` sequentially under one slot lock, synced between) —
+disproven by reading `workers.rs`/`engine.rs` before coding.
+
+**Fix (`4caf12f`).** `clamp_host_cache_budget` in `prefix_cache.rs`, wired in
+`serve_common::build_prefix_cache`: bound the requested budget to
+`(MemTotal − resident_weights − 2 GiB reserve)`, floored at a confirmed-safe
+**2 GiB**, and `warn!` when it clamps. `resident_weights` = GGUF size for
+TP/hybrid, 0 for PP (drops its mmap). Pure helper, 4 unit tests. The
+`mesh_kind == "pp"` branch is a topology property (mmap residency), not a
+`gguf.architecture()` arch branch — rule 13 holds.
+
+**Validation (both archs, cap 12 → clamp 2 GiB).**
+- gemma-31B-Q8_0: was a crash; now **CLEAN** to 3478 tok, TTFT flat ~7 s
+  (cache-off climbs to ~39 s).
+- qwen-27B-Q8_0: off 103.4 s → on 31.2 s = **3.31×**, transcript parity PASS —
+  no regression (better than the prior 2.97× at unclamped 12 GB; lighter evict
+  churn). qwen's GDN snapshots are small so its working set fits well under
+  2 GiB.
+
+**Operational note.** On this 31 GB rig a 32 GB-class model can only host a
+~2 GiB prefix cache; the clamp now enforces that automatically — do not
+hand-tune `--prefix-cache-max-gb`. Boxes with real headroom (weights ≪ RAM)
+honor the requested cap unchanged.
+
+**Open follow-up.** The clamp removes the crash but the floor of 2 GiB is the
+*confirmed-safe* point, not a measured optimum; the true cliff for gemma sits
+between 2 and 12 GB. A pressure-aware dynamic budget (evict harder as
+`MemAvailable` drops, rather than a static ceiling) would reclaim the
+in-between headroom on boxes where the model doesn't fully fill RAM. Also
+unaddressed: the per-capture snapshot still does an `alloc_zeros` of the host
+buffer (rule 8) before the DtoH overwrites it — a cheap hot-path cleanup.
