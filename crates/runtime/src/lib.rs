@@ -21,8 +21,8 @@ pub mod tp_slice;
 
 pub use cluster::Cluster;
 pub use collective::{
-    AllGather, AllReduce, AllToAll, Broadcast, CollectiveError, CollectiveResult, RefMesh,
-    RefRankHandle,
+    AllGather, AllReduce, AllToAll, Broadcast, CollectiveError, CollectiveResult, DeviceAllReduce,
+    RefMesh, RefRankHandle,
 };
 pub use kv_cache::{
     CacheLayout, F16Contig, KvCache, KvCacheError, KvCacheResult, Q8Contig, Q8_0_BLOCK_BYTES,

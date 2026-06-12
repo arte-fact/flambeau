@@ -9,6 +9,9 @@
 
 use std::sync::{Arc, Barrier, Mutex};
 
+use flambeau_core::device::Device;
+use flambeau_core::DevicePtr;
+
 use crate::mesh::{CollectiveCfg, CollectiveDType, Mesh, RankId, ReduceOp};
 
 /// Error surface for the collective layer.
@@ -166,6 +169,26 @@ pub trait AllToAll {
 /// Fan rank `root`'s buffer out to every rank.
 pub trait Broadcast {
     fn broadcast(&self, buf: &mut [u8], root: RankId, cfg: &CollectiveCfg) -> CollectiveResult<()>;
+}
+
+/// On-device AllReduce-sum: the device-pointer analog of [`AllReduce`].
+/// Reduces `n_elems` `dtype` elements in place at `buf` across all ranks
+/// without a host bounce. Implemented on a per-rank handle (HIP BAR1 P2P,
+/// later NCCL on CUDA) carrying the rank's identity, mirroring how
+/// [`RefRankHandle`] carries its rank for the byte-buffer path. `op` is
+/// always `Sum` — the only reduction the forward AR path issues.
+pub trait DeviceAllReduce {
+    /// Per-rank device type (`HipDevice`, `CudaDevice`).
+    type Device: Device;
+
+    fn all_reduce_sum(
+        &self,
+        buf: DevicePtr,
+        n_elems: usize,
+        dtype: CollectiveDType,
+        device: &Self::Device,
+        stream: &<Self::Device as Device>::Stream,
+    ) -> CollectiveResult<()>;
 }
 
 // Generic element-wise reduction over a dtype, in place on rank 0 then

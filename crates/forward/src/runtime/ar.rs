@@ -15,6 +15,7 @@
 use anyhow::Result;
 use flambeau_backend_hip::{BarP2pAllReduce, HipDevice, HipEvent, HipStream};
 use flambeau_core::{CopyDirection, Device, DevicePtr};
+use flambeau_runtime::{CollectiveDType, CollectiveError, CollectiveResult, DeviceAllReduce};
 use std::sync::{Arc, Barrier, Mutex};
 
 /// Above this `n_elems`, the AR call rides the host-sync producer
@@ -643,6 +644,76 @@ pub fn make_bar_ar_callback(coord: Arc<BarArCoordinator>, rank: usize) -> ArCall
     Box::new(move |_r, _nr, buf, n_elems, dev, st| {
         bar_ar_sum_f32(&coord, rank, buf, n_elems, dev, st)
     })
+}
+
+fn ar_device_err(e: anyhow::Error, backend: &'static str) -> CollectiveError {
+    CollectiveError::Device {
+        backend,
+        ctx: "all_reduce_sum",
+        message: format!("{e:#}"),
+    }
+}
+
+/// Per-rank handle binding a shared [`BarArCoordinator`] to one rank so it
+/// satisfies the [`DeviceAllReduce`] seam — the device-pointer analog of the
+/// byte-buffer `AllReduce`. The seam the generic forward engine threads its
+/// AR through once it is backend-generic (A2.4 / C3).
+pub struct BarArRank {
+    pub coord: Arc<BarArCoordinator>,
+    pub rank: usize,
+}
+
+impl DeviceAllReduce for BarArRank {
+    type Device = HipDevice;
+
+    fn all_reduce_sum(
+        &self,
+        buf: DevicePtr,
+        n_elems: usize,
+        dtype: CollectiveDType,
+        device: &HipDevice,
+        stream: &HipStream,
+    ) -> CollectiveResult<()> {
+        match dtype {
+            CollectiveDType::F32 => {
+                bar_ar_sum_f32(&self.coord, self.rank, buf, n_elems, device, stream)
+            }
+            CollectiveDType::F16 => {
+                bar_ar_sum_f16(&self.coord, self.rank, buf, n_elems, device, stream)
+            }
+        }
+        .map_err(|e| ar_device_err(e, "hip-bar1"))
+    }
+}
+
+/// Host-bounce sibling of [`BarArRank`] for clusters without a fully-
+/// connected peer matrix. F32 only — the F16 payload needs the BAR1 path.
+pub struct HostArRank {
+    pub coord: Arc<ArCoordinator>,
+    pub rank: usize,
+}
+
+impl DeviceAllReduce for HostArRank {
+    type Device = HipDevice;
+
+    fn all_reduce_sum(
+        &self,
+        buf: DevicePtr,
+        n_elems: usize,
+        dtype: CollectiveDType,
+        device: &HipDevice,
+        stream: &HipStream,
+    ) -> CollectiveResult<()> {
+        match dtype {
+            CollectiveDType::F32 => ar_sum_f32(&self.coord, self.rank, buf, n_elems, device, stream)
+                .map_err(|e| ar_device_err(e, "host-bounce")),
+            CollectiveDType::F16 => Err(CollectiveError::Device {
+                backend: "host-bounce",
+                ctx: "all_reduce_sum",
+                message: "host-bounce AllReduce is F32-only; F16 requires the BAR1 path".to_string(),
+            }),
+        }
+    }
 }
 
 /// Per-edge handoff slot between two consecutive PP stages
