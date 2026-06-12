@@ -20,7 +20,7 @@ use axum::Router;
 use flambeau_backend_hip::HipCluster;
 use flambeau_quant::{ChatTemplate, GgufFile};
 use tokio::sync::Mutex;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::prefix_cache::{PrefixCache, TopologyTag};
 use crate::routes::{
@@ -136,14 +136,63 @@ pub fn topology_tag_from_mesh(mesh: MeshMode, device_count: usize) -> TopologyTa
     }
 }
 
+/// Total host RAM in bytes, parsed from `/proc/meminfo` `MemTotal`.
+/// `None` when the file is absent or unparseable (non-Linux, sandbox),
+/// in which case the snapshot-cache budget is left unclamped.
+fn host_mem_total_bytes() -> Option<usize> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let kb: usize = meminfo
+        .lines()
+        .find_map(|l| l.strip_prefix("MemTotal:"))?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()?;
+    Some(kb * 1024)
+}
+
 /// Build the prefix cache. Always constructed; methods short-circuit
 /// when `cfg.prefix_cache == false`. Boot-time logging here so every
 /// path emits one consistent line.
+///
+/// The requested host budget is clamped to real headroom: the live
+/// snapshot cache plus the resident model weights must not oversubscribe
+/// RAM, or large per-capture snapshots stall on direct reclaim (which
+/// surfaced as a 10 s pipeline-handoff timeout). PP drops its mmap after
+/// upload (loader `advise_drop`); TP/hybrid keep it mapped, so they count
+/// the weights as resident.
 pub fn build_prefix_cache(cfg: &ServeConfig, mesh_kind: &'static str) -> Arc<PrefixCache> {
-    let prefix_cache = Arc::new(PrefixCache::new(
-        PrefixCache::gb_to_bytes(cfg.prefix_cache_max_gb),
-        cfg.prefix_cache,
-    ));
+    let requested_bytes = PrefixCache::gb_to_bytes(cfg.prefix_cache_max_gb);
+    let mut budget_bytes = requested_bytes;
+    if cfg.prefix_cache {
+        if let Some(mem_total) = host_mem_total_bytes() {
+            let resident_weight_bytes = if mesh_kind == "pp" {
+                0
+            } else {
+                std::fs::metadata(&cfg.gguf_path)
+                    .map(|m| m.len() as usize)
+                    .unwrap_or(0)
+            };
+            budget_bytes = crate::prefix_cache::clamp_host_cache_budget(
+                requested_bytes,
+                mem_total,
+                resident_weight_bytes,
+            );
+            if budget_bytes < requested_bytes {
+                warn!(
+                    requested_bytes,
+                    effective_bytes = budget_bytes,
+                    mem_total_bytes = mem_total,
+                    resident_weight_bytes,
+                    mesh = mesh_kind,
+                    "prefix cache budget clamped to host headroom \
+                     (requested cap would oversubscribe RAM and stall \
+                     under memory pressure)"
+                );
+            }
+        }
+    }
+    let prefix_cache = Arc::new(PrefixCache::new(budget_bytes, cfg.prefix_cache));
     if prefix_cache.enabled() {
         info!(
             chunk_tokens = cfg.prefill_chunk_tokens.max(1),

@@ -260,6 +260,39 @@ struct PrefixCacheInner {
     used_bytes: usize,
 }
 
+/// Lowest host budget we ever clamp the snapshot cache to. The
+/// gemma-31B-Q8_0 (32.6 GB resident) live A/B on a 31 GB host crashed at
+/// a 12 GB cap with a stalled pipeline handoff but ran clean at 2 GB, so
+/// even when the model alone nearly fills RAM the cache stays this large
+/// and useful. Never clamp below it; a smaller *requested* cap is still
+/// honored verbatim.
+const HOST_CACHE_FLOOR_BYTES: usize = 2 * 1024 * 1024 * 1024;
+
+/// Host RAM held back on top of the resident weights for the OS, request
+/// scratch, and the decode working set. Keeps the large per-capture
+/// snapshot allocations off the direct-reclaim cliff that surfaced as the
+/// 10 s `HybStage::peer_recv` timeout on the over-subscribed box.
+const HOST_CACHE_RESERVE_BYTES: usize = 2 * 1024 * 1024 * 1024;
+
+/// Clamp a requested host-snapshot-cache budget so the live cache plus the
+/// resident model weights don't oversubscribe host RAM.
+///
+/// Returns the effective budget: never above `requested_bytes`, and never
+/// below [`HOST_CACHE_FLOOR_BYTES`] unless the request itself is lower.
+/// `resident_weight_bytes` is the GGUF size for TP/hybrid (the mmap stays
+/// mapped after upload) and 0 for PP (the loader drops it post-upload).
+pub(crate) fn clamp_host_cache_budget(
+    requested_bytes: usize,
+    mem_total_bytes: usize,
+    resident_weight_bytes: usize,
+) -> usize {
+    let headroom = mem_total_bytes
+        .saturating_sub(resident_weight_bytes)
+        .saturating_sub(HOST_CACHE_RESERVE_BYTES);
+    let ceiling = headroom.max(HOST_CACHE_FLOOR_BYTES);
+    requested_bytes.min(ceiling)
+}
+
 impl PrefixCache {
     /// Construct an empty cache with the given VRAM budget and enabled flag.
     pub fn new(vram_budget_bytes: usize, enabled: bool) -> PrefixCache {
@@ -528,6 +561,40 @@ mod tests {
             pp_size: 1,
             tp_size: 2,
         }
+    }
+
+    const GIB: usize = 1024 * 1024 * 1024;
+
+    #[test]
+    fn clamp_honors_request_when_ram_is_ample() {
+        // 128 GB host, 32 GB resident weights, 12 GB request: full headroom.
+        let eff = clamp_host_cache_budget(12 * GIB, 128 * GIB, 32 * GIB);
+        assert_eq!(eff, 12 * GIB);
+    }
+
+    #[test]
+    fn clamp_drops_to_floor_when_model_nearly_fills_ram() {
+        // gemma-31B-Q8_0 (32.6 GB resident) on a 31 GB host: the 12 GB cap
+        // that crashed live must clamp down to the 2 GB floor that ran clean.
+        let mem = 31 * GIB;
+        let weights = 32 * GIB + 600 * 1024 * 1024;
+        let eff = clamp_host_cache_budget(12 * GIB, mem, weights);
+        assert_eq!(eff, HOST_CACHE_FLOOR_BYTES);
+    }
+
+    #[test]
+    fn clamp_never_raises_a_smaller_request() {
+        // An explicit small cap on the over-subscribed box stays as asked.
+        let eff = clamp_host_cache_budget(GIB, 31 * GIB, 32 * GIB);
+        assert_eq!(eff, GIB);
+    }
+
+    #[test]
+    fn clamp_leaves_headroom_above_the_floor_intact() {
+        // 64 GB host, 28 GB weights → ~34 GB headroom minus reserve; a 4 GB
+        // request fits comfortably and is honored.
+        let eff = clamp_host_cache_budget(4 * GIB, 64 * GIB, 28 * GIB);
+        assert_eq!(eff, 4 * GIB);
     }
 
     #[test]
