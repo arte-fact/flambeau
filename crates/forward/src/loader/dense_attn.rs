@@ -5,8 +5,7 @@
 //! proj is row-sharded along its input cols.
 
 use anyhow::{bail, Result};
-use flambeau_backend_hip::HipDevice;
-use flambeau_core::DevicePtr;
+use flambeau_core::{Device, DevicePtr};
 use flambeau_quant::GgufFile;
 
 use crate::ctx::AttnWeights;
@@ -57,7 +56,7 @@ pub struct DenseAttnLayerSpec<'a> {
 
 pub fn load_dense_attn_layer(
     file: &GgufFile,
-    device: &HipDevice,
+    device: &impl Device,
     spec: &DenseAttnLayerSpec,
     shard: ShardMode,
     allocs: &mut Vec<(DevicePtr, usize)>,

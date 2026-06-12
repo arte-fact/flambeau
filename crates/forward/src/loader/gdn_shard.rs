@@ -11,7 +11,6 @@
 //! `kq_replicated = false` splits all three.
 
 use anyhow::{bail, Context, Result};
-use flambeau_backend_hip::HipDevice;
 use flambeau_core::{CopyDirection, Device, DevicePtr};
 use flambeau_model_ops::{Tensor, F32};
 use flambeau_quant::{GgmlDType, GgufFile};
@@ -100,7 +99,7 @@ pub(super) fn pack_gdn_qkv_slab(
 /// F16 / BF16 / F32 fall back to dequant → Q8_0 on host.
 pub fn upload_gdn_fused_qkv_quant(
     file: &GgufFile,
-    device: &HipDevice,
+    device: &impl Device,
     name: &str,
     heads: GdnHeadDims,
     hidden: usize,
@@ -180,7 +179,7 @@ pub fn upload_gdn_fused_qkv_quant(
 /// (`ssm_conv1d`), sharded per `kq_replicated`.
 pub fn upload_gdn_fused_qkv_f32(
     file: &GgufFile,
-    device: &HipDevice,
+    device: &impl Device,
     name: &str,
     heads: GdnHeadDims,
     conv_kernel: usize,
@@ -216,7 +215,7 @@ pub fn upload_gdn_fused_qkv_f32(
 /// elements starting at `rank * (full_len / n_ranks)`.
 pub fn upload_f32_array_sharded(
     file: &GgufFile,
-    device: &HipDevice,
+    device: &impl Device,
     name: &str,
     full_len: usize,
     rank: usize,

@@ -3,7 +3,6 @@
 //! modules.
 
 use anyhow::{bail, Context, Result};
-use flambeau_backend_hip::HipDevice;
 use flambeau_core::op::QDtype;
 use flambeau_core::{CopyDirection, Device, DevicePtr};
 use flambeau_model_ops::{Tensor, F16, F32};
@@ -13,7 +12,7 @@ use half::f16;
 use crate::ctx::QuantWeight;
 
 pub fn upload_bytes(
-    device: &HipDevice,
+    device: &impl Device,
     bytes: &[u8],
     allocs: &mut Vec<(DevicePtr, usize)>,
 ) -> Result<DevicePtr> {
@@ -38,7 +37,7 @@ pub fn upload_bytes(
 /// gemma4's `v_ones` per-head V-norm weight. Caller adds the
 /// allocation to `allocs` for lifetime tracking via this function.
 pub fn upload_f16_ones(
-    device: &HipDevice,
+    device: &impl Device,
     n: usize,
     allocs: &mut Vec<(DevicePtr, usize)>,
 ) -> Result<Tensor<F16>> {
@@ -61,7 +60,7 @@ pub fn upload_f16_ones(
 }
 
 pub fn upload_f16_from_f32(
-    device: &HipDevice,
+    device: &impl Device,
     f32_vec: &[f32],
     allocs: &mut Vec<(DevicePtr, usize)>,
 ) -> Result<Tensor<F16>> {
@@ -133,7 +132,7 @@ pub fn wrap_quant(ptr: DevicePtr, n_elems: usize, dtype: GgmlDType) -> Result<Qu
 
 pub fn upload_raw(
     file: &GgufFile,
-    device: &HipDevice,
+    device: &impl Device,
     name: &str,
     allocs: &mut Vec<(DevicePtr, usize)>,
 ) -> Result<DevicePtr> {
@@ -147,7 +146,7 @@ pub fn upload_raw(
 /// weights (F32 in GGUF) and quantised embedding tables.
 pub fn upload_dequant_to_f16(
     file: &GgufFile,
-    device: &HipDevice,
+    device: &impl Device,
     name: &str,
     expected_elems: usize,
     allocs: &mut Vec<(DevicePtr, usize)>,
@@ -170,7 +169,7 @@ pub fn upload_dequant_to_f16(
 /// `crates/models/gemma4/src/weights_hip.rs` upload path.
 pub fn upload_gemma4_pre_router_weight_f16(
     file: &GgufFile,
-    device: &HipDevice,
+    device: &impl Device,
     name: &str,
     hidden: usize,
     allocs: &mut Vec<(DevicePtr, usize)>,
@@ -218,7 +217,7 @@ pub fn upload_gemma4_pre_router_weight_f16(
 /// `ssm_dt_bias`, `ssm_a`, `ssm_conv1d`).
 pub fn upload_f32_tensor(
     file: &GgufFile,
-    device: &HipDevice,
+    device: &impl Device,
     name: &str,
     expected_elems: usize,
     allocs: &mut Vec<(DevicePtr, usize)>,

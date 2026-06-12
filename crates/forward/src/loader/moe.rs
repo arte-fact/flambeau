@@ -5,9 +5,8 @@
 //! one buffer and return `Vec<QuantWeight>` views into it.
 
 use anyhow::{bail, Context, Result};
-use flambeau_backend_hip::HipDevice;
 use flambeau_core::op::QDtype;
-use flambeau_core::DevicePtr;
+use flambeau_core::{Device, DevicePtr};
 use flambeau_quant::GgufFile;
 
 use crate::ctx::QuantWeight;
@@ -36,7 +35,7 @@ pub struct MoeStackedShape {
 /// dequant→Q8_0 fallback the same way `upload_quant_weight` does.
 pub fn upload_moe_experts_stacked(
     file: &GgufFile,
-    device: &HipDevice,
+    device: &impl Device,
     name: &str,
     shape: MoeStackedShape,
     allocs: &mut Vec<(DevicePtr, usize)>,
@@ -91,7 +90,7 @@ pub fn upload_moe_experts_stacked(
 /// `QuantWeight` views with `local_dim_a * dim_b` elements each.
 pub fn upload_moe_experts_stacked_col_sharded(
     file: &GgufFile,
-    device: &HipDevice,
+    device: &impl Device,
     name: &str,
     shape: MoeStackedShape,
     shard: ShardMode,
@@ -165,7 +164,7 @@ pub fn upload_moe_experts_stacked_col_sharded(
 /// shape so we bail rather than add a dequant fallback.
 pub fn upload_moe_experts_fused_gate_up_stacked(
     file: &GgufFile,
-    device: &HipDevice,
+    device: &impl Device,
     name: &str,
     shape: MoeStackedShape,
     shard: ShardMode,
@@ -246,7 +245,7 @@ pub fn upload_moe_experts_fused_gate_up_stacked(
 /// `QuantWeight` views with `dim_a * local_dim_b` elements each.
 pub fn upload_moe_experts_stacked_row_sharded(
     file: &GgufFile,
-    device: &HipDevice,
+    device: &impl Device,
     name: &str,
     shape: MoeStackedShape,
     shard: ShardMode,

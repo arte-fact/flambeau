@@ -1,8 +1,7 @@
 //! GDN (gated delta-net) layer loader.
 
 use anyhow::{bail, Result};
-use flambeau_backend_hip::HipDevice;
-use flambeau_core::DevicePtr;
+use flambeau_core::{Device, DevicePtr};
 use flambeau_quant::GgufFile;
 
 use crate::ctx::{GdnDims, GdnWeights};
@@ -113,7 +112,7 @@ pub struct GdnLayerSpec<'a> {
 /// `ssm_conv1d` is interpreted by this loader.
 pub fn load_gdn_layer(
     file: &GgufFile,
-    device: &HipDevice,
+    device: &impl Device,
     spec: &GdnLayerSpec,
     shard: ShardMode,
     allocs: &mut Vec<(DevicePtr, usize)>,
