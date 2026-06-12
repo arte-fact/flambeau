@@ -2,15 +2,14 @@
 //! Fields are `pub` so composites read/write without accessor noise;
 //! external crates see only the `ForwardCtx` trait surface.
 
-use flambeau_backend_hip::{HipDevice, HipStream};
-use flambeau_ops::{HipOps, OpsRegistry};
+use flambeau_backend::{Backend, HipBackend};
 
 use super::ScratchPool;
 
-pub struct CoreState<'a> {
-    pub device: &'a HipDevice,
-    pub stream: &'a HipStream,
-    pub reg: &'a OpsRegistry,
+pub struct CoreState<'a, B: Backend = HipBackend> {
+    pub device: &'a B::Device,
+    pub stream: &'a B::Stream,
+    pub reg: &'a B::Registry,
     pub pool: &'a mut ScratchPool,
     pub logits_host: Vec<f32>,
     /// First global layer index this rank owns. Composites that index
@@ -19,11 +18,11 @@ pub struct CoreState<'a> {
     pub layer_idx_offset: usize,
 }
 
-impl<'a> CoreState<'a> {
+impl<'a, B: Backend> CoreState<'a, B> {
     pub fn new(
-        device: &'a HipDevice,
-        stream: &'a HipStream,
-        reg: &'a OpsRegistry,
+        device: &'a B::Device,
+        stream: &'a B::Stream,
+        reg: &'a B::Registry,
         pool: &'a mut ScratchPool,
     ) -> Self {
         Self {
@@ -36,8 +35,8 @@ impl<'a> CoreState<'a> {
         }
     }
 
-    pub fn ops(&self) -> HipOps<'a> {
-        HipOps::new(self.reg, self.stream)
+    pub fn ops(&self) -> B::Ops<'a> {
+        B::ops(self.reg, self.stream)
     }
 
     pub fn hidden(&self) -> usize {

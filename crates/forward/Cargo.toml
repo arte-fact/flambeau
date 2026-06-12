@@ -8,7 +8,7 @@ description = "Topology executor for model forward passes. A model writes ONE fo
 
 [features]
 default = []
-hip = ["dep:flambeau-backend-hip", "flambeau-model-ops/hip", "flambeau-ops/hip"]
+hip = ["dep:flambeau-backend-hip", "dep:flambeau-backend", "flambeau-backend/hip", "flambeau-model-ops/hip", "flambeau-ops/hip"]
 
 [dependencies]
 flambeau-core = { path = "../core" }
@@ -17,6 +17,7 @@ flambeau-model-ops = { path = "../model-ops" }
 flambeau-ops = { path = "../ops" }
 flambeau-runtime = { path = "../runtime" }
 flambeau-backend-hip = { path = "../backend-hip", optional = true }
+flambeau-backend = { path = "../backend", optional = true }
 anyhow.workspace = true
 bytemuck.workspace = true
 half.workspace = true
