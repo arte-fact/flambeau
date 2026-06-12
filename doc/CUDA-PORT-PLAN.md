@@ -325,3 +325,43 @@ trait. This is a multi-session architectural effort; sliced as:
 
 After C1–C3 the engine names no `Hip*` AR type and A2.4 (CoreState/ctx/hooks
 genericization) proceeds; then A2.2/A2.3 (ScratchPool, composites) finish A2.
+
+---
+
+## A2.2/A2.4 scope finding — the engine genericization is one connected cascade (2026-06-12)
+
+C1–C3 landed the AR seam (`DeviceAllReduce`/`FusedAllReduce`) and routed the
+forward engine's fused AR through it (live pp2tp2 byte-identical gate green,
+`76b5e55`). The remaining A2 (ScratchPool → CoreState → composites →
+ForwardCtx → hooks genericization) is **not** a series of isolated mechanical
+edits like A2.1 (loaders).
+
+Tried A2.2 in isolation — `device: &HipDevice` → `&impl Device` on the 7
+`ScratchPool` methods (scratch.rs). It builds the 7 sites fine but **breaks 4
+model-ops callees**: `delta_net.rs:{430,485,544}` + `moe_experts.rs:352`
+(`alloc_prefill_scratch`) — ScratchPool passes its device into those model-ops
+scratch allocators, which take a concrete `&HipDevice`. So genericizing
+ScratchPool requires genericizing the model-ops scratch-alloc fns first, and
+those likely reach further (HipOps construction, etc.).
+
+**Consequence — order the engine genericization bottom-up, as one connected
+refactor that compiles at each step:**
+1. model-ops scratch-alloc fns (`delta_net` GDN scratch, `moe_experts`
+   prefill scratch) over `&impl Device`.
+2. `ScratchPool` methods (scratch.rs, 7 sites) over `&impl Device`.
+3. `CoreState<'a>` → carry the backend seam (`device: &B::Device`,
+   `stream: &B::Stream`, `reg: &B::Registry`) — the `Backend` bundle, not just
+   `Device`, since `reg: &OpsRegistry` and ops construction (`HipOps::new`)
+   are backend-typed.
+4. The `ForwardCtx` impls (SingleDevice/Tp/Pp/Hybrid) + `TopologyHooks` /
+   `StageHooks` / `ArCallback` signatures over `<B: Backend>` — `TpHooks`/
+   `HybridHooks` swap `Arc<BarArCoordinator>` for a generic `FusedAllReduce`
+   handle (the C1–C3 seam makes this a type swap, not a logic change).
+5. The composites (`standard_attn`, `dense_ffn`, `moe_ffn`, `gdn`, …) inherit
+   `CoreState<B>` — mostly free once 1–4 land.
+
+Type-only (no behavior change), but a **wide, single-session-too-big** sweep:
+the crate does not compile between steps 1 and 4. Do it in a dedicated session,
+bottom-up, with the forward parity/synth suite + a pp2tp2 byte-identical gate
+as the net. A2.1 (loaders) + C1–C3 (AR seam) are the isolated pieces already
+banked; the rest is this one connected cascade.
