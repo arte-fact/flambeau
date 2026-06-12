@@ -1,7 +1,6 @@
 //! Pre-allocated device scratch + per-layer KV cache.
 
 use anyhow::{Context, Result};
-use flambeau_backend_hip::HipDevice;
 use flambeau_core::{CopyDirection, Device, DevicePtr};
 
 use crate::ctx::GdnDims;
@@ -521,7 +520,7 @@ impl PagedKvCache {
     /// assigned". Caller is responsible for tracking the returned
     /// allocations and freeing them on dispose.
     pub fn alloc(
-        device: &HipDevice,
+        device: &impl Device,
         cfg: PagedKvCacheConfig,
         kv_width: usize,
         max_slots: usize,
@@ -973,7 +972,7 @@ pub struct GdnLayerState {
 }
 
 impl ScratchPool {
-    pub fn new(device: &HipDevice, config: ScratchConfig) -> Result<Self> {
+    pub fn new(device: &impl Device, config: ScratchConfig) -> Result<Self> {
         let mut allocs: Vec<(DevicePtr, usize)> = Vec::new();
         let mut alloc_bytes = |bytes: usize| -> Result<DevicePtr> {
             let p = device.alloc(bytes).context("alloc")?;
@@ -1460,7 +1459,7 @@ impl ScratchPool {
     }
 
     /// Idempotent.
-    pub fn dispose(&mut self, device: &HipDevice) -> Result<()> {
+    pub fn dispose(&mut self, device: &impl Device) -> Result<()> {
         for (ptr, bytes) in self.allocs.drain(..) {
             // SAFETY: `ptr` came from `device.alloc(bytes)`; caller
             // contract: no further forward calls past dispose.
@@ -1484,7 +1483,7 @@ impl ScratchPool {
     /// next request starts fresh. No-op when the arch is non-GDN.
     /// KV-cache positions are caller-supplied (no counter on the
     /// pool), so this is the only stateful slot that needs reset.
-    pub fn reset_gdn_state(&self, device: &HipDevice) -> Result<()> {
+    pub fn reset_gdn_state(&self, device: &impl Device) -> Result<()> {
         let Some(g) = self.config.gdn else {
             return Ok(());
         };
@@ -1527,7 +1526,7 @@ impl ScratchPool {
     /// Used by the server's shared-Session pool to reset a single
     /// conversation slot without touching others. No-op for non-GDN
     /// archs or when the slot index is out of range.
-    pub fn reset_gdn_state_slot(&self, slot_id: usize, device: &HipDevice) -> Result<()> {
+    pub fn reset_gdn_state_slot(&self, slot_id: usize, device: &impl Device) -> Result<()> {
         let Some(g) = self.config.gdn else {
             return Ok(());
         };
@@ -1607,7 +1606,7 @@ impl ScratchPool {
         &self,
         slot_id: usize,
         n_tokens: usize,
-        device: &HipDevice,
+        device: &impl Device,
     ) -> Result<Vec<u8>> {
         const MAGIC: u32 = 0x4B56_5331; // "KVS1"
         let n_slots = self.config.max_slots.max(1);
@@ -1671,7 +1670,7 @@ impl ScratchPool {
         slot_id: usize,
         n_tokens: usize,
         bytes: &[u8],
-        device: &HipDevice,
+        device: &impl Device,
     ) -> Result<()> {
         const MAGIC: u32 = 0x4B56_5331;
         let n_slots = self.config.max_slots.max(1);
