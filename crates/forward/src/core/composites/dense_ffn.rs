@@ -7,8 +7,8 @@ use flambeau_model_ops::{Tensor, F16, F32, Q8_1};
 use crate::core::{CoreState, TopologyHooks};
 use crate::ctx::{Activation, FfnWeights};
 
-pub fn dense_ffn_local<H: TopologyHooks>(
-    state: &mut CoreState<'_>,
+pub fn dense_ffn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
+    state: &mut CoreState<'_, B>,
     hooks: &mut H,
     input: &Tensor<F16>,
     weights: &FfnWeights,

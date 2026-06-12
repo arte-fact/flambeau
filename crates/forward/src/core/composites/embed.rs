@@ -7,8 +7,8 @@ use crate::ctx::EmbeddingWeights;
 
 use super::slot_f16;
 
-pub fn embed_local<H: TopologyHooks>(
-    state: &mut CoreState<'_>,
+pub fn embed_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
+    state: &mut CoreState<'_, B>,
     _hooks: &mut H,
     weights: &EmbeddingWeights,
     tokens: &[u32],

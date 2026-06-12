@@ -21,8 +21,8 @@ use flambeau_model_ops::{Tensor, F16, F32, I32, Q8_1};
 use crate::core::{CoreState, MixedBatch, TopologyHooks};
 use crate::ctx::AttnWeights;
 
-pub fn standard_attn_mixed_local<H: TopologyHooks>(
-    state: &mut CoreState<'_>,
+pub fn standard_attn_mixed_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
+    state: &mut CoreState<'_, B>,
     hooks: &mut H,
     input: &Tensor<F16>,
     weights: &AttnWeights,

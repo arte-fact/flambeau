@@ -18,8 +18,8 @@ use crate::core::{CoreState, TopologyHooks};
 use crate::ctx::{Activation, MoeWeights};
 use flambeau_model_ops::moe_experts::Activation as BlockActivation;
 
-pub fn moe_ffn_local<H: TopologyHooks>(
-    state: &mut CoreState<'_>,
+pub fn moe_ffn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
+    state: &mut CoreState<'_, B>,
     hooks: &mut H,
     input: &Tensor<F16>,
     weights: &MoeWeights,
@@ -328,8 +328,8 @@ pub fn moe_ffn_local<H: TopologyHooks>(
 /// inside still fires at n_tokens=1 per loop iteration, but it's a
 /// small per-layer add — the dominant cost is the routed path which
 /// is now batched.
-fn moe_ffn_loop<H: TopologyHooks>(
-    state: &mut CoreState<'_>,
+fn moe_ffn_loop<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
+    state: &mut CoreState<'_, B>,
     hooks: &mut H,
     input: &Tensor<F16>,
     weights: &MoeWeights,
@@ -600,8 +600,8 @@ fn build_shared_expert_block(
 /// cur_combined  = cur_mlp + cur_moe
 /// delta_f16     = cast_f32_to_f16(rmsnorm_f32(cur_combined, post_ffn_norm))
 /// ```
-fn gemma4_moe_cascade_local<H: TopologyHooks>(
-    state: &mut CoreState<'_>,
+fn gemma4_moe_cascade_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
+    state: &mut CoreState<'_, B>,
     hooks: &mut H,
     input: &Tensor<F16>,
     weights: &MoeWeights,
@@ -621,8 +621,8 @@ fn gemma4_moe_cascade_local<H: TopologyHooks>(
     }))
 }
 
-fn gemma4_moe_cascade_batched<H: TopologyHooks>(
-    state: &mut CoreState<'_>,
+fn gemma4_moe_cascade_batched<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
+    state: &mut CoreState<'_, B>,
     hooks: &mut H,
     input: &Tensor<F16>,
     weights: &MoeWeights,
@@ -860,8 +860,8 @@ fn gemma4_moe_cascade_batched<H: TopologyHooks>(
     Ok(())
 }
 
-fn gemma4_moe_cascade_one_token<H: TopologyHooks>(
-    state: &mut CoreState<'_>,
+fn gemma4_moe_cascade_one_token<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
+    state: &mut CoreState<'_, B>,
     hooks: &mut H,
     input_ptr: DevicePtr,
     weights: &MoeWeights,
