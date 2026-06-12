@@ -7,23 +7,10 @@ use anyhow::Result;
 use flambeau_backend_hip::{HipDevice, HipStream};
 use flambeau_core::DevicePtr;
 
-/// Buffer set for [`TopologyHooks::ar_residual_rmsnorm_f16`].
-#[derive(Copy, Clone, Debug)]
-pub struct ArResidualRmsNormHookBuffers {
-    pub residual_inout: DevicePtr,
-    pub partial_f16: DevicePtr,
-    pub rms_weight: DevicePtr,
-    pub out_norm: DevicePtr,
-}
-
-/// Buffer set for [`TopologyHooks::ar_postattn_residual_rmsnorm_f32_to_f16`].
-#[derive(Copy, Clone, Debug)]
-pub struct ArPostAttnRmsNormHookBuffers {
-    pub proj_local_f32: DevicePtr,
-    pub post_norm_w_f16: DevicePtr,
-    pub resid_in_f16: DevicePtr,
-    pub resid_out_f16: DevicePtr,
-}
+// The AR-epilogue buffer sets are the backend-neutral `FusedAllReduce` seam
+// types; the topology hooks below are the forward-engine view of the same
+// contract, re-exported so existing `crate::core::…` paths are unchanged.
+pub use flambeau_runtime::{ArPostAttnRmsNormHookBuffers, ArResidualRmsNormHookBuffers};
 
 pub trait TopologyHooks {
     /// In-place reduce-sum across ranks. Called after row-parallel

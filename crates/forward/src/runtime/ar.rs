@@ -15,7 +15,10 @@
 use anyhow::Result;
 use flambeau_backend_hip::{BarP2pAllReduce, HipDevice, HipEvent, HipStream};
 use flambeau_core::{CopyDirection, Device, DevicePtr};
-use flambeau_runtime::{CollectiveDType, CollectiveError, CollectiveResult, DeviceAllReduce};
+use flambeau_runtime::{
+    ArPostAttnRmsNormHookBuffers, ArResidualRmsNormHookBuffers, CollectiveDType, CollectiveError,
+    CollectiveResult, DeviceAllReduce, FusedAllReduce,
+};
 use std::sync::{Arc, Barrier, Mutex};
 
 /// Above this `n_elems`, the AR call rides the host-sync producer
@@ -713,6 +716,87 @@ impl DeviceAllReduce for HostArRank {
                 message: "host-bounce AllReduce is F32-only; F16 requires the BAR1 path".to_string(),
             }),
         }
+    }
+}
+
+impl FusedAllReduce for BarArRank {
+    fn supports_ar_sum_f16(&self) -> bool {
+        matches!(self.coord.ranks(), 2 | 4)
+    }
+
+    fn ar_sum_f16(
+        &self,
+        buf: DevicePtr,
+        n_elems: usize,
+        device: &HipDevice,
+        stream: &HipStream,
+    ) -> CollectiveResult<()> {
+        bar_ar_sum_f16(&self.coord, self.rank, buf, n_elems, device, stream)
+            .map_err(|e| ar_device_err(e, "hip-bar1"))
+    }
+
+    fn supports_ar_residual_f16(&self) -> bool {
+        self.coord.ranks() == 2
+    }
+
+    fn ar_residual_f16(
+        &self,
+        residual_inout: DevicePtr,
+        partial_f16: DevicePtr,
+        n_elems: usize,
+        device: &HipDevice,
+        stream: &HipStream,
+    ) -> CollectiveResult<()> {
+        bar_ar_residual_f16(
+            &self.coord,
+            self.rank,
+            residual_inout,
+            partial_f16,
+            n_elems,
+            device,
+            stream,
+        )
+        .map_err(|e| ar_device_err(e, "hip-bar1"))
+    }
+
+    fn supports_ar_residual_rmsnorm_f16(&self) -> bool {
+        self.coord.ranks() == 2
+    }
+
+    fn ar_residual_rmsnorm_f16(
+        &self,
+        bufs: ArResidualRmsNormHookBuffers,
+        n_elems: usize,
+        eps: f32,
+        device: &HipDevice,
+        stream: &HipStream,
+    ) -> CollectiveResult<()> {
+        bar_ar_residual_rmsnorm_f16(&self.coord, self.rank, bufs, n_elems, eps, device, stream)
+            .map_err(|e| ar_device_err(e, "hip-bar1"))
+    }
+
+    fn supports_ar_postattn_residual_rmsnorm_f32_to_f16(&self) -> bool {
+        matches!(self.coord.ranks(), 2 | 4)
+    }
+
+    fn ar_postattn_residual_rmsnorm_f32_to_f16(
+        &self,
+        bufs: ArPostAttnRmsNormHookBuffers,
+        n_rows: usize,
+        n: usize,
+        eps: f32,
+        device: &HipDevice,
+        stream: &HipStream,
+    ) -> CollectiveResult<()> {
+        bar_ar_postattn_residual_rmsnorm_f32_to_f16(
+            &self.coord,
+            self.rank,
+            bufs,
+            BarArPostAttnNormParams { n_rows, n, eps },
+            device,
+            stream,
+        )
+        .map_err(|e| ar_device_err(e, "hip-bar1"))
     }
 }
 
