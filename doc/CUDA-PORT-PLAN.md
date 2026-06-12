@@ -365,3 +365,25 @@ the crate does not compile between steps 1 and 4. Do it in a dedicated session,
 bottom-up, with the forward parity/synth suite + a pp2tp2 byte-identical gate
 as the net. A2.1 (loaders) + C1–C3 (AR seam) are the isolated pieces already
 banked; the rest is this one connected cascade.
+
+### Empirical depth of step 1 (the model-ops alloc layer) — 2026-06-12
+
+Attempted the bottom of the cascade (genericize `alloc_zeroed` /
+`alloc_zeroed_tracked` + the 4 scratch-alloc fns over `&impl Device`). It does
+NOT stop there: the scratch-alloc fns use the **entire `RawAllocTracker` API**
+(`alloc_i32`, `alloc_f32`, `alloc_zeroed_tracked`, `track`, …) plus the free
+helpers in `driver_utils.rs` — every one `&HipDevice`-typed — so widening the
+scratch fns surfaced **64 compile errors** across model-ops. Step 1 is
+therefore a genericization of the **whole `driver_utils` driver/alloc layer**
+(`RawAllocTracker` methods + `alloc_zeroed`/`upload_f16_ones`/`embed_token_host`
+/…), per the model-ops CLAUDE.md rule-9 form `<D: Device>(device: &D,
+stream: &D::Stream)` — careful per-fn (device+stream must be paired, not blanket
+sed), ~64 sites, before ScratchPool even starts.
+
+So the realistic cascade size, revised: **step 1 ≈ a full model-ops alloc-layer
+pass (~64 sites)**, then ScratchPool, then the `CoreState`/`Backend`-bundle top.
+Each step compiles only once its whole layer is converted — bottom-up, but each
+layer is itself a non-trivial mechanical sweep. This is a dedicated multi-hour
+session with full context budget, not an end-of-session continuation. Banked so
+far: A2.1 (loaders) + C1–C3 (AR seam, live-gated). The alloc-layer→engine
+cascade remains, now correctly sized.
