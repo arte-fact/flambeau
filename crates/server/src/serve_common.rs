@@ -152,13 +152,10 @@ fn host_mem_total_bytes() -> Option<usize> {
 }
 
 /// Build the prefix cache. Always constructed; methods short-circuit
-/// when `cfg.prefix_cache == false`. Boot-time logging here so every
-/// path emits one consistent line.
+/// when `cfg.prefix_cache == false`.
 ///
-/// The requested host budget is clamped to real headroom: the live
-/// snapshot cache plus the resident model weights must not oversubscribe
-/// RAM, or large per-capture snapshots stall on direct reclaim (which
-/// surfaced as a 10 s pipeline-handoff timeout). PP drops its mmap after
+/// The requested host budget is clamped to RAM headroom (live cache plus
+/// resident weights must not oversubscribe RAM). PP drops its mmap after
 /// upload (loader `advise_drop`); TP/hybrid keep it mapped, so they count
 /// the weights as resident.
 pub fn build_prefix_cache(cfg: &ServeConfig, mesh_kind: &'static str) -> Arc<PrefixCache> {
@@ -271,11 +268,9 @@ pub fn build_server_state(inputs: ServerStateInputs) -> SharedState {
         batched_pending: std::sync::Mutex::new(Vec::new()),
         batched_dispatcher: std::sync::Mutex::new(()),
         prefix_cache,
-        // Cache chunk size must equal the prefill LOOP granularity
-        // (`chunked_prefill_pp` iterates in `prefill_chunk_tokens` steps and
-        // captures at its boundaries) — NOT `prefill_ubatch`, which is a
-        // scratch-sizing knob that gets bumped to chunk+slots for
-        // mixed-batch and would misalign every intermediate boundary.
+        // Must match the prefill-loop step (`chunked_prefill_pp` captures at
+        // `prefill_chunk_tokens` boundaries), not `prefill_ubatch` — else
+        // intermediate boundaries misalign.
         prefix_cache_chunk_tokens: prefill_chunk_tokens,
         topology_tag,
         embedding_model,

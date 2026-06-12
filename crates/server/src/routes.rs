@@ -354,16 +354,12 @@ impl ServerState {
         })
     }
 
-    /// Insert an intermediate (full-chunk-boundary) cache entry during a
-    /// prefill's per-chunk loop. The slot's state at a boundary is exactly
-    /// the post-position state (each chunk runs the full layer stack, so
-    /// GDN state is committed between chunks). No logits are stored —
-    /// callers can't sample mid-prefill; a future request hitting this
-    /// entry restores at the boundary and prefills its own tail. This is
-    /// what makes a GROWN conversation hit: its prompt diverges from the
-    /// previous turn only near that turn's end, so the full-chunk chain
-    /// up to the boundary still matches while the previous full-prompt
-    /// entry (whose partial-tail key never reappears) cannot.
+    /// Insert a full-chunk-boundary cache entry during prefill's per-chunk
+    /// loop. State at a boundary is the committed post-position state (each
+    /// chunk runs the full layer stack). No logits — callers can't sample
+    /// mid-prefill; a hit restores at the boundary and prefills its own tail.
+    /// This is what lets a grown conversation hit (it diverges only near the
+    /// previous turn's end, past the last shared boundary).
     pub fn prefix_cache_insert_intermediate(
         &self,
         inflight: &mut dyn crate::Session,

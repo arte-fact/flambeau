@@ -1571,17 +1571,10 @@ impl ScratchPool {
         Ok(())
     }
 
-    /// Sum of every per-layer section copied by
-    /// [`snapshot_slot_bytes`](Self::snapshot_slot_bytes): K+V rows for the
-    /// resident-row count per contiguous KV layer, plus the fixed-size GDN
-    /// state + conv history per GDN layer.
-    ///
-    /// The resident-row count is `min(n_tokens, kv.depth)`. Full-context
-    /// (global) layers have `depth >= n_tokens` so this is `n_tokens`; ring
-    /// / sliding-window layers are window-sized (`depth = window +
-    /// prefill_ubatch`) and address positions modulo `depth`, so only the
-    /// `depth` physical rows hold state — capturing them whole reproduces
-    /// the exact ring (positions wrap back to the same physical rows).
+    /// Payload byte size of [`snapshot_slot_bytes`](Self::snapshot_slot_bytes).
+    /// Per contiguous KV layer `2 * min(n_tokens, depth) * bytes_per_row`
+    /// (ring/SWA layers address modulo `depth`, so only `depth` rows are
+    /// live); plus fixed-size GDN state + conv history per GDN layer.
     fn slot_snapshot_payload_bytes(&self, n_tokens: usize) -> Result<usize> {
         if !self.page_pools.is_empty() {
             anyhow::bail!("slot snapshot: paged KV is unsupported");
@@ -1604,16 +1597,12 @@ impl ScratchPool {
         Ok(total)
     }
 
-    /// Copy one slot's resident attention state to host: per contiguous KV
-    /// layer the K then V resident rows (`[0..min(n_tokens, depth))` — the
-    /// whole window slab for ring/SWA layers), then per GDN layer the
-    /// recurrent state then conv history (fixed size — the exact
-    /// post-position-`n_tokens` state). Layout-agnostic byte copy
-    /// (F16Contig and Q8Contig differ only in `bytes_per_row`). The
-    /// 16-byte header (magic, version, n_tokens) lets
-    /// [`restore_slot_bytes`](Self::restore_slot_bytes) reject mismatched
-    /// snapshots; section sizes are re-derived from the pool config, which
-    /// is identical by construction on the same model + topology.
+    /// DtoH one slot's resident state to a byte buffer: per KV layer the K
+    /// then V live rows, then per GDN layer state then conv history. Layout-
+    /// agnostic (F16/Q8 differ only in `bytes_per_row`). The 16-byte header
+    /// (magic, version, n_tokens) lets
+    /// [`restore_slot_bytes`](Self::restore_slot_bytes) reject a mismatched
+    /// snapshot; section sizes are re-derived from the pool config.
     pub fn snapshot_slot_bytes(
         &self,
         slot_id: usize,
@@ -1651,10 +1640,6 @@ impl ScratchPool {
                 continue;
             }
             let slot_base = slot_id * kv.depth * row_bytes;
-            // Resident physical rows: `min(n_tokens, depth)`. For ring/SWA
-            // layers (`depth < n_tokens`) this captures the whole window
-            // slab in physical order; restoring it verbatim reproduces the
-            // ring exactly (the slot's position counter drives the wrap).
             let len = n_tokens.min(kv.depth) * row_bytes;
             copy_d2h(off, kv.k.offset_bytes(slot_base), len).context("snapshot K rows")?;
             off += len;
@@ -1673,17 +1658,14 @@ impl ScratchPool {
                 off += hist;
             }
         }
-        debug_assert_eq!(off, buf.len());
+        assert_eq!(off, buf.len(), "snapshot coverage: every byte must be written");
         flambeau_core::Stream::synchronize(stream).context("sync slot snapshot")?;
         Ok(buf)
     }
 
-    /// Inverse of [`snapshot_slot_bytes`](Self::snapshot_slot_bytes):
-    /// write the snapshot's K/V rows `[0..n_tokens)` and GDN state back
-    /// into `slot_id`. Rows past `n_tokens` are left as-is — they are
-    /// never read before being re-appended. The caller must continue the
-    /// slot from position `n_tokens` (a half-restored position is silent
-    /// corruption; parity tests decode ≥ 8 steps to catch it).
+    /// Inverse of [`snapshot_slot_bytes`](Self::snapshot_slot_bytes): HtoD the
+    /// snapshot's KV rows + GDN state into `slot_id`. The caller must continue
+    /// from position `n_tokens` (recurrent state is only valid there).
     pub fn restore_slot_bytes(
         &self,
         slot_id: usize,
