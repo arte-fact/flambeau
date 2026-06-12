@@ -127,6 +127,24 @@ pub async fn chat_completions(
         })
     };
 
+    // B1 tool-choice forcing: when `tool_choice` requires a call, append the
+    // arch's tool-call opening to the prompt so the model continues from a
+    // guaranteed-valid call, fed to the parser ahead of the model output.
+    let tool_force_prefix: Option<String> = req
+        .tool_choice
+        .as_ref()
+        .filter(|_| merged_tools.is_some())
+        .and_then(|tc| tc.force_target())
+        .map(|name| {
+            crate::tool_call_parser::choose_format(
+                req.tool_call_format.as_deref(),
+                state.tool_call_format_default,
+            )
+            .map(|fmt| fmt.force_prefix(name))
+            .unwrap_or_default()
+        })
+        .filter(|s| !s.is_empty());
+
     let json_mode = matches!(
         req.response_format.as_ref(),
         Some(ResponseFormat::JsonObject) | Some(ResponseFormat::JsonSchema { .. }),
@@ -226,11 +244,14 @@ pub async fn chat_completions(
                 &messages,
                 merged_tools.as_deref(),
                 add_generation_prompt,
-                Some(params.enable_thinking),
+                Some(params.enable_thinking && tool_force_prefix.is_none()),
             )
             .map_err(ApiError::internal)?;
         if assistant_prefill_active {
             prompt = strip_trailing_assistant_terminator(&prompt);
+        }
+        if let Some(pfx) = &tool_force_prefix {
+            prompt.push_str(pfx);
         }
         if dev_flag("FLAMBEAU_DUMP_PROMPT") {
             eprintln!(
@@ -252,6 +273,7 @@ pub async fn chat_completions(
             parallel_tool_calls,
             relax_stop_mask,
             include_usage,
+            tool_force_prefix,
         )
         .into_response());
     }
@@ -264,11 +286,14 @@ pub async fn chat_completions(
             &messages,
             merged_tools.as_deref(),
             !assistant_prefill_active,
-            Some(params.enable_thinking),
+            Some(params.enable_thinking && tool_force_prefix.is_none()),
         )
         .map_err(ApiError::internal)?;
     if assistant_prefill_active {
         prompt = strip_trailing_assistant_terminator(&prompt);
+    }
+    if let Some(pfx) = &tool_force_prefix {
+        prompt.push_str(pfx);
     }
     if dev_flag("FLAMBEAU_DUMP_PROMPT") {
         eprintln!(
@@ -309,7 +334,11 @@ pub async fn chat_completions(
             false,
         )
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
-        let mut events = parser.push(&text);
+        let mut events = Vec::new();
+        if let Some(pfx) = &tool_force_prefix {
+            events.extend(parser.push(pfx));
+        }
+        events.extend(parser.push(&text));
         events.extend(parser.finish());
         split_events(ParserEvent::coalesce(events))
     };

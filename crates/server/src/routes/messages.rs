@@ -139,19 +139,47 @@ async fn messages_anthropic_inner(
             .collect::<Vec<_>>()
     });
 
-    let prompt = state
+    // B1 tool-choice forcing: when `tool_choice` requires a call, append the
+    // arch's tool-call opening to the prompt so the model continues from a
+    // guaranteed-valid call, and feed the same fragment to the parser ahead
+    // of the model output so the reconstructed call parses.
+    let tool_force_prefix: Option<String> = req
+        .tool_choice
+        .as_ref()
+        .filter(|_| merged_tools.is_some())
+        .and_then(|tc| tc.force_target())
+        .map(|name| {
+            crate::tool_call_parser::choose_format(None, state.tool_call_format_default)
+                .map(|fmt| fmt.force_prefix(name))
+                .unwrap_or_default()
+        })
+        .filter(|s| !s.is_empty());
+
+    // A forced call goes straight to the tool, so suppress the thinking
+    // prime — otherwise the prompt opens a `<think>` block immediately
+    // followed by the forced tool-call fragment.
+    let render_thinking = enable_thinking && tool_force_prefix.is_none();
+    let mut prompt = state
         .chat_template
-        .render_with_tools(&messages, merged_tools.as_deref(), true, Some(enable_thinking))
+        .render_with_tools(&messages, merged_tools.as_deref(), true, Some(render_thinking))
         .map_err(ApiError::internal)?;
+    if let Some(pfx) = &tool_force_prefix {
+        prompt.push_str(pfx);
+    }
     let has_tools = merged_tools.is_some();
     let relax_stop_mask = has_tools;
 
     if req.stream {
         let tcf = state.tool_call_format_default;
-        return Ok(
-            stream_messages_anthropic_sse(state, prompt, params, relax_stop_mask, tcf)
-                .into_response(),
-        );
+        return Ok(stream_messages_anthropic_sse(
+            state,
+            prompt,
+            params,
+            relax_stop_mask,
+            tcf,
+            tool_force_prefix,
+        )
+        .into_response());
     }
 
     let (text, prompt_tokens, completion_tokens, finish, _, reasoning, matched_stop) =
@@ -164,7 +192,11 @@ async fn messages_anthropic_inner(
         let mut parser =
             dispatcher_with_prompt(None, state.tool_call_format_default, &prompt, false)
                 .map_err(|e| ApiError::bad_request(e.to_string()))?;
-        let mut events = parser.push(&text);
+        let mut events = Vec::new();
+        if let Some(pfx) = &tool_force_prefix {
+            events.extend(parser.push(pfx));
+        }
+        events.extend(parser.push(&text));
         events.extend(parser.finish());
         split_events(ParserEvent::coalesce(events))
     } else {
@@ -355,6 +387,7 @@ fn stream_messages_anthropic_sse(
     params: SamplingParams,
     relax_stop_mask: bool,
     tool_call_format_default: crate::tool_call_parser::ToolCallFormat,
+    tool_force_prefix: Option<String>,
 ) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
     let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(32);
     let id = request_id("msg");
@@ -608,6 +641,13 @@ fn stream_messages_anthropic_sse(
                 &mut has_tool_calls,
             )
         };
+
+        // B1: feed the forced tool-call opening to the parser first so the
+        // model's continuation reconstructs a complete call (and any
+        // already-complete events, e.g. a named ToolCallOpen, stream out).
+        if let Some(pfx) = &tool_force_prefix {
+            emit_delta(pfx);
+        }
 
         let res = run_completion_blocking_streaming(
             state_clone,

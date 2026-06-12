@@ -123,8 +123,8 @@ pub fn attn_decode_f16_splitk(
 
 /// Same threshold as `flambeau_ops::hip::attention::splitk_chunk_size`
 /// — re-exported for callers that need to size scratch.
-pub fn splitk_chunk_size(n_tokens_kv: usize) -> usize {
-    flambeau_ops::hip::attention::splitk_chunk_size(n_tokens_kv)
+pub fn splitk_chunk_size(n_tokens_kv: usize, max_chunks: usize) -> usize {
+    flambeau_ops::hip::attention::splitk_chunk_size(n_tokens_kv, max_chunks)
 }
 
 /// S5a microbench — times `attn_decode_f16_splitk` at gemma4-31B-shaped
@@ -212,7 +212,7 @@ mod attn_microbench {
             }
             Stream::synchronize(stream).unwrap();
 
-            let chunk_size = splitk_chunk_size(N_TOKENS_KV);
+            let chunk_size = splitk_chunk_size(N_TOKENS_KV, 32);
             let n_chunks = N_TOKENS_KV.div_ceil(chunk_size);
             let pm_n = N_HEADS_Q * n_chunks;
             let po_n = pm_n * head_dim;

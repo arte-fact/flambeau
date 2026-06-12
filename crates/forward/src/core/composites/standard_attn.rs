@@ -712,7 +712,10 @@ pub fn standard_attn_local<H: TopologyHooks>(
                     0
                 };
                 let chunk_len = eff_n_tokens_kv - chunk_base;
-                let chunk_size = flambeau_model_ops::splitk_chunk_size(chunk_len);
+                let chunk_size = flambeau_model_ops::splitk_chunk_size(
+                chunk_len,
+                crate::core::scratch::MAX_SPLITK_CHUNKS,
+            );
                 let n_chunks = chunk_len.div_ceil(chunk_size);
                 // Ring decode also splits-K: the chunk kernel clamps each chunk
                 // to the SWA window (chunks before it collapse to empty) and
@@ -813,7 +816,10 @@ pub fn standard_attn_local<H: TopologyHooks>(
                 0
             };
             let chunk_len = eff_n_tokens_kv - chunk_base;
-            let chunk_size = flambeau_model_ops::splitk_chunk_size(chunk_len);
+            let chunk_size = flambeau_model_ops::splitk_chunk_size(
+                chunk_len,
+                crate::core::scratch::MAX_SPLITK_CHUNKS,
+            );
             let n_chunks = chunk_len.div_ceil(chunk_size);
             // Ring decode also splits-K (see the Q8 branch); single-block
             // fallback only above the MAX_SPLITK_CHUNKS cap (ctx > 16384).

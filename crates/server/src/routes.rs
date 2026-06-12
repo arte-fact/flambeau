@@ -278,75 +278,191 @@ impl crate::model_handle::SessionContext for ServerState {
 }
 
 impl ServerState {
-    /// **#229 P2.10c** — look up the prefix cache for the given
-    /// prompt. On a hit, restore the cached KV+GDN state into
-    /// `inflight` and report whether it covers the FULL prompt (with
-    /// cached logits, prefill skipped) or just a chunk-aligned PREFIX
-    /// (caller must run a partial tail prefill).
-    /// Returns `Ok(Miss)` (caller does fresh full prefill) when:
-    /// - `FLAMBEAU_PREFIX_CACHE` is unset (default OFF).
-    /// - Prompt is shorter than one chunk (< chunk_tokens).
-    /// - Topology is `Hybrid` (per-stage per-rank shape unsupported).
-    /// - No matching chain in the cache.
-    /// - Matched entry lacks a KV snapshot.
-    /// - Restore fails (logged + downgraded to miss).
+    /// Look up the prefix cache for the given prompt. On a hit, restore
+    /// the cached KV+GDN state into `inflight` and report whether it
+    /// covers the FULL prompt (with cached logits, prefill skipped) or a
+    /// chunk-aligned PREFIX (caller runs a tail prefill from
+    /// `position = n_matched`). Returns `Ok(Miss)` (caller does a fresh
+    /// full prefill) when the cache is disabled, nothing matches, the
+    /// matched entry lacks a snapshot, or the restore fails (logged +
+    /// downgraded after re-resetting the slot — a partially-restored
+    /// slot must never reach prefill).
     pub fn prefix_cache_try_restore(
         &self,
-        _inflight: &mut dyn crate::Session,
-        _prompt_ids: &[u32],
+        inflight: &mut dyn crate::Session,
+        prompt_ids: &[u32],
     ) -> anyhow::Result<PrefixCacheRestore> {
-        // Pending #219: v2 prefix-cache snapshot/restore. After #221
-        // deleted the legacy qwen3-moe snapshot/restore path, prefix
-        // cache is a no-op regardless of `FLAMBEAU_PREFIX_CACHE`.
-        Ok(PrefixCacheRestore::Miss)
+        use crate::prefix_cache::PrefixKeys;
+        if !self.prefix_cache.enabled() || prompt_ids.is_empty() {
+            return Ok(PrefixCacheRestore::Miss);
+        }
+        let keys = PrefixKeys::from_prompt(prompt_ids, self.prefix_cache_chunk_tokens);
+        let Some(m) = self
+            .prefix_cache
+            .longest_match(&keys, self.topology_tag, |_| {})
+        else {
+            tracing::info!(
+                target: "server.prefix_cache",
+                prompt_tokens = prompt_ids.len(),
+                n_chain = keys.chunk_keys.len(),
+                first_key = keys.chunk_keys.first().map(|k| k.0).unwrap_or(0),
+                "prefix cache MISS (no chain match)"
+            );
+            return Ok(PrefixCacheRestore::Miss);
+        };
+        // A full-prompt match is only usable with cached first-token
+        // logits: the restored GDN state sits at the prompt's end, so no
+        // token can be re-run to produce logits. A match longer than the
+        // prompt cannot be cut down for the same reason.
+        let full = m.n_tokens == prompt_ids.len();
+        let logits = if full {
+            self.prefix_cache.logits_for(m.terminal)
+        } else {
+            None
+        };
+        if (full && logits.is_none()) || m.n_tokens > prompt_ids.len() {
+            return Ok(PrefixCacheRestore::Miss);
+        }
+        let Some(kv) = self.prefix_cache.snapshot_for(m.terminal) else {
+            return Ok(PrefixCacheRestore::Miss);
+        };
+        let Some(driver) = inflight.as_model_driver_mut() else {
+            return Ok(PrefixCacheRestore::Miss);
+        };
+        if let Err(e) = driver.restore_slot(m.n_tokens, kv) {
+            tracing::warn!(
+                target: "server.prefix_cache",
+                error = %e,
+                "restore failed; resetting slot and falling back to cold prefill"
+            );
+            inflight.reset_for_next_request()?;
+            return Ok(PrefixCacheRestore::Miss);
+        }
+        tracing::info!(
+            target: "server.prefix_cache",
+            n_matched = m.n_tokens,
+            prompt_tokens = prompt_ids.len(),
+            full,
+            "prefix cache hit restored"
+        );
+        self.prefix_cache.touch(m.terminal);
+        Ok(match logits {
+            Some(l) => PrefixCacheRestore::FullHit { logits: l },
+            None => PrefixCacheRestore::PrefixHit {
+                n_matched: m.n_tokens,
+            },
+        })
     }
 
-    /// **#229 insert an intermediate (chunk-boundary) cache
-    /// entry produced during a fresh prefill's per-chunk loop. No
-    /// logits are stored (callers can't sample mid-prefill); future
-    /// requests that hit this entry restore at the boundary and
-    /// proceed with a partial-tail prefill via `prefill_logits`.
+    /// Insert a full-chunk-boundary cache entry during prefill's per-chunk
+    /// loop. State at a boundary is the committed post-position state (each
+    /// chunk runs the full layer stack). No logits — callers can't sample
+    /// mid-prefill; a hit restores at the boundary and prefills its own tail.
+    /// This is what lets a grown conversation hit (it diverges only near the
+    /// previous turn's end, past the last shared boundary).
     pub fn prefix_cache_insert_intermediate(
         &self,
-        _prompt_ids: &[u32],
-        _n_tokens_completed: usize,
-        _snap: Vec<crate::prefix_cache::RankSnapshot>,
+        inflight: &mut dyn crate::Session,
+        prompt_ids: &[u32],
+        n_tokens_completed: usize,
     ) {
-        // Pending #219: v2 prefix-cache snapshot path.
+        use crate::prefix_cache::{PrefixCacheInsert, PrefixKeys};
+        let chunk = self.prefix_cache_chunk_tokens;
+        if !self.prefix_cache.enabled()
+            || n_tokens_completed == 0
+            || n_tokens_completed % chunk != 0
+            || n_tokens_completed >= prompt_ids.len()
+        {
+            return;
+        }
+        let Some(driver) = inflight.as_model_driver_mut() else {
+            return;
+        };
+        let snaps = match driver.snapshot_slot(n_tokens_completed) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    target: "server.prefix_cache",
+                    error = %e,
+                    "intermediate snapshot failed; entry skipped"
+                );
+                return;
+            }
+        };
+        let bytes: usize = snaps.iter().map(Vec::len).sum();
+        let keys = PrefixKeys::from_prompt(&prompt_ids[..n_tokens_completed], chunk);
+        self.prefix_cache.insert_with_kv(
+            keys.chunk_keys,
+            PrefixCacheInsert {
+                topology: self.topology_tag,
+                chunk_tokens: chunk,
+                n_tokens: n_tokens_completed,
+                bytes,
+            },
+            std::sync::Arc::new(snaps),
+            None,
+        );
+        tracing::info!(
+            target: "server.prefix_cache",
+            boundary = n_tokens_completed,
+            prompt_tokens = prompt_ids.len(),
+            bytes,
+            "prefix cache captured chunk boundary"
+        );
     }
 
-    /// **#229 P2.10c** — best-effort capture of the post-prefill KV
-    /// state into the prefix cache. Inserts under the chunk-key chain
-    /// for the full prompt, replacing any prior entry with the same
-    /// chain (idempotent). Eligibility filter:
-    /// - `FLAMBEAU_PREFIX_CACHE` must be set.
-    /// - Topology must be PP or TP (Hybrid bails).
-    /// - Prompt must have at least one new complete chunk past
-    ///   `n_already_matched`.
-    /// - Prompt must be at least 50 tokens (cache-hit savings won't
-    ///   justify the host-RAM cost on tiny prompts).
-    ///   Errors are logged and swallowed — capture is opportunistic; a
-    ///   failed snapshot must not break the caller's request.
-    ///   **#229 V1** — capture the post-prefill KV+GDN state plus the
-    ///   last-position logits row into the prefix cache. V1 only inserts
-    ///   full-prompt entries — partial-chunk-boundary captures need
-    ///   GDN-at-position snapshotting (V2). Keyed by the full chain
-    ///   (chunk-keys including partial tail) so future identical
-    ///   prompts hit and can skip prefill entirely.
-    ///   `last_logits` is the prefill's last-position F32 vocab row,
-    ///   the same one the caller is about to feed into the first-token
-    ///   sampler. Cloned into the cache entry; ~600 KB on Qwen3.6.
-    ///   Eligibility:
-    /// - `FLAMBEAU_PREFIX_CACHE` set.
-    /// - Topology PP or TP (Hybrid bails).
-    /// - Prompt ≥ 50 tokens AND at least one full chunk in the chain.
+    /// Best-effort capture of the post-prefill KV+GDN state plus the
+    /// last-position logits row into the prefix cache, keyed by the full
+    /// chunk chain (including the partial tail) so an identical future
+    /// prompt skips prefill entirely. Replaces any prior same-chain entry
+    /// (idempotent). Skips prompts under 50 tokens — the hit savings
+    /// would not justify the host-RAM cost. Errors are logged and
+    /// swallowed: capture is opportunistic and must not break the
+    /// caller's request.
     pub fn prefix_cache_try_capture_full(
         &self,
-        _inflight: &dyn crate::Session,
-        _prompt_ids: &[u32],
-        _last_logits: &[f32],
+        inflight: &mut dyn crate::Session,
+        prompt_ids: &[u32],
+        last_logits: &[f32],
     ) {
-        // Pending #219: v2 prefix-cache snapshot path.
+        use crate::prefix_cache::{PrefixCacheInsert, PrefixKeys};
+        const MIN_CAPTURE_TOKENS: usize = 50;
+        if !self.prefix_cache.enabled() || prompt_ids.len() < MIN_CAPTURE_TOKENS {
+            return;
+        }
+        let Some(driver) = inflight.as_model_driver_mut() else {
+            return;
+        };
+        let snaps = match driver.snapshot_slot(prompt_ids.len()) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    target: "server.prefix_cache",
+                    error = %e,
+                    "snapshot failed; entry skipped"
+                );
+                return;
+            }
+        };
+        let bytes: usize = snaps.iter().map(Vec::len).sum();
+        let keys = PrefixKeys::from_prompt(prompt_ids, self.prefix_cache_chunk_tokens);
+        self.prefix_cache.insert_with_kv(
+            keys.chunk_keys,
+            PrefixCacheInsert {
+                topology: self.topology_tag,
+                chunk_tokens: self.prefix_cache_chunk_tokens,
+                n_tokens: prompt_ids.len(),
+                bytes,
+            },
+            std::sync::Arc::new(snaps),
+            Some(std::sync::Arc::new(last_logits.to_vec())),
+        );
+        tracing::info!(
+            target: "server.prefix_cache",
+            prompt_tokens = prompt_ids.len(),
+            bytes,
+            "prefix cache captured full prompt"
+        );
     }
 
     /// **#232 P2.12** — try to admit a new request. Bumps `in_flight`
