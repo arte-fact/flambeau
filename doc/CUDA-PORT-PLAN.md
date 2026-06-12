@@ -267,3 +267,61 @@ sole impl, gfx906 fully green. CUDA now has a socket to plug into.
    vs. `runtime`. Recommend `core` (already the home of `Device`/`Op`).
 3. NCCL version pin + multi-GPU CUDA rig topology (NVLink pair vs PCIe-only) —
    determines the B6 AllReduce baseline.
+
+---
+
+## A2 progress + A1 Collectives design (build-on-Mesh) — 2026-06-12
+
+### Done
+- **A2.1 — loaders genericized over the `Device` seam** (`c8e7982`, branch
+  `feature/cuda-decouple`). `crates/forward/src/loader/*.rs`: `device:
+  &HipDevice` → `&impl Device`, HipDevice import dropped (8 files, 28 params).
+  Static dispatch → identical code; build + clippy clean (hip_serve); forward
+  parity/synth suite green on gfx906 (snapshot_restore 5/5, parity_snapshot_*,
+  synth dense/gdn/moe/gemma). Leaf-most, AR-free slice.
+
+### A2.4 prerequisite — the AR seam (`Collectives`)
+A2.4 (genericize `ForwardEngine` / `StageHooks` / `TopologyHooks` /
+`ArCallback`) is blocked: the engine's AR contract (`TopologyHooks` in
+`crates/forward/src/core/hooks.rs`) is typed on `&HipDevice`/`&HipStream` and
+routes through `BarArCoordinator` (`crates/forward/src/runtime/ar.rs`) →
+`BarP2pAllReduce` (`crates/backend-hip/src/bar_p2p.rs`, the BAR1 kernels). A1
+lifted Device/Stream/Event/Cluster/Ops but **not** a Collectives seam.
+
+**Audit finding:** there are TWO parallel collective abstractions today —
+1. `runtime::collective` (`AllReduce`/`AllGather`/`AllToAll`/`Broadcast` over
+   `runtime::mesh::Mesh`, byte-buffer `&mut [u8]` + `CollectiveCfg`) with only
+   a **CPU host-bounce reference impl** (`RefMesh`). Grep confirms **no
+   production consumer** — it is currently an oracle/cert target, not wired to
+   the real path.
+2. The real device AR — `BarP2pAllReduce` (backend-hip) + `BarArCoordinator`
+   (forward) + the fused ops `ar_sum_f32` / `ar_sum_f16` / `ar_residual_f16` /
+   `ar_residual_rmsnorm_f16` / `ar_postattn_residual_rmsnorm_f32_to_f16`. The
+   fused ops collapse AllReduce + residual-add + RMSNorm into one BAR1 kernel;
+   they CANNOT be expressed as a plain byte-buffer `AllReduce`.
+
+**Decision (user, 2026-06-12): build the seam ON the `Mesh`/`AllReduce`
+framework** — unify the two abstractions rather than add a third parallel
+trait. This is a multi-session architectural effort; sliced as:
+
+- **C1 — device collective surface on `Mesh`.** Extend the `collective`
+  framework with a device-pointer AllReduce op (`DevicePtr` + `&Stream`, sum,
+  F32/F16), parallel to the byte-buffer one. Implement it for the HIP cluster
+  (wrapping `BarP2pAllReduce`/`BarArCoordinator`, preserving the deterministic
+  copy-engine DtoD path — see `doc/DETERMINISM_INVESTIGATION.md`). Keep the CPU
+  `RefMesh` byte-buffer impl as the oracle. Gate: existing collective ref
+  tests + a HIP device AR cert.
+- **C2 — fused-epilogue ops as a layer.** Express `ar_residual_f16` /
+  `ar_residual_rmsnorm_f16` / `ar_postattn_…` at the **semantic** level on the
+  seam (so HIP fuses via BAR1 and CUDA does NCCL-allreduce + a separate
+  epilogue kernel — rule-3 two-impls-one-contract). `supports_*` capability
+  (n_ranks ∈ {2,4}, ranks == 2) moves onto the impl.
+- **C3 — rewire forward.** `TopologyHooks`/`TpHooks`/`HybridHooks` delegate to
+  the Mesh-based seam; genericize the signatures + `ArCallback` over the
+  Device seam. Unblocks A2.4. **Highest-risk** — AR has a long subtle-bug
+  history (BAR1 incoherence, determinism, write-target).
+- **C4 — validate.** CPU-ref oracle parity (kept) + `gdn_tp_mode` + a live
+  pp2tp2 smoke (gemma4 + qwen3.6) for byte-identical decode vs pre-refactor.
+
+After C1–C3 the engine names no `Hip*` AR type and A2.4 (CoreState/ctx/hooks
+genericization) proceeds; then A2.2/A2.3 (ScratchPool, composites) finish A2.
