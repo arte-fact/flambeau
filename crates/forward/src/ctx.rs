@@ -224,7 +224,7 @@ impl QuantWeight {
         act_q8_1_mmq: &Tensor<flambeau_model_ops::Q8_1>,
         output: &mut Tensor<flambeau_model_ops::F32>,
         shape: flambeau_ops::MatmulShape,
-        ops: &flambeau_ops::HipOps<'_>,
+        ops: &impl flambeau_ops::Ops,
     ) -> Result<()> {
         if output.n_elems < shape.m * shape.n {
             anyhow::bail!(
@@ -236,7 +236,7 @@ impl QuantWeight {
                 shape.m * shape.n
             );
         }
-        <flambeau_ops::HipOps<'_> as flambeau_ops::Ops>::qmatmul(
+        flambeau_ops::Ops::qmatmul(
             ops,
             flambeau_ops::QmatmulBuffers {
                 weights: self.ptr,
@@ -291,7 +291,7 @@ impl QuantWeight {
         output: &mut Tensor<flambeau_model_ops::F16>,
         k: usize,
         n: usize,
-        ops: &flambeau_ops::HipOps<'_>,
+        ops: &impl flambeau_ops::Ops,
     ) -> Result<()> {
         if output.n_elems < n {
             anyhow::bail!(
@@ -300,7 +300,7 @@ impl QuantWeight {
                 output.n_elems,
             );
         }
-        <flambeau_ops::HipOps<'_> as flambeau_ops::Ops>::mmvq_f16_direct(
+        flambeau_ops::Ops::mmvq_f16_direct(
             ops,
             flambeau_ops::MmvqBuffers {
                 weights: self.ptr,
