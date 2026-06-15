@@ -464,3 +464,32 @@ A1 seams + C1–C3 are the runtime prerequisites B6/B7 depend on.
 Optional tidy (not required): `PeerSlot`/`new_peer_*` are now generic forward
 types living beside the HIP-concrete `BarArCoordinator` in `runtime/ar.rs`;
 could move to a `runtime/peer.rs`. Cosmetic — defer unless ar.rs churns.
+
+### C4 — DONE (2026-06-12). A2 engine genericization complete.
+
+All four slices landed green + pp2tp2 byte-identical (`805a6178…` / `cb529e9c…`):
+- **C4.1** (`ae564b0`): `bind`/`memcpy_peer_async`/`memcpy_peer_in_async` lifted
+  to `core::Device`; HipDevice delegates to its inherent methods.
+- **C4.2** (`5b4b12b`): `PeerSlot<D: Device = HipDevice>`; edge constructors take
+  a caller-supplied `Arc<D>` (HipDevice::new moved to `orchestrate.rs`).
+- **C4.3** (`dcd582e`): `StageHooks<B>` + `PpStage<'a, B>`/`HybStage<'a, B>`;
+  handoff event via `core.device.new_event()`; peer-copy/bind through the seam.
+- **C4.4** (`d52db7c`): `ForwardEngine<'a, B, H: TopologyHooks<B>, S: StageHooks<B>>`
+  generic; the gemma per-layer-embd builder now routes `dense_gemv` through
+  `Ops` (last engine trait-bypass closed).
+
+`flambeau-forward` now names `Hip*` ONLY at the construction/selection boundary
+(`engine.rs` 4 HIP `new` ctors + `*Engine` aliases, `workers.rs`
+`HipDevice::new`/`OpsRegistry::new`, `orchestrate.rs` `HipCluster::new`) +
+`runtime/ar.rs` (the HIP AR+P2P impl behind the `DeviceAllReduce`/`FusedAllReduce`
+seams) + the concrete `TpHooks`/`HybridHooks` `TopologyHooks` impls (rule-12
+arch-specific impls wrapping `BarArCoordinator`). Every one of these is the
+deliberate HIP backend-selection point, not leakage.
+
+**Track A status:** A0 ✅, A1 ✅, A2 ✅ (loaders A2.1 + AR seam C1–C3 + engine
+cascade A2.4 + peer-copy seam C4). **A3 remains** (model crates' arch/loader +
+server cluster + cli `--backend`/`cuda:` — see §"Track A" A3). Then Track B
+(B0–B8: `backend-cuda` + `kernels-cuda` + certs). The runtime prerequisites
+B6/B7 depend on (Device/Event/Cluster/Collectives/peer-copy seams) are all in
+place; a CUDA `Backend` impl can now instantiate `ForwardEngine<CudaBackend>`
+once its kernels + cluster land.
