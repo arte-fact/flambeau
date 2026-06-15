@@ -34,7 +34,7 @@ pub fn attention_decode_f16(
     attention_decode_f16_slots(ctx, buffers, shape, knobs, None)
 }
 
-/// 7.a-i3 — graph-captureable variant of [`attention_decode_f16`].
+/// Graph-captureable variant of [`attention_decode_f16`].
 /// Identical behaviour for non-capture callers (slots=None). When
 /// `slots` is Some, the n_tokens_kv kernel arg is tagged via
 /// `KernelArgs::push_slot` so the graph recorder can bind the slot.
@@ -90,10 +90,10 @@ pub fn attention_decode_f16_slots(
     Ok(())
 }
 
-/// **#266b** — single-launch batched-decode attention over `n_slots`
+/// Single-launch batched-decode attention over `n_slots`
 /// (Q-row, per-slot KV-cache) pairs. Replaces the per-slot loop in
 /// `forward_full_attn_layer_decode_batched_*`, which structurally caps
-/// hybrid throughput at ~1.0× (per #267 cert).
+/// hybrid throughput.
 /// Each grid block owns one `(q_head, slot)` pair and runs the same
 /// flash-attn-v2 online-softmax body as [`attention_decode_f16`]. Slot
 /// addressing comes from device-side tables built once per call by the
@@ -541,7 +541,7 @@ pub fn kv_append_f16_batched_slots(
     Ok(())
 }
 
-/// 9.b — split-K (flash-decoding) decode attention, F16 KV. Same math
+/// Split-K (flash-decoding) decode attention, F16 KV. Same math
 /// as [`attention_decode_f16`] but partitions the context across grid.y to
 /// attack the single-pass kernel's occupancy starvation on Qwen3.6
 /// (16 heads × 1 block = 27 % of 60 CUs at head_dim=256).
@@ -759,8 +759,8 @@ pub fn attention_decode_f16_splitk_h2(
 /// context is short enough that split-K overhead (the combine kernel +
 /// partials write/read) costs more than the occupancy win.
 pub fn splitk_chunk_size(n_tokens_kv: usize, max_chunks: usize) -> usize {
-    // Threshold tuned per the 9.b A/B: at n_tokens=128 split-K already
-    // ties the single-pass (1.10×) and every larger shape wins hard, so
+    // Threshold tuned by A/B: at n_tokens=128 split-K already
+    // ties the single-pass and every larger shape wins hard, so
     // default to split-K whenever it gives ≥ 4 chunks.
     let base = if n_tokens_kv <= 256 {
         return n_tokens_kv; // one chunk; caller should just use single-pass
@@ -1114,7 +1114,7 @@ pub fn attention_prefill_f16(
     attention_prefill_f16_slots(ctx, buffers, shape, knobs, None)
 }
 
-/// 6.a-i4 — graph-captureable variant of [`attention_prefill_f16`].
+/// Graph-captureable variant of [`attention_prefill_f16`].
 /// Behaviour matches the wrapper in every non-capture case. When the
 /// optional [`ScalarSlot`] handles are `Some`, `push_slot` tags their
 /// kernel args so the graph recorder can bind the slots to the
@@ -1195,7 +1195,7 @@ pub fn attention_prefill_f16_slots(
         args.push(&scale);
         args.push(&window_size);
         args.push(&ring_depth);
-        // 9.b — BR depends on which variant we dispatch to.
+        // BR depends on which variant we dispatch to.
         // d256_br8 uses BR=8 (more Q rows per block, fewer blocks);
         // other head_dims still use BR=4.
         let br: u32 = if head_dim == 256 { 8 } else { 4 };

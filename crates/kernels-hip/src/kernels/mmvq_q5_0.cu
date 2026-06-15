@@ -18,7 +18,7 @@
 // `b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)` — each byte is 0 or 1.
 // Block/grid: blockDim=256, gridDim=n_rows.
 //
-// Two output dtypes via templated __device__ body (#120):
+// Two output dtypes via templated __device__ body:
 //   flambeau_mmvq_q5_0_q8_1      → F32 dst (legacy scratch-then-cast)
 //   flambeau_mmvq_q5_0_q8_1_f16  → F16 dst (saturating; direct store)
 

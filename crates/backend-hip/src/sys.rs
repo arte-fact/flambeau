@@ -134,7 +134,7 @@ extern "C" {
     // submit successfully but leave the source stream in an unsync'able
     // state (see `cluster.rs` header), the BAR1 *direct dereference*
     // mechanism enabled by these calls works reliably on the same
-    // gfx906 + ROCm 7.1.x topology — mi50grad ships it in production
+    // gfx906 + ROCm 7.1 topology — mi50grad ships it in production
     // and flambeau ports the same path here for TP decode AllReduce.
     pub fn hipDeviceCanAccessPeer(
         can_access_peer: *mut c_int,
@@ -144,7 +144,7 @@ extern "C" {
     pub fn hipDeviceEnablePeerAccess(peer_device_id: c_int, flags: c_uint) -> c_int;
     pub fn hipDeviceDisablePeerAccess(peer_device_id: c_int) -> c_int;
 
-    // 5.b — event primitives for cross-stream / cross-device DAG
+    // Event primitives for cross-stream / cross-device DAG
     // scheduling (async peer-copy pipeline-parallel ubatch path).
     pub fn hipEventCreate(event: *mut HipEventT) -> c_int;
     pub fn hipEventCreateWithFlags(event: *mut HipEventT, flags: c_uint) -> c_int;
@@ -157,7 +157,7 @@ extern "C" {
     /// for the timestamp to be valid.
     pub fn hipEventElapsedTime(ms: *mut f32, start: HipEventT, stop: HipEventT) -> c_int;
 
-    // 6.a — graph-capture primitives. Record a sequence of kernel
+    // Graph-capture primitives. Record a sequence of kernel
     // launches + memcpys on a stream once, instantiate into an executable
     // graph, and replay per ubatch. Collapses per-ubatch Rust FFI /
     // driver launch overhead to a single graph-replay call.
@@ -165,7 +165,7 @@ extern "C" {
     /// capture stream work INTO an existing graph. Multiple
     /// streams can capture into the SAME `HipGraphT` simultaneously,
     /// resolving cross-stream events as internal graph edges. Beta API in
-    /// ROCm 7.x; `dependencyData` must be NULL.
+    /// ROCm 7; `dependencyData` must be NULL.
     pub fn hipStreamBeginCaptureToGraph(
         stream: HipStreamT,
         graph: HipGraphT,
@@ -188,7 +188,7 @@ extern "C" {
     pub fn hipGraphExecDestroy(exec: HipGraphExecT) -> c_int;
     pub fn hipGraphDestroy(graph: HipGraphT) -> c_int;
 
-    // 6.a-i2 — graph-node introspection + in-place param update on an
+    // Graph-node introspection + in-place param update on an
     // instantiated exec. Lets us capture a forward pass once and replay it
     // with updated scalar params (e.g. pos, start_position) per ubatch.
     pub fn hipGraphGetNodes(
@@ -207,7 +207,7 @@ extern "C" {
         params: *const hipKernelNodeParams,
     ) -> c_int;
 
-    // 6.a-i5b — 1D memcpy-node in-place update on an instantiated exec.
+    // 1D memcpy-node in-place update on an instantiated exec.
     // Used to retarget the KV-cache append memcpys per ubatch (dst is
     // pos-dependent; src and size stay fixed).
     pub fn hipGraphExecMemcpyNodeSetParams1D(

@@ -1,4 +1,4 @@
-//! T1.3 — Chat-template parity cert vs `llama.cpp --jinja`.
+//! Chat-template parity cert vs `llama.cpp --jinja`.
 //! For a fixed set of (messages, tools, add_generation_prompt) inputs,
 //! the prompt string flambeau's Jinja render produces must be
 //! byte-identical to `llama.cpp`'s `test-chat-template` render on the

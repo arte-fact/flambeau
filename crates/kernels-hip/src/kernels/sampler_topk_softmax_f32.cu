@@ -60,7 +60,7 @@
 // — at K=256 the GPU sampler restricts candidates more aggressively
 // than the host path, biasing the multinomial toward the small handful
 // of highest-prob tokens (often `<|im_end|>` at "natural endpoint"
-// positions). The chat-decode truncation bug (#211 follow-up) where
+// positions). The chat-decode truncation bug where
 // the model would emit a one-sentence answer + EOS instead of the
 // requested longer response was caused by this K=256 cap.
 // SAMPLER_K_MAX=4096 still bounds total candidates; the kernel sorts

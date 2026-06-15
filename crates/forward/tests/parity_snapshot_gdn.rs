@@ -32,7 +32,7 @@ const CONV_KERNEL: usize = 4;
 const RMS_EPS: f32 = 1e-5;
 
 /// Reference for `forward_one_token(token_id=7, position=0)` on the
-/// synthetic GDN model below, captured against the post-#222 build.
+/// synthetic GDN model below.
 /// Tolerance covers F16/F32 rounding across the recurrent step and
 /// the LM-head matmul.
 const REFERENCE_LOGITS_HEAD16: [f32; 16] = [

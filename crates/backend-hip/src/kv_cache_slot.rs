@@ -1,4 +1,4 @@
-//! 6.a-i5b2 — graph-captureable KvCache::append for HIP.
+//! Graph-captureable KvCache::append for HIP.
 //! The stock `KvCache::append` (in `flambeau-runtime`) drives two
 //! `Device::memcpy_async` calls through the `Device` trait surface,
 //! which is agnostic to graph-capture slot tagging. This module owns

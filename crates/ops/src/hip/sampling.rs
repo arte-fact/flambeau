@@ -27,7 +27,7 @@ use flambeau_backend_hip::{KernelArgs, LaunchCfg};
 /// positions (one-sentence-then-stop chat-truncation bug).
 pub const SAMPLER_K_OUT_MAX: usize = 2048;
 
-/// **Sampler-D4 (#212)** — apply repetition / presence / frequency
+/// Apply repetition / presence / frequency
 /// penalties in place on `[V]` F32 logits. `token_counts` is a flat
 /// device buffer of `n_pairs * 2` u32s laid out as
 /// `[tok0, count0, tok1, count1, ...]`. Caller must dedup the

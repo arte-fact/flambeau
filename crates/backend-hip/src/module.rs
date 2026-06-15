@@ -236,7 +236,7 @@ impl LaunchCfg {
 
 /// Kernel argument buffer. Pushes pointer to each arg's storage; the
 /// underlying storage must outlive the launch.
-/// 6.a-i3 adds `push_slot`: tag a pushed arg with a
+/// `push_slot` tags a pushed arg with a
 /// [`ScalarSlot`](crate::graph_capture::ScalarSlot) so post-capture we
 /// can bind the slot to its kernel-node arg index for later
 /// `hipGraphExecKernelNodeSetParams` updates. `push` (untagged) is
@@ -405,7 +405,7 @@ impl HipKernel<'_> {
         cfg: LaunchCfg,
         mut args: KernelArgs<'_>,
     ) -> DeviceResult<()> {
-        // 6.a-i3 — if a capture is active on this thread, record the
+        // If a capture is active on this thread, record the
         // launch's arity + tagged slots so post-capture the exec can build
         // a SlotMap. Outside capture this is a no-op.
         crate::graph_capture::record_launch(args.len(), &args.tagged_slots);

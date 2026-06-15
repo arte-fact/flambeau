@@ -2,8 +2,7 @@
 //!
 //! Routes.rs holds the handle as `Box<dyn EmbeddingHandle>` so the
 //! `/v1/embeddings` handler doesn't reach into arch-specific code
-//! directly. Concrete impls live in their respective model crates
-//! and ship with the v2 stack (see #220).
+//! directly. Concrete impls live in their respective model crates.
 
 #![cfg(feature = "hip")]
 

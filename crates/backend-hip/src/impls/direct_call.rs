@@ -12,7 +12,7 @@ use flambeau_core::DirectCallKernel;
 /// a second implementation for the same dtype means promoting the pair into
 /// a `KernelDescriptor` table so shape-dispatch can pick between them.
 pub const DIRECT_CALL_KERNELS_GFX906: &[DirectCallKernel] = &[
-    // 9.b flash-decoding split-K attention for long-context decode.
+    // Flash-decoding split-K attention for long-context decode.
     // Forward layer crosses the threshold at `n_tokens_kv > 256` and
     // invokes this kernel directly rather than `attention_decode_f16`.
     DirectCallKernel {
@@ -25,7 +25,7 @@ pub const DIRECT_CALL_KERNELS_GFX906: &[DirectCallKernel] = &[
         impl_id: "attention_decode_q8_kv_splitk_gfx906",
         cert_rel_path: "certs/hip/gfx906/attention_decode_q8_kv_splitk_gfx906.json",
     },
-    // 3.a — dense Q4_0 / Q5_0 MMVQ (DP4A) for Qwen3.6-35B-A3B-Q4_0
+    // Dense Q4_0 / Q5_0 MMVQ (DP4A) for Qwen3.6-35B-A3B-Q4_0
     // attention and shared-expert weights. Single-kernel per dtype.
     DirectCallKernel {
         impl_id: "mmvq_q4_0_gfx906",
@@ -35,12 +35,12 @@ pub const DIRECT_CALL_KERNELS_GFX906: &[DirectCallKernel] = &[
         impl_id: "mmvq_q5_0_gfx906",
         cert_rel_path: "certs/hip/gfx906/mmvq_q5_0_gfx906.json",
     },
-    // 6.a — Q5_1 dense MMVQ (llama.cpp parity).
+    // Q5_1 dense MMVQ (llama.cpp parity).
     DirectCallKernel {
         impl_id: "mmvq_q5_1_gfx906",
         cert_rel_path: "certs/hip/gfx906/mmvq_q5_1_gfx906.json",
     },
-    // 1.b / 5.a — F16 × Q8_1 MMVQ + MMQ (Unsloth UD-Q8_K_XL F16 layers).
+    // F16 × Q8_1 MMVQ + MMQ (Unsloth UD-Q8_K_XL F16 layers).
     DirectCallKernel {
         impl_id: "mmvq_f16_q8_1_gfx906",
         cert_rel_path: "certs/hip/gfx906/mmvq_f16_q8_1_gfx906.json",
@@ -49,13 +49,13 @@ pub const DIRECT_CALL_KERNELS_GFX906: &[DirectCallKernel] = &[
         impl_id: "mmq_f16_q8_1_gfx906",
         cert_rel_path: "certs/hip/gfx906/mmq_f16_q8_1_gfx906.json",
     },
-    // V2.29.a — tile-M F16 × Q8_1 MMQ for m >= 8. Call-site dispatched
+    // Tile-M F16 × Q8_1 MMQ for m >= 8. Call-site dispatched
     // alongside mmq_f16_q8_1 inside qmatmul.rs::dispatch_qmatmul.
     DirectCallKernel {
         impl_id: "mmq_f16_tile_gfx906",
         cert_rel_path: "certs/hip/gfx906/mmq_f16_tile_gfx906.json",
     },
-    // 2.a / 3.a / indexed-MoE MMVQ for Q8_0 / Q4_0 / Q6_K
+    // Indexed-MoE MMVQ for Q8_0 / Q4_0 / Q6_K
     // expert weights. Routing is by GGUF tensor dtype, not shape.
     DirectCallKernel {
         impl_id: "indexed_moe_mmvq_q8_0_gfx906",
@@ -91,7 +91,7 @@ pub const DIRECT_CALL_KERNELS_GFX906: &[DirectCallKernel] = &[
     },
     // Indexed-MoE MMQ tile8 (gate_up + down) per dtype. Routed by GGUF
     // tensor dtype, not via dispatch_qmatmul; cert harness in
-    // crates/bench/src/sweep_moe.rs (T2.3b — generic tile8 harness).
+    // crates/bench/src/sweep_moe.rs (generic tile8 harness).
     DirectCallKernel {
         impl_id: "indexed_moe_mmq_q8_0_gate_up_tile8_gfx906",
         cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q8_0_gate_up_tile8_gfx906.json",

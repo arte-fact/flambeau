@@ -186,8 +186,8 @@ pub struct Sampler {
     logit_scratch: Vec<f32>,
     /// Reused for top-k / top-p / min-p filtering.
     pair_scratch: Vec<(u32, f32)>,
-    /// Sampler-F (#208) — reused sorted+dedup history snapshot for the
-    /// penalty path. Replaces the per-call `HashMap<u32, u32>` with a
+    /// Reused sorted+dedup history snapshot for the penalty path.
+    /// Replaces the per-call `HashMap<u32, u32>` with a
     /// `Vec<(u32, u32)>` (token id, count) sorted by id. Build via
     /// sort_unstable on a copy of `history`, then dedup-with-counter.
     /// At typical history lengths (≤2k), this beats hashing on cache
@@ -222,7 +222,7 @@ impl Sampler {
         &mut self.rng
     }
 
-    /// **Sampler-D3 (#211)** — sample one token from a pre-computed top-K
+    /// Sample one token from a pre-computed top-K
     /// `(id, prob)` distribution. The caller is responsible for
     /// providing a top-K already softmax-normalised so the K probs sum
     /// to ≈1 (the GPU `topk_softmax_f32` kernel does exactly this).
@@ -304,11 +304,9 @@ impl Sampler {
     /// to a clone of `logits` only when needed; otherwise the caller's
     /// buffer is read directly.
     pub fn sample(&mut self, logits: &[f32], mode: &Sampling, history: &[u32]) -> u32 {
-        // **Sampler-E (#207)** — when no penalty is active we don't
-        // need a writeable copy of `logits`, so skip the 600 KB
-        // `extend_from_slice` and read the caller's buffer directly.
-        // Saves ~150 µs/token on Qwen3.6's V=151424 vocab at default
-        // penalties (the chat-temp+top_p case the user hit).
+        // When no penalty is active we don't need a writeable copy of
+        // `logits`, so skip the 600 KB `extend_from_slice` and read the
+        // caller's buffer directly.
         let needs_penalties = mode.has_penalties() && !history.is_empty();
         let bias_active = mode.logit_bias.as_deref().is_some_and(|b| !b.is_empty());
         let logits_view: &[f32] = if needs_penalties || bias_active {
@@ -548,8 +546,8 @@ pub fn build_history_counts(
     counts_out.push((prev, run));
 }
 
-/// **Sampler-F (#208)** — penalty path with caller-owned scratch
-/// buffers. Replaces the per-call `HashMap<u32, u32>` build with a
+/// Penalty path with caller-owned scratch buffers. Replaces the
+/// per-call `HashMap<u32, u32>` build with a
 /// sort+dedup over a reused `Vec<u32>`. Faster than hashing for
 /// `history.len() ≤ ~2k` (typical chat-decode history at the time
 /// the penalty path runs) because the sort+dedup is O(N log N) but
@@ -644,8 +642,8 @@ fn sample_stochastic(
     // Sort by descending prob — needed for top-k / top-p. We always
     // sort when any filter is active; for plain-temperature there's no
     // sort (we go straight to multinomial over the full distribution).
-    // **Sampler-A** (#206) — when `top_p` (or `min_p`) is set without an
-    // explicit `top_k`, default to `top_k = TOP_K_AUTO_CAP` so the
+    // When `top_p` (or `min_p`) is set without an explicit `top_k`,
+    // default to `top_k = TOP_K_AUTO_CAP` so the
     // partial-sort path activates instead of an O(V log V) full sort.
     // The cap is chosen well above the largest plausible top-p prefix
     // at any sane temperature × top_p (a flat-ish distribution at
@@ -661,8 +659,8 @@ fn sample_stochastic(
     };
     let kept_end: usize = if any_filter {
         // Partial-sort to top-K when K < V; full sort otherwise. At
-        // V=151424 vocab this turns the hot path from O(V log V) ≈
-        // 2.6M ops to O(V) + O(K log K) ≈ 150k + 22k = ~7× faster.
+        // V=151424 vocab this turns the hot path from O(V log V) to
+        // O(V) + O(K log K).
         if let Some(k) = effective_top_k {
             let k = (k as usize).min(pair_scratch.len());
             if k > 0 && k < pair_scratch.len() {

@@ -17,7 +17,7 @@
 // vi_hi = (v >> 4) & 0x0F0F0F0F — 4 high nibbles
 // Block/grid: blockDim=256, gridDim=n_rows (one block per output row).
 //
-// Two output dtypes via templated __device__ body (#120):
+// Two output dtypes via templated __device__ body:
 //   flambeau_mmvq_q4_0_q8_1      → F32 dst (legacy scratch-then-cast path)
 //   flambeau_mmvq_q4_0_q8_1_f16  → F16 dst (saturating; consumer-direct, no
 //                                  scratch + no cast launch)

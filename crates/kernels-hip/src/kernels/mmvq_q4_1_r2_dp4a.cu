@@ -2,7 +2,7 @@
 // Sibling of `mmvq_q4_1.cu` that emits TWO output rows per block while
 // keeping the 256-thread DP4A inner loop. Halves grid.x (and launch
 // count) and shares the Y read across the two rows (served from L1).
-// A scalar r2 variant without DP4A was 2.3× slower — DP4A is essential
+// A scalar r2 variant without DP4A was slower — DP4A is essential
 // at the dense-packed Q4_1 block structure.
 // Block/grid:
 // blockDim = 256, gridDim = ceil(n_rows / 2)

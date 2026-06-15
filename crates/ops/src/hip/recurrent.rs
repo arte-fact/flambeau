@@ -355,7 +355,7 @@ pub fn gdn_conv_trio_decode_f32_batched_slots(
     Ok(())
 }
 
-/// 3.d.1 — fused `conv_input = [history, current]`. Replaces the two
+/// Fused `conv_input = [history, current]`. Replaces the two
 /// back-to-back DtoD memcpys in `forward/gdn.rs::assemble_conv_input` (decode
 /// path) with a single elementwise kernel. Each GDN layer at decode fires
 /// this pattern once per token.

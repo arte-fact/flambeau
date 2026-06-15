@@ -9,7 +9,7 @@ pub struct SamplingParams {
     pub sampling: Sampling,
     pub seed: u64,
     pub max_tokens: u32,
-    /// **P0.1** — when `true`, the decode loop applies a per-step JSON
+    /// When `true`, the decode loop applies a per-step JSON
     /// structural mask: candidate tokens are filtered against a small
     /// JSON state machine (object/array/string/number balance). Driven
     /// by the OpenAI `response_format: {"type":"json_object"}` request
@@ -19,20 +19,20 @@ pub struct SamplingParams {
     /// schema (not just `json_object`). `json_mode` is also true; the decode
     /// loop builds a schema-aware constraint instead of the structural one.
     pub json_schema: Option<serde_json::Value>,
-    /// **P0.2** — caller-provided stop sequences. OpenAI accepts a
+    /// Caller-provided stop sequences. OpenAI accepts a
     /// string or an array of up to 4 strings; parsed at the request
     /// boundary into a `Vec<String>`. Decode loops detect each on the
     /// running emitted text (string-level, identical mechanism to the
     /// reasoning-marker stop) and cut decoding when matched. The stop
     /// sequence itself is stripped from the final text in `finalise`.
     pub stop_strings: Vec<String>,
-    /// **P1.7** — when `Some(n)`, the decode loop collects per-token
+    /// When `Some(n)`, the decode loop collects per-token
     /// log-probabilities + the top-`n` alternatives. `None` means no
     /// collection (the OpenAI default). Range 0..=20, capped at the
     /// boundary. V1 implementation is non-streaming, host-sampler-only;
     /// other paths silently return `None` with a warn-once log.
     pub collect_logprobs: Option<u32>,
-    /// **#233 P3.13** — opt-in for Qwen3.6 reasoning mode. `true` ⇒
+    /// Opt-in for Qwen3.6 reasoning mode. `true` ⇒
     /// the chat template is rendered with `enable_thinking=true`, the
     /// `<think>` / `</think>` reasoning-marker stop logic is
     /// disabled in the decode loop, and `finalise` splits the
@@ -45,7 +45,7 @@ pub struct SamplingParams {
     /// loop forces the reasoning-close marker so the model moves to the
     /// answer. `None` ⇒ unbounded reasoning.
     pub reasoning_budget: Option<u32>,
-    /// **#236 P0.1b** — bytes to feed into the JSON state machine
+    /// Bytes to feed into the JSON state machine
     /// before the first decoded token. Two callers populate this:
     /// (a) JSON-mode requests where the last `messages[]` entry is
     /// `role: "assistant"` (assistant-prefill / partial-completion
@@ -182,7 +182,7 @@ impl SamplingParams {
         // is a documented greedy override and must NOT fall back to
         // the model default — that would surprise a caller who
         // explicitly asked for greedy.
-        // **P0.4** — auto-low-temp for tool-router / structured-output
+        // Auto-low-temp for tool-router / structured-output
         // meta-prompts. OpenWebUI's auto-prompts (search-query-gen,
         // follow-ups, title, tags) and Aider/Continue/LangChain JSON
         // modes all set `response_format`. At default temperature

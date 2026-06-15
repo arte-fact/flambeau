@@ -295,7 +295,7 @@ fn ring_vs_full_mixed(layout: KvLayout, label: &str) {
 
 #[test]
 fn gemma_ring_swa_mixed_matches_full_depth() {
-    // standard_attn_mixed on a ring layer (the #142 follow-up).
+    // standard_attn_mixed on a ring layer.
     ring_vs_full_mixed(KvLayout::F16Contig, "ring-swa mixed");
 }
 

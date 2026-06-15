@@ -1,9 +1,7 @@
-// mmvq_q4_1_r2 — 4.a.1 multi-row r2 DPP-reduce Q4_1 MMVQ.
-// Sibling of `mmvq_q4_k_r2.cu` (candle P29 multi-row DPP pattern) for the
+// mmvq_q4_1_r2 — multi-row r2 DPP-reduce Q4_1 MMVQ.
+// Sibling of `mmvq_q4_k_r2.cu` (multi-row DPP pattern) for the
 // legacy Q4_1 quant used by Qwen3.5-9B-Q4_1. Replaces the 256-thread,
-// single-row `mmvq_q4_1.cu` () that is 45 % of Qwen3.5-9B decode
-// tg=64 time on gfx906 (462 ms / 11,616 calls × 40 µs — measured
-// 2026-04-24).
+// single-row `mmvq_q4_1.cu`.
 // Structure (matches Q4_K r2):
 // 64 threads/block = 1 wave64. Lanes 0..31 compute row R+0; lanes 32..63
 // compute row R+1. Block.x indexes the row *pair*. Each half-warp's 32

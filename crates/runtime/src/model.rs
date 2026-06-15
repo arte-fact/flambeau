@@ -2,7 +2,7 @@
 //!
 //! V1 surface is intentionally minimal: each `Model` implementor names
 //! the GGUF `general.architecture` strings it handles plus a
-//! description for diagnostics. Forward methods land in R5.2+ as the
+//! description for diagnostics. Forward methods land once the
 //! topology drivers hoist out of model crates.
 //!
 //! A `Model` impl is a thin pointer to "which crate handles this

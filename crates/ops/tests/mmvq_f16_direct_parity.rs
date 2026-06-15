@@ -1,4 +1,4 @@
-//! Parity test for #120 — `mmvq_f16_direct` (F16-store MMVQ) vs the
+//! Parity test — `mmvq_f16_direct` (F16-store MMVQ) vs the
 //! legacy `mmvq + cast_f32_to_f16` two-launch path.
 //!
 //! Same `(weights, x)` fed through both paths; max abs F16 diff on the

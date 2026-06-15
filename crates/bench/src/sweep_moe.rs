@@ -587,7 +587,7 @@ fn run_r2_shape(
 // Q6_K IndexedMoE MMVQ cert (UD-Q4_K_S mixed-quant down_exps)
 // ---------------------------------------------------------------------------
 
-/// 8.b-i4 — Q5_K indexed-MoE MMVQ correctness sweep. Shapes cover
+/// Q5_K indexed-MoE MMVQ correctness sweep. Shapes cover
 /// the Qwen3-Coder-30B-A3B-Instruct-UD-Q4_K_XL ffn_down_exps footprint:
 /// hidden=2048, inter=768, n_experts=128, top_k=8. Scaled down to 16
 /// experts for cert runtime.
@@ -835,7 +835,7 @@ pub fn run_indexed_moe_mmvq_q6_k_sweep(repo_root: &Path) -> Result<Cert> {
     Ok(cert)
 }
 
-/// 2.a — Q8_0 indexed-MoE MMVQ correctness sweep. Shapes cover the
+/// Q8_0 indexed-MoE MMVQ correctness sweep. Shapes cover the
 /// Qwen3.6-35B-A3B MoE footprint in UD-Q8_K_XL: hidden=2048, inter=768,
 /// n_experts=256, top_k=8. Scaled down to 16 experts for cert runtime.
 pub fn run_indexed_moe_mmvq_q8_0_sweep(repo_root: &Path) -> Result<Cert> {
@@ -1733,9 +1733,9 @@ fn run_combine_shape(
 }
 
 // ---------------------------------------------------------------------------
-// 2.b — Q8_0 indexed-MoE tile8 MMQ certs.
+// Q8_0 indexed-MoE tile8 MMQ certs.
 // Fused gate+up and standalone down kernels on Q8_0 expert weights. Weight
-// dtype identical to the existing 2.a Q8_0 MoE MMVQ path — this cert
+// dtype identical to the existing Q8_0 MoE MMVQ path — this cert
 // gates the tile8 structural port specifically.
 // ---------------------------------------------------------------------------
 

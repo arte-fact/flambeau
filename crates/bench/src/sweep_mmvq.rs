@@ -85,9 +85,7 @@ pub enum Dtype {
     Q5KR2,
     /// DP4A 256-thread Q5_K MMVQ (port of llama.cpp's
     /// `vec_dot_q5_K_q8_1_impl_vmmq`). Replaces per-element FP32
-    /// multiplies with `__builtin_amdgcn_sdot4` SIMD int8 dot products
-    /// — measured ~3× faster than `mmvq_q5_k_r2` on Qwen3.6-27B
-    /// `ssm_out` shape (n=5120, k=6144, m=1).
+    /// multiplies with `__builtin_amdgcn_sdot4` SIMD int8 dot products.
     Q5KDp4a,
     /// Wave64 r2 dp4a Q5_K MMVQ — dense analog of the MoE-side M-c
     /// kernel. 2 output rows per block, 32 lanes per row, half-warp
@@ -104,16 +102,16 @@ pub enum Dtype {
     /// Q4_1 legacy quant with per-block min offset. Single row per
     /// 256-thread block, DP4A inner loop.
     Q4_1,
-    /// 4.a.1 r2 multi-row Q4_1 (64 threads, 2 rows/block, half-warp
+    /// r2 multi-row Q4_1 (64 threads, 2 rows/block, half-warp
     /// DPP reduce). NULL — lost DP4A parallelism. Kept for regression.
     Q4_1R2,
-    /// 4.a.2 DP4A r2 multi-row Q4_1 (256 threads, 2 rows/block).
+    /// DP4A r2 multi-row Q4_1 (256 threads, 2 rows/block).
     /// Halves grid + shares Y across rows; preserves DP4A.
-    /// NULL — register pressure regressed wall −7.5 %.
+    /// NULL — register pressure regressed.
     Q4_1R2DP4A,
-    /// 4.a.3 thin-block 128-thread single-row Q4_1 DP4A.
+    /// thin-block 128-thread single-row Q4_1 DP4A.
     Q4_1T128,
-    /// C9-i1 thin-block 128-thread single-row Q8_0 DP4A. Mirror of Q4_1T128
+    /// C9-i1 thin-block 128-thread single-row Q8_0 DP4A — analog of Q4_1T128
     /// for Q8_0 weights — targets the gfx906 latency-bound regime where Q8_0
     /// MMVQ is the dominant kernel on Coder-30B-Q8_0 / 27B-Q8_0 decode.
     Q8_0T128,

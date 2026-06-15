@@ -32,7 +32,7 @@ const SHAPES: &[(usize, usize, usize)] = &[
 ];
 const QK: usize = QK8_0;
 
-// Mirror of `flambeau_ops::hip::attention::splitk_chunk_size(n_tokens, 32)`
+// Duplicate of `flambeau_ops::hip::attention::splitk_chunk_size(n_tokens, 32)`
 // (the bench crate does not depend on flambeau-ops). Keep in sync: the chunk
 // grows past 16384 tokens so n_chunks stays <= MAX_SPLITK_CHUNKS (32).
 fn pick_chunk(n_tokens: usize) -> usize {

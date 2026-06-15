@@ -49,12 +49,12 @@ pub struct ServeConfig {
     /// don't set the field explicitly (constructors use struct-update
     /// syntax with `..Default::default()`).
     pub mesh_mode: MeshMode,
-    /// **#230 P2.11a** — optional path to a `qwen3` arch embedding
+    /// Optional path to a `qwen3` arch embedding
     /// GGUF loaded alongside the chat model. `None` disables the
-    /// embedding subsystem; `/v1/embeddings` (#231) returns 503 when
+    /// embedding subsystem; `/v1/embeddings` returns 503 when
     /// unset.
     pub embedding_gguf_path: Option<PathBuf>,
-    /// **#230 P2.11a** — HIP device id for the embedding model. Must
+    /// HIP device id for the embedding model. Must
     /// be one of `device_ids`; the embedding model reuses the
     /// chat-cluster's `HipDevice` handle for the matching rank.
     pub embedding_device_id: Option<i32>,
@@ -77,7 +77,7 @@ pub struct ServeConfig {
     /// (correctness only, no VRAM win). Activation also unlocks the
     /// paged decode + prefill attention kernels in `standard_attn`.
     pub paged_kv_pages: Option<usize>,
-    /// #232 admission-control queue depth beyond the inflight pool. 0
+    /// Admission-control queue depth beyond the inflight pool. 0
     /// disables (legacy unbounded queue). Default 16.
     pub max_queue_depth: usize,
     /// Decode-batching coalescence window (microseconds). The leader
@@ -97,7 +97,7 @@ pub struct ServeConfig {
     /// Batched-decode scheduler. Coalesces concurrent decode steps via
     /// the inflight-slot leader. Required for N>1 throughput.
     pub batched_decode: bool,
-    /// #229 prompt prefix cache. Caches prompt-prefix KV across requests.
+    /// Prompt prefix cache. Caches prompt-prefix KV across requests.
     pub prefix_cache: bool,
     /// Prefix-cache LRU size in GB. Tune to free VRAM minus model + KV.
     pub prefix_cache_max_gb: f64,
@@ -270,7 +270,7 @@ pub(crate) async fn serve_inner_v2(
     let prefix_cache = crate::serve_common::build_prefix_cache(&cfg, topology_tag.mesh_kind);
 
     // Embedding endpoint disabled — legacy qwen3-moe `EmbeddingModel`
-    // was removed in #221; v2 reimplementation is a follow-up.
+    // was removed; reimplementation is a follow-up.
     let embedding_rank: Option<usize> = None;
     let embedding: Option<crate::serve_common::EmbeddingHandle> = None;
 

@@ -1,7 +1,7 @@
 // attention_decode_f16_batched — single-launch GQA decode attention over
 // N (Q-row, per-slot KV-cache) pairs.
 // Replaces the per-slot loop in `forward_full_attn_layer_decode_batched_*`,
-// which structurally caps hybrid throughput at ~1.0× (per #267 cert).
+// which structurally caps hybrid throughput.
 // Each (q_head, slot) block runs the same flash-attn-v2 online-softmax
 // body as `attention_decode_f16`; the slot index is carried through
 // `blockIdx.y`, and per-slot KV-cache base pointers + KV-tail lengths

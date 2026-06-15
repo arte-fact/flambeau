@@ -6,9 +6,9 @@ use std::any::Any;
 
 use anyhow::Result;
 
-/// One queued slot in a batched decode dispatch. Arch-neutral mirror of
-/// `flambeau_qwen3_moe::forward::BatchSlot`; qwen3-moe dispatchers
-/// convert at the boundary so the trait surface stays arch-clean.
+/// One queued slot in a batched decode dispatch. Arch-neutral; qwen3-moe
+/// dispatchers convert `flambeau_qwen3_moe::forward::BatchSlot` at the
+/// boundary so the trait surface stays arch-clean.
 #[derive(Debug, Clone, Copy)]
 pub struct BatchSlot {
     /// Index into the caller's `inflights` / `logits_refs` parallel array.

@@ -326,7 +326,7 @@ pub fn build_inp_per_layer_table_with_proj(
 
 /// Host-side build of `inp_per_layer_table` for the current token.
 ///
-/// Mirrors llama.cpp's `project_per_layer_inputs` for n_tokens = 1:
+/// Computes `project_per_layer_inputs` for n_tokens = 1:
 ///
 /// ```text
 /// table = dequant(per_layer_token_embd[token]) * sqrt(pe)

@@ -678,7 +678,7 @@ pub fn indexed_moe_mmvq_q5_k(
     Ok(())
 }
 
-/// 3.a — Q4_0 indexed-MoE MMVQ. Unblocks Qwen3.6-35B-A3B-Q4_0 whose
+/// Q4_0 indexed-MoE MMVQ. Unblocks Qwen3.6-35B-A3B-Q4_0 whose
 /// MoE expert weights are Q4_0 (gate+up+down in most layers). Same
 /// contract as `indexed_moe_mmvq_q8_0`, 256 threads/block with VDR=2 DP4A.
 pub fn indexed_moe_mmvq_q4_0(
@@ -792,7 +792,7 @@ pub fn indexed_moe_mmvq_q5_1(
     Ok(())
 }
 
-/// B6 / 5.a — Q4_1 indexed-MoE MMVQ. Unblocks Qwen-published
+/// Q4_1 indexed-MoE MMVQ. Unblocks Qwen-published
 /// Qwen3.6-35B-A3B-Q4_0 whose `ffn_down_exps` are Q4_1 (gate/up are Q4_0,
 /// down is Q4_1). Same contract as `indexed_moe_mmvq_q4_0`; per-block
 /// reconstruction differs (`m_x · s_y` instead of `-8 · d_x · s_y`).
@@ -831,7 +831,7 @@ pub fn indexed_moe_mmvq_q4_1(
     Ok(())
 }
 
-/// 3.b.1 — fused gate+up Q4_0 indexed-MoE MMVQ. Reads each Q8_1
+/// Fused gate+up Q4_0 indexed-MoE MMVQ. Reads each Q8_1
 /// activation word once per block and produces both gate and up outputs,
 /// halving the launch count for MoE Q4_0 decode vs calling
 /// `indexed_moe_mmvq_q4_0` twice.
@@ -874,7 +874,7 @@ pub fn indexed_moe_mmvq_q4_0_gate_up(
     Ok(())
 }
 
-/// 2.a — Q8_0 indexed-MoE MMVQ. Unblocks UD-Q8_K_XL GGUFs whose MoE
+/// Q8_0 indexed-MoE MMVQ. Unblocks UD-Q8_K_XL GGUFs whose MoE
 /// expert weights stay Q8_0 instead of the usual Q4_K/Q4_K_S. Uses VDR=2
 /// DP4A inside the inner loop (matches `mmvq_q8_0_dp4a_vdr2` pattern),
 /// 256 threads/block, 1 output row per block. A multi-row r2/r4 variant
@@ -2048,7 +2048,7 @@ pub fn indexed_moe_mmq_q3_k_down_tile8(
     Ok(())
 }
 
-/// 8.c — Q4_0 gate+up tile8 MoE MMQ sibling. Same contract as the Q4_K
+/// Q4_0 gate+up tile8 MoE MMQ sibling. Same contract as the Q4_K
 /// `indexed_moe_mmq_q4_k_gate_up_tile8` wrapper; weight dtype is Q4_0 so
 /// `n_sb_per_row` in the `MoeShape` should be set to `hidden / 32` (Q4_0
 /// block size) by the caller, not `hidden / QK_K` as for Q4_K.
@@ -2097,7 +2097,7 @@ pub fn indexed_moe_mmq_q4_0_gate_up_tile8(
     Ok(())
 }
 
-/// 8.c — Q4_0 down tile8 MoE MMQ sibling.
+/// Q4_0 down tile8 MoE MMQ sibling.
 pub fn indexed_moe_mmq_q4_0_down_tile8(
     ctx: crate::OpCtx<'_>,
     buffers: crate::MoeMmqTile8DownBuffers,
@@ -2363,8 +2363,8 @@ pub fn indexed_moe_mmq_q4_1_down_tile8(
 }
 
 /// Q4_1 gate+up tile8 MoE MMQ. Q4_0 gate+up structure with Q4_1's affine
-/// reduction `d_x · d_y · sumi + m_x · s_y` per block, mirror of the
-/// `indexed_moe_mmq_q4_1_down_tile8` sibling.
+/// reduction `d_x · d_y · sumi + m_x · s_y` per block; sibling of
+/// `indexed_moe_mmq_q4_1_down_tile8`.
 pub fn indexed_moe_mmq_q4_1_gate_up_tile8(
     ctx: crate::OpCtx<'_>,
     buffers: crate::MoeMmqTile8GateUpBuffers,
@@ -2410,7 +2410,7 @@ pub fn indexed_moe_mmq_q4_1_gate_up_tile8(
     Ok(())
 }
 
-/// 2.b — Q8_0 gate+up tile8 MoE MMQ sibling of the Q4_0 and Q4_K tile8
+/// Q8_0 gate+up tile8 MoE MMQ sibling of the Q4_0 and Q4_K tile8
 /// wrappers. Weight dtype is Q8_0 so `n_sb_per_row` in `MoeShape` is
 /// `hidden / 32` (Q8_0 block size), matching the Q4_0 convention. Same
 /// grid/block shape as Q4_0 tile8 — one wave64 per 64×8 output tile.
@@ -2459,7 +2459,7 @@ pub fn indexed_moe_mmq_q8_0_gate_up_tile8(
     Ok(())
 }
 
-/// 2.b — Q8_0 down tile8 MoE MMQ sibling.
+/// Q8_0 down tile8 MoE MMQ sibling.
 pub fn indexed_moe_mmq_q8_0_down_tile8(
     ctx: crate::OpCtx<'_>,
     buffers: crate::MoeMmqTile8DownBuffers,
@@ -2501,12 +2501,12 @@ pub fn indexed_moe_mmq_q8_0_down_tile8(
     Ok(())
 }
 
-/// 4.c: llamacpp-turbo 4-warp LDS-tiled indexed-MoE Q4_K gate+up MMQ.
+/// llamacpp-turbo 4-warp LDS-tiled indexed-MoE Q4_K gate+up MMQ.
 /// MMQ_Y=128, MMQ_X=8 (aligned with padded sort), 256 threads/block.
 /// Dual weight LDS tile (gate + up) + shared Y LDS tile with per-token
 /// indirect gather. DS4 Q8_1 activation (per-token layout).
-/// 4.d null result**: this kernel is slower than `_tile8` on Qwen3.6-35B
-/// indexed-MoE workloads (−17 to −21 % end-to-end). Root cause: the turbo LDS
+/// Null result: this kernel is slower than `_tile8` on Qwen3.6-35B
+/// indexed-MoE workloads. Root cause: the turbo LDS
 /// pattern amortises Y-LDS loads across many output cols (dense uses
 /// MMQ_X=32-64); at MMQ_X=8 the LDS overhead dominates. Opt-in via
 /// `FLAMBEAU_MOE_VARIANT=turbo`; default stays on `_tile8`.
@@ -2574,7 +2574,7 @@ pub fn indexed_moe_mmq_q4_k_gate_up_turbo(
     Ok(())
 }
 
-/// 4.c: Q4_K down sibling of `indexed_moe_mmq_q4_k_gate_up_turbo`.
+/// Q4_K down sibling of `indexed_moe_mmq_q4_k_gate_up_turbo`.
 /// Single weight matrix; activation indexed by per-pair sort; output also
 /// indexed by per-pair.
 pub fn indexed_moe_mmq_q4_k_down_turbo(
@@ -2635,11 +2635,11 @@ pub fn indexed_moe_mmq_q4_k_down_turbo(
 /// per-block-expert invariant) with Q6_K decode (raw·y - 32·Σy bias
 /// correction to avoid the byte-borrow bug). Used for UD-Q4_K_S
 /// `ffn_down_exps` layers that are Q6_K-quantised.
-/// 1.a — Q5_K down-projection MoE MMQ (tile8).
+/// Q5_K down-projection MoE MMQ (tile8).
 /// Same contract as `indexed_moe_mmq_q6_k_down_tile8` / `indexed_moe_mmq_q4_k_down_tile8`.
 /// Closes the MMVQ-at-prefill hole for Qwen3-Coder-30B-A3B-UD-Q4_K_XL
-/// (13/48 layers promote `ffn_down_exps` to Q5_K). Profiled as 31.56 %
-/// of prefill wall in 0.b; MMQ variant mirrors Q6_K fix.
+/// (13/48 layers promote `ffn_down_exps` to Q5_K). Uses the Q6_K
+/// decode fix.
 pub fn indexed_moe_mmq_q5_k_down_tile8(
     ctx: crate::OpCtx<'_>,
     buffers: crate::MoeMmqTile8DownBuffers,
@@ -3093,7 +3093,7 @@ pub fn moe_combine_no_residual_f32(
     Ok(())
 }
 
-/// 3.a.2 — `moe_combine_f16` variant that accepts two F16 residuals and
+/// `moe_combine_f16` variant that accepts two F16 residuals and
 /// sums them inline. Saves one `add_f16` launch per layer per token on the
 /// shared-expert path (`moe_residual = mid + shared_delta`).
 pub fn moe_combine_two_residuals_f16(
@@ -3313,9 +3313,9 @@ pub fn moe_sort_by_expert(
 // pair where padded slots repeat the last real pair_idx (so an 8-slot
 // per-block MMQ kernel can assume all 8 slots in its block share an expert).
 // ---------------------------------------------------------------------------
-/// 1.b — pad-to-16 sibling of `moe_sort_by_expert_padded`. Currently
+/// Pad-to-16 sibling of `moe_sort_by_expert_padded`. Currently
 /// unreachable — the tile16 MMQ kernel it was designed to feed was NULL
-/// on 35B-UD-Q4_K_S (1.b moved to `_unverified/`). Kept in case a
+/// on 35B-UD-Q4_K_S (moved to `_unverified/`). Kept in case a
 /// future tile16-class attempt with different kernel internals wants the
 /// pad-to-16 invariant; the scan_padded_offsets_16 kernel is already
 /// compiled into `moe_sort_by_expert`.

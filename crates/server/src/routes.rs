@@ -63,7 +63,7 @@ pub struct ServerState {
     pub cluster: Arc<HipCluster>,
     pub tokenizer: GgufTokenizer,
     pub chat_template: ChatTemplate,
-    /// **P2.9b-i1 (multi-slot pool)** — N pre-allocated per-request
+    /// Multi-slot pool: N pre-allocated per-request
     /// sessions sized to `FLAMBEAU_INFLIGHT_SLOTS` (default 1). A
     /// request acquires any free slot via `acquire_inflight_blocking()`
     /// (try-lock round-robin, then block on slot 0 if all busy).
@@ -75,7 +75,7 @@ pub struct ServerState {
     /// `as_pp_mut()` / `as_tp_mut()` / `as_hybrid_mut()` trait
     /// accessors.
     pub inflight_pool: Vec<Mutex<Box<dyn crate::Session>>>,
-    /// **P2.9b-i2-B (scheduler)** — request-lifetime claim flag for
+    /// Scheduler: request-lifetime claim flag for
     /// each slot. Distinct from `inflight_pool`'s mutex: the mutex
     /// guards short-term *exclusive access* to the `Inflight`; this
     /// `AtomicBool` records the *long-term ownership* of the slot
@@ -89,7 +89,7 @@ pub struct ServerState {
     /// otherwise the legacy decode path holds the mutex for the full
     /// request lifetime and this field is ignored.
     pub slot_in_use: Vec<std::sync::atomic::AtomicBool>,
-    /// **P2.9b-i2-B** — pending-decode queue. Each handler in the
+    /// Pending-decode queue. Each handler in the
     /// scheduler-aware decode loop pushes a `PendingDecode` carrying
     /// `(slot_idx, token, position, response_tx)`. The leader (the
     /// handler that wins `batched_dispatcher`) drains the queue,
@@ -98,27 +98,27 @@ pub struct ServerState {
     /// `response_tx` channels. Non-leader handlers just wait on
     /// their `rx`.
     pub batched_pending: std::sync::Mutex<Vec<PendingDecode>>,
-    /// **P2.9b-i2-B** — single-leader gate. The handler that
+    /// Single-leader gate. The handler that
     /// `try_lock`s this becomes the dispatch leader for the next
     /// batched call. Held only during dispatch (lock ⇒ drain queue
     /// ⇒ blocking_lock the relevant slots ⇒ batched forward ⇒
     /// distribute responses ⇒ unlock).
     pub batched_dispatcher: std::sync::Mutex<()>,
-    /// **#229 P2.10c** — process-local prompt prefix cache. Always
+    /// Process-local prompt prefix cache. Always
     /// constructed; methods short-circuit when `state.prefix_cache.enabled()`
     /// is false (default OFF; flip via `FLAMBEAU_PREFIX_CACHE=1`).
     /// Stores host-RAM KV snapshots keyed by chained chunk hashes;
     /// LRU-evicts under `FLAMBEAU_PREFIX_CACHE_MAX_GB` (default 2 GB).
     /// PP and TP supported; Hybrid bails on capture/restore in V1.
     pub prefix_cache: Arc<PrefixCache>,
-    /// **#229** — chunk size used by every cache entry in this server's
+    /// Chunk size used by every cache entry in this server's
     /// lifetime (snapshot of `FLAMBEAU_PREFILL_UBATCH` at boot). Cache
     /// rejects lookups with a different chunk size. Default 512.
     pub prefix_cache_chunk_tokens: usize,
-    /// **#229** — topology fingerprint stored on every cache entry.
+    /// Topology fingerprint stored on every cache entry.
     /// Defensive guard against cross-topology pollution.
     pub topology_tag: TopologyTag,
-    /// **#230 / #231** — optional embedding model for the
+    /// Optional embedding model for the
     /// `/v1/embeddings` endpoint. `None` when the server was started
     /// without `--embedding-model`; the endpoint returns 503 in that
     /// case. Wrapped in `tokio::sync::Mutex` because forward state
@@ -127,18 +127,18 @@ pub struct ServerState {
     /// 0.6B model that V1 doesn't bother with multi-slot pooling.
     pub embedding_model:
         Option<Arc<tokio::sync::Mutex<Box<dyn crate::embedding::EmbeddingHandle>>>>,
-    /// **#231 quality fix** — embedding model's own tokenizer.
+    /// Embedding model's own tokenizer.
     /// Qwen3-Embedding ships a vocab (151669) that diverges from
     /// chat-side tokenizers (151424 on Qwen3.5-9B); reusing the chat
     /// tokenizer feeds wrong token ids into the embedding model's
     /// `token_embd`. `None` mirrors `embedding_model = None`.
     pub embedding_tokenizer: Option<Arc<flambeau_quant::GgufTokenizer>>,
-    /// **#231** — HIP rank index for the embedding device, derived at
+    /// HIP rank index for the embedding device, derived at
     /// boot from `--embedding-device`. The endpoint uses
     /// `cluster.device(rank)` to get a `&HipDevice` for the forward
     /// call. `None` mirrors `embedding_model = None`.
     pub embedding_rank: Option<usize>,
-    /// **#232 P2.12** — admission-control counter. Incremented at
+    /// Admission-control counter. Incremented at
     /// request entry, decremented at response. When this exceeds
     /// `inflight_slots + max_queue_depth`, new requests get 503 +
     /// `Retry-After: 2` instead of queueing on the slot mutex.
@@ -148,7 +148,7 @@ pub struct ServerState {
     /// host. The counter is a cheap atomic; `AdmissionGuard` makes
     /// the decrement RAII-safe across early returns.
     pub in_flight: std::sync::atomic::AtomicUsize,
-    /// **#232** — max queued requests beyond the inflight slot pool.
+    /// Max queued requests beyond the inflight slot pool.
     /// `0` disables the check (legacy behaviour). Default 16 means
     /// `inflight_slots + 16` admitted requests at any time; further
     /// requests get 503. Sized so the queue empties in a few seconds
@@ -181,14 +181,14 @@ pub struct ServerState {
     /// template even though the arch tag says `qwen35moe`. Honoured
     /// when a request omits `tool_call_format` or sets it to "auto".
     pub tool_call_format_default: crate::tool_call_parser::ToolCallFormat,
-    /// **#235 P3.15** — `true` when the chat template carries the
+    /// `true` when the chat template carries the
     /// `enable_thinking` Jinja variable (Qwen3.6 reasoning mode).
     /// Surfaced as the `"thinking"` capability in `/v1/models` so
     /// clients know whether to expose the request-side
-    /// `enable_thinking` flag (#233). Detected once at boot by
+    /// `enable_thinking` flag. Detected once at boot by
     /// substring-matching the raw template source.
     pub supports_thinking: bool,
-    /// **#235 P3.15** — human-readable quantization label derived
+    /// Human-readable quantization label derived
     /// from the GGUF `general.file_type` integer (`"Q4_0"`,
     /// `"Q4_K_M"`, `"F16"`, etc). `None` when the GGUF lacks the
     /// field. Surfaced in `/v1/models`.
@@ -199,7 +199,7 @@ pub struct ServerState {
     /// GGUF doesn't carry stay `None`; the OpenAI-shaped fallback in
     /// `from_parts` then takes effect.
     pub model_defaults: crate::state::ModelDefaults,
-    /// **P0.5** — fallback system prompt injected when the request
+    /// Fallback system prompt injected when the request
     /// carries no `role: "system"` message. Sourced at boot from
     /// `FLAMBEAU_DEFAULT_SYSTEM` (env), or `None` if unset. Some clients
     /// (Aider, plain `curl`, the embedded UI) routinely send only a
@@ -212,7 +212,7 @@ pub struct ServerState {
 
 pub type SharedState = Arc<ServerState>;
 
-/// **P2.9b-i2-B** — one queued decode request awaiting batched dispatch.
+/// One queued decode request awaiting batched dispatch.
 /// Pushed by the scheduler-aware decode loop (`decode_via_scheduler`)
 /// and drained by the leader (the first handler to acquire
 /// `batched_dispatcher`).
@@ -223,7 +223,7 @@ pub struct PendingDecode {
     pub response: std::sync::mpsc::Sender<anyhow::Result<Vec<f32>>>,
 }
 
-/// **#232 P2.12** — RAII guard for admission control. Holding one
+/// RAII guard for admission control. Holding one
 /// of these means the request is counted against
 /// `ServerState.in_flight`; dropping it decrements the counter on
 /// every exit path (success, error, panic-unwind).
@@ -243,7 +243,7 @@ impl Drop for AdmissionGuard {
     }
 }
 
-/// **#236 P0.1b** — strip the chat-template-emitted assistant
+/// Strip the chat-template-emitted assistant
 /// terminator from a rendered prompt so the model continues the
 /// assistant prefill content rather than seeing a closed turn.
 /// Qwen-family templates emit `<|im_end|>` followed by a newline at
@@ -462,7 +462,7 @@ impl ServerState {
         );
     }
 
-    /// **#232 P2.12** — try to admit a new request. Bumps `in_flight`
+    /// Try to admit a new request. Bumps `in_flight`
     /// if under cap (`inflight_slots + max_queue_depth`); returns
     /// `None` when the cap is hit (caller should respond with 503).
     /// `max_queue_depth = 0` disables admission control.
@@ -492,7 +492,7 @@ impl ServerState {
         })
     }
 
-    /// **P2.9b-i1** — acquire an idle inflight slot, blocking until one
+    /// Acquire an idle inflight slot, blocking until one
     /// is available. Iterates the pool with `try_lock` first; if every
     /// slot is busy, blocks on slot 0 (head-of-line, but bounded by
     /// the longest in-flight decode). The returned guard ties the slot
@@ -514,7 +514,7 @@ impl ServerState {
         (0, g)
     }
 
-    /// **P2.9b-i2-B** — claim a slot for the lifetime of a request via
+    /// Claim a slot for the lifetime of a request via
     /// `slot_in_use[idx]` CAS. Distinct from `acquire_inflight_blocking`,
     /// which holds the slot's mutex; the claim records *long-term
     /// ownership* of the slot across the full request, while the
@@ -536,14 +536,14 @@ impl ServerState {
         }
     }
 
-    /// **P2.9b-i2-B** — release a request-lifetime slot claim. Pair
+    /// Release a request-lifetime slot claim. Pair
     /// with [`claim_slot_blocking`].
     pub fn release_slot(&self, idx: usize) {
         self.model.release_paged_slot(idx);
         self.slot_in_use[idx].store(false, std::sync::atomic::Ordering::Release);
     }
 
-    /// **P2.9b-i2-B** — push one decode request into the batched
+    /// Push one decode request into the batched
     /// queue and wait for the leader to dispatch.
     /// Caller must NOT be holding `inflight_pool[slot_idx]`'s mutex —
     /// the leader needs to `blocking_lock` it during dispatch.
@@ -609,7 +609,7 @@ impl ServerState {
         }
         tr!("entry n_others_active={}", n_others_active);
         if n_others_active == 0 {
-            // #16 race-safe fast-path: hold prefill_serialiser across
+            // Race-safe fast-path: hold prefill_serialiser across
             // decode_logits so a concurrent prefill on a sibling slot
             // can't race shared HipCluster scratch mid-decode. Cheap
             // (microseconds) on the fast-path; the lock is uncontended
@@ -642,7 +642,7 @@ impl ServerState {
 
         // Try to become the dispatch leader for this round. Stored in an
         // Option so we can deterministically drop it *while holding*
-        // `batched_pending` to close the post-dispatch race (see #276 fix).
+        // `batched_pending` to close the post-dispatch race.
         let mut dispatch_lock_opt: Option<_> = self.batched_dispatcher.try_lock().ok();
         tr!("LEADER try_lock={}", dispatch_lock_opt.is_some());
         if dispatch_lock_opt.is_some() {
@@ -663,7 +663,7 @@ impl ServerState {
                 ));
             }
 
-            // **#276 fix** — drain-dispatch-loop with atomic empty-drop.
+            // Drain-dispatch-loop with atomic empty-drop.
             // Without this restructure, late-arriving pending entries
             // could be stranded by a two-step race:
             // 1. Leader L drains queue (perhaps empty). Releases
@@ -729,7 +729,7 @@ impl ServerState {
         Ok(())
     }
 
-    /// **P2.9b-i2-B** — leader's dispatch step. Locks each referenced
+    /// Leader's dispatch step. Locks each referenced
     /// slot's `Inflight`, builds the `BatchSlot` list, runs
     /// `forward_decode_batched_pp`, and sends per-slot logits via
     /// the response senders.

@@ -1,5 +1,5 @@
 // indexed_moe_mmvq_q4_0 — Q4_0 MMVQ with per-token expert routing.
-// Sibling of `indexed_moe_mmvq_q8_0.cu` (2.a); unblocks
+// Sibling of `indexed_moe_mmvq_q8_0.cu`; unblocks
 // Qwen3.6-35B-A3B-Q4_0 where MoE expert weights are Q4_0. Inner arithmetic
 // is byte-identical to `mmvq_q4_0.cu` — same `(q - 8) · y = q · y - 8 · s_y`
 // identity, same nibble-pair DP4A.

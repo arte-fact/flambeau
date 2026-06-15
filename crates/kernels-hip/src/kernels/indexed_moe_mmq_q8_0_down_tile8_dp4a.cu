@@ -1,5 +1,5 @@
-// indexed_moe_mmq_q8_0_down_tile8_dp4a — 2.b down-projection MoE MMQ
-// for Q8_0. Sibling of the gate_up kernel and structural mirror of 8.c's
+// indexed_moe_mmq_q8_0_down_tile8_dp4a — down-projection MoE MMQ
+// for Q8_0. Sibling of the gate_up kernel, same structure as
 // `indexed_moe_mmq_q4_0_down_tile8_dp4a.cu`.
 // Down-projection specifics (same as Q4_K/Q4_0 tile8 down):
 // - one weight tensor (ffn_down_exps), not fused

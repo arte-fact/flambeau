@@ -1,8 +1,6 @@
-// mmq_q4_0_wave64 — 8.a wave64 MMQ for Q4_0 × Q8_1 activation.
-// head-to-head bench showed Qwen3.6-35B-A3B-Q4_0 prefill at 12% of
-// llama.cpp (132 vs 1118 tok/s) because 3 shipped Q4_0 MMVQ only and
-// `qmatmul()` falls back to row-by-row at L>1. Closing that gap needs a
-// proper MMQ tile. This kernel is the direct Q4_0 sibling of
+// mmq_q4_0_wave64 — wave64 MMQ for Q4_0 × Q8_1 activation.
+// With Q4_0 MMVQ only, `qmatmul()` falls back to row-by-row at L>1;
+// this kernel provides a proper MMQ tile. Direct Q4_0 sibling of
 // `mmq_q4_1_wave64.cu` — identical structure with the simpler no-min
 // bias-correction identity (3 MMVQ already uses this form):
 // dot = Σ_i (d · (q_i - 8)) · d_y · q8_i

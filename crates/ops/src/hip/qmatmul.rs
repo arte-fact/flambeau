@@ -49,7 +49,7 @@ pub fn qmatmul(
     // M (including L>1 prefill) routes through per-row MMVQ.
     if dtype_weight == QDtype::F16 {
         let _ = act_q8_1_mmq;
-        // 9.a — tile-M kernel at m >= 8: each block handles 64 output
+        // Tile-M kernel at m >= 8: each block handles 64 output
         // rows × 8 activation rows (512 outputs/block) with weight HBM
         // read once per K-sub-block per thread instead of per activation
         // row. 5 multi-row kept for m < 8 where tile partial-fill
@@ -1032,7 +1032,7 @@ pub fn mmvq_q8_0_gate_up(
     Ok(())
 }
 
-/// Fused gate+up Q5_K dense MMVQ. Mirror of [`mmvq_q8_0_gate_up`]: reads
+/// Fused gate+up Q5_K dense MMVQ. Like [`mmvq_q8_0_gate_up`], reads
 /// the Q8_1 activation once per inner-loop block and computes both dot
 /// products. Used by the qwen3.5/3.6 shared-expert FFN path when
 /// `ffn_gate_shexp` and `ffn_up_shexp` are both Q5_K.
@@ -1095,14 +1095,14 @@ pub fn mmvq(
             k,
         );
     }
-    // 3.a — Q4_0 / Q5_0 bypass the dispatch table. Unblock Qwen3.6-35B
+    // Q4_0 / Q5_0 bypass the dispatch table. Unblock Qwen3.6-35B
     // -A3B-Q4_0 which uses Q4_0 for attn/FFN and Q5_0 for shared-expert FFN.
     // Single productionised kernel per dtype, no shape-dependent selection.
-    // 8.d NULL: tried the r2 half-warp-per-row variant (mmvq_q4_0_r2.cu,
+    // NULL: tried the r2 half-warp-per-row variant (mmvq_q4_0_r2.cu,
     // moved to _unverified/) — it drops the DP4A advantage of the single-row
-    // kernel (F32 FMA per lane vs DP4A 4×INT8 per lane). Measured −21 %
+    // kernel (F32 FMA per lane vs DP4A 4×INT8 per lane), with a measured
     // decode regression AND a logit re-accumulation-order argmax shift on
-    // seed 9419. The candle P29 r2 pattern wins on K-quants (sub-block
+    // seed 9419. The candle r2 pattern wins on K-quants (sub-block
     // scales block DP4A) but strictly loses on Q4_0's flat-block DP4A path.
     assert_eq!(k % 32, 0, "MMVQ requires k % 32 == 0");
     let n_blocks_q32 = k / 32;
@@ -1166,8 +1166,8 @@ pub fn mmvq(
 /// at ±F16_MAX. Equivalent shape to [`mmvq`] but skips the `mmvq_f32`
 /// scratch + the separate `cast_f32_to_f16` launch. Kernel bodies are
 /// shared with the F32 variants via templated `__device__` thunks in
-/// `mmvq_q{4_0, 4_1, 8_0}*.cu`; this entry point is opt-in per consumer
-/// (#120). Caller must ensure `dst_f16` is sized `n_rows × sizeof(fp16)`.
+/// `mmvq_q{4_0, 4_1, 8_0}*.cu`; this entry point is opt-in per consumer.
+/// Caller must ensure `dst_f16` is sized `n_rows × sizeof(fp16)`.
 ///
 /// Supported dtypes: `Q4_0`, `Q4_1`, `Q8_0`. Other dtypes bail —
 /// extending the set is mechanical (add the templated thunk in the
@@ -1356,7 +1356,7 @@ pub fn mmvq_f16_direct(
 /// 1 for traditional single-row kernels, 2 for r2 K-quant multi-row.
 /// Grid = `ceil(n_rows / rows_per_block)`. `units_per_row` is the
 /// caller-defined inner-loop count (n_blocks for 32-element-block
-/// dtypes, n_superblocks for K-quants). #120 / #120-followup.
+/// dtypes, n_superblocks for K-quants).
 /// Module + kernel-entry pair for direct kernel launches that don't
 /// flow through `Recipe`. File-private; if a third launcher needs this
 /// shape outside `qmatmul.rs`, lift to `sig.rs`.
@@ -1403,7 +1403,7 @@ pub fn mmvq_simple_launch(
     Ok(())
 }
 
-/// 9.a — tile-M F16 MMQ. 64 threads/block = wave64 × 1 row each, MMQ_Y
+/// Tile-M F16 MMQ. 64 threads/block = wave64 × 1 row each, MMQ_Y
 /// = 64 output rows per block, MMQ_X = 8 activation rows per block. Each
 /// thread owns one weight row's dot against all 8 activation rows; weight
 /// is loaded into registers once per K-sub-block and reused 8×. The
@@ -1451,7 +1451,7 @@ fn mmq_f16_tile_launch(
     Ok(())
 }
 
-/// 5.a — multi-row F16 MMQ. Same kernel math as mmvq_f16_launch, but
+/// Multi-row F16 MMQ. Same kernel math as mmvq_f16_launch, but
 /// picks up n_tokens via grid.y. Stem `mmq_f16_q8_1`, block = 256, grid =
 /// (n_rows, n_tokens).
 fn mmq_f16_launch(
@@ -2175,7 +2175,7 @@ impl Recipe {
                 entry: "flambeau_mmq_q8_0_wave64_tile32_q8_1",
                 threads: 64,
                 rows_per_block: 0,
-                // 1.d — TILE_N=32 experimental.
+                // TILE_N=32 experimental.
                 mmq_tile: (64, 32),
             },
             "qmatmul_q8_0_mmq_wave64_tile16_gfx906" => Self {
@@ -2199,7 +2199,7 @@ impl Recipe {
                 // and dynamic LDS bytes. These MUST match mmq_q4_1_4warp_lds.cu.
                 mmq_tile: (128, 64),
             },
-            // 3.a: wave64 MMQ for Q4_1. Same shape family as Q8_0/K-quant
+            // wave64 MMQ for Q4_1. Same shape family as Q8_0/K-quant
             // wave64 kernels — MMQ_Y=64, TILE_N=8, 64 threads, DP4A inner.
             "qmatmul_q4_1_mmq_wave64_gfx906" => Self {
                 kind: RecipeKind::MmqWave64,
@@ -2209,11 +2209,9 @@ impl Recipe {
                 rows_per_block: 0,
                 mmq_tile: (64, 8),
             },
-            // 9.e: TILE_N=16 port from mmq_q8_0_wave64_tile16. Each
+            // TILE_N=16 port from mmq_q8_0_wave64_tile16. Each
             // decoded Q4_1 weight tile (8 v[] entries) reused across 16
             // output cols instead of 8 → halves weight HBM bandwidth.
-            // Targets the 40.8 % of 9B prefill wall-time the 4warp_lds
-            // variant was consuming per 9.a audit.
             "qmatmul_q4_1_mmq_wave64_tile16_gfx906" => Self {
                 kind: RecipeKind::MmqWave64,
                 stem: "mmq_q4_1_wave64_tile16",
@@ -2222,7 +2220,7 @@ impl Recipe {
                 rows_per_block: 0,
                 mmq_tile: (64, 16),
             },
-            // 8.a: wave64 MMQ for Q4_0. Closes the 8.5× prefill gap to
+            // wave64 MMQ for Q4_0. Closes the prefill gap to
             // llama.cpp on Qwen3.6-35B-A3B-Q4_0 at dense + MoE shapes.
             "qmatmul_q4_0_mmq_wave64_gfx906" => Self {
                 kind: RecipeKind::MmqWave64,
@@ -2244,9 +2242,9 @@ impl Recipe {
                 rows_per_block: 0,
                 mmq_tile: (128, 64),
             },
-            // 0.a: wave64 MMQ for Q5_0. Same tile shape + launch as Q4_0;
-            // inner loop adds the 5th-bit `16·bit·y` DP4A term (3's
-            // mmvq_q5_0 pattern).
+            // wave64 MMQ for Q5_0. Same tile shape + launch as Q4_0;
+            // inner loop adds the 5th-bit `16·bit·y` DP4A term
+            // (mmvq_q5_0 pattern).
             "qmatmul_q5_0_mmq_wave64_gfx906" => Self {
                 kind: RecipeKind::MmqWave64,
                 stem: "mmq_q5_0_wave64",
@@ -2271,7 +2269,7 @@ impl Recipe {
                 rows_per_block: 0,
                 mmq_tile: (16, 8),
             },
-            // 4.b kernel, wired (2026-04-27): llamacpp-turbo
+            // llamacpp-turbo
             // 4-warp LDS-tiled Q4_K MMQ with DS4 Q8_1 activation. MMQ_Y=128,
             // MMQ_X=16, NWARPS=4 → 256 threads per (64, 4, 1) block. Promoted
             // to default at m≥128 (Q4_K wave64 owns m=32..127 below). Dynamic

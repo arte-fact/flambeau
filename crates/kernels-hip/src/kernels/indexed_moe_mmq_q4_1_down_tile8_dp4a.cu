@@ -1,6 +1,6 @@
 // indexed_moe_mmq_q4_1_down_tile8_dp4a — down-projection
 // MoE MMQ for Q4_1 weights × Q8_1 activation.
-// Direct port of `indexed_moe_mmq_q4_0_down_tile8_dp4a.cu` (8.c) with
+// Direct port of `indexed_moe_mmq_q4_0_down_tile8_dp4a.cu` with
 // the Q4_1 reconstruction: `y_real = q · d + m`. The dot product per
 // block becomes `d_x · d_y · sumi + m_x · s_y` instead of Q4_0's bias-
 // correction `d_x · (d_y · sumi - 8 · s_y)`.

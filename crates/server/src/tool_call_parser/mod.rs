@@ -1,16 +1,15 @@
 //! Tool-call parser trait + format-dispatch.
 //! The parser consumes the **decoded text stream** (what the tokenizer
 //! produced from sampled tokens) and emits a stream of structured events
-//! that the chat-completions handler (T2.5) assembles into
+//! that the chat-completions handler assembles into
 //! `tool_calls[]` — for the non-streaming path — and the SSE producer
-//! (T3) translates into `delta.tool_calls[]` chunks.
-//! The core design goal (see ROADMAP-V2-TOOL-CALLING-AND-MCP §T2): the
+//! translates into `delta.tool_calls[]` chunks.
+//! The core design goal: the
 //! state machine's shape mirrors XGrammar's "structural tag" primitive —
 //! `Outside` (free text) vs `Inside { schema }` (constrained JSON body).
-//! Today we run it post-hoc over the decoded text; under T5, the same
-//! states drive an `llguidance` mask generator that constrains logits
-//! directly. Keeping the shape compatible from day one avoids a rewrite
-//! when T5 lands.
+//! Today we run it post-hoc over the decoded text; the same
+//! states can drive an `llguidance` mask generator that constrains logits
+//! directly. Keeping the shape compatible from day one avoids a rewrite.
 //! Two formats exist in the Qwen family and we expose a trait so the
 //! format-specific logic is one file each:
 //! - **Hermes-JSON** (`hermes.rs`): `<tool_call>\n{...JSON...}\n</tool_call>`.
@@ -18,7 +17,7 @@
 //!   chat template.
 //! - **Qwen3-Coder XML** (`qwen3_coder.rs`): nested XML with
 //!   `<function=name>…<parameter=k>v</parameter>…</function>` inside a
-//!   `<tool_call>`. Qwen3-Coder family and — per the T1.3 parity-cert
+//!   `<tool_call>`. Qwen3-Coder family and — per the parity-cert
 //!   finding — the Unsloth "UD" Qwen3.6 quants on this rig.
 //!   Both parsers conform to [`ToolCallParser`]. Selection at request
 //!   time goes through [`dispatcher`], which honours the `tool_call_format`
@@ -27,8 +26,7 @@
 //!   it.
 //!   The `arguments` field emitted by [`ParserEvent::ToolCallArgumentsDelta`]
 //!   / collected across the turn is always a JSON-encoded *string* — never
-//!   an object — so the server wire format stays stable. This guards
-//!   llama.cpp #20198.
+//!   an object — so the server wire format stays stable.
 
 use anyhow::{anyhow, Result};
 
@@ -73,8 +71,8 @@ impl ParserEvent {
     /// Concatenate adjacent text-like events (TextDelta+TextDelta,
     /// ThinkDelta+ThinkDelta, ArgumentsDelta for same index +
     /// ArgumentsDelta). Makes events comparable regardless of how a
-    /// stream was chunked. Used by fixture tests (T2.4) and by the
-    /// non-streaming assembler (T2.5).
+    /// stream was chunked. Used by fixture tests and by the
+    /// non-streaming assembler.
     pub fn coalesce(events: Vec<ParserEvent>) -> Vec<ParserEvent> {
         let mut out: Vec<ParserEvent> = Vec::with_capacity(events.len());
         for e in events {
@@ -98,11 +96,11 @@ impl ParserEvent {
     }
 }
 
-/// T2.5 assembler: walk a (coalesced) parser-event stream and split it
+/// Assembler: walk a (coalesced) parser-event stream and split it
 /// into the assistant `content` string and the `tool_calls[]` list that
 /// go into the OpenAI response body.
 /// - `TextDelta` chunks concatenate into `content`.
-/// - `ThinkDelta` is discarded today (reasoning_content is V3 scope).
+/// - `ThinkDelta` is discarded today (reasoning_content is future scope).
 /// - Each `ToolCallOpen` + its `ToolCallArgumentsDelta`s + matching
 ///   `ToolCallClose` build one [`crate::api::ToolCall`].
 /// - Close events whose matching Open never fired still produce a
@@ -152,7 +150,7 @@ pub fn split_events(events: Vec<ParserEvent>) -> (String, Vec<crate::api::ToolCa
 /// Implementations must be deterministic: feeding the same bytes split
 /// into different chunks (e.g. `push("<tool_call>\n")` vs
 /// `push("<tool_"); push("call>\n");`) must produce the same total
-/// event stream. The T2.4 fixture corpus exercises this invariant via
+/// event stream. The fixture corpus exercises this invariant via
 /// randomised chunk splits.
 /// Malformed input is NEVER a panic. Garbage JSON in a tool-call body,
 /// a missing `</tool_call>`, or a `<tool_call>` inside a `<think>`
@@ -492,7 +490,7 @@ mod tests {
         assert_eq!(detect_format_from_template(tpl), ToolCallFormat::Hermes);
     }
 
-    // ---- T2.5: split_events ----
+    // ---- split_events ----
 
     #[test]
     fn split_events_pure_text() {
@@ -659,7 +657,7 @@ mod fuzz {
 
     #[test]
     fn arguments_is_always_a_json_string() {
-        // llama.cpp #20198: `arguments` must be a JSON-encoded STRING
+        // `arguments` must be a JSON-encoded STRING
         // that itself parses as JSON — never an object on the wire.
         for (fmt, input) in CASES {
             let (_c, calls) = run_split(fmt, input);

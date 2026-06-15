@@ -1,4 +1,4 @@
-// indexed_moe_mmq_q4_0_down_tile8_dp4a — 8.c down-projection MoE MMQ
+// indexed_moe_mmq_q4_0_down_tile8_dp4a — down-projection MoE MMQ
 // for Q4_0. Same tile8 structure as the gate+up sibling, but:
 // - one weight tensor (`ffn_down_exps`, not fused)
 // - activation is per-PAIR: `y[pair_idx, :]` indexed directly by sorted_pair_idx

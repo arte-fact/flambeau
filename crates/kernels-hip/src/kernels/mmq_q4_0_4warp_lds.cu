@@ -1,5 +1,5 @@
 // mmq_q4_0_4warp_lds — 4-warp LDS-tiled MMQ for Q4_0 × Q8_1_MMQ.
-// Direct sibling of `mmq_q4_1_4warp_lds.cu`. The 8.a single-warp wave64
+// Direct sibling of `mmq_q4_1_4warp_lds.cu`. The single-warp wave64
 // MMQ for Q4_0 (mmq_q4_0_wave64) saturates at small-M (35B-A3B-Q4_0 MoE)
 // but loses 2.5× to Q4_1's 4warp_lds at dense prefill (V1 bench matrix
 // 27B-Q4_0 = 73 tok/s pp4 vs 27B-Q4_1 = 188 tok/s pp4). The dense path
@@ -188,7 +188,7 @@ static __device__ __forceinline__ void vec_dot_q4_0_q8_1_dp4a(
     }
 }
 
-// Main impl — line-for-line mirror of Q4_1 4warp_lds with Q4_0 substitutions.
+// Main impl — same structure as Q4_1 4warp_lds with Q4_0 substitutions.
 template <int mmq_x, bool need_check>
 static __device__ void mul_mat_q4_0_4warp_impl(
     const void* __restrict__ vx,

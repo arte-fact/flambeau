@@ -744,7 +744,7 @@ fn swa_prefill_flash_tile_window_4() {
 }
 
 /// flash_tile prefill with window=0 must produce output bit-equivalent
-/// to the pre-#15 baseline (regression guard for the kernel change).
+/// to the pre-softcap baseline (regression guard for the kernel change).
 #[test]
 fn flash_tile_window_zero_matches_oracle() {
     let Some(dev) = dev_or_skip() else {

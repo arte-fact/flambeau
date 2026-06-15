@@ -1,4 +1,4 @@
-//! 1.b — F16 weight × Q8_1 activation MMVQ correctness sweep.
+//! F16 weight × Q8_1 activation MMVQ correctness sweep.
 //! Unsloth's UD-Q8_K_XL GGUFs reserve F16 for i-matrix-flagged layers. Sweep
 //! validates `flambeau_mmvq_f16_q8_1` against an F32 reference that
 //! dequantises the Q8_1 activation back to F32, multiplies in F32 with the
@@ -36,7 +36,7 @@ const SHAPES: &[(usize, usize)] = &[
     (248320, 5120), // Qwen3.6-27B LM head / embeddings (F16 in UD)
 ];
 
-/// 9.a — tile-M variant sweep: exercises `flambeau_mmq_f16_tile_q8_1`
+/// tile-M variant sweep: exercises `flambeau_mmq_f16_tile_q8_1`
 /// at `n_tokens > 1` (covers MMQ_X=8 tile-fit + under-fill partial tiles)
 /// and compares each row to the single-row F32 reference.
 pub fn run_mmq_tile_sweep(repo_root: &Path) -> Result<Cert> {
@@ -184,7 +184,7 @@ fn run_mmq_tile_shape(
     Ok((got, reference))
 }
 
-/// 5.a — multi-row variant sweep: exercises `flambeau_mmq_f16_q8_1` at
+/// multi-row variant sweep: exercises `flambeau_mmq_f16_q8_1` at
 /// `n_tokens > 1` and compares each row to the single-row F32 reference.
 pub fn run_mmq_sweep(repo_root: &Path) -> Result<Cert> {
     if device_count().context("hipGetDeviceCount")? < 1 {

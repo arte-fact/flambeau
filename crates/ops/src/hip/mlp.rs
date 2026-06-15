@@ -67,7 +67,7 @@ pub fn swiglu_f32(
     Ok(())
 }
 
-/// 3.b.2 — fused `y_f16[i] = (fp16)(silu(a[i]) * b[i])`. Replaces the
+/// Fused `y_f16[i] = (fp16)(silu(a[i]) * b[i])`. Replaces the
 /// swiglu_f32 + cast_f32_f16 pair on MoE activation paths.
 pub fn swiglu_f32_to_f16(
     reg: &OpsRegistry,

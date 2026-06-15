@@ -144,7 +144,7 @@ pub trait Ops {
     /// (saturating at ±65504). Skips the F32 scratch + `cast_f32_to_f16`
     /// two-step path for consumers whose downstream kernel expects F16
     /// (e.g. K projection feeding `rmsnorm_f16`). Supports Q4_0 / Q4_1
-    /// / Q8_0 today; other dtypes bail. #120.
+    /// / Q8_0 today; other dtypes bail.
     fn mmvq_f16_direct(
         &self,
         buf: crate::MmvqBuffers,

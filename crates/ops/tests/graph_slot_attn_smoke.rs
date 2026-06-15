@@ -1,5 +1,5 @@
-//! 6.a-i4 — parity test for `attention_prefill_f16_slots` under
-//! `HipGraphExec` capture + `set_slot` update.
+//! Parity test for `attention_prefill_f16_slots` under `HipGraphExec`
+//! capture + `set_slot` update.
 //!
 //! Plan:
 //! 1. Run `attention_prefill_f16` uncaptured at (n_k_tokens=N_K_FINAL,

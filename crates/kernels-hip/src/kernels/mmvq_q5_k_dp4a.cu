@@ -5,7 +5,7 @@
 // loop, warp + cross-warp shfl reduce).
 //
 // Why this exists: the prior Q5_K kernels (`mmvq_q5_k`, `mmvq_q5_k_r2`) do
-// scalar per-element FP32 multiplies — ~3× slower per call than llama.cpp's
+// scalar per-element FP32 multiplies, slower per call than the
 // dp4a-based path. On Qwen3.6-27B-Q4_0 PP4 the rocprofv3 trace showed
 // `flambeau_mmvq_q5_k_r2_q8_1` at 268 µs/call × 2976 calls = 798 ms (24% of
 // total kernel time), vs llama.cpp's generic `mul_mat_vec_q` at ~91 µs for

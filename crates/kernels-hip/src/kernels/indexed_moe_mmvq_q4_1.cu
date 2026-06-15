@@ -1,5 +1,5 @@
 // indexed_moe_mmvq_q4_1 — Q4_1 MMVQ with per-token expert routing.
-// B6 / 5.a — unblocks Qwen-published Qwen3.6-35B-A3B-Q4_0 whose
+// Unblocks Qwen-published Qwen3.6-35B-A3B-Q4_0 whose
 // `ffn_down_exps` are Q4_1 (gate/up are Q4_0; down is Q4_1 because affine
 // is friendlier to the down direction's wider dynamic range, a common
 // quant-by-tensor-class choice).
