@@ -15,8 +15,9 @@
   #include <cuda_runtime.h>
   #include <cuda_fp16.h>
   typedef __half fb_fp16_t;
-  // CUDA removed the non-sync warp shuffles (deprecated CUDA 9, gone by 13).
-  // Shared algorithmic headers use the bare `__shfl_xor(var, mask, width)`
+  // The non-sync warp shuffles are deprecated (CUDA 9.0) and unsupported on
+  // sm_70+ since CUDA 10.1 (PTX 6.4). Shared algorithmic headers use the bare
+  // `__shfl_xor(var, mask, width)`
   // form; map it to the sync version with a full-warp mask (kernels launch
   // warp-aligned, so every lane participates).
   #ifndef __shfl_xor
