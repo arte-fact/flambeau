@@ -387,3 +387,80 @@ layer is itself a non-trivial mechanical sweep. This is a dedicated multi-hour
 session with full context budget, not an end-of-session continuation. Banked so
 far: A2.1 (loaders) + C1–C3 (AR seam, live-gated). The alloc-layer→engine
 cascade remains, now correctly sized.
+
+---
+
+## C4 — peer-copy / stage-handoff seam (the last Track-A blocker) — 2026-06-12
+
+A2.4 finalized the forward **execution** layer (composites + `CoreState<B>` +
+`TopologyHooks<B>`, commits `8bfc8bc`→`9d822e1`, pp2tp2 byte-identical). The
+engine (`ForwardEngine` / `StageHooks`) deliberately stayed `HipBackend`-pinned
+because `ForwardEngine<B>` is **blocked on a missing peer-copy seam** — exactly
+analogous to how A2.4's AR genericization was blocked on the AR seam until
+C1–C3. C4 builds that seam, mirroring C1–C3's shape.
+
+### Audit (file-grounded, branch `feature/cuda-decouple`)
+
+The PP/Hybrid stage handoff bottoms out in HIP P2P with no seam:
+- **`Device`-seam gap.** The peer-copy primitives are HIP-**inherent** methods,
+  NOT on the `core::Device` trait: `HipDevice::bind` (`backend-hip/device.rs:1029`),
+  `memcpy_peer_async` (`:1210`), `memcpy_peer_in_async` (`:1251`). They resolve
+  today only because `B = HipBackend`. These are precisely the `bind()` + "peer
+  copy" seam rows the plan already lists (§"The seam", lines 84–85) — the only
+  A1 seams never lifted.
+- **`PeerSlot`** (`forward/src/runtime/ar.rs:823`) holds
+  `send_done: Mutex<Option<HipEvent>>` + `consumer_device: Option<Arc<HipDevice>>`;
+  constructors `new_peer_edge`/`new_peer_edge_prealloc` (`:869`,`:888`) call
+  `HipDevice::new`.
+- **`StageHooks`** (`engine.rs:263`) methods take `&mut CoreState<'_>` (HipBackend);
+  `PpStage`/`HybStage` (`:301`,`:471`) borrow `&PeerSlot`, and the bodies call
+  `HipEvent::new`, `device.memcpy_peer_async`, `device.bind`.
+- The `Cluster` seam (A1, `runtime/cluster.rs`) already covers the peer matrix
+  (`peer_access_full()`); peer-access *authorization* stays in `HipCluster::new`
+  (the construction boundary). C4 does **not** touch `Cluster`.
+
+### Slices (bottom-up, green per slice; mirrors C1–C3)
+
+- **C4.1 — extend the `Device` seam.** Add `bind(&self)`,
+  `memcpy_peer_async(&self, stream, dst, dst_dev_id, src, bytes)`, and
+  `memcpy_peer_in_async(...)` to `core::Device`; implement on `HipDevice` by
+  delegating to the existing inherent methods (re-home, not rewrite — the A1
+  pattern). Net behavior: zero. The AR DtoD path (`ar.rs:577`
+  `device.memcpy_peer_in_async`) and `PpStage::peer_send` keep calling the same
+  code, now via the trait. Gate: build/clippy `--features hip` + HIP unit tests
+  + forward parity/synth.
+- **C4.2 — genericize `PeerSlot<D: Device = HipDevice>`.**
+  `send_done: Mutex<Option<D::Event>>`, `consumer_device: Option<Arc<D>>`
+  (`PeerDeviceBuffer` is pure `DevicePtr`+`bytes`, unchanged). The constructors
+  stop calling `HipDevice::new`: take a caller-supplied `Arc<D>` (orchestrate.rs
+  already owns the cluster's devices) — pushes device construction to the
+  orchestration boundary (rule 12). Default `= HipDevice` keeps callers green
+  (de-atomization trick). Gate: build + parity.
+- **C4.3 — genericize `StageHooks<B: Backend = HipBackend>` + `PpStage`/`HybStage`
+  over `B`.** Methods take `&mut CoreState<'_, B>`; the stage structs hold
+  `&'a PeerSlot<B::Device>`; bodies swap `HipEvent::new(id)` → `core.device.new_event()`
+  and use the C4.1 trait methods. `SoloStage` impls `StageHooks<B>` (peer_* are
+  bails — trivially generic). **AR/handoff-adjacent → live pp2tp2 gate** (pp2tp2
+  is PP×TP, so HybStage peer-copy + TP AR both fire): one `.probe/c3_gate.py`
+  run, qwen3.6 `cb529e9c…` / gemma4 `805a6178…` (`PORT=18080`).
+- **C4.4 — `ForwardEngine<'a, B, H: TopologyHooks<B>, S: StageHooks<B>>` falls
+  out.** `core: CoreState<'a, B>`; `build`/the 4 `new` impls take
+  `&B::Device`/`&B::Stream`/`&B::Registry`; `ForwardCtx for ForwardEngine` is
+  mechanical (composites already infer `B`). `workers.rs` pins `B = HipBackend`
+  at per-rank construction; `orchestrate.rs` constructs `HipCluster` and feeds
+  `Arc<HipDevice>` into the now-generic `new_peer_edge`. Gate: full forward
+  suite + final pp2tp2 byte-identical.
+
+### After C4
+
+`ForwardEngine<B>` is generic; the only `Hip*` left in `flambeau-forward` is the
+deliberate **construction/selection boundary** — `workers.rs` (`HipDevice::new`),
+`orchestrate.rs` (`HipCluster::new`), and `runtime/ar.rs` (the HIP AR+P2P impl
+behind the `DeviceAllReduce`/`FusedAllReduce`/`Device` seams). That completes A2.
+Remaining for end-to-end CUDA: **A3** (models + server + cli generic) then
+**Track B** (B0–B8: the `backend-cuda`/`kernels-cuda` port + certs). C4 + the
+A1 seams + C1–C3 are the runtime prerequisites B6/B7 depend on.
+
+Optional tidy (not required): `PeerSlot`/`new_peer_*` are now generic forward
+types living beside the HIP-concrete `BarArCoordinator` in `runtime/ar.rs`;
+could move to a `runtime/peer.rs`. Cosmetic — defer unless ar.rs churns.
