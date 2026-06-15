@@ -6,7 +6,7 @@
 //! `FullShard`.
 
 use anyhow::Result;
-use flambeau_backend_hip::HipDevice;
+use flambeau_core::Device;
 use flambeau_forward::ctx::{ForwardCtx, GdnDims};
 use flambeau_forward::loader::{per_rank_gdn_dims, ShardMode};
 use flambeau_forward::runtime::Arch;
@@ -27,7 +27,7 @@ impl Arch for Qwen35V2 {
 
     fn load(
         file: &GgufFile,
-        device: &HipDevice,
+        device: &impl Device,
         shard: ShardMode,
         layer_range: Option<(usize, usize)>,
         ctx_cap: Option<usize>,
@@ -79,7 +79,7 @@ impl Arch for Qwen35V2 {
         )
     }
 
-    fn dispose(model: &mut Self::Model, device: &HipDevice) -> Result<()> {
+    fn dispose(model: &mut Self::Model, device: &impl Device) -> Result<()> {
         model.dispose(device)
     }
 }

@@ -8,7 +8,7 @@ pub mod orchestrate;
 pub mod workers;
 
 use anyhow::{anyhow, Result};
-use flambeau_backend_hip::HipDevice;
+use flambeau_core::Device;
 use flambeau_quant::GgufFile;
 
 use crate::core::{KvLayout, ScratchConfig};
@@ -74,7 +74,7 @@ pub trait Arch: Send + Sync + 'static {
     /// slabs don't allocate for the full 128–256k context.
     fn load(
         file: &GgufFile,
-        device: &HipDevice,
+        device: &impl Device,
         shard: ShardMode,
         layer_range: Option<(usize, usize)>,
         ctx_cap: Option<usize>,
@@ -132,7 +132,7 @@ pub trait Arch: Send + Sync + 'static {
     }
 
     /// Release device memory. Called from the worker thread.
-    fn dispose(model: &mut Self::Model, device: &HipDevice) -> Result<()>;
+    fn dispose(model: &mut Self::Model, device: &impl Device) -> Result<()>;
 }
 
 /// Topology-abstracted forward session. Holds persistent worker threads
