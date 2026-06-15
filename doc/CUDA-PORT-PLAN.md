@@ -530,3 +530,25 @@ Slices:
 So the useful-now A3 = **A3a + A3b** (decouple the model + per-arch-contract
 surfaces); A3c/A3d are deferred to Track B by the same "selection boundary"
 principle that kept the engine/workers HIP-concrete.
+
+### A3a + A3b — DONE (2026-06-12). Useful-now A3 complete.
+
+- **A3a** (`d415aaf`): `Arch::load`/`dispose` + the 3 model crates' loader/arch
+  over `&impl Device` (loaders use `Device::id` instead of the inherent
+  `HipStream::device_id`). Model crates name no `Hip*`. pp2tp2 byte-identical
+  (the gate boots both real models through `Arch::load`).
+- **A3b** (`2fbba03`): deleted the **dead** `SessionContext::cluster() ->
+  &HipCluster` (uncalled; the `&dyn SessionContext` consumers underscore the
+  param) + its impl + the now-unused optional `backend-hip` dep. **`server-core`
+  is now backend-hip-free**, matching its "backend-neutral traits" charter.
+  pp2tp2 serve-smoke byte-identical.
+
+**A3c/A3d remain, deferred to Track B** (the server `--backend` runtime selector
+needs a second backend to select; `server`'s `state.cluster: Arc<HipCluster>` +
+the cli `hip:` prefix are the correct selection boundary until then). Net Track-A
+status: **A0 ✅ A1 ✅ A2 ✅ A3a/b ✅; A3c/d deferred.** Everything above the
+kernels except the server backend-selector is now backend-neutral; the only
+`Hip*` left in the non-backend crates is the deliberate construction/selection
+boundary (workers/orchestrate/serve cluster construction + `runtime/ar.rs` HIP
+AR-P2P impl + concrete `TpHooks`/`HybridHooks`). Track B (CUDA backend + kernels)
+is the remaining work; its runtime prerequisites are all in place.
