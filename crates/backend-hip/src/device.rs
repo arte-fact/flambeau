@@ -1187,6 +1187,35 @@ impl Device for HipDevice {
         self.bind()?;
         HipEvent::new_timing(self.id)
     }
+
+    fn bind(&self) -> DeviceResult<()> {
+        HipDevice::bind(self)
+    }
+
+    unsafe fn memcpy_peer_async(
+        &self,
+        stream: &Self::Stream,
+        dst: DevicePtr,
+        dst_device_id: i32,
+        src: DevicePtr,
+        bytes: usize,
+    ) -> DeviceResult<()> {
+        // SAFETY: forwarded to the inherent method (path form resolves to the
+        // inherent, not this trait method); caller upholds its contract.
+        unsafe { HipDevice::memcpy_peer_async(self, stream, dst, dst_device_id, src, bytes) }
+    }
+
+    unsafe fn memcpy_peer_in_async(
+        &self,
+        stream: &Self::Stream,
+        dst: DevicePtr,
+        src: DevicePtr,
+        src_device_id: i32,
+        bytes: usize,
+    ) -> DeviceResult<()> {
+        // SAFETY: forwarded to the inherent method; caller upholds its contract.
+        unsafe { HipDevice::memcpy_peer_in_async(self, stream, dst, src, src_device_id, bytes) }
+    }
 }
 
 impl HipDevice {

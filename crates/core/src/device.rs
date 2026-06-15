@@ -201,4 +201,52 @@ pub trait Device: Send + Sync + 'static {
     /// # Errors
     /// Returns `DeviceError::Backend` if the backend event-create call fails.
     fn new_timing_event(&self) -> DeviceResult<Self::Event>;
+
+    /// Bind this device as the calling thread's active context before issuing
+    /// ops or peer copies. Multi-GPU paths re-bind whenever a prior call may
+    /// have left another rank's context current.
+    /// # Errors
+    /// Returns `DeviceError::Backend` if the backend context-bind call fails.
+    fn bind(&self) -> DeviceResult<()>;
+
+    /// Cross-device PUSH: copy `src` (on this device) into `dst` (on
+    /// `dst_device_id`), enqueued on `stream` (which must belong to this
+    /// source device). Peer access must already be authorised by cluster
+    /// bring-up. The PP / Hybrid stage hand-off producer side.
+    /// # Safety
+    /// `dst` valid for `bytes` writes on `dst_device_id`; `src` valid for
+    /// `bytes` reads on this device; no in-flight op on `stream` aliases
+    /// either pointer.
+    /// # Errors
+    /// Returns `DeviceError::Backend` if the peer-copy enqueue fails. Zero-byte
+    /// copies are infallible.
+    unsafe fn memcpy_peer_async(
+        &self,
+        stream: &Self::Stream,
+        dst: DevicePtr,
+        dst_device_id: i32,
+        src: DevicePtr,
+        bytes: usize,
+    ) -> DeviceResult<()>;
+
+    /// Cross-device PULL: copy `src` (on `src_device_id`) into `dst` (on this
+    /// device), enqueued on `stream` (which must belong to this destination
+    /// device). Used by the deterministic DtoD AllReduce, where the copy
+    /// engine sources peer bytes coherently (an in-kernel BAR1 load is stale
+    /// on some PCIe-P2P silicon).
+    /// # Safety
+    /// `dst` valid for `bytes` writes on this device; `src` valid for `bytes`
+    /// reads on `src_device_id`; no in-flight op on `stream` aliases either
+    /// pointer.
+    /// # Errors
+    /// Returns `DeviceError::Backend` if the peer-copy enqueue fails. Zero-byte
+    /// copies are infallible.
+    unsafe fn memcpy_peer_in_async(
+        &self,
+        stream: &Self::Stream,
+        dst: DevicePtr,
+        src: DevicePtr,
+        src_device_id: i32,
+        bytes: usize,
+    ) -> DeviceResult<()>;
 }
