@@ -5,7 +5,6 @@
 use std::any::Any;
 
 use anyhow::Result;
-use flambeau_backend_hip::HipCluster;
 
 /// One queued slot in a batched decode dispatch. Arch-neutral mirror of
 /// `flambeau_qwen3_moe::forward::BatchSlot`; qwen3-moe dispatchers
@@ -26,7 +25,6 @@ pub struct BatchSlot {
 /// via `Any` downcast). Lets the trait file live without a back-reference
 /// to flambeau-server's concrete `ServerState`.
 pub trait SessionContext {
-    fn cluster(&self) -> &HipCluster;
     fn max_inflight_slots(&self) -> usize;
     /// Arch-specific shared extras (e.g. qwen3-moe's `Qwen3MoeServerExtras`).
     /// Returns `None` for arches that don't carry shared state beyond the

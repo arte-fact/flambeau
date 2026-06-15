@@ -689,7 +689,6 @@ name = "flambeau-server-core"
 version = "0.1.0-dev"
 dependencies = [
  "anyhow",
- "flambeau-backend-hip",
  "flambeau-model-ops",
  "flambeau-runtime",
 ]

@@ -11,13 +11,9 @@ anyhow.workspace = true
 flambeau-runtime = { path = "../runtime" }
 flambeau-model-ops = { path = "../model-ops" }
 
-[dependencies.flambeau-backend-hip]
-path = "../backend-hip"
-optional = true
-
 [features]
 default = []
-hip = ["dep:flambeau-backend-hip", "flambeau-model-ops/hip"]
+hip = ["flambeau-model-ops/hip"]
 
 [lints]
 workspace = true

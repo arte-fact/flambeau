@@ -266,9 +266,6 @@ fn strip_trailing_assistant_terminator(prompt: &str) -> String {
 }
 
 impl crate::model_handle::SessionContext for ServerState {
-    fn cluster(&self) -> &flambeau_backend_hip::HipCluster {
-        &self.cluster
-    }
     fn max_inflight_slots(&self) -> usize {
         self.inflight_pool.len()
     }
