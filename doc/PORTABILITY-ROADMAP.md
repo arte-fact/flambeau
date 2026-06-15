@@ -199,5 +199,5 @@ P0 (done) ─► P1 (spine) ─┬─► P2 (matmul templates) ──┐
   fold into P1–P6 here).
 - `doc/KERNEL-TEMPLATING.md` — the template decomposition + codegen mechanics
   (K-phases fold into P1–P2 here).
-- `doc/AUTOTUNE.md` (to write) — the harness: candidate registry, rank-and-emit,
-  measurement protocol, CI integration.
+- `doc/AUTOTUNE.md` — the harness: candidate registry, rank-and-emit, measurement
+  protocol, CI integration, and the crowdsourced tuning-DB upload design.
