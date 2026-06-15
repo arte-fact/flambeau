@@ -33,6 +33,11 @@ fn main() {
             .expect("nvcc not found — set CUDA_PATH or CUDA_SKIP_BUILD=1 to build without kernels");
         let arch = env::var("CUDA_ARCH").unwrap_or_else(|_| "sm_86".into());
 
+        // Fold included-header contents into the per-kernel cache key so a
+        // change to a shared / arch_primitives header recompiles the kernels
+        // (the .cu source alone is not enough).
+        let headers_hash = hash_headers(&[arch_inc, shared_inc]);
+
         let cache_dir = out_dir.join("cache");
         let _ = fs::create_dir_all(&cache_dir);
 
@@ -43,7 +48,7 @@ fn main() {
                 let cubin = out_dir.join(format!("{stem}.cubin"));
                 let cache_hash_file = cache_dir.join(format!("{stem}.sha256"));
 
-                if needs_rebuild(cu, &cubin, &cache_hash_file, &arch) {
+                if needs_rebuild(cu, &cubin, &cache_hash_file, &arch, &headers_hash) {
                     compile_cu(
                         &nvcc,
                         cu,
@@ -51,7 +56,7 @@ fn main() {
                         &arch,
                         IncludeRoots { arch: arch_inc, shared: shared_inc, kernel: src_dir },
                     );
-                    let hash = hash_cu_source(cu, &arch);
+                    let hash = hash_cu_source(cu, &arch, &headers_hash);
                     fs::write(&cache_hash_file, &hash).ok();
                 }
 
@@ -112,17 +117,45 @@ fn find_nvcc(cuda_path: &str) -> Option<PathBuf> {
         })
 }
 
-fn hash_cu_source(cu: &Path, arch: &str) -> String {
+/// SHA-256 over every `.cuh`/`.h` header in the include dirs (sorted by path),
+/// so any header edit changes the cache key.
+fn hash_headers(dirs: &[&Path]) -> String {
+    let mut files: Vec<PathBuf> = Vec::new();
+    for d in dirs {
+        if let Ok(rd) = fs::read_dir(d) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.extension().is_some_and(|x| x == "cuh" || x == "h") {
+                    files.push(p);
+                }
+            }
+        }
+    }
+    files.sort();
+    let mut hasher = Sha256::new();
+    for p in &files {
+        if let Ok(mut f) = fs::File::open(p) {
+            let mut buf = Vec::new();
+            let _ = f.read_to_end(&mut buf);
+            hasher.update(p.to_string_lossy().as_bytes());
+            hasher.update(&buf);
+        }
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+fn hash_cu_source(cu: &Path, arch: &str, headers_hash: &str) -> String {
     let mut hasher = Sha256::new();
     let mut f = fs::File::open(cu).expect("open cu file");
     let mut buf = Vec::new();
     f.read_to_end(&mut buf).expect("read cu file");
     hasher.update(&buf);
     hasher.update(arch.as_bytes());
+    hasher.update(headers_hash.as_bytes());
     format!("{:x}", hasher.finalize())
 }
 
-fn needs_rebuild(cu: &Path, cubin: &Path, cache_hash: &Path, arch: &str) -> bool {
+fn needs_rebuild(cu: &Path, cubin: &Path, cache_hash: &Path, arch: &str, headers_hash: &str) -> bool {
     if !cubin.exists() {
         return true;
     }
@@ -130,7 +163,7 @@ fn needs_rebuild(cu: &Path, cubin: &Path, cache_hash: &Path, arch: &str) -> bool
         return true;
     }
     let cached_hash = fs::read_to_string(cache_hash).unwrap_or_default().trim().to_string();
-    hash_cu_source(cu, arch) != cached_hash
+    hash_cu_source(cu, arch, headers_hash) != cached_hash
 }
 
 /// Include-path roots passed to `nvcc -I`.

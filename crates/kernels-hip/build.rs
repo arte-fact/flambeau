@@ -33,6 +33,10 @@ fn main() {
             .expect("hipcc not found — set ROCM_PATH or HIP_SKIP_BUILD=1 to build without kernels");
         let arch = env::var("HIP_OFFLOAD_ARCH").unwrap_or_else(|_| "gfx906".into());
 
+        // Fold included-header contents into the per-kernel cache key so a
+        // change to a shared / arch_primitives header recompiles the kernels.
+        let headers_hash = hash_headers(&[arch_inc, shared_inc]);
+
         let cache_dir = out_dir.join("cache");
         let _ = fs::create_dir_all(&cache_dir);
 
@@ -48,7 +52,7 @@ fn main() {
                 let hsaco = out_dir.join(format!("{stem}.hsaco"));
                 let cache_hash_file = cache_dir.join(format!("{stem}.sha256"));
 
-                let needs_rebuild = needs_rebuild(cu, &hsaco, &cache_hash_file, &arch);
+                let needs_rebuild = needs_rebuild(cu, &hsaco, &cache_hash_file, &arch, &headers_hash);
 
                 if needs_rebuild {
                     compile_cu(
@@ -59,7 +63,7 @@ fn main() {
                         IncludeRoots { arch: arch_inc, shared: shared_inc, kernel: src_dir },
                         &device_lib,
                     );
-                    let hash = hash_cu_source(cu, &arch);
+                    let hash = hash_cu_source(cu, &arch, &headers_hash);
                     fs::write(&cache_hash_file, &hash).ok();
                 }
 
@@ -139,21 +143,49 @@ fn find_device_lib_path(rocm_path: &str) -> String {
         .unwrap_or_else(|| format!("{rocm_path}/lib"))
 }
 
-fn hash_cu_source(cu: &Path, arch: &str) -> String {
+/// SHA-256 over every `.cuh`/`.h` header in the include dirs (sorted by path),
+/// so any header edit changes the cache key.
+fn hash_headers(dirs: &[&Path]) -> String {
+    let mut files: Vec<PathBuf> = Vec::new();
+    for d in dirs {
+        if let Ok(rd) = fs::read_dir(d) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.extension().is_some_and(|x| x == "cuh" || x == "h") {
+                    files.push(p);
+                }
+            }
+        }
+    }
+    files.sort();
+    let mut hasher = Sha256::new();
+    for p in &files {
+        if let Ok(mut f) = fs::File::open(p) {
+            let mut buf = Vec::new();
+            let _ = f.read_to_end(&mut buf);
+            hasher.update(p.to_string_lossy().as_bytes());
+            hasher.update(&buf);
+        }
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+fn hash_cu_source(cu: &Path, arch: &str, headers_hash: &str) -> String {
     let mut hasher = Sha256::new();
     let mut f = fs::File::open(cu).expect("open cu file");
     let mut buf = Vec::new();
     f.read_to_end(&mut buf).expect("read cu file");
     hasher.update(&buf);
     hasher.update(arch.as_bytes());
+    hasher.update(headers_hash.as_bytes());
     format!("{:x}", hasher.finalize())
 }
 
-fn needs_rebuild(cu: &Path, hsaco: &Path, cache_hash: &Path, arch: &str) -> bool {
+fn needs_rebuild(cu: &Path, hsaco: &Path, cache_hash: &Path, arch: &str, headers_hash: &str) -> bool {
     if !hsaco.exists() {
         return true;
     }
-    let current_hash = hash_cu_source(cu, arch);
+    let current_hash = hash_cu_source(cu, arch, headers_hash);
     if !cache_hash.exists() {
         return true;
     }
