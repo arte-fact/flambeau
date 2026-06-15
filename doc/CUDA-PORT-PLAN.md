@@ -493,3 +493,40 @@ server cluster + cli `--backend`/`cuda:` — see §"Track A" A3). Then Track B
 B6/B7 depend on (Device/Event/Cluster/Collectives/peer-copy seams) are all in
 place; a CUDA `Backend` impl can now instantiate `ForwardEngine<CudaBackend>`
 once its kernels + cluster land.
+
+### A3 — scope (file-grounded audit, 2026-06-12)
+
+Coupling is far lighter than the original §"coupling" table guessed. Counts of
+`Hip*`/`OpsRegistry` refs: qwen35-v2 / qwen35moe-v2 / gemma4-v2 = **8 each**
+(all `&HipDevice` in `arch.rs`+`loader.rs` load/dispose/shard fns); server-core
+= **2** (`SessionContext::cluster -> &HipCluster`); server = **21** (cluster
+construction + `state.cluster: Arc<HipCluster>` + a few `&HipCluster` reads);
+cli = **2** (`hip:` device-string prefix). The `Arch::forward<C: ForwardCtx>`
+methods are already backend-neutral.
+
+Slices:
+- **A3a — model loaders + `Arch` over the Device seam.** `Arch::load`/`dispose`
+  (`forward/runtime/mod.rs:77,135`) `&HipDevice` → `&impl Device`, plus the 3
+  model crates' `loader.rs` free fns + `dispose` method + `arch.rs` impls.
+  **Atomic** across the trait + 3 impls (a method-level `&impl Device` can't use
+  the `=HipBackend`-default trick), but pure A2.1-style widening — `workers.rs`
+  call sites pass `&HipDevice`, which coerces. Gate: build + forward
+  parity/synth + a gfx906 serve smoke.
+- **A3b — `server-core::SessionContext::cluster` over the Cluster seam.**
+  `cluster(&self) -> &HipCluster` (`server-core/traits.rs:29`) →
+  `&impl Cluster` / generic, + the impl (`server/routes.rs:269`). Lets the
+  per-arch contract stop naming `HipCluster`.
+- **A3c — server cluster construction + `state.cluster` (DEFERRED — design
+  fork).** The server is a *runtime* backend selector (`--backend cuda` is a
+  startup flag), so it can't be purely compile-time-generic — it needs runtime
+  dispatch (`enum {Hip,Cuda}` / `Box<dyn Cluster>`) OR a per-backend
+  monomorphized entry point chosen by a startup `match`. That design is built
+  WITH the CUDA backend (Track B), not speculatively — there is no second
+  backend to select today. Until then `server` naming `HipCluster` is the
+  correct selection boundary (rule 12), exactly like `workers.rs`/`orchestrate.rs`.
+- **A3d — cli `--backend` / `cuda:` prefix + `cuda_{sweep,serve}` features.**
+  Depends on A3c; deferred with it.
+
+So the useful-now A3 = **A3a + A3b** (decouple the model + per-arch-contract
+surfaces); A3c/A3d are deferred to Track B by the same "selection boundary"
+principle that kept the engine/workers HIP-concrete.
