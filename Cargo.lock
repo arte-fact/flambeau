@@ -453,6 +453,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "flambeau-backend-cuda"
+version = "0.1.0-dev"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "flambeau-core",
+ "flambeau-kernels-cuda",
+ "flambeau-runtime",
+ "half",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "flambeau-backend-hip"
 version = "0.1.0-dev"
 dependencies = [
@@ -544,6 +558,15 @@ dependencies = [
  "half",
  "thiserror 2.0.18",
  "tracing",
+]
+
+[[package]]
+name = "flambeau-kernels-cuda"
+version = "0.1.0-dev"
+dependencies = [
+ "anyhow",
+ "rayon",
+ "sha2",
 ]
 
 [[package]]

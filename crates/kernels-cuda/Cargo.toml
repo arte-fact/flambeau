@@ -1,0 +1,17 @@
+[package]
+name = "flambeau-kernels-cuda"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "CUDA `.cu` kernel sources compiled to `.cubin` via nvcc in build.rs (sm_80+)."
+
+[dependencies]
+
+[build-dependencies]
+anyhow.workspace = true
+rayon = "1"
+sha2 = "0.10"
+
+[lints]
+workspace = true

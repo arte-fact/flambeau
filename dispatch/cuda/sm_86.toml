@@ -1,0 +1,5 @@
+# Dispatch table — CUDA / sm_86 (RTX 3090, Ampere).
+#
+# Each `[[op]]` row maps a (dtype, shape-predicate) to a kernel `impl` and its
+# cert under certs/cuda/sm_86/. Empty until a CUDA kernel certifies; the
+# dispatch_toml_roundtrip + cert_check gates treat an empty table as valid.

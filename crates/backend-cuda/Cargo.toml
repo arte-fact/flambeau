@@ -1,0 +1,20 @@
+[package]
+name = "flambeau-backend-cuda"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "CUDA driver-API backend: device/stream/event + .cubin module loader over the cu* driver API."
+
+[dependencies]
+flambeau-core = { path = "../core" }
+flambeau-runtime = { path = "../runtime" }
+flambeau-kernels-cuda = { path = "../kernels-cuda" }
+thiserror.workspace = true
+anyhow.workspace = true
+bytemuck.workspace = true
+half.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true
