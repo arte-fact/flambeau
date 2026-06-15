@@ -13,7 +13,7 @@
 // block_idx = tid >> 2 — 0..31: 32 blocks/iter (vs 64 in 256t vdr2)
 // Outer stride = 32 blocks/iter.
 //
-// Two output dtypes via templated __device__ body (#120):
+// Two output dtypes via templated __device__ body:
 //   flambeau_mmvq_q8_0_t128_vdr2_q8_1      → F32 dst (legacy)
 //   flambeau_mmvq_q8_0_t128_vdr2_q8_1_f16  → F16 dst (saturating)
 

@@ -54,8 +54,8 @@ static __device__ __forceinline__ int dp4a(int a, int b, int c) {
 }
 
 // Unpack the packed 6-bit (scale, min) pair for Q5_K sub-block `j` from
-// the 12-byte `scales` array. Bit-identical mirror of `get_scale_min_k4`
-// in candle and `flambeau_q4k_scale_min` in flambeau's block_quant.cuh.
+// the 12-byte `scales` array. Bit-identical with `flambeau_q4k_scale_min`
+// in flambeau's block_quant.cuh.
 static __device__ __forceinline__ void q5k_scale_min(
     int j, const uint8_t* __restrict__ q, uint8_t& sc, uint8_t& m
 ) {

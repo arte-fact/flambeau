@@ -107,9 +107,9 @@ pub(crate) fn stream_completion_sse(
                 .is_ok()
         };
 
-        // T3.1 / T3.2: state threaded through the per-token text feed.
+        // State threaded through the per-token text feed.
         let mut has_tool_calls = false;
-        // T3.2: when parallel_tool_calls=false, set on the first
+        // When parallel_tool_calls=false, set on the first
         // ToolCallClose so the next emit_delta call returns false and
         // the decode loop hard-terminates.
         let mut abort_after_close = false;
@@ -243,7 +243,7 @@ pub(crate) fn stream_completion_sse(
         };
         let _ = tx_clone.blocking_send(Ok(Event::default().data(done_frame.to_string())));
 
-        // P0.3 — canonical separate usage chunk. Emitted strictly after
+        // Canonical separate usage chunk. Emitted strictly after
         // the finish chunk and strictly before [DONE], with choices=[]
         // so clients that match on `choices[0].finish_reason` don't
         // double-fire.
@@ -301,7 +301,7 @@ pub(crate) async fn run_completion(
     .map_err(|e| anyhow!("spawn_blocking join failed: {e}"))?
 }
 
-/// **P1.6b** — token-id entry point used by the FIM `/infill` route.
+/// Token-id entry point used by the FIM `/infill` route.
 /// Skips the tokenizer string round-trip so callers that build prompts
 /// directly out of pre-tokenized fragments (e.g., FIM specials wrapping
 /// user prefix/suffix) don't depend on the tokenizer's special-token
@@ -319,7 +319,7 @@ pub(crate) async fn run_completion_ids(
     .map_err(|e| anyhow!("spawn_blocking join failed: {e}"))?
 }
 
-/// **P2.9b-i2-B-wire** — gate predicate for the scheduler-aware
+/// Gate predicate for the scheduler-aware
 /// chat handler. The scheduler path is a focused subset of the full
 /// `run_completion_blocking_ids` flow: greedy, PP topology, no
 /// spec-decode, no GPU sampler, no JSON mode, no logprobs, no tools.
@@ -337,7 +337,7 @@ fn scheduler_can_engage(state: &ServerState, params: &SamplingParams) -> bool {
     !params.json_mode && params.collect_logprobs.is_none()
 }
 
-/// **P2.9b-i2-B-wire (cleanup 2026-05-03)** — chat handler that uses
+/// Chat handler that uses
 /// the scheduler. Engaged when [`scheduler_can_engage`] returns true.
 /// Releases the slot's mutex during the decode loop so the scheduler-
 /// leader can `blocking_lock` other slots' mutexes for batched dispatch.
@@ -757,7 +757,7 @@ fn run_completion_blocking_ids(
     params: SamplingParams,
     relax_stop_mask: bool,
 ) -> Result<CompletionOutput> {
-    // **P2.9b-i2-B-wire** — opt into the scheduler path when
+    // Opt into the scheduler path when
     // conditions allow. Greedy + PP + no MTP + no JSON + no logprobs.
     if scheduler_can_engage(&state, &params) {
         return run_completion_scheduler_pp_blocking(state, prompt_ids, params, relax_stop_mask);
@@ -845,7 +845,7 @@ fn run_completion_blocking_ids(
     } else {
         1.0
     };
-    // **#236 P0.1b** — JSON state primed BEFORE first_next. When the
+    // JSON state primed BEFORE first_next. When the
     // request is in json_mode AND the chat handler detected an
     // assistant prefill (last message had `role: "assistant"`),
     // `params.json_prime_bytes` carries those bytes; the JSON state
@@ -867,7 +867,7 @@ fn run_completion_blocking_ids(
     } else {
         None
     };
-    // **#236 P0.1b** — mask first-token logits when json_mode is
+    // Mask first-token logits when json_mode is
     // active. Without this the very first sampled token can violate
     // the grammar (e.g. emit `Hello` before `{`), and the existing
     // post-sample feed_slice would silently advance into a doomed
@@ -892,7 +892,7 @@ fn run_completion_blocking_ids(
         "first token produced (time-to-first-token)"
     );
 
-    // **P1.7** — accumulate logprobs when the request opted in AND
+    // Accumulate logprobs when the request opted in AND
     // the path supports it (host sampler only; GPU sampler / spec-
     // decode silently disable). `top_logprobs` may be 0 → just the
     // chosen token's logprob.
@@ -924,7 +924,7 @@ fn run_completion_blocking_ids(
     let mut generated: Vec<u32> = Vec::with_capacity(params.max_tokens as usize);
     let is_stop = |t: u32| stop_ids.contains(&t);
 
-    // **P0.1** — advance JSON state by first_next's bytes (the
+    // Advance JSON state by first_next's bytes (the
     // pre-sample mask above already filtered candidates that would
     // invalidate the running JSON, so this should always succeed
     // when the mask was active).
@@ -957,7 +957,7 @@ fn run_completion_blocking_ids(
     // on multi-turn prompts otherwise emits `<|im_end|>` after 0-1 content
     // tokens, producing unusable one-word replies. MIN is small enough
     // that short on-topic answers ("Yes.", "42.") are still possible.
-    // T4.1: tool-call turns disable this entirely. When the model is
+    // Tool-call turns disable this entirely. When the model is
     // asked to emit a `<tool_call>…</tool_call>` body it may legitimately
     // take only ~10 tokens; forcing 24 content tokens before allowing
     // stop injects noise between the body and the `<|im_end|>` and
@@ -1021,7 +1021,7 @@ fn run_completion_blocking_ids(
                     }
                 }
             }
-            // **#236 P0.1b** — host-path JSON mask. Mirrors the
+            // Host-path JSON mask. Matches the
             // GPU-path mask above: set logit of any top-K candidate
             // that would invalidate the running JSON to NEG_INFINITY
             // before the sampler picks. Only active when the request
@@ -1038,13 +1038,13 @@ fn run_completion_blocking_ids(
             // Once the thinking budget is spent, emit the reasoning-close
             // marker verbatim so the model stops thinking and answers.
             // Otherwise pass `generated` as history so penalties can fire on
-            // repeats / frequent tokens (T4.b.2 — without this, Qwen3.5/3.6
+            // repeats / frequent tokens (without this, Qwen3.5/3.6
             // agent loops degrade to long-CoT drift).
             let next = match reasoning_closer.next_forced(&generated, params.reasoning_budget) {
                 Some(forced) => forced,
                 None => sampler.sample(&logits_buf, sampling, &generated),
             };
-            // P1.7 — collect per-token logprobs (host path only).
+            // Collect per-token logprobs (host path only).
             if let Some(lp) = logprobs_acc.as_mut() {
                 if let Some(entry) = build_logprob_entry(
                     &state.tokenizer,
@@ -1059,7 +1059,7 @@ fn run_completion_blocking_ids(
             }
             next
         };
-        // P0.1 — advance JSON state with the chosen token's bytes.
+        // Advance JSON state with the chosen token's bytes.
         let mut json_complete = false;
         if let Some(js) = json_state.as_mut() {
             if let Ok(text) = state.tokenizer.decode(&[next]) {
@@ -1084,7 +1084,7 @@ fn run_completion_blocking_ids(
         // mask by emitting the multi-token text form. Detokenize
         // the recent tail and stop if a leak is present. Final
         // response cleanup happens in `finalise`.
-        // **P0.2** — same mechanism extended to the per-request
+        // Same mechanism extended to the per-request
         // `stop` strings. Tail window grows with the longest
         // user stop so multi-token caller stops are catchable.
         let user_stop_max = params
@@ -1129,7 +1129,7 @@ fn run_completion_blocking_ids(
     // for the batched decode kernels.
     let _ = gpu_scratch.take();
 
-    // **P2.9a (slot pool)** — no dispose. The pooled inflight stays
+    // Slot pool: no dispose. The pooled inflight stays
     // allocated; releasing the mutex returns the slot to the pool
     // for the next request, which will reset_for_next_request on
     // claim. Removing per-request dispose saves the ~ms cost of
@@ -1410,7 +1410,7 @@ pub(crate) fn run_completion_blocking_streaming(
                 }
             }
         }
-        // T4.1: same relax-stop-mask behaviour as the non-streaming path.
+        // Same relax-stop-mask behaviour as the non-streaming path.
         let force_mask = step < min_response_tokens && !relax_stop_mask;
         let hp_step_t0 = if host_profile_on {
             Some(Instant::now())
@@ -1476,7 +1476,7 @@ pub(crate) fn run_completion_blocking_streaming(
         // char-safe slice — `emitted_text.len() - 64` can land inside
         // a multi-byte UTF-8 codepoint (e.g. `’` at byte 805..808),
         // which would panic. Walk back to the nearest char boundary.
-        // P0.2 — user-supplied stop sequences also use this tail-window
+        // User-supplied stop sequences also use this tail-window
         // detector. Window size grows with the longest user stop so
         // multi-codepoint caller stops are catchable.
         let user_stop_max = params

@@ -1,4 +1,4 @@
-//! #288-v2 finding test — verifies (and documents) that the wave64
+//! Finding test — verifies (and documents) that the wave64
 //! kernel's per-slot outputs differ at f32 LSB scale even when the two
 //! batched activation rows are IDENTICAL.
 //! Result observed on gfx906: 11118 / 14336 outputs differ between

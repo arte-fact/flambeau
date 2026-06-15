@@ -7,7 +7,7 @@
 // Each thread owns one int32 (4 packed i8 quants) within a Q8_1 sub-block.
 // 256 threads / 8 int32-per-sub-block = 32 sub-blocks processed per iter.
 
-// Two output dtypes via templated __device__ body (#120):
+// Two output dtypes via templated __device__ body:
 //   flambeau_mmvq_q8_K_q8_1      → F32 dst
 //   flambeau_mmvq_q8_K_q8_1_f16  → F16 dst (saturating)
 

@@ -1,4 +1,4 @@
-// rmsnorm_f16_add_residual — 3.a.1 fused add+rmsnorm.
+// rmsnorm_f16_add_residual — fused add+rmsnorm.
 // Pattern in `forward_layer_decode`:
 // mid = x_in + attn_delta (add_f16)
 // mid_norm = rmsnorm(mid) * weight (rmsnorm_f16)

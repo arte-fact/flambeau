@@ -44,7 +44,7 @@ static __device__ __forceinline__ int dp4a(int a, int b, int c) {
 }
 
 // `__launch_bounds__(WARP_SIZE, 1)` is intentional. (WARP_SIZE, 2) was
-// 2.0× slower (Scratch 156 → 684 B). An inline-accumulator refactor
+// slower (Scratch 156 → 684 B). An inline-accumulator refactor
 // (eliminating the per-super-block sumf_* FP32 transients) likewise
 // failed to recover (_, 2) — the real spill sources are the
 // `g_v[8]`/`u_v[8]` int weight packs + scale buffers across the

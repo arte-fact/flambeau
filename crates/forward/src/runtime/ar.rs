@@ -660,7 +660,7 @@ fn ar_device_err(e: anyhow::Error, backend: &'static str) -> CollectiveError {
 /// Per-rank handle binding a shared [`BarArCoordinator`] to one rank so it
 /// satisfies the [`DeviceAllReduce`] seam — the device-pointer analog of the
 /// byte-buffer `AllReduce`. The seam the generic forward engine threads its
-/// AR through once it is backend-generic (A2.4 / C3).
+/// AR through once it is backend-generic.
 pub struct BarArRank {
     pub coord: Arc<BarArCoordinator>,
     pub rank: usize,

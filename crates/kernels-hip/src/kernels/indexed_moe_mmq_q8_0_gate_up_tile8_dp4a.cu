@@ -1,6 +1,6 @@
-// indexed_moe_mmq_q8_0_gate_up_tile8_dp4a — 2.b fused gate+up MoE MMQ
+// indexed_moe_mmq_q8_0_gate_up_tile8_dp4a — fused gate+up MoE MMQ
 // for Q8_0 expert weights.
-// Direct sibling of 8.c's `indexed_moe_mmq_q4_0_gate_up_tile8_dp4a.cu`
+// Direct sibling of `indexed_moe_mmq_q4_0_gate_up_tile8_dp4a.cu`
 // with the nibble-unpack and (q-8) bias correction removed. Q8_0 is already
 // signed/centred so the inner formula collapses to
 // sums[c] += x_d · d_y · sumi.

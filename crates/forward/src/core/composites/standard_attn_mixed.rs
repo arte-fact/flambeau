@@ -451,7 +451,7 @@ pub fn standard_attn_mixed_local<B: flambeau_backend::Backend, H: TopologyHooks<
     let v_dec_ptr = v_pref_ptr.offset_bytes(k * kv_width * 2);
     let out_dec_ptr = out_pref_ptr.offset_bytes(k * q_width * 2);
     {
-        // Per-slot SWA window-offset mirror of standard_attn.rs.
+        // Per-slot SWA window-offset, same scheme as standard_attn.rs.
         // kv_append writes at absolute slot positions; attention
         // reads from each slot's window start. When any slot has
         // pos+1 > window we re-upload offset ptrs before attention.

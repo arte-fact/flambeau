@@ -1,4 +1,4 @@
-// moe_combine_two_residuals_f16 — 3.a.2 variant of moe_combine_f16
+// moe_combine_two_residuals_f16 — variant of moe_combine_f16
 // that accepts two F16 residuals and inlines their sum into the combine step.
 // For each token (row) and each hidden dim element:
 // out[token, d] = residual1[token, d] + residual2[token, d]

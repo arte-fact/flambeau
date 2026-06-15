@@ -14,7 +14,7 @@
 // Per block: 4 DP4A (nibble_lo + nibble_hi + bit_lo + bit_hi) + `m·s_y/4`.
 // Block/grid: blockDim=256, gridDim=n_rows.
 //
-// Two output dtypes via templated __device__ body (#120):
+// Two output dtypes via templated __device__ body:
 //   flambeau_mmvq_q5_1_q8_1      → F32 dst (legacy scratch-then-cast)
 //   flambeau_mmvq_q5_1_q8_1_f16  → F16 dst (saturating; direct store)
 

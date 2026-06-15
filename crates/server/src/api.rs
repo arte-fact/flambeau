@@ -1,11 +1,7 @@
 //! OpenAI-compatible request/response types.
-//! shipped chat completions, text completions, models list, health.
-//! V2 tool-calling track (T1.1 — ROADMAP-V2-TOOL-CALLING-AND-MCP.md) adds
-//! the wire surface for `tools[]`, `tool_choice`, `tool_calls[]`,
-//! `role="tool"`, and `finish_reason="tool_calls"`. The types are wired
-//! here but not acted upon yet — T1.2/T2.x fill in the behaviour.
-//! Logprobs, embeddings, structured outputs (response_format=json_schema),
-//! vision/audio tool results stay V2+.
+//! Covers chat completions, text completions, models list, health.
+//! Tool-calling adds the wire surface for `tools[]`, `tool_choice`,
+//! `tool_calls[]`, `role="tool"`, and `finish_reason="tool_calls"`.
 
 use serde::{Deserialize, Serialize};
 
@@ -23,31 +19,31 @@ pub struct ModelObject {
     pub object: &'static str,
     pub created: u64,
     pub owned_by: &'static str,
-    /// **#235 P3.15** — operational context window in tokens (already
+    /// Operational context window in tokens (already
     /// reflects the `FLAMBEAU_CTX_CAP` shrink, not the architectural
     /// max from the GGUF). Surfaced so clients can size prompts
     /// without a separate `/v1/models/<id>/details` round-trip.
     pub context_length: u32,
-    /// **#235 P3.15** — server-enforced ceiling on `max_tokens` per
+    /// Server-enforced ceiling on `max_tokens` per
     /// request (`SamplingParams::from_parts` clamps at this value).
     pub max_output_tokens: u32,
-    /// **#235 P3.15** — model architecture tag from the GGUF
+    /// Model architecture tag from the GGUF
     /// `general.architecture` key (`qwen35moe`, `qwen36moe`,
     /// `qwen3next`, etc). flambeau-only field; OpenAI clients ignore.
     pub architecture: String,
-    /// **#235 P3.15** — quantization label derived from the GGUF
+    /// Quantization label derived from the GGUF
     /// `general.file_type` integer. `None` when the GGUF doesn't
     /// carry the field (rare; older converters).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quantization: Option<String>,
-    /// **#235 P3.15** — feature surface this model + server combo
+    /// Feature surface this model + server combo
     /// supports. Each entry is a stable token (`"chat"`,
     /// `"completion"`, `"infill"`, `"embeddings"`, `"tools"`,
     /// `"thinking"`). Clients can use `.includes("thinking")` to
     /// know whether to expose the `enable_thinking` request flag in
     /// their UI.
     pub capabilities: Vec<&'static str>,
-    /// **#235 P3.15** — wire shape the parser expects for tool-call
+    /// Wire shape the parser expects for tool-call
     /// model output (`"hermes"`, `"qwen_coder"`). Set even when the
     /// caller doesn't pass `tool_call_format`; matches the boot-time
     /// detection from the chat template.
@@ -78,7 +74,7 @@ pub struct ChatCompletionRequest {
     #[serde(default)]
     pub stop: Option<serde_json::Value>,
 
-    // ---- Sampler fields (T4.b — ships with T1). Behaviour wired in T4.b.2. ----
+    // ---- Sampler fields ----
     /// Per-token repetition penalty applied over the accumulated history.
     /// llama.cpp convention: `logit /= penalty` when `logit > 0`. Off at
     /// 1.0. Qwen3-Coder ships `1.05` in its `generation_config.json`;
@@ -103,7 +99,7 @@ pub struct ChatCompletionRequest {
     #[serde(default)]
     pub min_p: Option<f32>,
 
-    // ---- Tool-calling fields (T1.1). Behaviour wired in T1.2 / T2.5. ----
+    // ---- Tool-calling fields ----
     /// Tool definitions to surface to the model. Rendered into the prompt
     /// via the GGUF-embedded Jinja `tokenizer.chat_template`.
     #[serde(default)]
@@ -123,7 +119,7 @@ pub struct ChatCompletionRequest {
     #[serde(default)]
     pub tool_call_format: Option<String>,
 
-    // ---- Structured-output fields (P0.1) -----------------------------
+    // ---- Structured-output fields ----
     /// OpenAI `response_format`. When set to `{"type":"json_object"}`,
     /// the sampler is constrained at every step to keep the running
     /// output structurally-valid JSON (no token can break a brace
@@ -133,7 +129,7 @@ pub struct ChatCompletionRequest {
     #[serde(default)]
     pub response_format: Option<ResponseFormat>,
 
-    // ---- Logprobs (P1.7) ---------------------------------------------
+    // ---- Logprobs ----
     /// OpenAI `logprobs`: when `true`, the response carries the
     /// per-token log-probability of every generated token. Default
     /// `false`. V1 implementation is non-streaming, host-path-only:
@@ -147,7 +143,7 @@ pub struct ChatCompletionRequest {
     #[serde(default)]
     pub top_logprobs: Option<u32>,
 
-    // ---- Streaming options (P0.3) ------------------------------------
+    // ---- Streaming options ----
     /// OpenAI `stream_options`. When `include_usage=true`, the server
     /// emits a final `choices=[]` SSE chunk carrying the `usage` block
     /// after the finish-reason chunk. This is the canonical OpenAI
@@ -157,15 +153,15 @@ pub struct ChatCompletionRequest {
     #[serde(default)]
     pub stream_options: Option<StreamOptions>,
 
-    // ---- Reasoning mode (P3.13) --------------------------------------
-    /// **#233 P3.13** — opt into Qwen3.6 reasoning / extended-thinking
+    // ---- Reasoning mode ----
+    /// Opt into Qwen3.6 reasoning / extended-thinking
     /// mode. When `Some(true)`, the chat template renders without the
     /// suppression block, the model emits
     /// `<think>{cot}</think>{answer}`, and the server splits the two:
     /// `{cot}` returns in `message.reasoning_content`, `{answer}` in
     /// `message.content`. Default `None` ⇒ thinking suppressed
-    /// (legacy behaviour: server passes `enable_thinking=false` to
-    /// the chat template). Mirrors HF Transformers `chat_template`
+    /// (server passes `enable_thinking=false` to
+    /// the chat template). Matches the HF Transformers `chat_template`
     /// kwarg; OpenAI's o-series + Anthropic extended-thinking surface
     /// the same toggle via different field names — this is the
     /// OpenAI-compat shape.
@@ -218,7 +214,7 @@ pub enum ResponseFormat {
 }
 
 /// One chat message on the wire.
-/// T1.1 extends this to carry tool-call payloads: a prior `role="assistant"`
+/// Carries tool-call payloads: a prior `role="assistant"`
 /// turn may carry `tool_calls` with no `content`; a `role="tool"` turn
 /// carries `tool_call_id` + `content` (the tool's reply). OpenAI sends
 /// `content: null` in those cases, hence `Option<String>`.
@@ -237,9 +233,9 @@ pub struct ChatMessage {
     /// Set on `role="assistant"` messages that invoked one or more tools.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
-    /// **#233 P3.13** — chain-of-thought returned separately when the
+    /// Chain-of-thought returned separately when the
     /// request set `enable_thinking=true` and the model emitted a
-    /// `<think>{cot}</think>` block. Mirrors the de-facto convention
+    /// `<think>{cot}</think>` block. Follows the de-facto convention
     /// shared by DeepSeek-R1 / vLLM / sglang / OpenWebUI for
     /// reasoning models: same shape as `content` but in a sibling
     /// field so clients can render it collapsibly. Always `None`
@@ -258,7 +254,7 @@ impl ChatMessage {
     }
 }
 
-// ---- Tool-calling types (T1.1) --------------------------------------------
+// ---- Tool-calling types ----
 
 /// A tool the client exposes to the model. OpenAI shape: currently only
 /// `type="function"` exists; we mirror that rather than over-generalising.
@@ -278,7 +274,7 @@ pub struct FunctionDef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// JSON Schema for the function's parameters. We keep it as opaque
-    /// `serde_json::Value` — T1.2's Jinja template render + T5's optional
+    /// `serde_json::Value` — the Jinja template render and the optional
     /// llguidance mask generator are the only readers.
     #[serde(default)]
     pub parameters: serde_json::Value,
@@ -348,10 +344,10 @@ pub struct ToolChoiceFunction {
 
 /// One tool call emitted by the model and echoed back in prior-turn
 /// assistant messages.
-/// **`arguments` is a JSON-encoded string, never an object.** This guards
-/// llama.cpp #20198, where returning `arguments` as an object broke the
-/// openai-python SDK. The wire contract stays string; any structural
-/// constraint lives in the parser / grammar.
+/// **`arguments` is a JSON-encoded string, never an object.** Returning
+/// `arguments` as an object breaks the openai-python SDK. The wire
+/// contract stays string; any structural constraint lives in the
+/// parser / grammar.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,
@@ -388,10 +384,10 @@ pub struct ChatCompletionResponse {
 pub struct ChatChoice {
     pub index: u32,
     pub message: ChatMessage,
-    /// OpenAI `finish_reason`. Valid values today: `"stop"`, `"length"`,
-    /// and — with T2.5 wired — `"tool_calls"`.
+    /// OpenAI `finish_reason`. Valid values: `"stop"`, `"length"`,
+    /// `"tool_calls"`.
     pub finish_reason: String,
-    /// **P1.7** — per-token log-probabilities. `None` when the request
+    /// Per-token log-probabilities. `None` when the request
     /// did not enable logprobs, or when the path didn't support them
     /// (GPU sampler, spec-decode). Skipped from JSON when `None`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -442,7 +438,7 @@ pub struct CompletionRequest {
     pub stream: bool,
     #[serde(default)]
     pub stop: Option<serde_json::Value>,
-    /// **P1.6c** — OpenAI suffix-style Fill-in-the-Middle. When set
+    /// OpenAI suffix-style Fill-in-the-Middle. When set
     /// (and the model carries FIM tokens), `/v1/completions` switches
     /// to the same PSM-token assembly used by `/infill`: `prompt` is
     /// the prefix and `suffix` is the suffix, the model fills the gap.
@@ -451,7 +447,7 @@ pub struct CompletionRequest {
     pub suffix: Option<String>,
 }
 
-// ---- /infill (P1.6b — llama.cpp-compat fill-in-the-middle) ----------------
+// ---- /infill (llama.cpp-compat fill-in-the-middle) ----
 
 /// llama.cpp-compatible `/infill` request body. The endpoint composes a
 /// FIM prompt of the form `<|fim_prefix|>{prefix}<|fim_suffix|>{suffix}<|fim_middle|>`
@@ -542,13 +538,10 @@ pub struct CompletionTokensDetails {
     pub reasoning_tokens: u32,
 }
 
-// ---- Anthropic /v1/messages (P1.8a) ---------------------------------------
-// Mirrors the request envelope at https://docs.anthropic.com/en/api/messages
+// ---- Anthropic /v1/messages ----
+// Tracks the request envelope at https://docs.anthropic.com/en/api/messages
 // closely enough for Claude Code, Cursor, and the anthropic-sdk-python /
 // anthropic-sdk-typescript clients to talk to flambeau without a shim.
-// V1 scope (P1.8a — this commit): text-only content blocks, non-streaming
-// path, no tools mapping. Tools (`tool_use` / `tool_result` content blocks)
-// are P1.8c; SSE event stream is P1.8b.
 
 /// Anthropic /v1/messages request body.
 #[derive(Debug, Clone, Deserialize)]
@@ -573,14 +566,14 @@ pub struct AnthropicMessagesRequest {
     pub stop_sequences: Option<Vec<String>>,
     #[serde(default)]
     pub stream: bool,
-    /// **P1.8c** — tool definitions exposed to the model. Each carries
+    /// Tool definitions exposed to the model. Each carries
     /// `name`, `description`, and an `input_schema` (JSON Schema). The
     /// shape mirrors Anthropic's spec; the handler translates them
     /// into the OpenAI `ToolDef` shape that the chat-template Jinja
     /// renderer already consumes.
     #[serde(default)]
     pub tools: Option<Vec<AnthropicTool>>,
-    /// **P1.8c** — Anthropic `tool_choice`. Forms:
+    /// Anthropic `tool_choice`. Forms:
     /// - `{"type":"auto"}` (default) — model decides
     /// - `{"type":"any"}` — model must use a tool
     /// - `{"type":"tool","name":"..."}` — force a specific tool
@@ -640,7 +633,7 @@ pub enum AnthropicSystem {
 
 impl AnthropicSystem {
     /// Flatten any text content into one plain string. Non-text blocks
-    /// are dropped (P1.8a is text-only; vision arrives later).
+    /// are dropped (text-only).
     pub fn to_plain(&self) -> String {
         match self {
             Self::Plain(s) => s.clone(),
@@ -674,8 +667,8 @@ pub enum AnthropicContent {
 
 impl AnthropicContent {
     /// Flatten text blocks into a single string. Non-text blocks
-    /// (image, tool_use, tool_result) are dropped in P1.8a; tools land
-    /// in P1.8c via a richer translation path.
+    /// (image, tool_use, tool_result) are dropped here; tools are
+    /// handled via a richer translation path.
     pub fn to_plain(&self) -> String {
         match self {
             Self::Plain(s) => s.clone(),
@@ -700,19 +693,19 @@ pub enum AnthropicContentBlock {
     Text {
         text: String,
     },
-    /// `image`: P1.8 scope is text-only; deserialised but discarded.
+    /// `image`: text-only scope; deserialised but discarded.
     Image {
         #[serde(default)]
         source: serde_json::Value,
     },
-    /// Tool-call invocation (assistant turn). P1.8c maps these into
+    /// Tool-call invocation (assistant turn). Mapped into
     /// `tool_calls[]` on a synthetic OpenAI assistant message.
     ToolUse {
         id: String,
         name: String,
         input: serde_json::Value,
     },
-    /// Tool result (user turn). P1.8c maps these into `role="tool"` +
+    /// Tool result (user turn). Mapped into `role="tool"` +
     /// `tool_call_id`.
     ToolResult {
         tool_use_id: String,
@@ -756,7 +749,7 @@ pub enum AnthropicResponseBlock {
     Text {
         text: String,
     },
-    /// **P1.8c** — model-emitted tool call. `id` is the call id the
+    /// Model-emitted tool call. `id` is the call id the
     /// caller will echo back on the corresponding `tool_result` block.
     /// `input` is the parsed JSON object the caller passes to its tool.
     ToolUse {
@@ -815,7 +808,7 @@ mod tests {
         let calls = msg.tool_calls.as_ref().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "get_weather");
-        // Arguments must remain a string on the wire (guards #20198).
+        // Arguments must remain a string on the wire.
         assert_eq!(calls[0].function.arguments, r#"{"loc":"SF"}"#);
     }
 
@@ -982,7 +975,7 @@ mod tests {
     #[test]
     fn anthropic_request_tool_blocks_parse_but_drop_text() {
         // Tool blocks are parsed (so the request doesn't error) but
-        // contribute no plain text in P1.8a.
+        // contribute no plain text.
         let wire = r#"{
             "model":"x","max_tokens":10,
             "messages":[
@@ -1207,7 +1200,7 @@ mod tests {
 }
 
 // ============================================================================
-// **#231 P2.11b** — `/v1/embeddings` types.
+// `/v1/embeddings` types.
 // ============================================================================
 
 /// Inputs for `POST /v1/embeddings`. OpenAI accepts:
@@ -1274,8 +1267,8 @@ pub struct EmbeddingsResponse {
 
 // ---- /tokenize, /detokenize -----------------------------------------------
 
-/// **#234 P3.14** — llama.cpp-compatible tokenize endpoint body.
-/// Mirrors `llama.cpp` server: `content` is the text to tokenize,
+/// llama.cpp-compatible tokenize endpoint body.
+/// Matches the `llama.cpp` server: `content` is the text to tokenize,
 /// `add_special` toggles BOS/EOS injection (default `false` — the
 /// chat template handles specials for actual chat turns), and
 /// `with_pieces` switches the response from a flat `[id, ...]` to
@@ -1290,7 +1283,7 @@ pub struct TokenizeRequest {
     pub with_pieces: bool,
 }
 
-/// **#234 P3.14** — llama.cpp-compatible detokenize endpoint body.
+/// llama.cpp-compatible detokenize endpoint body.
 #[derive(Debug, Clone, Deserialize)]
 pub struct DetokenizeRequest {
     pub tokens: Vec<u32>,

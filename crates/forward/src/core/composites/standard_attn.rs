@@ -777,7 +777,7 @@ pub fn standard_attn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
                 }
                 let _ = (k_cache, v_cache);
             } else {
-            // SWA at decode (mirror of the Q8 lever above): when
+            // SWA at decode, same lever as the Q8 path above: when
             // window_size < n_tokens_kv, slide the F16 cache pointer
             // to the window start and pass n_tokens_kv = window. The
             // kernel's internal SWA mask becomes a no-op. Eliminates

@@ -113,7 +113,7 @@ pub fn dense_gemv_f16_f16_batched(
     Ok(())
 }
 
-/// 1.g — batched dense GEMV: `y[t, n] = Σ_k w[n, k] * (float) x[t, k]`.
+/// Batched dense GEMV: `y[t, n] = Σ_k w[n, k] * (float) x[t, k]`.
 /// Weight F32 `[n_rows, k]`; activation F16 `[n_tokens, k]`; output F32
 /// `[n_tokens, n_rows]`.
 /// Launch: `gridDim = (n_rows, n_tokens)`, one block per (row, token) pair.

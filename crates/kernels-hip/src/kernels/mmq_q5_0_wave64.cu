@@ -1,6 +1,6 @@
-// mmq_q5_0_wave64 — 0.a wave64 MMQ for Q5_0 × Q8_1 activation.
-// Direct sibling of `mmq_q4_0_wave64.cu` (8.a) with the 5th-bit ladder
-// from 3's `mmvq_q5_0.cu` grafted into the inner loop. Q5_0 closes a
+// mmq_q5_0_wave64 — wave64 MMQ for Q5_0 × Q8_1 activation.
+// Direct sibling of `mmq_q4_0_wave64.cu` with the 5th-bit ladder
+// from `mmvq_q5_0.cu` grafted into the inner loop. Q5_0 closes a
 // low-traffic gap in Qwen3.6-35B-A3B-Q4_0 (20/40 layers use Q5_0 for
 // ffn_*_shexp); the 7 head-to-head never measured it as a primary
 // bottleneck, but it's a cheap port and clears the dtype out of MMVQ-only

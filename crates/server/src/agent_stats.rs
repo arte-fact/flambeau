@@ -1,4 +1,4 @@
-//! M2.3 — per-iteration agent-loop telemetry, exposed at
+//! Per-iteration agent-loop telemetry, exposed at
 //! `GET /v1/agent/stats`.
 //! Read-only debug surface. Each chat completion contributes zero or
 //! more `IterStat` entries (one per agent-loop iteration); they land

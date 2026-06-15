@@ -1,10 +1,10 @@
-// dense_gemv_f32_f16_batched — 1.g batched dense GEMV.
+// dense_gemv_f32_f16_batched — batched dense GEMV.
 // Extension of `dense_gemv_f32_f16.cu` with an outer token dimension.
 // Same inner warp-reduce math; adds blockIdx.y as token index.
 // y[t, n] = Σ_k w[n, k] · (float) x[t, k]
 // Target: the MoE router at prefill. The non-batched version launches
 // L × n_layers kernels (e.g. 512 × 40 = 20520 for 35B at L=512 =
-// 9 % of prefill wall in 0.b profile). A batched launch collapses
+// 9 % of prefill wall in profile). A batched launch collapses
 // the L dimension into grid.y — 40 launches instead of 20520.
 // Launch:
 // gridDim = { n_rows, n_tokens, 1 }

@@ -93,8 +93,8 @@ enum State {
 /// All of them route into the (lenient) call-header path. `<think>` /
 /// `</think>` are the qwen-style reasoning markers the model sometimes
 /// substitutes for its native `<|channel>` channel; they route to the
-/// reasoning stream rather than leaking into content. This mirrors
-/// llama.cpp's permissive Gemma-4 tool-call grammar (PR #21326).
+/// reasoning stream rather than leaking into content. Matches a
+/// permissive Gemma-4 tool-call grammar.
 const TEXT_OPEN_TAGS: &[&str] = &[
     "<|tool_call>",
     TOOL_CALL_OPEN_SYM,
@@ -1440,7 +1440,7 @@ mod tests {
 
     #[test]
     fn lenient_brace_inside_string_value_preserved() {
-        // Upstream llama.cpp #21384: a `{`/`}` inside a value must not
+        // A `{`/`}` inside a value must not
         // break depth tracking. flambeau delimits by <|"|>, so it holds.
         let events = collect(
             "<|tool_call>call:write{code:<|\"|>fn f() { x }<|\"|>}<tool_call|>",

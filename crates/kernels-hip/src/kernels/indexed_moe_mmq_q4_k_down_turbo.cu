@@ -1,4 +1,4 @@
-// indexed_moe_mmq_q4_k_down_turbo — 4.c sibling of gate_up_turbo.
+// indexed_moe_mmq_q4_k_down_turbo — sibling of gate_up_turbo.
 // Down-projection has a single weight matrix and uses the SwiGLU'd per-pair
 // activation (each pair has its own activation vector), so both the
 // activation index AND the output index use slot_pair directly.

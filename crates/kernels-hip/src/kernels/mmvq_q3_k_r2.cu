@@ -19,7 +19,7 @@
 // Scale unpack uses the byte-wise u32 load (Q3_K block size 110 B leaves
 // scales[] misaligned for every other super-block — same idiom as mmvq_q3_k).
 
-// Two output dtypes via templated __device__ body (#120):
+// Two output dtypes via templated __device__ body:
 //   flambeau_mmvq_q3_k_r2_q8_1      → F32 dst
 //   flambeau_mmvq_q3_k_r2_q8_1_f16  → F16 dst (saturating)
 

@@ -1,4 +1,4 @@
-//! T2.4 — Fixture-driven regression corpus for `QwenCoderXmlParser`.
+//! Fixture-driven regression corpus for `QwenCoderXmlParser`.
 //! Walks `crates/server/tests/tool_call_fixtures/*.txt` and, for each
 //! fixture, asserts that the coalesced event stream the parser produces
 //! matches the committed `*.expected.jsonl`. Runs the input twice —

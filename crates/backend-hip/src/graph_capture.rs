@@ -1,4 +1,4 @@
-//! 6.a-i3 — thread-local capture-state recorder.
+//! Thread-local capture-state recorder.
 //! While a capture is active on a thread, every `HipKernel::launch` call
 //! appends a record to the thread-local state. `KernelArgs::push_slot`
 //! attaches a logical [`ScalarSlot`] tag to a pushed arg so post-capture
@@ -8,8 +8,8 @@
 //! (kernel_node_idx, arg_index, arity) triple — enough for
 //! [`crate::HipGraphExec::set_slot`] to build a fresh `kernelParams`
 //! pointer array and call `hipGraphExecKernelNodeSetParams`.
-//! Scope of i3 is infra + a small unit test. Forward-path integration
-//! lands in 6.a-i4 (`pos`-bearing kernels in `forward_layer_prefill`).
+//! Scope here is infra + a small unit test. Forward-path integration
+//! handles `pos`-bearing kernels in `forward_layer_prefill`.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -37,7 +37,7 @@ pub(crate) struct LaunchRecord {
 #[derive(Debug, Default)]
 pub(crate) struct CaptureState {
     pub launches: Vec<LaunchRecord>,
-    /// 6.a-i5b — memcpy issues observed during this capture, in
+    /// Memcpy issues observed during this capture, in
     /// dispatch order. Each entry records whether the caller tagged the
     /// memcpy with a [`MemcpySlot`] and the initial (dst, src, count,
     /// kind) so post-capture we can seed the exec's memcpy shadow.
@@ -113,7 +113,7 @@ pub(crate) fn record_launch(arity: usize, tagged: &[(ScalarSlot, usize)]) {
     });
 }
 
-/// 6.a-i5b — called by `HipDevice::memcpy_async*` before submitting
+/// Called by `HipDevice::memcpy_async*` before submitting
 /// a memcpy. If capture is active, appends a [`MemcpyRecord`] so
 /// post-capture we can zip records with memcpy-type graph nodes.
 /// `slot=None` means the caller isn't interested in updating this
@@ -146,7 +146,7 @@ pub(crate) fn record_memcpy(
 pub struct SlotMap {
     /// slot -> (kernel_node_idx, arg_index, launch_arity)
     entries: HashMap<ScalarSlot, SlotBinding>,
-    /// 6.a-i5b — memcpy-slot bindings. memcpy_node_idx indexes into
+    /// Memcpy-slot bindings. memcpy_node_idx indexes into
     /// the exec's ordered list of memcpy-type graph nodes (SEPARATE
     /// from kernel_nodes — their indices are not interchangeable).
     memcpy_entries: HashMap<MemcpySlot, MemcpyBinding>,

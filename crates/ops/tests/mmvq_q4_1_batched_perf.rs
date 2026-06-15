@@ -1,8 +1,8 @@
-//! #288 microbench — wall-clock A/B between per-row `qmatmul(m=1)` ×N
+//! Microbench — wall-clock A/B between per-row `qmatmul(m=1)` ×N
 //! and the new batched `mmvq_q4_1_batched` kernel via `qmatmul(m=N)`.
 //! Goal: confirm the weight-HBM amortization lever delivers a real
 //! speedup at the GDN matmul shapes used by Qwen3.6-27B (k=4096,
-//! n_rows in [3584, 14336]). Not the perf gate — that's #292 / live
+//! n_rows in [3584, 14336]). Not the perf gate — that's the live
 //! cert. This bench just sanity-checks direction-of-win.
 //! Run with:
 //! cargo test --release -p flambeau-ops --features hip \

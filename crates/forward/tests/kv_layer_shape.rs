@@ -116,8 +116,8 @@ fn per_layer_kv_depths_honors_override() {
 // If the trait shape ever changes a derivation, these tests catch it
 // before any arch crate sees the regression.
 
-/// Synthetic qwen35-v2-style dense hybrid (e.g. Qwen3.6-27B). Mirrors
-/// the math at qwen35-v2/src/arch.rs HEAD~ (commit c5622ec, pre-builder).
+/// Synthetic qwen35-v2-style dense hybrid (e.g. Qwen3.6-27B). Matches
+/// the math at qwen35-v2/src/arch.rs.
 struct QwenDenseShape {
     n_layers: usize,
     hidden: usize,

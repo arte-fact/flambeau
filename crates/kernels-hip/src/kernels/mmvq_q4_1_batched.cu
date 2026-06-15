@@ -6,9 +6,9 @@
 // break;` inside `#pragma unroll`; the compiler kept all 8 slots'
 // accumulators in VGPRs regardless of actual n_slots → ~59 VGPRs → 4
 // waves/SIMD on gfx906 → weight-amortization win drowned in latency-
-// hiding loss. (Pre-K1 #288 measurements: null-to-loss on every anchor.)
+// hiding loss.
 //
-// Fix mirrors K1: emit three `extern "C"` entry points (N=2, 3, 4) that
+// Fix: emit three `extern "C"` entry points (N=2, 3, 4) that
 // instantiate `flambeau_mmvq_q4_1_batched_body<N>` with compile-time N.
 // The compiler then allocates only N slots' worth of registers → keeps
 // occupancy near the single-row baseline.

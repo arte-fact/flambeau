@@ -70,7 +70,7 @@ enum Cmd {
         mesh_mode: String,
     },
     /// OpenAI-compatible HTTP server () + optional MCP upstream
-    /// client (7 — ROADMAP-V2 §M2.1).
+    /// client.
     Serve {
         #[arg(long)]
         model: String,
@@ -108,13 +108,13 @@ enum Cmd {
         /// arch like Qwen3.6. Default: uniform split.
         #[arg(long = "layer-split")]
         layer_split: Option<String>,
-        /// **#230 P2.11a** — optional path to a `qwen3` arch embedding
+        /// Optional path to a `qwen3` arch embedding
         /// GGUF (e.g. `Qwen3-Embedding-0.6B-Q8_0.gguf`). Loaded
         /// alongside the chat model on a single device; powers the
-        /// `/v1/embeddings` endpoint (#231). Omit to disable embeddings.
+        /// `/v1/embeddings` endpoint. Omit to disable embeddings.
         #[arg(long = "embedding-model")]
         embedding_model: Option<String>,
-        /// **#230 P2.11a** — HIP device for the embedding model
+        /// HIP device for the embedding model
         /// (numeric, e.g. `0`). Defaults to the first device in
         /// `--devices`. The embedding model shares VRAM with whatever
         /// chat-model rank lives on the same device; a 600 M / 4 B
@@ -486,7 +486,7 @@ fn serve_cmd(args: ServeArgs) -> Result<()> {
     };
 
     let bind_addr: SocketAddr = format!("0.0.0.0:{port}").parse()?;
-    // **#230** — resolve embedding device. Default to the first chat
+    // Resolve embedding device. Default to the first chat
     // device; reject explicit IDs that aren't already in `--devices`
     // (the cluster's HipDevice handles cover only those).
     let resolved_embedding_device = if embedding_model.is_some() {

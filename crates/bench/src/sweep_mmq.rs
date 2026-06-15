@@ -52,18 +52,18 @@ pub enum Dtype {
     Q8_0Wave64Tile16,
     /// 4-warp LDS-tiled Q4_1 MMQ, MMQ_Y=32, MMQ_X=8, 256 threads.
     Q4_14Warp,
-    /// Wave64 Q4_1 MMQ (3.a). MMQ_Y=64, TILE_N=8, 64 threads. DP4A inner.
+    /// Wave64 Q4_1 MMQ. MMQ_Y=64, TILE_N=8, 64 threads. DP4A inner.
     Q4_1Wave64,
-    /// Wave64 Q4_0 MMQ (8.a). MMQ_Y=64, TILE_N=8, 64 threads. DP4A inner
+    /// Wave64 Q4_0 MMQ. MMQ_Y=64, TILE_N=8, 64 threads. DP4A inner
     /// with the `(q-8)·y = dp4a(q,y) - 8·y_s` bias-correction identity.
     Q4_0Wave64,
     /// 4-warp LDS-tiled Q4_0 MMQ. MMQ_Y=128, MMQ_X=64, 256 threads
     /// (4 warps × 64). Direct port of Q4_1 4warp_lds with bias-correction in
     /// the dot. Closes the 2.5× dense-prefill gap on 27B-Q4_0 vs Q4_1.
     Q4_04Warp,
-    /// Wave64 Q5_0 MMQ (0.a). MMQ_Y=64, TILE_N=8, 64 threads. DP4A inner
+    /// Wave64 Q5_0 MMQ. MMQ_Y=64, TILE_N=8, 64 threads. DP4A inner
     /// with the `(q5-16)·y = dp4a(nibble,y) + 16·dp4a(bit,y) - 16·y_s` identity
-    /// (5th-bit side from 3 mmvq_q5_0 grafted into the 8.a tile shape).
+    /// (5th-bit side from mmvq_q5_0 grafted into the Q4_0 wave64 tile shape).
     Q5_0Wave64,
     /// Wave64 Q5_1 MMQ. Combines the Q5_0 5th-bit ladder with the Q4_1
     /// `d·d_y·sumi + m·y_s` reduction; Q5_1 elements are unsigned so no
@@ -71,7 +71,7 @@ pub enum Dtype {
     Q5_1Wave64,
     /// 4-warp LDS-tiled Q4_K MMQ, MMQ_Y=16, MMQ_X=8, 128 threads.
     Q4K4Warp,
-    /// 4.b — llamacpp-turbo Q4_K MMQ port. 256 threads (4 warps × 64),
+    /// llamacpp-turbo Q4_K MMQ port. 256 threads (4 warps × 64),
     /// MMQ_Y=16, MMQ_X=16, double-buffered Y LDS per super-block. DS4 Q8_1
     /// activation layout.
     Q4KTurbo,
@@ -122,13 +122,13 @@ fn tile_shape(dtype: Dtype) -> (u32, u32) {
         Dtype::Q8_0Wave64 => (64, 8),        // MMQ_Y × TILE_N — wave64 ()
         Dtype::Q8_0Wave64Tile16 => (64, 16), // MMQ_Y × TILE_N — wave64 ()
         Dtype::Q4_14Warp => (128, 64),       // 5 — candle turbo tile shape
-        Dtype::Q4_1Wave64 => (64, 8),        // 3.a wave64 MMQ for Q4_1
-        Dtype::Q4_0Wave64 => (64, 8),        // 8.a wave64 MMQ for Q4_0
+        Dtype::Q4_1Wave64 => (64, 8),        // wave64 MMQ for Q4_1
+        Dtype::Q4_0Wave64 => (64, 8),        // wave64 MMQ for Q4_0
         Dtype::Q4_04Warp => (128, 64),       // C1 — 4warp_lds tile, MMQ_Y=128, MMQ_X=64
-        Dtype::Q5_0Wave64 => (64, 8),        // 0.a wave64 MMQ for Q5_0
+        Dtype::Q5_0Wave64 => (64, 8),        // wave64 MMQ for Q5_0
         Dtype::Q5_1Wave64 => (64, 8),
         Dtype::Q4K4Warp => (16, 8), // MMQ_Y × MMQ_X (Q4_K uses 16 rows to fit LDS)
-        Dtype::Q4KTurbo => (128, 16), // 4.b turbo-ported Q4_K (MMQ_Y=128, MMQ_X=16)
+        Dtype::Q4KTurbo => (128, 16), // turbo-ported Q4_K (MMQ_Y=128, MMQ_X=16)
         Dtype::Q4KWave64 => (64, 8), // MMQ_Y × TILE_N — wave64 MMQ for Q4_K (candle port)
         Dtype::Q5KWave64 => (64, 8), // MMQ_Y × TILE_N — wave64 MMQ for Q5_K (candle port)
         Dtype::Q6K4Warp => (16, 8), // MMQ_Y × MMQ_X (Q6_K same tile as Q4_K)

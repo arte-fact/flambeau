@@ -381,7 +381,7 @@ impl GgufFile {
     /// latency 100× past the RAM watermark.
     /// Drop the mmap range for this tensor (definitively, via `munmap` —
     /// same technique llama.cpp's `unmap_fragment` uses; `madvise(DONTNEED)`
-    /// is advisory and does not reliably free page cache on Linux 5.x/6.x).
+    /// is advisory and does not reliably free page cache on current Linux).
     /// Only the page-aligned inner slice is unmapped; partially-used
     /// boundary pages stay mapped so neighbouring tensors still work.
     /// Safe to call even if the tensor doesn't exist — best-effort hint.

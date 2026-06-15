@@ -1,4 +1,4 @@
-// indexed_moe_mmvq_q4_0_gate_up_dp4a — 3.b.1 fused gate+up MoE MMVQ
+// indexed_moe_mmvq_q4_0_gate_up_dp4a — fused gate+up MoE MMVQ
 // for Q4_0 expert weights. Sibling of `indexed_moe_mmvq_q4_0.cu` that
 // reads the Q8_1 activation once per block and produces two outputs
 // (gate and up), halving the launch count at decode where the tile8 MMQ

@@ -26,7 +26,7 @@
 
 #define TOPK_MAX_K 16
 // Qwen3.6 is 256 experts top-8. Qwen3-Coder-Next-80B (qwen3next) is
-// 512 experts top-10 → bumped from 256 to 512 in V1.x #120.
+// 512 experts top-10 → bumped from 256 to 512.
 #define TOPK_MAX_EXPERTS 512
 #define TOPK_MAX_WARPS (TOPK_MAX_EXPERTS / 64)  // 8 at EXPERTS=512
 

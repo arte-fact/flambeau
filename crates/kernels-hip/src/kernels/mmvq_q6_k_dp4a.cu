@@ -3,7 +3,7 @@
 // Q6_K per-element math: raw_q (6-bit) = (4-bit ql nibble | (2-bit qh bits << 4)) - 32.
 // DP4A packs 4 raw_q int8 values (-32..31) × 4 Q8_1 int8 values into one
 // v_dot4_i32_i8 instruction per 4 elements.
-// Indexing mirrors llama.cpp's `iqs`-based scheme so the bit-layout
+// Indexing follows the `iqs`-based scheme so the bit-layout
 // assumptions match exactly. QI6_K = QK_K/(4*QR6_K) = 32 iqs positions per
 // super-block. Each iqs call processes 2×4 = 8 elements (QR6_K=2, inner dp4a
 // per iteration on 4 elements).
@@ -19,7 +19,7 @@
 // - Two iterations (i=0,1): construct 4-element signed int8 vi, dp4a, scale
 // - acc += d * Σ_i (d8[i] * dp4a(vi, u[i], 0) * sc[i])
 
-// Two output dtypes via templated __device__ body (#120):
+// Two output dtypes via templated __device__ body:
 //   flambeau_mmvq_q6_k_dp4a_q8_1      → F32 dst
 //   flambeau_mmvq_q6_k_dp4a_q8_1_f16  → F16 dst (saturating)
 

@@ -18,7 +18,7 @@ use crate::gguf::GgufFile;
 /// Python-`json.dumps`-compatible compact JSON formatter: space after
 /// `,` and `:`, no other whitespace. Matches what `nlohmann::json::dump`
 /// (the C++ JSON lib llama.cpp uses, via its `tojson` Jinja filter)
-/// emits by default. Byte-exact with llama.cpp is the T1.3 gate.
+/// emits by default. Byte-exact with llama.cpp is the gate.
 struct PythonCompactFormatter;
 
 impl serde_json::ser::Formatter for PythonCompactFormatter {
@@ -144,7 +144,7 @@ impl ChatTemplate {
         env.set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
         // Shadow minijinja's built-in `tojson` with one that matches
         // llama.cpp's (nlohmann::json) output byte-for-byte: field order
-        // preserved, `, ` / `: ` separators. See T1.3 parity cert.
+        // preserved, `, ` / `: ` separators. See parity cert.
         env.add_filter("tojson", tojson_python_style);
         // Leak the template string — it lives for the rest of the process
         // and Jinja needs a `'static` reference. One per model load, fine.

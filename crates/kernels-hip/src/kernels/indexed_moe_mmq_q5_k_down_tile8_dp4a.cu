@@ -1,7 +1,7 @@
-// indexed_moe_mmq_q5_k_down_tile8_dp4a — 1.a Q5_K down-projection MoE MMQ.
+// indexed_moe_mmq_q5_k_down_tile8_dp4a — Q5_K down-projection MoE MMQ.
 // Closes the MMVQ-at-prefill hole in Qwen3-Coder-30B-A3B-UD-Q4_K_XL. In the
 // UD mixed-quant GGUF, 13 of 48 layers have Q5_K `ffn_down_exps` (the rest
-// Q4_K / Q6_K). 0.b rocprofv3 at Mesh<4> pp=512 attributed 640 ms
+// Q4_K / Q6_K). rocprofv3 at Mesh<4> pp=512 attributed 640 ms
 // (31.56 % of prefill wall, 9.8 ms / call × 65 calls) to
 // `indexed_moe_mmvq_q5_k` — classic prefill-on-MMVQ latency-bound pattern.
 // Structure: fuses `indexed_moe_mmq_q4_k_down_tile8_dp4a` tile

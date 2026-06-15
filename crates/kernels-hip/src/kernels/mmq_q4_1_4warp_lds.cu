@@ -332,7 +332,7 @@ static __device__ void mul_mat_q4_1_turbo_impl(
 // --- Single kernel export: MMQ_X=64, need_check=false ---
 // 2 waves/SIMD with 128 VGPR is the right config for this kernel.
 // MMQ_X=32 (VGPR 116→84, waves/SIMD 2→3) and __launch_bounds__(256, 3)
-// occupancy-override variants are both 1.5–1.7× slower at realistic
+// occupancy-override variants are both slower at realistic
 // prefill shapes — extra VGPR lets the compiler unroll the DP4A chain
 // and hold sumi accumulators in registers, and dropping below that
 // hurts per-thread throughput more than occupancy gains can recover.

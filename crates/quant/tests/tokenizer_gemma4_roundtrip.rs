@@ -26,15 +26,15 @@ fn gemma4_tokenizer_loads_and_advertises_overrides() {
     assert_eq!(tok.bos_id, Some(2));
     assert_eq!(tok.eos_id, Some(106));
     assert_eq!(tok.pad_id, Some(0));
-    // PR #21500 override: regardless of GGUF flag (false for this
-    // file), the runtime must add BOS for gemma4.
+    // Regardless of GGUF flag (false for this file), the runtime must
+    // add BOS for gemma4.
     assert!(
         tok.force_add_bos,
         "gemma4 must force add_bos=true (PR #21500)"
     );
     // <end_of_turn> = 106 = eos in gemma4. <eos> = 1 is the
-    // also-stop token (PR #21492 strips `</s>` from EOG, but gemma4
-    // doesn't have `</s>` in its vocab — it has `<eos>`/`<end_of_turn>`).
+    // also-stop token (`</s>` is stripped from EOG, but gemma4 doesn't
+    // have `</s>` in its vocab — it has `<eos>`/`<end_of_turn>`).
     assert!(tok.stop_ids.contains(&106));
     let eos_extra = tok.inner.get_vocab(false).get("<eos>").copied();
     if let Some(eos1) = eos_extra {
@@ -67,14 +67,13 @@ fn gemma4_roundtrip_with_spaces() {
 
 #[test]
 fn gemma4_roundtrip_newlines() {
-    // PR #21343 / #21406: newline-only tokens. Single, double, and
-    // mixed newline runs.
+    // Newline-only tokens. Single, double, and mixed newline runs.
     roundtrip("line one\nline two\n\nthird");
 }
 
 #[test]
 fn gemma4_roundtrip_unicode() {
-    // Byte-fallback path (PR #21488). Emoji + CJK + accented latin.
+    // Byte-fallback path. Emoji + CJK + accented latin.
     roundtrip("¡Hola! こんにちは 🌍 résumé");
 }
 

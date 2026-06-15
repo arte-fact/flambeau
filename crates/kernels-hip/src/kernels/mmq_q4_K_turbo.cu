@@ -1,4 +1,4 @@
-// mmq_q4_K_turbo — 4.b port of llamacpp-turbo's 4-warp LDS-tiled Q4_K MMQ.
+// mmq_q4_K_turbo — port of llamacpp-turbo's 4-warp LDS-tiled Q4_K MMQ.
 // Source: /artefact/llamacpp-turbo/llama-cpp-gfx906-turbo/ggml/src/ggml-cuda/mmq.cuh
 // - load_tiles_q4_K (DP4A branch)
 // - vec_dot_q4_K_q8_1_dp4a
@@ -6,7 +6,7 @@
 // - mul_mat_q_process_tile (outer K loop with double-buffered Y LDS)
 // This is the DENSE standalone port — no indexed-MoE wrapping. That lands in
 // once this passes sweep_mmq correctness.
-// Fixed template parameters for 4.b:
+// Fixed template parameters:
 // mmq_x = 16 (activation cols per block)
 // mmq_y = 16 (weight rows per block)
 // nwarps = 4 × warp_size 64 = 256 threads/block

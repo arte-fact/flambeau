@@ -1,7 +1,7 @@
 //! `KernelImpl` registrations for `QMatMul` on `HipDevice`.
 //! Each row corresponds to a `[[qmatmul]]` / `[[qmatmul_mmq]]` entry in
 //! `dispatch/hip/gfx906.toml` and a cert under `certs/hip/gfx906/`. This
-//! module is the Rust-typed mirror of the TOML — the dispatcher calls
+//! module is the Rust-typed counterpart of the TOML — the dispatcher calls
 //! [`dispatch_qmatmul`] with a runtime `QMatMulCfg` and gets back the
 //! matching `KernelDescriptor` (or `None` if no impl applies).
 
@@ -413,7 +413,7 @@ pub fn dispatch_qmatmul(cfg: &QMatMulCfg) -> Option<&'static KernelDescriptor> {
         cfg.m,
     )
 }
-// 1.b was an attempt at shape-aware (n < 1024 → tile8) for Q8_0 MMQ,
+// An attempt at shape-aware (n < 1024 → tile8) for Q8_0 MMQ,
 // based on microbench PMC showing tile16 MemBusy crashes 75 % → 35 % at
 // small-N. End-to-end was a regression: the shexp shapes (k=2048 n=512)
 // are already-fast (~0.15 ms/call), and routing them through tile8's
