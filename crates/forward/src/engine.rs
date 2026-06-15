@@ -7,8 +7,9 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
-use flambeau_backend_hip::{HipDevice, HipEvent, HipStream};
-use flambeau_core::{CopyDirection, Device, DevicePtr};
+use flambeau_backend::{Backend, HipBackend};
+use flambeau_backend_hip::{HipDevice, HipStream};
+use flambeau_core::{CopyDirection, Device, DevicePtr, Event};
 use flambeau_model_ops::{Tensor, F16};
 use flambeau_ops::OpsRegistry;
 
@@ -260,14 +261,14 @@ impl TopologyHooks for HybridHooks {
     }
 }
 
-pub trait StageHooks {
+pub trait StageHooks<B: Backend = HipBackend> {
     fn is_first(&self) -> bool;
     fn is_last(&self) -> bool;
     fn layer_range(&self, layout: &ModelLayout) -> Range<usize>;
-    fn peer_recv(&mut self, core: &mut CoreState<'_>, n_tokens: usize) -> Result<Tensor<F16>>;
+    fn peer_recv(&mut self, core: &mut CoreState<'_, B>, n_tokens: usize) -> Result<Tensor<F16>>;
     fn peer_send(
         &mut self,
-        core: &mut CoreState<'_>,
+        core: &mut CoreState<'_, B>,
         input: &Tensor<F16>,
         n_tokens: usize,
     ) -> Result<()>;
@@ -275,7 +276,7 @@ pub trait StageHooks {
 
 pub struct SoloStage;
 
-impl StageHooks for SoloStage {
+impl<B: Backend> StageHooks<B> for SoloStage {
     fn is_first(&self) -> bool {
         true
     }
@@ -285,12 +286,12 @@ impl StageHooks for SoloStage {
     fn layer_range(&self, layout: &ModelLayout) -> Range<usize> {
         0..layout.num_layers
     }
-    fn peer_recv(&mut self, _core: &mut CoreState<'_>, _n_tokens: usize) -> Result<Tensor<F16>> {
+    fn peer_recv(&mut self, _core: &mut CoreState<'_, B>, _n_tokens: usize) -> Result<Tensor<F16>> {
         bail!("SoloStage::peer_recv unreachable — is_first() is true")
     }
     fn peer_send(
         &mut self,
-        _core: &mut CoreState<'_>,
+        _core: &mut CoreState<'_, B>,
         _input: &Tensor<F16>,
         _n_tokens: usize,
     ) -> Result<()> {
@@ -298,20 +299,20 @@ impl StageHooks for SoloStage {
     }
 }
 
-pub struct PpStage<'a> {
+pub struct PpStage<'a, B: Backend = HipBackend> {
     pub rank: usize,
     pub n_ranks: usize,
     pub layer_start: usize,
     pub layer_end: usize,
     /// Edge that this rank produces TO (rank → rank+1). `None` on the
     /// final rank, which has no downstream consumer.
-    pub send_edge: Option<&'a crate::runtime::ar::PeerSlot>,
+    pub send_edge: Option<&'a crate::runtime::ar::PeerSlot<B::Device>>,
     /// Edge that this rank consumes FROM (rank-1 → rank). `None` on
     /// rank 0, which feeds itself from the embedding.
-    pub recv_edge: Option<&'a crate::runtime::ar::PeerSlot>,
+    pub recv_edge: Option<&'a crate::runtime::ar::PeerSlot<B::Device>>,
 }
 
-impl<'a> StageHooks for PpStage<'a> {
+impl<'a, B: Backend> StageHooks<B> for PpStage<'a, B> {
     fn is_first(&self) -> bool {
         self.rank == 0
     }
@@ -321,7 +322,7 @@ impl<'a> StageHooks for PpStage<'a> {
     fn layer_range(&self, _layout: &ModelLayout) -> Range<usize> {
         self.layer_start..self.layer_end
     }
-    fn peer_recv(&mut self, core: &mut CoreState<'_>, n_tokens: usize) -> Result<Tensor<F16>> {
+    fn peer_recv(&mut self, core: &mut CoreState<'_, B>, n_tokens: usize) -> Result<Tensor<F16>> {
         let edge = self
             .recv_edge
             .ok_or_else(|| anyhow!("PpStage::peer_recv: rank 0 has no recv_edge"))?;
@@ -359,7 +360,7 @@ impl<'a> StageHooks for PpStage<'a> {
     }
     fn peer_send(
         &mut self,
-        core: &mut CoreState<'_>,
+        core: &mut CoreState<'_, B>,
         input: &Tensor<F16>,
         n_tokens: usize,
     ) -> Result<()> {
@@ -451,8 +452,10 @@ impl<'a> StageHooks for PpStage<'a> {
 
         // Record producer-side done event; consumer's peer_recv will
         // stream_wait on it.
-        let event = HipEvent::new(flambeau_core::Device::id(core.device))
-            .map_err(|e| anyhow!("PpStage peer_send HipEvent::new: {e}"))?;
+        let event = core
+            .device
+            .new_event()
+            .map_err(|e| anyhow!("PpStage peer_send new_event: {e}"))?;
         event
             .record(core.stream)
             .map_err(|e| anyhow!("PpStage peer_send event.record: {e}"))?;
@@ -468,7 +471,7 @@ impl<'a> StageHooks for PpStage<'a> {
 /// event-based DtoD peer copy on a per-rank edge (rank_in_stage k of
 /// stage i ↔ rank k of stage i+1) — same shape as [`PpStage`]. No
 /// CPU barrier, no host bounce.
-pub struct HybStage<'a> {
+pub struct HybStage<'a, B: Backend = HipBackend> {
     pub stage_idx: usize,
     pub n_stages: usize,
     pub rank_in_stage: usize,
@@ -476,13 +479,13 @@ pub struct HybStage<'a> {
     pub layer_end: usize,
     /// Edge this rank produces TO (stage i / rank k → stage i+1 / rank k).
     /// `None` on the final stage.
-    pub send_edge: Option<&'a crate::runtime::ar::PeerSlot>,
+    pub send_edge: Option<&'a crate::runtime::ar::PeerSlot<B::Device>>,
     /// Edge this rank consumes FROM (stage i-1 / rank k → stage i / rank k).
     /// `None` on the first stage.
-    pub recv_edge: Option<&'a crate::runtime::ar::PeerSlot>,
+    pub recv_edge: Option<&'a crate::runtime::ar::PeerSlot<B::Device>>,
 }
 
-impl<'a> StageHooks for HybStage<'a> {
+impl<'a, B: Backend> StageHooks<B> for HybStage<'a, B> {
     fn is_first(&self) -> bool {
         self.stage_idx == 0
     }
@@ -492,7 +495,7 @@ impl<'a> StageHooks for HybStage<'a> {
     fn layer_range(&self, _layout: &ModelLayout) -> Range<usize> {
         self.layer_start..self.layer_end
     }
-    fn peer_recv(&mut self, core: &mut CoreState<'_>, n_tokens: usize) -> Result<Tensor<F16>> {
+    fn peer_recv(&mut self, core: &mut CoreState<'_, B>, n_tokens: usize) -> Result<Tensor<F16>> {
         let edge = self
             .recv_edge
             .ok_or_else(|| anyhow!("HybStage::peer_recv: first stage has no recv_edge"))?;
@@ -549,7 +552,7 @@ impl<'a> StageHooks for HybStage<'a> {
     }
     fn peer_send(
         &mut self,
-        core: &mut CoreState<'_>,
+        core: &mut CoreState<'_, B>,
         input: &Tensor<F16>,
         n_tokens: usize,
     ) -> Result<()> {
@@ -637,8 +640,10 @@ impl<'a> StageHooks for HybStage<'a> {
                 .map_err(|e| anyhow!("HybStage peer_send memcpy_peer_async: {e}"))?;
         }
 
-        let event = HipEvent::new(flambeau_core::Device::id(core.device))
-            .map_err(|e| anyhow!("HybStage peer_send HipEvent::new: {e}"))?;
+        let event = core
+            .device
+            .new_event()
+            .map_err(|e| anyhow!("HybStage peer_send new_event: {e}"))?;
         event
             .record(core.stream)
             .map_err(|e| anyhow!("HybStage peer_send event.record: {e}"))?;
