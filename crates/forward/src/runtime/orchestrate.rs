@@ -18,7 +18,7 @@
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
-use flambeau_backend_hip::{BarP2pAllReduce, HipCluster};
+use flambeau_backend_hip::{BarP2pAllReduce, HipCluster, HipDevice};
 use flambeau_quant::GgufFile;
 
 use super::ar::{new_peer_edge, new_peer_edge_prealloc, ArCoordinator, BarArCoordinator};
@@ -141,10 +141,10 @@ fn launch_pp<A: Arch>(
     let mut edges: Vec<super::ar::PeerBuffer> = Vec::with_capacity(n.saturating_sub(1));
     for edge_idx in 0..n.saturating_sub(1) {
         let consumer_dev = devices[edge_idx + 1];
-        edges.push(
-            new_peer_edge(consumer_dev)
-                .with_context(|| format!("PP edge {edge_idx}→{} (consumer hip:{consumer_dev})", edge_idx + 1))?,
-        );
+        let consumer_device = Arc::new(HipDevice::new(consumer_dev).with_context(|| {
+            format!("PP edge {edge_idx}→{} (consumer hip:{consumer_dev})", edge_idx + 1)
+        })?);
+        edges.push(new_peer_edge(consumer_device));
     }
     let mut handles = Vec::with_capacity(n);
     let mut layer_cursor = 0usize;
@@ -241,8 +241,14 @@ fn launch_hybrid<A: Arch>(
         const MAX_HIDDEN: usize = 8192;
         let max_bytes = params.prefill_ubatch * MAX_HIDDEN * 2;
         for (k, &consumer_dev) in dst_ranks.iter().enumerate().take(src_ranks.len()) {
+            let consumer_device = Arc::new(HipDevice::new(consumer_dev).with_context(|| {
+                format!(
+                    "Hybrid edge stage {ti}→{} rank_in_stage {k} (consumer hip:{consumer_dev}: device init)",
+                    ti + 1
+                )
+            })?);
             edges_at_transition.push(
-                new_peer_edge_prealloc(consumer_dev, max_bytes).with_context(|| {
+                new_peer_edge_prealloc(consumer_device, max_bytes).with_context(|| {
                     format!(
                         "Hybrid edge stage {ti}→{} rank_in_stage {k} (consumer hip:{consumer_dev}, prealloc {max_bytes} B)",
                         ti + 1

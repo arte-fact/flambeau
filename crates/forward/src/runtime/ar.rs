@@ -820,22 +820,21 @@ impl FusedAllReduce for BarArRank {
 /// `buf` (the host bounce vec) is retained as a fallback used by the
 /// `HybStage` path which hasn't been migrated to the device path yet
 /// — see TODO in `engine.rs`.
-pub struct PeerSlot {
+pub struct PeerSlot<D: Device = HipDevice> {
     pub buf: Mutex<Vec<half::f16>>,
-    pub send_done: Mutex<Option<HipEvent>>,
+    pub send_done: Mutex<Option<D::Event>>,
     /// Pre-allocated device buffer on the CONSUMER's device. Lazy:
     /// `None` until first `peer_send` allocates with the actual
     /// hidden×n_tokens size.
     pub dst: Mutex<Option<PeerDeviceBuffer>>,
-    /// Consumer device ID — used by the producer to call
-    /// `hipMemcpyPeerAsync`. `None` for the hybrid path (still on
-    /// host bounce).
+    /// Consumer device ID — used by the producer to call the peer
+    /// copy. `None` for the hybrid path (still on host bounce).
     pub consumer_device_id: Option<i32>,
-    /// Consumer's HipDevice handle, kept alive so allocations made
-    /// on it remain valid for the slot's lifetime. Producer doesn't
-    /// touch this — it only uses `consumer_device_id` for the peer
-    /// copy call. The Arc keeps `dst` valid.
-    pub consumer_device: Option<Arc<HipDevice>>,
+    /// Consumer's device handle, kept alive so allocations made on it
+    /// remain valid for the slot's lifetime. Producer doesn't touch
+    /// this — it only uses `consumer_device_id` for the peer copy
+    /// call. The Arc keeps `dst` valid.
+    pub consumer_device: Option<Arc<D>>,
 }
 
 pub struct PeerDeviceBuffer {
@@ -843,12 +842,12 @@ pub struct PeerDeviceBuffer {
     pub bytes: usize,
 }
 
-pub type PeerBuffer = Arc<PeerSlot>;
+pub type PeerBuffer<D = HipDevice> = Arc<PeerSlot<D>>;
 
 /// Build a peer slot for the **legacy / hybrid** path — host-bounce
 /// only, no device buffer. Used by [`launch_hybrid`] and any caller
 /// that hasn't migrated to the per-edge BAR1 P2P handoff.
-pub fn new_peer_buffer(hidden: usize) -> PeerBuffer {
+pub fn new_peer_buffer<D: Device>(hidden: usize) -> PeerBuffer<D> {
     Arc::new(PeerSlot {
         buf: Mutex::new(vec![half::f16::ZERO; hidden]),
         send_done: Mutex::new(None),
@@ -859,22 +858,17 @@ pub fn new_peer_buffer(hidden: usize) -> PeerBuffer {
 }
 
 /// Build a per-edge PP slot wired for direct cross-device peer copy.
-/// `consumer_device_id` is the device the buffer will be allocated on.
-/// The actual allocation is deferred to the first `peer_send`, when
-/// the byte size becomes known.
-///
-/// # Errors
-/// Returns a [`HipDevice::new`] failure if `consumer_device_id` is
-/// invalid (out of range, or the underlying HIP context init fails).
-pub fn new_peer_edge(consumer_device_id: i32) -> anyhow::Result<PeerBuffer> {
-    let dev = HipDevice::new(consumer_device_id)?;
-    Ok(Arc::new(PeerSlot {
+/// `consumer_device` is the (caller-owned) device the buffer will be
+/// allocated on; the slot keeps the `Arc` alive for its lifetime. The
+/// actual allocation is deferred to the first `peer_send`.
+pub fn new_peer_edge<D: Device>(consumer_device: Arc<D>) -> PeerBuffer<D> {
+    Arc::new(PeerSlot {
         buf: Mutex::new(Vec::new()),
         send_done: Mutex::new(None),
         dst: Mutex::new(None),
-        consumer_device_id: Some(consumer_device_id),
-        consumer_device: Some(Arc::new(dev)),
-    }))
+        consumer_device_id: Some(consumer_device.id()),
+        consumer_device: Some(consumer_device),
+    })
 }
 
 /// Build a per-edge slot with `dst` pre-allocated to `max_bytes` on
@@ -884,14 +878,13 @@ pub fn new_peer_edge(consumer_device_id: i32) -> anyhow::Result<PeerBuffer> {
 /// Used by `launch_hybrid` since stage workers wake up concurrently.
 ///
 /// # Errors
-/// Returns errors from [`HipDevice::new`] or [`Device::alloc`].
-pub fn new_peer_edge_prealloc(
-    consumer_device_id: i32,
+/// Returns errors from [`Device::bind`] or [`Device::alloc`].
+pub fn new_peer_edge_prealloc<D: Device>(
+    consumer_device: Arc<D>,
     max_bytes: usize,
-) -> anyhow::Result<PeerBuffer> {
-    let dev = HipDevice::new(consumer_device_id)?;
-    dev.bind()?;
-    let ptr = flambeau_core::Device::alloc(&dev, max_bytes)?;
+) -> anyhow::Result<PeerBuffer<D>> {
+    consumer_device.bind()?;
+    let ptr = flambeau_core::Device::alloc(consumer_device.as_ref(), max_bytes)?;
     Ok(Arc::new(PeerSlot {
         buf: Mutex::new(Vec::new()),
         send_done: Mutex::new(None),
@@ -899,7 +892,7 @@ pub fn new_peer_edge_prealloc(
             ptr,
             bytes: max_bytes,
         })),
-        consumer_device_id: Some(consumer_device_id),
-        consumer_device: Some(Arc::new(dev)),
+        consumer_device_id: Some(consumer_device.id()),
+        consumer_device: Some(consumer_device),
     }))
 }
