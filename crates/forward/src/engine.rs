@@ -11,7 +11,7 @@ use flambeau_backend::{Backend, HipBackend};
 use flambeau_backend_hip::{HipDevice, HipStream};
 use flambeau_core::{CopyDirection, Device, DevicePtr, Event};
 use flambeau_model_ops::{Tensor, F16};
-use flambeau_ops::OpsRegistry;
+use flambeau_ops::{Ops, OpsRegistry};
 
 use crate::core::{composites, CoreState, NoopHooks, ScratchPool, TopologyHooks};
 use crate::ctx::{
@@ -655,17 +655,18 @@ impl<'a, B: Backend> StageHooks<B> for HybStage<'a, B> {
     }
 }
 
-pub struct ForwardEngine<'a, H: TopologyHooks, S: StageHooks> {
-    pub core: CoreState<'a>,
+pub struct ForwardEngine<'a, B: Backend = HipBackend, H: TopologyHooks<B> = NoopHooks, S: StageHooks<B> = SoloStage>
+{
+    pub core: CoreState<'a, B>,
     pub hooks: H,
     pub stage: S,
 }
 
-impl<'a, H: TopologyHooks, S: StageHooks> ForwardEngine<'a, H, S> {
+impl<'a, B: Backend, H: TopologyHooks<B>, S: StageHooks<B>> ForwardEngine<'a, B, H, S> {
     fn build(
-        device: &'a HipDevice,
-        stream: &'a HipStream,
-        reg: &'a OpsRegistry,
+        device: &'a B::Device,
+        stream: &'a B::Stream,
+        reg: &'a B::Registry,
         pool: &'a mut ScratchPool,
         hooks: H,
         stage: S,
@@ -677,7 +678,7 @@ impl<'a, H: TopologyHooks, S: StageHooks> ForwardEngine<'a, H, S> {
     }
 }
 
-impl<'a> ForwardEngine<'a, NoopHooks, SoloStage> {
+impl<'a> ForwardEngine<'a, HipBackend, NoopHooks, SoloStage> {
     pub fn new(
         device: &'a HipDevice,
         stream: &'a HipStream,
@@ -688,7 +689,7 @@ impl<'a> ForwardEngine<'a, NoopHooks, SoloStage> {
     }
 }
 
-impl<'a> ForwardEngine<'a, TpHooks, SoloStage> {
+impl<'a> ForwardEngine<'a, HipBackend, TpHooks, SoloStage> {
     pub fn new(
         device: &'a HipDevice,
         stream: &'a HipStream,
@@ -700,7 +701,7 @@ impl<'a> ForwardEngine<'a, TpHooks, SoloStage> {
     }
 }
 
-impl<'a> ForwardEngine<'a, NoopHooks, PpStage<'a>> {
+impl<'a> ForwardEngine<'a, HipBackend, NoopHooks, PpStage<'a>> {
     pub fn new(
         device: &'a HipDevice,
         stream: &'a HipStream,
@@ -713,7 +714,7 @@ impl<'a> ForwardEngine<'a, NoopHooks, PpStage<'a>> {
     }
 }
 
-impl<'a> ForwardEngine<'a, HybridHooks, HybStage<'a>> {
+impl<'a> ForwardEngine<'a, HipBackend, HybridHooks, HybStage<'a>> {
     pub fn new(
         device: &'a HipDevice,
         stream: &'a HipStream,
@@ -727,7 +728,7 @@ impl<'a> ForwardEngine<'a, HybridHooks, HybStage<'a>> {
     }
 }
 
-impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
+impl<B: Backend, H: TopologyHooks<B>, S: StageHooks<B>> ForwardCtx for ForwardEngine<'_, B, H, S> {
     fn embed(&mut self, weights: &EmbeddingWeights, tokens: &[u32]) -> Result<Tensor<F16>> {
         if self.stage.is_first() {
             composites::embed_local(&mut self.core, &mut self.hooks, weights, tokens)
@@ -970,31 +971,28 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
         let per_token = pe * n_layer;
         let total = n_tokens * per_token;
         if n_tokens == 1 {
-            flambeau_ops::hip::router::dense_gemv_f16_f16(
-                self.core.reg,
-                stream,
-                model_proj_f16_dev,
-                main_embd_scratch_dev,
-                proj_matmul_f32_dev,
-                per_token,
-                hidden,
-            )
-            .context("per_layer_embd build: dense_gemv_f16_f16")?;
+            self.core
+                .ops()
+                .dense_gemv_f16_f16(
+                    model_proj_f16_dev,
+                    main_embd_scratch_dev,
+                    proj_matmul_f32_dev,
+                    per_token,
+                    hidden,
+                )
+                .context("per_layer_embd build: dense_gemv_f16_f16")?;
         } else {
-            flambeau_ops::hip::router::dense_gemv_f16_f16_batched(
-                flambeau_ops::OpCtx { reg: self.core.reg, stream },
-                flambeau_ops::DenseGemvBatchedBuffers {
-                    w: model_proj_f16_dev,
-                    x: main_embd_scratch_dev,
-                    y: proj_matmul_f32_dev,
-                },
-                flambeau_ops::DenseGemvBatchedShape {
-                    n_rows: per_token,
-                    k: hidden,
+            self.core
+                .ops()
+                .dense_gemv_f16_f16_batched(
+                    model_proj_f16_dev,
+                    main_embd_scratch_dev,
+                    proj_matmul_f32_dev,
+                    per_token,
+                    hidden,
                     n_tokens,
-                },
-            )
-            .context("per_layer_embd build: dense_gemv_f16_f16_batched")?;
+                )
+                .context("per_layer_embd build: dense_gemv_f16_f16_batched")?;
         }
 
         let mut proj_matmul_host = vec![0.0f32; total];
@@ -1064,10 +1062,10 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
     }
 }
 
-pub type SingleDeviceEngine<'a> = ForwardEngine<'a, NoopHooks, SoloStage>;
-pub type TpEngine<'a> = ForwardEngine<'a, TpHooks, SoloStage>;
-pub type PpEngine<'a> = ForwardEngine<'a, NoopHooks, PpStage<'a>>;
-pub type HybridEngine<'a> = ForwardEngine<'a, HybridHooks, HybStage<'a>>;
+pub type SingleDeviceEngine<'a> = ForwardEngine<'a, HipBackend, NoopHooks, SoloStage>;
+pub type TpEngine<'a> = ForwardEngine<'a, HipBackend, TpHooks, SoloStage>;
+pub type PpEngine<'a> = ForwardEngine<'a, HipBackend, NoopHooks, PpStage<'a>>;
+pub type HybridEngine<'a> = ForwardEngine<'a, HipBackend, HybridHooks, HybStage<'a>>;
 
 pub type SingleDeviceForwardCtx<'a> = SingleDeviceEngine<'a>;
 pub type TpForwardCtx<'a> = TpEngine<'a>;
