@@ -148,19 +148,41 @@ P0 (done) ─► P1 (spine) ─┬─► P2 (matmul templates) ──┐
 - **P2 and P3 run in parallel** — disjoint kernel sets, both rigs.
 - **P4 runs in parallel** from after P1.
 
-## Rigs (what runs where — no mixed-GPU box needed)
+## Dev rig — one box, both backends co-resident
 
-- **gfx906 box** — HIP cert + the **bit-identity oracle** (step 2) + HIP autotune.
-- **sm_86 box (this one: RTX 3090, nvcc 13.3, llama.cpp)** — CUDA cert vs CPU ref +
-  CUDA autotune + the llama.cpp parity oracle (P5).
-- **Dev box: both *compilers* (hipcc + nvcc), no second GPU** — compile-check every
-  `kernels-shared` template edit against both backends before it reaches either rig
-  (catches the portability breaks already seen: missing `stdint`, no `__exp2f`
-  intrinsic, the bare `__shfl_xor` unsupported on sm_70+). This box has nvcc;
-  adding compile-only hipcc closes the gap.
-- **2× CUDA** — only for P4 (NCCL). **2–4× gfx906** — only for the HIP BAR1 path.
-  Validation is per-backend against the shared CPU reference, so the two backends
-  are never co-resident; the existing two rigs suffice.
+The per-family vertical slice touches both backends at their real target silicon
+(gfx906 **wave64** for the HIP bit-match, sm_86 for the CUDA cert). Running those
+on two separate machines means a context-switch per slice. The fix is to
+**consolidate into a single dev rig**: rebuild the MI50 box as **2× MI50 (gfx906,
+HIP) + 1× RTX 3090 (sm_86, CUDA)** — replacing 2 of the 4 MI50s with the 3090.
+Then the whole slice (template → hipcc-compile + gfx906 bit-match → nvcc-compile
++ sm_86 cert → `bench autotune` for *both* archs) runs on one machine, and both
+dispatch tables are generated in one place. No remote dispatch, no switching.
+
+- **Power / space — favorable.** MI50 ≈ 300 W, 3090 ≈ 350 W: `2×300 + 350 = 950 W`
+  vs the original `4×300 = 1200 W` (net **−250 W**), and removing two dual-slot
+  MI50s frees slots for the 2.5–3-slot 3090. The freed MI50 PCIe-power connectors
+  feed it. Gen3 x16 is plenty for the 3090 (compute, not bandwidth-bound).
+- **Both toolkits installed** — ROCm (hipcc, `/opt/rocm`) **and** CUDA (nvcc,
+  `/usr/local/cuda`). This also delivers the compile-both-backends-per-edit check
+  for free — most portability breaks are compile-time (`stdint`, `__exp2f`, the
+  bare `__shfl_xor` unsupported on sm_70+, the offset-2 Q8_0 misalignment shows up
+  at runtime though, so the co-resident GPUs matter too).
+- **Driver coexistence is the only real setup cost.** `amdgpu` + the NVIDIA
+  proprietary driver coexist in one kernel (separate PCI devices / modules); ROCm
+  enumerates only AMD GPUs, CUDA only NVIDIA. Scope each toolkit if needed
+  (`ROCR_VISIBLE_DEVICES` for ROCm, `CUDA_VISIBLE_DEVICES` for CUDA), keep the box
+  headless, and **re-check the IOMMU/BAR grub tweaks** (`scripts/setup/grub_*`,
+  tuned for MI50 BAR1 P2P) tolerate the 3090 — IOMMU-off is fine for a single CUDA
+  card (no NVIDIA P2P with one GPU). Budget an afternoon; then it's stable.
+- **Trade-off: 2× MI50, not 4.** Validates **2-GPU TP/PP (BAR1 P2P pairs)** — the
+  core collective path — but not 4-GPU scaling. Irrelevant to the kernel/templating/
+  autotune program (kernels are single-GPU); it only bites the multi-GPU `forward`
+  validation. **Pop the two MI50s back in temporarily** when 4-GPU scaling needs a
+  pass. Reversible.
+- **Validation stays per-backend.** Even co-resident, the two GPUs never compare to
+  each other (HIP and CUDA aren't bit-identical); each certs against the shared CPU
+  dequant reference, so the equivalence contract is transitive through that.
 
 ## Decisions to lock before P1
 
