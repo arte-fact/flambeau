@@ -25,8 +25,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use flambeau_core::{CopyDirection, Device, DevicePtr, LaunchCfg, Stream};
 use flambeau_quant::{
     dequantize_into, BlockIq1M, BlockIq1S, BlockIq2S, BlockIq2Xs, BlockIq2Xxs, BlockIq3S,
-    BlockIq3Xxs, BlockIq4Nl, BlockIq4Xs, BlockQ2K, BlockQ3K, BlockQ4K, BlockQ4_1, BlockQ5K,
-    BlockQ6K, BlockQ8K, BlockQ8_0, BlockQ8_1, GgmlDType, QK8_0, QK_K,
+    BlockIq3Xxs, BlockIq4Nl, BlockIq4Xs, BlockQ2K, BlockQ3K, BlockQ4K, BlockQ4_0, BlockQ4_1,
+    BlockQ5K, BlockQ6K, BlockQ8K, BlockQ8_0, BlockQ8_1, GgmlDType, QK8_0, QK_K,
 };
 use half::f16;
 
@@ -42,6 +42,10 @@ const QK8: usize = QK8_0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dtype {
     Q8_0,
+    /// Templated 256-thread single-row Q4_0 DP4A
+    /// (`mmvq_dp4a_row<Q4_0, 256>`). Same source on HIP + CUDA; the neutral
+    /// impl_id certs the templated kernel on either backend.
+    Q4_0,
     Q2K,
     Q3K,
     Q4K,
@@ -204,6 +208,7 @@ impl Dtype {
     pub fn name(self) -> &'static str {
         match self {
             Dtype::Q8_0 | Dtype::Q8_0T128 | Dtype::Q8_0T128VDR2 | Dtype::Q8_0Dp4a => "Q8_0",
+            Dtype::Q4_0 => "Q4_0",
             Dtype::Q2K | Dtype::Q2KR2 | Dtype::Q2KDp4a | Dtype::Q2KR2Dp4a => "Q2_K",
             Dtype::Q3K | Dtype::Q3KR2 | Dtype::Q3KDp4a | Dtype::Q3KR2Dp4a => "Q3_K",
             Dtype::Q4K | Dtype::Q4KR2 | Dtype::Q4KR2Dp4a => "Q4_K",
@@ -228,6 +233,7 @@ impl Dtype {
             Dtype::Q8_0 | Dtype::Q8_0T128 | Dtype::Q8_0T128VDR2 | Dtype::Q8_0Dp4a => {
                 GgmlDType::Q8_0
             }
+            Dtype::Q4_0 => GgmlDType::Q4_0,
             Dtype::Q2K | Dtype::Q2KR2 | Dtype::Q2KDp4a | Dtype::Q2KR2Dp4a => GgmlDType::Q2K,
             Dtype::Q3K | Dtype::Q3KR2 | Dtype::Q3KDp4a | Dtype::Q3KR2Dp4a => GgmlDType::Q3K,
             Dtype::Q4K | Dtype::Q4KR2 | Dtype::Q4KR2Dp4a => GgmlDType::Q4K,
@@ -251,6 +257,7 @@ impl Dtype {
         match self {
             Dtype::Q8_0 => "qmatmul_q8_0_mmvq_single_row_gfx906",
             Dtype::Q8_0Dp4a => "qmatmul_q8_0_mmvq_dp4a",
+            Dtype::Q4_0 => "qmatmul_q4_0_mmvq_dp4a",
             Dtype::Q2K => "qmatmul_q2_K_mmvq_single_row_gfx906",
             Dtype::Q2KR2 => "qmatmul_q2_K_mmvq_nw1_r2_gfx906",
             Dtype::Q2KDp4a => "qmatmul_q2_K_mmvq_dp4a_gfx906",
@@ -310,6 +317,7 @@ impl Dtype {
         match self {
             Dtype::Q8_0 => "mmvq_q8_0",
             Dtype::Q8_0Dp4a => "mmvq_q8_0_dp4a",
+            Dtype::Q4_0 => "mmvq_q4_0",
             Dtype::Q8_0T128 => "mmvq_q8_0_t128",
             Dtype::Q8_0T128VDR2 => "mmvq_q8_0_t128_vdr2",
             Dtype::Q2K => "mmvq_q2_k",
@@ -369,6 +377,7 @@ impl Dtype {
         match self {
             Dtype::Q8_0 => "flambeau_mmvq_q8_0_q8_1",
             Dtype::Q8_0Dp4a => "flambeau_mmvq_q8_0_dp4a_q8_1",
+            Dtype::Q4_0 => "flambeau_mmvq_q4_0_q8_1",
             Dtype::Q2K => "flambeau_mmvq_q2_K_q8_1",
             Dtype::Q2KR2 => "flambeau_mmvq_q2_K_r2_q8_1",
             Dtype::Q2KDp4a => "flambeau_mmvq_q2_k_dp4a_q8_1",
@@ -429,6 +438,7 @@ impl Dtype {
             Dtype::Q8_0 | Dtype::Q8_0T128 | Dtype::Q8_0T128VDR2 | Dtype::Q8_0Dp4a => {
                 std::mem::size_of::<BlockQ8_0>()
             }
+            Dtype::Q4_0 => std::mem::size_of::<BlockQ4_0>(),
             Dtype::Q2K | Dtype::Q2KR2 | Dtype::Q2KDp4a | Dtype::Q2KR2Dp4a => std::mem::size_of::<BlockQ2K>(),
             Dtype::Q3K | Dtype::Q3KR2 | Dtype::Q3KDp4a | Dtype::Q3KR2Dp4a => std::mem::size_of::<BlockQ3K>(),
             Dtype::Q4K | Dtype::Q4KR2 | Dtype::Q4KR2Dp4a => std::mem::size_of::<BlockQ4K>(),
@@ -456,7 +466,7 @@ impl Dtype {
 
     fn launch_threads(self) -> u32 {
         match self {
-            Dtype::Q8_0 | Dtype::Q8_0Dp4a | Dtype::Q4_1 | Dtype::Q4_1R2DP4A | Dtype::Q8K | Dtype::Q5KDp4a | Dtype::Q3KDp4a | Dtype::Q2KDp4a | Dtype::Iq4XsDp4a | Dtype::Iq4NlDp4a | Dtype::Iq3SDp4a | Dtype::Iq3XxsDp4a | Dtype::Iq2SDp4a | Dtype::Iq2XsDp4a | Dtype::Iq2XxsDp4a | Dtype::Iq1SDp4a | Dtype::Iq1MDp4a => 256,
+            Dtype::Q8_0 | Dtype::Q8_0Dp4a | Dtype::Q4_0 | Dtype::Q4_1 | Dtype::Q4_1R2DP4A | Dtype::Q8K | Dtype::Q5KDp4a | Dtype::Q3KDp4a | Dtype::Q2KDp4a | Dtype::Iq4XsDp4a | Dtype::Iq4NlDp4a | Dtype::Iq3SDp4a | Dtype::Iq3XxsDp4a | Dtype::Iq2SDp4a | Dtype::Iq2XsDp4a | Dtype::Iq2XxsDp4a | Dtype::Iq1SDp4a | Dtype::Iq1MDp4a => 256,
             Dtype::Q4_1T128 | Dtype::Q8_0T128 | Dtype::Q8_0T128VDR2 => 128,
             _ => 64,
         }
@@ -863,13 +873,63 @@ fn emit_dispatch(
 ) -> Result<PathBuf> {
     use std::collections::BTreeMap;
 
-    let mut by_impl: BTreeMap<&'static str, (Dtype, usize, usize)> = BTreeMap::new();
+    // One `[[qmatmul]]` block per dtype, keyed by `dtype` name so the table is
+    // a merge: re-emit only the dtypes in this run, preserving rows for any
+    // other dtype already in the table (the table is built up one dtype at a
+    // time and must not clobber prior rows). Within a dtype, group by the
+    // winning impl and emit an m-range predicate when the autotune picked
+    // different impls at different m.
+    let mut by_dtype: BTreeMap<&'static str, BTreeMap<&'static str, (usize, usize)>> =
+        BTreeMap::new();
     for &(m, d) in winners {
-        let e = by_impl.entry(d.impl_id()).or_insert((d, m, m));
-        e.1 = e.1.min(m);
-        e.2 = e.2.max(m);
+        let impls = by_dtype.entry(d.name()).or_default();
+        let e = impls.entry(d.impl_id()).or_insert((m, m));
+        e.0 = e.0.min(m);
+        e.1 = e.1.max(m);
     }
-    let single = by_impl.len() == 1;
+
+    let mut blocks: BTreeMap<String, String> = BTreeMap::new();
+    for (dtype, impls) in &by_dtype {
+        let single = impls.len() == 1;
+        let mut block = String::new();
+        for (impl_id, (m_min, m_max)) in impls {
+            let m_pred = if single {
+                "any".to_string()
+            } else {
+                format!("{m_min}..{}", m_max + 1)
+            };
+            write!(
+                block,
+                "\n[[qmatmul]]\n\
+                 dtype   = \"{dtype}\"\n\
+                 dtype_q = \"Q8_1\"\n\
+                 shape   = {{ m = \"{m_pred}\", k = \"any\", n = \"any\" }}\n\
+                 impl    = \"{impl_id}\"\n\
+                 cert    = \"certs/{backend}/{arch}/{impl_id}.json\"\n\
+                 notes   = \"autotuned\"\n"
+            )
+            .expect("write to String is infallible");
+        }
+        blocks.insert((*dtype).to_string(), block);
+    }
+
+    let path = repo_root.join(format!("dispatch/{backend}/{arch}.toml"));
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        for raw in existing.split("\n[[qmatmul]]").skip(1) {
+            let dtype = raw.lines().find_map(|l| {
+                l.trim()
+                    .strip_prefix("dtype")?
+                    .trim_start()
+                    .strip_prefix('=')
+                    .map(|v| v.trim().trim_matches('"').to_string())
+            });
+            if let Some(dt) = dtype {
+                blocks
+                    .entry(dt)
+                    .or_insert_with(|| format!("\n[[qmatmul]]{}\n", raw.trim_end()));
+            }
+        }
+    }
 
     let mut s = String::new();
     writeln!(
@@ -878,27 +938,10 @@ fn emit_dispatch(
          # (median of timed mmvq launches per shape). Regenerate; do not hand-edit."
     )
     .expect("write to String is infallible");
-    for (impl_id, (d, m_min, m_max)) in &by_impl {
-        let m_pred = if single {
-            "any".to_string()
-        } else {
-            format!("{m_min}..{}", m_max + 1)
-        };
-        write!(
-            s,
-            "\n[[qmatmul]]\n\
-             dtype   = \"{}\"\n\
-             dtype_q = \"Q8_1\"\n\
-             shape   = {{ m = \"{m_pred}\", k = \"any\", n = \"any\" }}\n\
-             impl    = \"{impl_id}\"\n\
-             cert    = \"certs/{backend}/{arch}/{impl_id}.json\"\n\
-             notes   = \"autotuned\"\n",
-            d.name()
-        )
-        .expect("write to String is infallible");
+    for block in blocks.values() {
+        s.push_str(block);
     }
 
-    let path = repo_root.join(format!("dispatch/{backend}/{arch}.toml"));
     std::fs::write(&path, s).with_context(|| format!("write {}", path.display()))?;
     Ok(path)
 }
@@ -929,6 +972,11 @@ fn tame_scales(dtype: Dtype, raw: Vec<u8>) -> Vec<u8> {
         match dtype {
             Dtype::Q8_0 | Dtype::Q8_0T128 | Dtype::Q8_0T128VDR2 | Dtype::Q8_0Dp4a => {
                 // BlockQ8_0: d (f16, 2 bytes) + qs[32]. Scale ≈ 0.01 to 0.11.
+                let d = f16::from_f32((block[0] as f32 / 255.0) * 0.1 + 0.01);
+                block[0..2].copy_from_slice(&d.to_bits().to_le_bytes());
+            }
+            Dtype::Q4_0 => {
+                // BlockQ4_0: d (f16, 0..2) + qs[16] nibbles. Same scale envelope.
                 let d = f16::from_f32((block[0] as f32 / 255.0) * 0.1 + 0.01);
                 block[0..2].copy_from_slice(&d.to_bits().to_le_bytes());
             }
