@@ -8,7 +8,27 @@ sm_86) is built and `feature/cuda-decouple` is pulled in. Delete once P1 closes.
 - **Program:** `doc/PORTABILITY-ROADMAP.md` (one program: templating + CUDA port +
   autotune as per-family vertical slices). Sub-plans: `CUDA-PORT-PLAN.md`,
   `KERNEL-TEMPLATING.md`, `AUTOTUNE.md`.
-- **Branch `feature/cuda-decouple`** (pushed, tip ~`a293791`) has it all:
+### Done since the rig came up (2026-06-16)
+
+- **NVIDIA driver is up.** Was nouveau-bound + a kernel-module mismatch; the user
+  set it up on the host (the Claude sandbox can't load modules — see memory
+  `reference-dev-rig-nvidia-sandbox`). Now driver 610.43.02 / CUDA 13.3, nvcc 13.3
+  at `/usr/local/cuda`. Both backends green on one box: `cargo test -p
+  flambeau-backend-cuda` (3090) + gfx906 qmatmul sweep (2× MI50).
+- **P1 remaining items 1–3 DONE** (commit `e900ba3`): neutral primitive aliases in
+  `gfx906.cuh`; `mmvq_q8_0_dp4a.cu` is now the `mmvq_dp4a_row<Q8_0,256>`
+  instantiation, proven **bit-identical** to the retired hand-written kernel on the
+  gfx906 grid; scalar parity + qmatmul sweep green.
+- **`quantize_q8_1` CUDA port DONE** (commit `36b7a18`): extracted to a shared
+  `kernels-shared/include/quantize_q8_1.cuh` device fn; HIP kernel + new CUDA
+  kernel are thin wrappers (same `flambeau_quantize_row_q8_1` entry). CUDA
+  bit-exact vs CPU ref on the 3090. The CUDA activation path is real.
+
+**Next P1 item = the instantiation manifest + codegen** (then backend-generic
+bench) — see "Then continue P1" below. The two pilots prove the templating loop
+end-to-end on both backends.
+
+- **Branch `feature/cuda-decouple`** (pushed, tip ~`36b7a18`) has it all:
   - Decoupling A0–A3 — `ForwardEngine<B>`, the backend seams, models/server
     backend-clean. **Validated on gfx906** before this work.
   - CUDA backend B0/B1 + B2-foundation — `cu*` driver core, `add_f32`,
@@ -49,7 +69,10 @@ cargo test -p flambeau-backend-cuda            # add_f32_smoke + mmvq_q8_0_cuda
 cargo run -p bench -- sweep --arch gfx906      # confirm gfx906 certs green
 ```
 
-## P1 remaining — the HIP half that needed this rig
+## P1 remaining — the HIP half that needed this rig  — ✅ DONE (commit e900ba3)
+
+The three items below are complete; kept for context. The HIP twin is the
+canonical `mmvq_q8_0_dp4a`, bit-identical to the old hand-written kernel.
 
 1. **Neutral primitive aliases in `kernels-hip/src/arch_primitives/gfx906.cuh`** so
    the shared `quant_traits.cuh` / `mmvq.cuh` compile under hipcc (CUDA's
@@ -76,8 +99,9 @@ cargo run -p bench -- sweep --arch gfx906      # confirm gfx906 certs green
 
 ## Then continue P1 (now trivial to do both-backends on one box)
 
-- Port `quantize_q8_1` (CUDA) so the activation path is real (the test CPU-quantizes
-  for now).
+- ~~Port `quantize_q8_1` (CUDA) so the activation path is real.~~ ✅ DONE (commit
+  `36b7a18`) — now a shared `kernels-shared/include/quantize_q8_1.cuh` device fn
+  with thin HIP + CUDA wrappers; CUDA bit-exact vs CPU ref on the 3090.
 - **Instantiation manifest + codegen**: `kernels/instantiations.toml` → a `build.rs`
   helper that generates the `extern "C"` wrapper `.cu` per cell, for both
   `kernels-hip` and `kernels-cuda`. Replace the hand-written `mmvq_q8_0` wrappers.
