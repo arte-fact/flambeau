@@ -33,13 +33,52 @@ sm_86) is built and `feature/cuda-decouple` is pulled in.
 > 4-byte read on NVIDIA). Bit-match held for all (Q5_0/Q5_1 cert max_rel_err
 > byte-identical despite the templated kernel using fewer VGPRs — 23 vs 29).
 >
-> Next dtypes: the **K-quants** (Q2_K…Q6_K, Q8_K) — these have super-block
-> scales (sub-block `d`/`dmin` plus packed 4/6-bit scale arrays), so each
-> `quant_traits` `partial` is more involved than the legacy flat blocks (closer
-> to the per-superblock dp4a in the existing `mmvq_q*_k_dp4a.cu`); they're
-> already in the generic `Dtype` enum (suffixed gfx906 impl_ids) but not
-> templated and not CUDA-ported. Then the `ROWS`/`THREADS`/`VDR` config variants
-> and **IQ** quants, then P2b fusion (`gate_up`/`batched`/`row_tile`).
+> **NEXT = K-quants (Q2_K…Q6_K, Q8_K) — a genuine multi-session sub-phase, NOT
+> the mechanical legacy loop.** Assessed 2026-06-16 by reading
+> `mmvq_q6_k_dp4a.cu` (the cleanest K-quant). Four structural facts the legacy
+> slices did not have — read these before starting:
+>
+> 1. **Wave-size leak (rule 5) — the blocker.** The K-quant dp4a kernels use a
+>    64-thread/super-block layout (`lane=threadIdx.x`, `iqs=lane&31`,
+>    `super_hi=lane>>5`) and finish with `gfx906_warp_reduce_sum(acc)` +
+>    `if(lane==0) store`. That assumes a **64-wide** warp — on CUDA wave32 it
+>    sums only the first 32 lanes → silently wrong. Every K-quant CUDA port
+>    needs the reduce made warp-size-agnostic: `WARPS = 64/WARP_SIZE`,
+>    warp_reduce then an inter-warp LDS rendezvous (exactly the tail of the flat
+>    `mmvq_dp4a_row`). On HIP WARPS=1 → degenerates to the current code →
+>    bit-match preserved. **Recommended first step: extract that reduce tail
+>    into a shared `mmvq_reduce_store<THREADS, OutT>(acc, dst, row)` helper
+>    (refactor the flat skeleton to use it too — 2nd site, justified), then each
+>    K-quant body just calls it.**
+> 2. **No single cross-K-quant template (rule 14).** Each K-quant has a distinct
+>    `iqs`/scale-offset decode (Q2_K/Q3_K 2–3-bit + min; Q4_K/Q5_K 6-bit packed
+>    scales + dmin; Q6_K int8 scales + the (raw−32)·y = raw·y − 32·Σy bias trick
+>    with `dp4a(0x01010101,u,0)`). Do NOT abstract a shared super-block skeleton
+>    from one example. Port each as its **own** backend-neutral shared `.cuh`
+>    (body moved out of the hand `.cu`, intrinsics → neutral `dp4a`/
+>    `warp_reduce_sum`, misaligned `((int*)ql)[i]`/`((int*)qh)[i]` →
+>    `load_int_b2`) + a manifest cell (F32+F16 entries). Only after ≥2–3 are
+>    ported and the shared shape is visible, consider a skeleton.
+> 3. **Misalignment.** Super-block fields sit at non-mul-4 block offsets
+>    (block_q6_K is 210 B; `ql`@0, `qh`@128, `d`@208) → 4-byte reads fault on
+>    NVIDIA for odd super-blocks. Use `load_int_b2` for every `int`-cast load,
+>    same as the legacy quants. fp16 `d` reads are 2-byte and fine.
+> 4. **impl_id naming debt — batch it.** The K-quant mmvq dp4a impl_ids are
+>    legacy `_gfx906`-suffixed (e.g. `qmatmul_q6_K_mmvq_dp4a_gfx906`, 6 refs:
+>    hip dispatch + `backend-hip/src/impls/qmatmul.rs` registry + an `impls.rs`
+>    test assert + an `ops` recipe arm + the `sweep_mmvq` enum + cert file). A
+>    `cuda/sm_86` row must NOT carry `_gfx906`. **Do a single dedicated rename
+>    pass** neutralizing all K-quant mmvq dp4a ids (`_gfx906` → drop, `q6_K` →
+>    `q6_k`) across those refs + `git mv` the certs, cert-check HIP green, commit
+>    — THEN port, reusing the now-neutral `Dtype` variants for both backends.
+>    Don't add parallel neutral `Dtype` variants (the Q4_1Dp4a trick doesn't
+>    scale to 6 K-quants).
+>
+> Suggested K-quant order: the rename pass first; then **Q6_K** (cleanest, int8
+> scales) as the pilot that also validates the `mmvq_reduce_store` helper; then
+> Q4_K/Q5_K (shared 6-bit scale decode), then Q2_K/Q3_K, then Q8_K. After the
+> K-quants: the `ROWS`/`THREADS`/`VDR` config variants and **IQ** quants, then
+> P2b fusion (`gate_up`/`batched`/`row_tile`).
 
 ## Where we are
 
