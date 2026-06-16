@@ -74,11 +74,30 @@ sm_86) is built and `feature/cuda-decouple` is pulled in.
 >    Don't add parallel neutral `Dtype` variants (the Q4_1Dp4a trick doesn't
 >    scale to 6 K-quants).
 >
-> Suggested K-quant order: the rename pass first; then **Q6_K** (cleanest, int8
-> scales) as the pilot that also validates the `mmvq_reduce_store` helper; then
-> Q4_K/Q5_K (shared 6-bit scale decode), then Q2_K/Q3_K, then Q8_K. After the
-> K-quants: the `ROWS`/`THREADS`/`VDR` config variants and **IQ** quants, then
-> P2b fusion (`gate_up`/`batched`/`row_tile`).
+> **Q6_K DONE** (`c10cf1f` HIP + `cb5745c` CUDA) — the K-quant pilot. Validated
+> the whole approach: shared `mmvq_reduce_store<THREADS,OutT>` (warp-size
+> agnostic — bit-match on gfx906 wave64 WARPS=1, AND CUDA wave32 cert green = the
+> inter-warp LDS path sums all 64 threads); neutral `mmvq_q6_k.cuh` body;
+> `load_int_b2` for misaligned `ql`/`qh`; impl_id neutralized
+> (`qmatmul_q6_k_mmvq_dp4a`). cuda/sm_86 now 6 rows. CUDA max_rel_err matches HIP
+> to ~1e-6 (integer-exact dp4a). Also fixed a P1 orphan-cert test failure
+> (`every_cert_on_disk_is_registered`, red since `76e17bc`).
+>
+> Remaining K-quants — **each its own slice** (same recipe as Q6_K, per the
+> rename→port→bit-match→CUDA-cert→emit loop). NOTE the structures differ:
+> - **Q5_K** `Q5KDp4a` (256-thread single-row) — closest to mechanical; shares
+>   the 6-bit packed-scale + dmin decode (`get_scale_min_k4`) with Q4_K.
+> - **Q4_K** `Q4KR2Dp4a` is the *r2* (64-thread, **2 rows/block**) variant — its
+>   reduce is a **half-warp** reduce, not the full-block `mmvq_reduce_store`; needs
+>   a 2-row reduce/store helper (or template `mmvq_reduce_store` over a row-group
+>   width). Don't assume it slots into the Q6_K helper unchanged.
+> - **Q2_K/Q3_K** `Q2KDp4a`/`Q3KDp4a` (256-thread) — 2-bit/3-bit + min decode,
+>   two dp4a per term (value + broadcast-min). Messier.
+> - **Q8_K** — activation-side; the weight mmvq is unusual, do last.
+> Each K-quant dp4a impl_id is still `_gfx906`-suffixed — neutralize per-dtype as
+> you port (the Q6_K commit shows the 6-ref pattern). After the K-quants: the
+> `ROWS`/`THREADS`/`VDR` config variants and **IQ** quants, then P2b fusion
+> (`gate_up`/`batched`/`row_tile`).
 
 ## Where we are
 
