@@ -114,27 +114,29 @@ sm_86) is built and `feature/cuda-decouple` is pulled in.
 > + IQ4_NL/IQ4_XS); cert-check green (cuda 13, hip 82). Every standard GGUF
 > weight quant **and** the IQ4 family is now templated on both backends.
 >
-> **+ IQ2_XXS DONE** (`134e225` HIP + `6949ff1` CUDA) — first grid-codebook
-> kernel. **iq_grid.cuh nvcc-compiles + certs clean on the 3090** → the whole
-> IQ-grid CUDA path is proven (the earlier caveat is retired). cuda/sm_86 = 14
-> mmvq rows. (Rig note: hit a `cuInit 999` here because the sandbox was missing
-> `/dev/nvidia-uvm`; root cause + host fix are in memory
-> `reference-dev-rig-nvidia-sandbox`.)
+> **+ ALL IQ DONE — the entire mmvq weight-quant family is templated on both
+> backends.** IQ2_XXS (`134e225`/`6949ff1`, first grid-codebook), IQ3_XXS/IQ3_S
+> (`a5e2bf1`), IQ2_XS/IQ2_S (`325846a`), IQ1_S/IQ1_M (`699f0c3`). The grid kernels
+> all reuse the IQ2_XXS sign helpers (`iq2xxs_apply_signs`/`unpack_ksigns`) +
+> `mmvq_reduce_store<256>` + `load_int_b2` + the already-neutral `iq_grid.cuh`
+> (proven on nvcc). IQ1 uses a direct grid + `delta·Σu` bias (no sign LUT).
+> All HIP bit-matched byte-identical; all CUDA certs pass/15 (IQ1 reproduced
+> identical after a rig restart — see the rig note below).
 >
-> **NEXT (P2a tail → P2b):**
-> - **IQ1/2/3 remaining** — `IQ1_S/M`, `IQ2_XS/S`, `IQ3_XXS/S` (6 dp4a kernels).
->   **Fully mechanical and de-risked** (IQ2_XXS is the worked template at
->   `mmvq_iq2_xxs.cuh`): all 256-thread single-row → reuse `mmvq_reduce_store<256>`
->   + neutral `dp4a` + `load_int_b2` + the neutral `iq_grid.cuh`. Per-kernel care:
->   each has its own grid (`IQ3XXS_GRID` u32 vs `IQ2XXS_GRID` u64, `IQ3S_GRID`,
->   `IQ2XS/IQ2S/IQ1S/IQ1M` grids), its own `apply_signs`/`unpack_ksigns` variant
->   (IQ3_XXS uses the same sign-pack as IQ2_XXS + a `sumi=(ls*sumi+sumi/2)/2`
->   rounding; IQ3_S/IQ2_S/IQ2_XS carry explicit sign/qh arrays), and `__builtin_
->   popcount` (both-compiler builtin). Transcribe each body faithfully (swap the
->   `flambeau_iq*_dp4a`→`dp4a`, reduce→`mmvq_reduce_store<256>`, misaligned int
->   reads→`load_int_b2`), one neutral `.cuh` each. Batch-friendly. **Low model
->   relevance** (extreme-compression quants) — fine to defer behind config
->   variants / mmq if prioritizing impact.
+> **`cuda/sm_86` = 20 mmvq rows — every GGUF weight quant** (Q4_0/Q4_1/Q5_0/Q5_1/
+> Q8_0 · Q2_K/Q3_K/Q4_K/Q5_K/Q6_K/Q8_K · IQ4_NL/XS · IQ3_XXS/S · IQ2_XXS/XS/S ·
+> IQ1_S/M); cert-check green (cuda 20, hip 82). **P2a mmvq is DONE.**
+>
+> Rig notes (memory `reference-dev-rig-nvidia-sandbox`): (1) `cuInit 999` =
+> sandbox missing `/dev/nvidia-uvm` (host modprobe + sandbox restart). (2) The
+> box hard-reset under all-core compile load — CPU-thermal (cooler swapped +
+> 3090↔MI50 PSU rails rebalanced; CPU now 64–66°C vs 85°C). **Build kernels with
+> `RAYON_NUM_THREADS=8`** (build.rs rayon pool runs `hipcc` on all 32 cores
+> otherwise; `cargo -j` doesn't reach it). (3) A cuda-feature binary built while
+> uvm was absent segfaults at startup forever — force a relink (`touch
+> crates/cli/src/main.rs`) after the GPU returns.
+>
+> **NEXT (P2b):**
 > - **Config variants** — `t128`/`vdr2`/`r2`/`r4`/`gate_up`/`batched`/`row_tile`
 >   MMVQ per dtype (the autotune candidate fan-out — where per-shape autotune
 >   earns its keep). `r2`/`r4` are wave64-shaped → reuse `mmvq_reduce_store_2row`
