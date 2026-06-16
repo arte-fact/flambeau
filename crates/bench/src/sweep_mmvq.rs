@@ -26,7 +26,8 @@ use flambeau_core::{CopyDirection, Device, DevicePtr, LaunchCfg, Stream};
 use flambeau_quant::{
     dequantize_into, BlockIq1M, BlockIq1S, BlockIq2S, BlockIq2Xs, BlockIq2Xxs, BlockIq3S,
     BlockIq3Xxs, BlockIq4Nl, BlockIq4Xs, BlockQ2K, BlockQ3K, BlockQ4K, BlockQ4_0, BlockQ4_1,
-    BlockQ5K, BlockQ6K, BlockQ8K, BlockQ8_0, BlockQ8_1, GgmlDType, QK8_0, QK_K,
+    BlockQ5K, BlockQ5_0, BlockQ5_1, BlockQ6K, BlockQ8K, BlockQ8_0, BlockQ8_1, GgmlDType, QK8_0,
+    QK_K,
 };
 use half::f16;
 
@@ -46,6 +47,14 @@ pub enum Dtype {
     /// (`mmvq_dp4a_row<Q4_0, 256>`). Same source on HIP + CUDA; the neutral
     /// impl_id certs the templated kernel on either backend.
     Q4_0,
+    /// Templated single-row Q4_1 DP4A with the neutral cross-backend impl_id
+    /// (the base `mmvq_q4_1` kernel; the suffixed `Q4_1` variant keeps the
+    /// older gfx906 dispatch context).
+    Q4_1Dp4a,
+    /// Templated single-row Q5_0 DP4A (`mmvq_dp4a_row<Q5_0, 256>`).
+    Q5_0,
+    /// Templated single-row Q5_1 DP4A (`mmvq_dp4a_row<Q5_1, 256>`).
+    Q5_1,
     Q2K,
     Q3K,
     Q4K,
@@ -209,13 +218,17 @@ impl Dtype {
         match self {
             Dtype::Q8_0 | Dtype::Q8_0T128 | Dtype::Q8_0T128VDR2 | Dtype::Q8_0Dp4a => "Q8_0",
             Dtype::Q4_0 => "Q4_0",
+            Dtype::Q5_0 => "Q5_0",
+            Dtype::Q5_1 => "Q5_1",
             Dtype::Q2K | Dtype::Q2KR2 | Dtype::Q2KDp4a | Dtype::Q2KR2Dp4a => "Q2_K",
             Dtype::Q3K | Dtype::Q3KR2 | Dtype::Q3KDp4a | Dtype::Q3KR2Dp4a => "Q3_K",
             Dtype::Q4K | Dtype::Q4KR2 | Dtype::Q4KR2Dp4a => "Q4_K",
             Dtype::Q5K | Dtype::Q5KR2 | Dtype::Q5KDp4a | Dtype::Q5KR2Dp4a => "Q5_K",
             Dtype::Q6K | Dtype::Q6KR4 | Dtype::Q6KDP4A => "Q6_K",
             Dtype::Q8K => "Q8_K",
-            Dtype::Q4_1 | Dtype::Q4_1R2 | Dtype::Q4_1R2DP4A | Dtype::Q4_1T128 => "Q4_1",
+            Dtype::Q4_1 | Dtype::Q4_1Dp4a | Dtype::Q4_1R2 | Dtype::Q4_1R2DP4A | Dtype::Q4_1T128 => {
+                "Q4_1"
+            }
             Dtype::Iq4Nl | Dtype::Iq4NlR2 | Dtype::Iq4NlDp4a => "IQ4_NL",
             Dtype::Iq4Xs | Dtype::Iq4XsR2 | Dtype::Iq4XsDp4a => "IQ4_XS",
             Dtype::Iq3Xxs | Dtype::Iq3XxsR2 | Dtype::Iq3XxsDp4a => "IQ3_XXS",
@@ -234,13 +247,17 @@ impl Dtype {
                 GgmlDType::Q8_0
             }
             Dtype::Q4_0 => GgmlDType::Q4_0,
+            Dtype::Q5_0 => GgmlDType::Q5_0,
+            Dtype::Q5_1 => GgmlDType::Q5_1,
             Dtype::Q2K | Dtype::Q2KR2 | Dtype::Q2KDp4a | Dtype::Q2KR2Dp4a => GgmlDType::Q2K,
             Dtype::Q3K | Dtype::Q3KR2 | Dtype::Q3KDp4a | Dtype::Q3KR2Dp4a => GgmlDType::Q3K,
             Dtype::Q4K | Dtype::Q4KR2 | Dtype::Q4KR2Dp4a => GgmlDType::Q4K,
             Dtype::Q5K | Dtype::Q5KR2 | Dtype::Q5KDp4a | Dtype::Q5KR2Dp4a => GgmlDType::Q5K,
             Dtype::Q6K | Dtype::Q6KR4 | Dtype::Q6KDP4A => GgmlDType::Q6K,
             Dtype::Q8K => GgmlDType::Q8K,
-            Dtype::Q4_1 | Dtype::Q4_1R2 | Dtype::Q4_1R2DP4A | Dtype::Q4_1T128 => GgmlDType::Q4_1,
+            Dtype::Q4_1 | Dtype::Q4_1Dp4a | Dtype::Q4_1R2 | Dtype::Q4_1R2DP4A | Dtype::Q4_1T128 => {
+                GgmlDType::Q4_1
+            }
             Dtype::Iq4Nl | Dtype::Iq4NlR2 | Dtype::Iq4NlDp4a => GgmlDType::Iq4Nl,
             Dtype::Iq4Xs | Dtype::Iq4XsR2 | Dtype::Iq4XsDp4a => GgmlDType::Iq4Xs,
             Dtype::Iq3Xxs | Dtype::Iq3XxsR2 | Dtype::Iq3XxsDp4a => GgmlDType::Iq3Xxs,
@@ -258,6 +275,9 @@ impl Dtype {
             Dtype::Q8_0 => "qmatmul_q8_0_mmvq_single_row_gfx906",
             Dtype::Q8_0Dp4a => "qmatmul_q8_0_mmvq_dp4a",
             Dtype::Q4_0 => "qmatmul_q4_0_mmvq_dp4a",
+            Dtype::Q4_1Dp4a => "qmatmul_q4_1_mmvq_dp4a",
+            Dtype::Q5_0 => "qmatmul_q5_0_mmvq_dp4a",
+            Dtype::Q5_1 => "qmatmul_q5_1_mmvq_dp4a",
             Dtype::Q2K => "qmatmul_q2_K_mmvq_single_row_gfx906",
             Dtype::Q2KR2 => "qmatmul_q2_K_mmvq_nw1_r2_gfx906",
             Dtype::Q2KDp4a => "qmatmul_q2_K_mmvq_dp4a_gfx906",
@@ -318,6 +338,9 @@ impl Dtype {
             Dtype::Q8_0 => "mmvq_q8_0",
             Dtype::Q8_0Dp4a => "mmvq_q8_0_dp4a",
             Dtype::Q4_0 => "mmvq_q4_0",
+            Dtype::Q4_1Dp4a => "mmvq_q4_1",
+            Dtype::Q5_0 => "mmvq_q5_0",
+            Dtype::Q5_1 => "mmvq_q5_1",
             Dtype::Q8_0T128 => "mmvq_q8_0_t128",
             Dtype::Q8_0T128VDR2 => "mmvq_q8_0_t128_vdr2",
             Dtype::Q2K => "mmvq_q2_k",
@@ -378,6 +401,9 @@ impl Dtype {
             Dtype::Q8_0 => "flambeau_mmvq_q8_0_q8_1",
             Dtype::Q8_0Dp4a => "flambeau_mmvq_q8_0_dp4a_q8_1",
             Dtype::Q4_0 => "flambeau_mmvq_q4_0_q8_1",
+            Dtype::Q4_1Dp4a => "flambeau_mmvq_q4_1_q8_1",
+            Dtype::Q5_0 => "flambeau_mmvq_q5_0_q8_1",
+            Dtype::Q5_1 => "flambeau_mmvq_q5_1_q8_1",
             Dtype::Q2K => "flambeau_mmvq_q2_K_q8_1",
             Dtype::Q2KR2 => "flambeau_mmvq_q2_K_r2_q8_1",
             Dtype::Q2KDp4a => "flambeau_mmvq_q2_k_dp4a_q8_1",
@@ -439,13 +465,15 @@ impl Dtype {
                 std::mem::size_of::<BlockQ8_0>()
             }
             Dtype::Q4_0 => std::mem::size_of::<BlockQ4_0>(),
+            Dtype::Q5_0 => std::mem::size_of::<BlockQ5_0>(),
+            Dtype::Q5_1 => std::mem::size_of::<BlockQ5_1>(),
             Dtype::Q2K | Dtype::Q2KR2 | Dtype::Q2KDp4a | Dtype::Q2KR2Dp4a => std::mem::size_of::<BlockQ2K>(),
             Dtype::Q3K | Dtype::Q3KR2 | Dtype::Q3KDp4a | Dtype::Q3KR2Dp4a => std::mem::size_of::<BlockQ3K>(),
             Dtype::Q4K | Dtype::Q4KR2 | Dtype::Q4KR2Dp4a => std::mem::size_of::<BlockQ4K>(),
             Dtype::Q5K | Dtype::Q5KR2 | Dtype::Q5KDp4a | Dtype::Q5KR2Dp4a => std::mem::size_of::<BlockQ5K>(),
             Dtype::Q6K | Dtype::Q6KR4 | Dtype::Q6KDP4A => std::mem::size_of::<BlockQ6K>(),
             Dtype::Q8K => std::mem::size_of::<BlockQ8K>(),
-            Dtype::Q4_1 | Dtype::Q4_1R2 | Dtype::Q4_1R2DP4A | Dtype::Q4_1T128 => {
+            Dtype::Q4_1 | Dtype::Q4_1Dp4a | Dtype::Q4_1R2 | Dtype::Q4_1R2DP4A | Dtype::Q4_1T128 => {
                 std::mem::size_of::<BlockQ4_1>()
             }
             Dtype::Iq4Nl | Dtype::Iq4NlR2 | Dtype::Iq4NlDp4a => std::mem::size_of::<BlockIq4Nl>(),
@@ -466,7 +494,7 @@ impl Dtype {
 
     fn launch_threads(self) -> u32 {
         match self {
-            Dtype::Q8_0 | Dtype::Q8_0Dp4a | Dtype::Q4_0 | Dtype::Q4_1 | Dtype::Q4_1R2DP4A | Dtype::Q8K | Dtype::Q5KDp4a | Dtype::Q3KDp4a | Dtype::Q2KDp4a | Dtype::Iq4XsDp4a | Dtype::Iq4NlDp4a | Dtype::Iq3SDp4a | Dtype::Iq3XxsDp4a | Dtype::Iq2SDp4a | Dtype::Iq2XsDp4a | Dtype::Iq2XxsDp4a | Dtype::Iq1SDp4a | Dtype::Iq1MDp4a => 256,
+            Dtype::Q8_0 | Dtype::Q8_0Dp4a | Dtype::Q4_0 | Dtype::Q4_1 | Dtype::Q4_1Dp4a | Dtype::Q5_0 | Dtype::Q5_1 | Dtype::Q4_1R2DP4A | Dtype::Q8K | Dtype::Q5KDp4a | Dtype::Q3KDp4a | Dtype::Q2KDp4a | Dtype::Iq4XsDp4a | Dtype::Iq4NlDp4a | Dtype::Iq3SDp4a | Dtype::Iq3XxsDp4a | Dtype::Iq2SDp4a | Dtype::Iq2XsDp4a | Dtype::Iq2XxsDp4a | Dtype::Iq1SDp4a | Dtype::Iq1MDp4a => 256,
             Dtype::Q4_1T128 | Dtype::Q8_0T128 | Dtype::Q8_0T128VDR2 => 128,
             _ => 64,
         }
@@ -980,6 +1008,18 @@ fn tame_scales(dtype: Dtype, raw: Vec<u8>) -> Vec<u8> {
                 let d = f16::from_f32((block[0] as f32 / 255.0) * 0.1 + 0.01);
                 block[0..2].copy_from_slice(&d.to_bits().to_le_bytes());
             }
+            Dtype::Q5_0 => {
+                // BlockQ5_0: d (f16, 0..2) + qh[4] + qs[16]. Cap d only.
+                let d = f16::from_f32((block[0] as f32 / 255.0) * 0.1 + 0.01);
+                block[0..2].copy_from_slice(&d.to_bits().to_le_bytes());
+            }
+            Dtype::Q5_1 => {
+                // BlockQ5_1: d (f16, 0..2) + m (f16, 2..4) + qh[4] + qs[16].
+                let d = f16::from_f32((block[0] as f32 / 255.0) * 0.1 + 0.01);
+                let m = f16::from_f32((block[1] as f32 / 255.0) * 0.05);
+                block[0..2].copy_from_slice(&d.to_bits().to_le_bytes());
+                block[2..4].copy_from_slice(&m.to_bits().to_le_bytes());
+            }
             Dtype::Q2K | Dtype::Q2KR2 | Dtype::Q2KDp4a | Dtype::Q2KR2Dp4a => {
                 // BlockQ2K: scales[16] + qs[64] + d (f16 @ 80) + dmin (f16 @ 82).
                 // Keep scale-low-nibble in 0..15 (random already); cap d & dmin small.
@@ -1016,7 +1056,7 @@ fn tame_scales(dtype: Dtype, raw: Vec<u8>) -> Vec<u8> {
                 let d = f16::from_f32((block[d_off] as f32 / 255.0) * 0.05 + 0.01);
                 block[d_off..d_off + 2].copy_from_slice(&d.to_bits().to_le_bytes());
             }
-            Dtype::Q4_1 | Dtype::Q4_1R2 | Dtype::Q4_1R2DP4A | Dtype::Q4_1T128 => {
+            Dtype::Q4_1 | Dtype::Q4_1Dp4a | Dtype::Q4_1R2 | Dtype::Q4_1R2DP4A | Dtype::Q4_1T128 => {
                 // BlockQ4_1: d (f16, 0..2) + m (f16, 2..4) + qs[16] (4..20).
                 let d = f16::from_f32((block[0] as f32 / 255.0) * 0.1 + 0.01);
                 let m = f16::from_f32((block[1] as f32 / 255.0) * 0.05);

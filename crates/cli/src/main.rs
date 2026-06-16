@@ -1253,11 +1253,16 @@ fn autotune(arch: &str, op: &str, dtype: &str, emit: bool) -> Result<()> {
                 Dtype::Q8_0T128,
                 Dtype::Q8_0T128VDR2,
             ],
-            // Q4_0 is a single productionised kernel (no shape-dependent
-            // variant choice) — a degenerate one-candidate rank that just
-            // emits the dispatch row, the same on either backend.
+            // The legacy quants are each a single productionised kernel (no
+            // shape-dependent variant choice) — a degenerate one-candidate
+            // rank that just emits the dispatch row, the same on either backend.
             "Q4_0" => vec![Dtype::Q4_0],
-            other => anyhow::bail!("autotune: only --dtype Q8_0 / Q4_0 are wired so far (got {other:?})"),
+            "Q4_1" => vec![Dtype::Q4_1Dp4a],
+            "Q5_0" => vec![Dtype::Q5_0],
+            "Q5_1" => vec![Dtype::Q5_1],
+            other => anyhow::bail!(
+                "autotune: only --dtype Q8_0 / Q4_0 / Q4_1 / Q5_0 / Q5_1 are wired so far (got {other:?})"
+            ),
         };
         let m_grid = [1usize, 8, 16];
         let k_grid = [2048usize, 4096];
@@ -1296,9 +1301,18 @@ fn sweep_cuda(op: &str, dtype: &str) -> Result<()> {
     let dtypes: Vec<Dtype> = match dtype {
         "Q8_0" | "Q8_0_dp4a" => vec![Dtype::Q8_0Dp4a],
         "Q4_0" => vec![Dtype::Q4_0],
-        "all" => vec![Dtype::Q8_0Dp4a, Dtype::Q4_0],
+        "Q4_1" => vec![Dtype::Q4_1Dp4a],
+        "Q5_0" => vec![Dtype::Q5_0],
+        "Q5_1" => vec![Dtype::Q5_1],
+        "all" => vec![
+            Dtype::Q8_0Dp4a,
+            Dtype::Q4_0,
+            Dtype::Q4_1Dp4a,
+            Dtype::Q5_0,
+            Dtype::Q5_1,
+        ],
         other => {
-            anyhow::bail!("--arch sm_86: only Q8_0 / Q4_0 mmvq dp4a are ported to CUDA so far (got {other:?})")
+            anyhow::bail!("--arch sm_86: only Q8_0 / Q4_0 / Q4_1 / Q5_0 / Q5_1 mmvq dp4a are ported to CUDA so far (got {other:?})")
         }
     };
     let root = repo_root();

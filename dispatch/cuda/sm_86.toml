@@ -10,6 +10,30 @@ cert    = "certs/cuda/sm_86/qmatmul_q4_0_mmvq_dp4a.json"
 notes   = "autotuned"
 
 [[qmatmul]]
+dtype   = "Q4_1"
+dtype_q = "Q8_1"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "qmatmul_q4_1_mmvq_dp4a"
+cert    = "certs/cuda/sm_86/qmatmul_q4_1_mmvq_dp4a.json"
+notes   = "autotuned"
+
+[[qmatmul]]
+dtype   = "Q5_0"
+dtype_q = "Q8_1"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "qmatmul_q5_0_mmvq_dp4a"
+cert    = "certs/cuda/sm_86/qmatmul_q5_0_mmvq_dp4a.json"
+notes   = "autotuned"
+
+[[qmatmul]]
+dtype   = "Q5_1"
+dtype_q = "Q8_1"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "qmatmul_q5_1_mmvq_dp4a"
+cert    = "certs/cuda/sm_86/qmatmul_q5_1_mmvq_dp4a.json"
+notes   = "autotuned"
+
+[[qmatmul]]
 dtype   = "Q8_0"
 dtype_q = "Q8_1"
 shape   = { m = "any", k = "any", n = "any" }
