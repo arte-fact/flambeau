@@ -43,9 +43,21 @@ sm_86) is built and `feature/cuda-decouple` is pulled in.
 > `load_int_b2`). Certed both backends (err ≤1.5e-2, HIP↔CUDA equal); all 6 hand
 > `.cu` retired, ops/runtime untouched, bench-references registered. Harness
 > `BatchedDtype` now carries `launch_threads` (256/64) + `rows_per_block` (1/2).
-> **NEXT P2b: `row_tile`** (`mmvq_*_row_tile_batched.cu` — R output rows/block ×
-> N cols; and the `*_gate_up_row_tile_*` combo). Then **P2c mmq** (4-warp
-> LDS-tiled prefill lever) + **P2d** indexed_moe.
+> **`row_tile` STARTED — Q8_0 done.** R=THREADS/WARP_SIZE output rows/block
+> share an LDS-staged activation strip across N columns. **First wave-size-
+> restructured slice:** the hand kernel's `bi = lane>>3` block-coverage assumes
+> wave64 (8 blocks = 8 lanes-groups); the neutral body strides
+> `bi += WARP_SIZE/INT32_PER_BLOCK` so wave64 covers 8 blocks in one pass and
+> wave32 in two — `mmvq_q8_0_row_tile.cuh` + per-warp reduce
+> `mmvq_reduce_store_rowtile_batched<N>`. R is backend-dependent (4 wave64 / 8
+> wave32 at THREADS=256); the sweep launches `grid=ceil(m/4)` (wave64 R) which
+> covers on both (wave32 over-launches, guarded by `row>=n_rows`). Certed both
+> backends (err 2.3e-3, HIP↔CUDA equal); fits `run_shape_batched` (same op
+> signature) as `BatchedDtype::Q8_0RowTile`. NB: the manifest can't carry the
+> hand kernel's `__launch_bounds__(256,1)` (perf-only; revisit if hot). **NEXT
+> row_tile:** Q4_0 (nibble+bias) + Q5_K (super-block), then the
+> `*_gate_up_row_tile_*` combos. Then **P2c mmq** (4-warp LDS-tiled prefill
+> lever) + **P2d** indexed_moe.
 >
 > *(first gate_up slice writeup)*
 > **Q8_0 `gate_up`** (dense FFN decode kernel) templated onto a neutral skeleton

@@ -145,6 +145,21 @@ static __device__ __forceinline__ void mmvq_reduce_store_2row_batched(
     }
 }
 
+// Per-warp N-way reduce for the row-tiled batched kernel: each warp owns one
+// output row, so it reduces its N column accumulators across its own
+// `WARP_SIZE` lanes (no cross-warp / LDS step) and lane 0 writes the slot-major
+// `dst[c*n_rows + row]`. `lane` is the warp-local lane (`threadIdx.x &
+// (WARP_SIZE-1)`).
+template<int N, class OutT>
+static __device__ __forceinline__ void mmvq_reduce_store_rowtile_batched(
+    float (&acc)[N], OutT* dst, int row, int n_rows, int lane) {
+    #pragma unroll
+    for (int c = 0; c < N; ++c) {
+        const float v = warp_reduce_sum(acc[c]);
+        if (lane == 0) mmvq_store<OutT>(dst, c * n_rows + row, v);
+    }
+}
+
 template<int THREADS, class OutT>
 static __device__ __forceinline__ void mmvq_reduce_store(float acc, OutT* dst, int row) {
     constexpr int WARPS = THREADS / WARP_SIZE;
