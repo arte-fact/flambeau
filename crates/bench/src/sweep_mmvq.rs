@@ -326,10 +326,10 @@ impl Dtype {
             Dtype::Iq2SDp4a => "qmatmul_iq2_s_mmvq_dp4a",
             Dtype::Iq1S => "qmatmul_iq1_s_mmvq_single_row_gfx906",
             Dtype::Iq1SR2 => "qmatmul_iq1_s_mmvq_nw1_r2_gfx906",
-            Dtype::Iq1SDp4a => "qmatmul_iq1_s_mmvq_dp4a_gfx906",
+            Dtype::Iq1SDp4a => "qmatmul_iq1_s_mmvq_dp4a",
             Dtype::Iq1M => "qmatmul_iq1_m_mmvq_single_row_gfx906",
             Dtype::Iq1MR2 => "qmatmul_iq1_m_mmvq_nw1_r2_gfx906",
-            Dtype::Iq1MDp4a => "qmatmul_iq1_m_mmvq_dp4a_gfx906",
+            Dtype::Iq1MDp4a => "qmatmul_iq1_m_mmvq_dp4a",
         }
     }
 

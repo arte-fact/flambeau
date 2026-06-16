@@ -451,3 +451,53 @@ params = """
     const int n_rows,
     const int n_superblocks_per_row"""
 body = "mmvq_iq2_s_dp4a_row<fb_fp16_t>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+# IQ1_S single-row MMVQ — 11-bit IQ1S_GRID idx + 3-bit scale + delta bias.
+[[kernel]]
+stem = "mmvq_iq1_s_dp4a"
+includes = ["mmvq_iq1_s.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq1_s_dp4a_q8_1"
+params = """
+    const flambeau_block_iq1_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_iq1_s_dp4a_row<float>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq1_s_dp4a_q8_1_f16"
+params = """
+    const flambeau_block_iq1_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_iq1_s_dp4a_row<fb_fp16_t>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+# IQ1_M single-row MMVQ — IQ1_S codebook + reassembled super-block scale.
+[[kernel]]
+stem = "mmvq_iq1_m_dp4a"
+includes = ["mmvq_iq1_m.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq1_m_dp4a_q8_1"
+params = """
+    const flambeau_block_iq1_m* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_iq1_m_dp4a_row<float>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq1_m_dp4a_q8_1_f16"
+params = """
+    const flambeau_block_iq1_m* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_iq1_m_dp4a_row<fb_fp16_t>(x, y, dst, n_rows, n_superblocks_per_row);"

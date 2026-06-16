@@ -1951,7 +1951,7 @@ impl Recipe {
                 rows_per_block: 2,
                 mmq_tile: (0, 0),
             },
-            "qmatmul_iq1_s_mmvq_dp4a_gfx906" => Self {
+            "qmatmul_iq1_s_mmvq_dp4a" => Self {
                 kind: RecipeKind::Mmvq,
                 stem: "mmvq_iq1_s_dp4a",
                 entry: "flambeau_mmvq_iq1_s_dp4a_q8_1",
@@ -1975,7 +1975,7 @@ impl Recipe {
                 rows_per_block: 2,
                 mmq_tile: (0, 0),
             },
-            "qmatmul_iq1_m_mmvq_dp4a_gfx906" => Self {
+            "qmatmul_iq1_m_mmvq_dp4a" => Self {
                 kind: RecipeKind::Mmvq,
                 stem: "mmvq_iq1_m_dp4a",
                 entry: "flambeau_mmvq_iq1_m_dp4a_q8_1",
