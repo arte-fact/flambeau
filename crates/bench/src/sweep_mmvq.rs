@@ -301,7 +301,7 @@ impl Dtype {
             Dtype::Q4_1R2 => "qmatmul_q4_1_mmvq_nw1_r2_gfx906",
             Dtype::Q4_1R2DP4A => "qmatmul_q4_1_mmvq_r2_dp4a_gfx906",
             Dtype::Q4_1T128 => "qmatmul_q4_1_mmvq_t128_gfx906",
-            Dtype::Q8_0T128 => "qmatmul_q8_0_mmvq_t128_gfx906",
+            Dtype::Q8_0T128 => "qmatmul_q8_0_mmvq_t128",
             Dtype::Q8_0T128VDR2 => "qmatmul_q8_0_mmvq_t128_vdr2_gfx906",
             Dtype::Iq4Nl => "qmatmul_iq4_nl_mmvq_single_row_gfx906",
             Dtype::Iq4NlR2 => "qmatmul_iq4_nl_mmvq_nw1_r2_gfx906",
@@ -864,21 +864,33 @@ pub fn autotune<B: BenchBackend>(
         names.join(", ")
     );
 
+    // The runtime dispatch routes on `m` only (KernelDescriptor.m_range; there
+    // is no k-range), so a candidate that wins at one k and loses at another
+    // can't be expressed — emitting both would be two rows matching the same
+    // shape. The winner for an `m` is therefore the candidate with the best
+    // total time across the whole k-grid; per-(m,k) timings still print so a
+    // k-dependent split stays visible in the diagnostic output.
     let mut winners: Vec<(usize, Dtype)> = Vec::new();
     for &m in m_grid {
+        let mut totals: Vec<(Dtype, f64)> = avail.iter().map(|&d| (d, 0.0)).collect();
         for &k in k_grid {
-            let mut best: Option<(Dtype, f64)> = None;
-            for &d in &avail {
-                let us = time_mmvq::<B>(&dev, d, m, k, iters)?;
-                println!("  m={m:<5} k={k:<6} {:<34} {us:8.2} us", d.impl_id());
-                if best.is_none_or(|(_, b)| us < b) {
-                    best = Some((d, us));
-                }
+            for t in &mut totals {
+                let us = time_mmvq::<B>(&dev, t.0, m, k, iters)?;
+                println!("  m={m:<5} k={k:<6} {:<34} {us:8.2} us", t.0.impl_id());
+                t.1 += us;
             }
-            let (wd, wus) = best.expect("at least one candidate");
-            println!("    -> winner m={m} k={k}: {} ({wus:.2} us)", wd.impl_id());
-            winners.push((m, wd));
         }
+        let (wd, wtot) = totals
+            .iter()
+            .copied()
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .expect("at least one candidate");
+        println!(
+            "    -> winner m={m} (best total over {} k): {} ({wtot:.2} us)",
+            k_grid.len(),
+            wd.impl_id()
+        );
+        winners.push((m, wd));
     }
 
     if emit {

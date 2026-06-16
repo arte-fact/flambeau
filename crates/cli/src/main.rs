@@ -1246,7 +1246,11 @@ fn autotune(arch: &str, op: &str, dtype: &str, emit: bool) -> Result<()> {
     #[cfg(any(feature = "hip_sweep", feature = "cuda_sweep"))]
     {
         use flambeau_bench::sweep_mmvq::{autotune as run, Dtype};
+        // Config-variant fan-out is arch-aware: CUDA only has the templated
+        // variants, so the candidate set for sm_86 is the ported subset.
+        let cuda = arch == "sm_86";
         let candidates: Vec<Dtype> = match dtype {
+            "Q8_0" if cuda => vec![Dtype::Q8_0Dp4a, Dtype::Q8_0T128],
             "Q8_0" => vec![
                 Dtype::Q8_0,
                 Dtype::Q8_0Dp4a,
@@ -1315,6 +1319,7 @@ fn sweep_cuda(op: &str, dtype: &str) -> Result<()> {
     }
     let dtypes: Vec<Dtype> = match dtype {
         "Q8_0" | "Q8_0_dp4a" => vec![Dtype::Q8_0Dp4a],
+        "Q8_0_t128" => vec![Dtype::Q8_0T128],
         "Q4_0" => vec![Dtype::Q4_0],
         "Q4_1" => vec![Dtype::Q4_1Dp4a],
         "Q5_0" => vec![Dtype::Q5_0],
