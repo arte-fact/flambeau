@@ -83,27 +83,36 @@ sm_86) is built and `feature/cuda-decouple` is pulled in.
 > to ~1e-6 (integer-exact dp4a). Also fixed a P1 orphan-cert test failure
 > (`every_cert_on_disk_is_registered`, red since `76e17bc`).
 >
-> **Q5_K DONE** (`d93f16d`, both backends in one commit) — 256-thread single-row,
-> reuses `mmvq_reduce_store<256>` + shared `flambeau_q4k_scale_min`; cert
-> max_rel_err byte-identical, CUDA pass/15. cuda/sm_86 → 7 rows. Also removed a
-> stray duplicate cert under `crates/bench/src/certs/` (cruft from `974c9d3`).
+> **Q2_K / Q3_K / Q5_K / Q6_K ALL DONE** — every single-row dp4a K-quant is
+> templated on both backends (`c10cf1f`+`cb5745c` Q6_K, `d93f16d` Q5_K,
+> `2c156cb` Q3_K, `4ac1ed7` Q2_K). All reuse `mmvq_reduce_store<256>` (Q6_K uses
+> `<64>`); each its own neutral `mmvq_q{2,3,5,6}_k.cuh`; `load_int_b2` for the
+> misaligned super-block loads; impl_ids neutralized. Q3_K/Q2_K weren't
+> dispatched on HIP / had no prior cert → HIP correctness certs registered as
+> bench-references in `direct_call.rs`. **cuda/sm_86 = 9 mmvq rows**; cert-check
+> green (cuda 9, hip 82). Also fixed the P1 orphan-cert test + removed a stray
+> cert copy.
 >
-> Remaining K-quants — **each its own slice** (rename→port→bit-match→CUDA-cert
-> →emit). Split by structure:
-> - **Tractable now (single-row, full-block reduce → reuse `mmvq_reduce_store`):**
->   **Q2_K** `Q2KDp4a` and **Q3_K** `Q3KDp4a` (256-thread). 2-bit/3-bit + min
->   decode, two dp4a per term (value + broadcast-min). Messier `partial` than
->   Q5_K but same threading/reduce shape — do these next.
-> - **Harder (`r2`, wave64-shaped):** **Q4_K** — its only dp4a is `Q4KR2Dp4a`
->   (2 rows/block, **half-warp** reduce). A half-wave64 = 32 threads/row; on CUDA
->   wave32 that's a full warp, so the 2-row layout + `half_warp_reduce_sum` need a
->   wave-size-aware redesign (a row-group reduce helper), not a drop-in. Same for
->   any other `*R2Dp4a` you choose to port. Tackle after the single-row ones.
+> **Remaining: Q4_K (r2) + Q8_K.**
+> - **Q4_K** — its only dp4a is `Q4KR2Dp4a` (64 threads = 1 wave64, **2 rows/
+>   block**; each row owned by 32 lanes — `row_hi=lane>>5`, `lane_lo=lane&31`).
+>   The hand kernel reduces each row with `gfx906_half_warp_reduce_sum` (32-lane
+>   DPP). **Do NOT use the neutral `half_warp_reduce_sum`** — on wave32 it's a
+>   16-lane reduce, wrong here. The portable fix is a 32-lane butterfly that is a
+>   sub-warp on wave64 and a full warp on wave32:
+>   `for (off=16; off>0; off>>=1) v += __shfl_xor(v, off, 32); if (lane_lo==0) store(dst,row,v)`
+>   — correct on both (no LDS/cross-warp: on wave32 the two rows are two separate
+>   warps). Wrap it as `mmvq_reduce_store_2row<OutT>`. **Bit-match caveat:** the
+>   DPP half-warp reduce and the `__shfl_xor` butterfly may differ in the last
+>   ULPs (different instruction path, same butterfly order) → the HIP cert
+>   max_rel_err may NOT be byte-identical (still well within tol). Verify; if it
+>   shifts, that's expected, not a regression — note it. Q4_K IS dispatch-
+>   referenced (production decode), so re-cert carefully. `Q4KR2Dp4a` impl_id =
+>   `qmatmul_q4_K_mmvq_dp4a_gfx906` (check the full ref set incl. backend
+>   registry + dispatch — it has a real HIP cert, unlike Q2/Q3).
 > - **Q8_K** — activation-side; the weight mmvq is unusual, do last.
-> Each K-quant dp4a impl_id is still `_gfx906`-suffixed — neutralize per-dtype as
-> you port (Q6_K = 6 refs; Q5_K = 7, incl. the cli PMC-refresh target list +
-> watch for stray cert copies). After the K-quants: the `ROWS`/`THREADS`/`VDR`
-> config variants and **IQ** quants, then P2b fusion.
+> After the K-quants: the `ROWS`/`THREADS`/`VDR` config variants and **IQ**
+> quants, then P2b fusion.
 
 ## Where we are
 
