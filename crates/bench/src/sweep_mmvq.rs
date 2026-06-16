@@ -882,6 +882,217 @@ fn run_shape_gate_up<B: BenchBackend>(
     Ok((got_g, got_u, ref_g, ref_u))
 }
 
+// ---- batched (N-slot) sweep -----------------------------------------------
+
+/// Weight dtype for the batched MMVQ sweep (one weight row × N activation
+/// columns). Separate from `Dtype` because the kernel has N=2/3/4 entries and a
+/// slot-major output; only Q8_0 is templated so far.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchedDtype {
+    Q8_0,
+}
+
+impl BatchedDtype {
+    pub fn name(self) -> &'static str {
+        match self {
+            BatchedDtype::Q8_0 => "Q8_0",
+        }
+    }
+    fn weight_dtype(self) -> Dtype {
+        match self {
+            BatchedDtype::Q8_0 => Dtype::Q8_0Dp4a,
+        }
+    }
+    fn impl_id(self) -> &'static str {
+        match self {
+            BatchedDtype::Q8_0 => "qmatmul_q8_0_mmvq_batched",
+        }
+    }
+    fn kernel_stem(self) -> &'static str {
+        match self {
+            BatchedDtype::Q8_0 => "mmvq_q8_0_batched",
+        }
+    }
+    fn kernel_entry(self, n_slots: usize) -> &'static str {
+        match (self, n_slots) {
+            (BatchedDtype::Q8_0, 2) => "flambeau_mmvq_q8_0_q8_1_batched_n2",
+            (BatchedDtype::Q8_0, 3) => "flambeau_mmvq_q8_0_q8_1_batched_n3",
+            (BatchedDtype::Q8_0, 4) => "flambeau_mmvq_q8_0_q8_1_batched_n4",
+            _ => unreachable!("batched n_slots outside [2,4]"),
+        }
+    }
+}
+
+pub fn run_batched_sweep<B: BenchBackend>(
+    dtype: BatchedDtype,
+    repo_root: &Path,
+    arch: &str,
+) -> Result<Cert> {
+    let dev = B::new_device(0)?;
+
+    let bytes = B::image(dtype.kernel_stem())
+        .ok_or_else(|| anyhow!("{} kernel not compiled", dtype.kernel_stem()))?;
+    let module = B::load(&dev, bytes)?;
+    let kernel = B::kernel(&module, dtype.kernel_entry(2))?;
+    let pmc = B::attributes(&kernel)?;
+
+    let m_grid = vec![1usize, 8, 16, 128, 512];
+    let k_grid = vec![2048usize, 5120, 15360];
+    let n_grid = vec![2usize, 3, 4];
+    let seed = 0xC0FFEE_u64;
+
+    let mut results = Vec::new();
+    for &m in &m_grid {
+        for &k in &k_grid {
+            for &n in &n_grid {
+                let s = seed
+                    .wrapping_add((m as u64).wrapping_mul(0x1234567))
+                    .wrapping_add((k as u64).wrapping_mul(0x9E3779B97F4A7C15))
+                    .wrapping_add((n as u64).wrapping_mul(0x85EBCA6B));
+                let (got, reference) = run_shape_batched::<B>(&dev, dtype, m, k, n, s)?;
+                let max_rel_err = max_rel_err_with_floor(&got, &reference, (k as f32).sqrt());
+                let tolerance = cert_tol(k);
+                results.push(ShapeResult {
+                    m,
+                    k,
+                    n,
+                    seed: s,
+                    max_rel_err,
+                    tolerance,
+                    pass: max_rel_err <= tolerance,
+                });
+                tracing::info!(
+                    target: "flambeau_bench::sweep_mmvq",
+                    dtype = dtype.name(), m, k, n, max_rel_err, tolerance, "batched shape result"
+                );
+            }
+        }
+    }
+
+    let pass = results.iter().all(|r| r.pass);
+    let cert = Cert {
+        schema_version: SCHEMA_VERSION,
+        impl_id: dtype.impl_id().to_string(),
+        backend: dev.backend().to_string(),
+        arch: arch.to_string(),
+        op: "qmatmul_batched_mmvq".to_string(),
+        dtype_weight: dtype.name().to_string(),
+        dtype_activation: "Q8_1".to_string(),
+        tolerance_formula: "|err| <= 3e-2 * max(|ref|, sqrt(k))".to_string(),
+        results,
+        pass,
+        emitted_at: now_utc_iso8601(),
+        rig: rig_for(arch),
+        pmc: Some(pmc),
+    };
+    let written = cert.write_to_disk(repo_root)?;
+    tracing::info!(
+        target: "flambeau_bench::sweep_mmvq",
+        cert = %written.display(), pass = cert.pass, "batched cert written"
+    );
+    Ok(cert)
+}
+
+/// One (m, k, n_slots) batched shape. `n_slots` activation columns (each a
+/// distinct k-vector) are quantized slot-major; the kernel writes the slot-major
+/// `dst[n_slots][m]`. Returns `(got, reference)` flattened slot-major.
+fn run_shape_batched<B: BenchBackend>(
+    dev: &B::Device,
+    dtype: BatchedDtype,
+    m: usize,
+    k: usize,
+    n_slots: usize,
+    seed: u64,
+) -> Result<(Vec<f32>, Vec<f32>)> {
+    let q_bytes =
+        B::image("quantize_q8_1").ok_or_else(|| anyhow!("quantize_q8_1 not compiled"))?;
+    let m_bytes = B::image(dtype.kernel_stem())
+        .ok_or_else(|| anyhow!("{} kernel not compiled", dtype.kernel_stem()))?;
+    let q_module = B::load(dev, q_bytes)?;
+    let m_module = B::load(dev, m_bytes)?;
+    let k_quantize = B::kernel(&q_module, "flambeau_quantize_row_q8_1")?;
+    let k_mmvq = B::kernel(&m_module, dtype.kernel_entry(n_slots))?;
+
+    let wd = dtype.weight_dtype();
+    let block_elems = wd.block_elem_count();
+    let block_bytes = wd.block_size_bytes();
+    assert_eq!(k % block_elems, 0, "k {k} must be multiple of block size {block_elems}");
+    let n_blocks = k / block_elems;
+
+    let weights_raw = tame_scales(wd, seeded_bytes(seed, m * n_blocks * block_bytes));
+    let mut weights_dequant = vec![0.0f32; m * k];
+    dequantize_into(wd.ggml(), &weights_raw, &mut weights_dequant)?;
+    let d_x = alloc_and_upload(dev, weights_raw.as_slice());
+
+    // Per-slot activations: quantize each into a slot-major Q8_1 buffer.
+    let q8_1_blocks_per_slot = k / QK8;
+    let slot_bytes = q8_1_blocks_per_slot * std::mem::size_of::<BlockQ8_1>();
+    let d_y_q8_1 = dev.alloc(n_slots * slot_bytes)?;
+    let mut y_rt_slots: Vec<Vec<f32>> = Vec::with_capacity(n_slots);
+    for s in 0..n_slots {
+        let y_f32 = seeded_f32_range(seed.wrapping_add(0xA5A5 ^ (s as u64)), k, -1.0, 1.0);
+        let d_y_f32 = alloc_and_upload(dev, y_f32.as_slice());
+        {
+            let stream = dev.default_stream();
+            let n_elems = k as i32;
+            let d_y_f32_ptr: u64 = d_y_f32.as_usize() as u64;
+            let d_slot_ptr: u64 = (d_y_q8_1.as_usize() + s * slot_bytes) as u64;
+            let mut args = <B::Args<'_>>::default();
+            args.push_arg(&d_y_f32_ptr);
+            args.push_arg(&d_slot_ptr);
+            args.push_arg(&n_elems);
+            B::launch(&k_quantize, stream, LaunchCfg::one_d(q8_1_blocks_per_slot as u32, QK8 as u32), args)?;
+            stream.synchronize()?;
+        }
+        unsafe { dev.dealloc(d_y_f32, y_f32.len() * 4)?; }
+        y_rt_slots.push(quantize_q8_1_roundtrip(&y_f32));
+    }
+
+    let d_dst = dev.alloc(n_slots * m * 4)?;
+    {
+        let stream = dev.default_stream();
+        let n_rows = m as i32;
+        let n_units = n_blocks as i32;
+        let d_x_ptr: u64 = d_x.as_usize() as u64;
+        let d_y_ptr: u64 = d_y_q8_1.as_usize() as u64;
+        let d_dst_ptr: u64 = d_dst.as_usize() as u64;
+        let mut args = <B::Args<'_>>::default();
+        args.push_arg(&d_x_ptr);
+        args.push_arg(&d_y_ptr);
+        args.push_arg(&d_dst_ptr);
+        args.push_arg(&n_rows);
+        args.push_arg(&n_units);
+        B::launch(&k_mmvq, stream, LaunchCfg::one_d(m as u32, 256), args)?;
+        stream.synchronize()?;
+    }
+
+    let mut got = vec![0.0f32; n_slots * m];
+    unsafe {
+        dev.memcpy_async(
+            dev.default_stream(),
+            CopyDirection::DeviceToHost,
+            DevicePtr(got.as_mut_ptr() as usize),
+            d_dst,
+            n_slots * m * 4,
+        )?;
+    }
+    dev.default_stream().synchronize()?;
+
+    unsafe {
+        dev.dealloc(d_x, weights_raw.len())?;
+        dev.dealloc(d_y_q8_1, n_slots * slot_bytes)?;
+        dev.dealloc(d_dst, n_slots * m * 4)?;
+    }
+
+    // Reference, slot-major to match dst[s*m + r].
+    let mut reference = vec![0.0f32; n_slots * m];
+    for s in 0..n_slots {
+        let r = reference_matmul(&weights_dequant, &y_rt_slots[s], m, k);
+        reference[s * m..(s + 1) * m].copy_from_slice(&r);
+    }
+    Ok((got, reference))
+}
+
 // ---- PMC capture ----------------------------------------------------------
 
 fn capture_static_pmc<B: BenchBackend>(dev: &B::Device, dtype: Dtype) -> Result<PmcSnapshot> {

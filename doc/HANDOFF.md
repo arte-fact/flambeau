@@ -23,10 +23,22 @@ sm_86) is built and `feature/cuda-decouple` is pulled in.
 > certed cross-backend (`--dtype <dt>_gate_up`; max_rel_err 2e-3 / 2.6e-4 /
 > 1.8e-4 / 1.3e-2, HIP↔CUDA equal), same stem/entry → ops/runtime untouched, hand
 > `.cu` retired, bench-reference registered (`GateUpDtype` + `run_gate_up_sweep`
-> in `sweep_mmvq.rs`). **NEXT P2b: `batched`** (N>1 activation columns — the
-> `mmvq_*_batched.cu` / `*_gate_up_batched.cu` n2/n3/n4 entries; different op
-> signature, own skeleton) then **`row_tile`**. Then **P2c mmq** (4-warp
-> LDS-tiled prefill lever) + **P2d** indexed_moe.
+> in `sweep_mmvq.rs`).
+>
+> **`batched` (N>1 columns) STARTED — Q8_0 done.** Generic
+> `mmvq_dp4a_batched_row<Q,THREADS,N,OutT>` (one weight row × N slot-major Q8_1
+> columns → slot-major out; the weight load is slot-invariant so LICM hoists it
+> out of the unrolled N-loop = read-once amortization, the mirror of gate_up) +
+> N-way reduce `mmvq_reduce_store_batched<THREADS,N>`. n2/n3/n4 entries, same
+> stem/entry (`mmvq_q8_0_batched`) → ops untouched, hand `.cu` retired. New
+> harness path `BatchedDtype`/`run_batched_sweep` (sweeps m×k×n_slots = 45
+> shapes; `--dtype Q8_0_batched`); cert both backends err 2.3e-3, HIP↔CUDA equal,
+> bench-reference registered. The CUDA port also fixes the hand kernel's
+> NVIDIA-unsafe `((int*)qs)[i]` (now `load_int_b2` via `partial`). **NEXT
+> batched:** Q4_0/Q4_1 (reuse the skeleton via their `quant_traits::partial`),
+> then K-quant batched (Q4_K/Q5_K-r2/Q6_K — own super-block bodies). Then
+> `row_tile`. Then **P2c mmq** (4-warp LDS-tiled prefill lever) + **P2d**
+> indexed_moe.
 >
 > *(first gate_up slice writeup)*
 > **Q8_0 `gate_up`** (dense FFN decode kernel) templated onto a neutral skeleton

@@ -982,6 +982,19 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     );
                     return Ok(());
                 }
+                if let Some(bd) = batched_dtype(dtype) {
+                    use flambeau_bench::sweep_mmvq::run_batched_sweep;
+                    let root = repo_root();
+                    let cert = run_batched_sweep::<flambeau_bench::backend::Hip>(bd, &root, arch)?;
+                    println!(
+                        "sweep qmatmul_batched ({}): pass={} shapes={} rig={}",
+                        bd.name(),
+                        cert.pass,
+                        cert.results.len(),
+                        cert.rig
+                    );
+                    return Ok(());
+                }
                 let dtypes: Vec<Dtype> = match dtype {
                     "all" => vec![
                         Dtype::Q8_0,
@@ -1343,6 +1356,16 @@ fn gate_up_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::GateUpDtype>
     }
 }
 
+/// Map a `--dtype` string to a batched (N-slot) sweep target, if it names one.
+#[cfg(any(feature = "hip_sweep", feature = "cuda_sweep"))]
+fn batched_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::BatchedDtype> {
+    use flambeau_bench::sweep_mmvq::BatchedDtype;
+    match dtype {
+        "Q8_0_batched" => Some(BatchedDtype::Q8_0),
+        _ => None,
+    }
+}
+
 #[cfg(feature = "cuda_sweep")]
 fn sweep_cuda(op: &str, dtype: &str) -> Result<()> {
     use flambeau_bench::backend::Cuda;
@@ -1359,6 +1382,18 @@ fn sweep_cuda(op: &str, dtype: &str) -> Result<()> {
         println!(
             "sweep qmatmul_gate_up ({}): pass={} shapes={} rig={}",
             gu.name(),
+            cert.pass,
+            cert.results.len(),
+            cert.rig
+        );
+        return Ok(());
+    }
+    if let Some(bd) = batched_dtype(dtype) {
+        use flambeau_bench::sweep_mmvq::run_batched_sweep;
+        let cert = run_batched_sweep::<Cuda>(bd, &repo_root(), "sm_86")?;
+        println!(
+            "sweep qmatmul_batched ({}): pass={} shapes={} rig={}",
+            bd.name(),
             cert.pass,
             cert.results.len(),
             cert.rig

@@ -104,3 +104,41 @@ static __device__ __forceinline__ void mmvq_dp4a_nrow_row(
     }
     mmvq_reduce_store_group<LANES, OutT>(acc, dst, row, lane_lo);
 }
+
+// Batched config variant of mmvq_dp4a_row: one weight row is dotted against `N`
+// Q8_1 activation columns (slot-major `y[N][n_blocks_per_row]`), producing the
+// slot-major output `dst[N][n_rows]`. The weight block load is invariant in the
+// slot index, so the unrolled inner loop hoists it (LICM) — the weight row is
+// read once and reused across all N slots, the batched-decode amortization (the
+// mirror of the gate+up fusion, which shares the activation across 2 weights).
+template<class Q, int THREADS, int N, class OutT = float>
+static __device__ __forceinline__ void mmvq_dp4a_batched_row(
+    const typename quant_traits<Q>::block_t* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    OutT* __restrict__ dst,
+    int n_rows, int n_blocks_per_row)
+{
+    using T = quant_traits<Q>;
+    constexpr int IPB  = T::INT32_PER_BLOCK;
+    constexpr int STEP = THREADS / IPB;
+
+    const int row = blockIdx.x;
+    if (row >= n_rows) return;
+
+    const int tid = threadIdx.x;
+    const int j   = tid & (IPB - 1);
+    const int b0  = tid / IPB;
+
+    const typename T::block_t* xrow = x + (size_t) row * n_blocks_per_row;
+    float acc[N];
+    #pragma unroll
+    for (int s = 0; s < N; ++s) acc[s] = 0.0f;
+
+    for (int b = b0; b < n_blocks_per_row; b += STEP) {
+        #pragma unroll
+        for (int s = 0; s < N; ++s) {
+            acc[s] += T::partial(xrow[b], y[(size_t) s * n_blocks_per_row + b], j);
+        }
+    }
+    mmvq_reduce_store_batched<THREADS, N, OutT>(acc, dst, row, n_rows);
+}

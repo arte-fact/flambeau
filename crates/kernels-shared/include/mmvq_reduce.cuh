@@ -86,6 +86,45 @@ static __device__ __forceinline__ void mmvq_reduce_store_gate_up(
     }
 }
 
+// N-way reduce-and-store for the batched MMVQ kernel: one weight row dotted
+// against N activation columns, so each thread arrives with `N` partials. The
+// block reduces all N through one barrier (the LDS scratch is `WARPS * N`) and
+// the surviving lane writes the slot-major output `dst[s*n_rows + row]`. Same
+// warp-then-inter-warp structure as `mmvq_reduce_store`.
+template<int THREADS, int N, class OutT>
+static __device__ __forceinline__ void mmvq_reduce_store_batched(
+    float (&acc)[N], OutT* dst, int row, int n_rows) {
+    constexpr int WARPS = THREADS / WARP_SIZE;
+    const int lane = threadIdx.x & (WARP_SIZE - 1);
+    if constexpr (WARPS > 1) {
+        const int warp = threadIdx.x / WARP_SIZE;
+        __shared__ float s_warp[WARPS * N];
+        #pragma unroll
+        for (int s = 0; s < N; ++s) {
+            const float v = warp_reduce_sum(acc[s]);
+            if (lane == 0) s_warp[s * WARPS + warp] = v;
+        }
+        __syncthreads();
+        if (warp == 0) {
+            #pragma unroll
+            for (int s = 0; s < N; ++s) {
+                float v = (lane < WARPS) ? s_warp[s * WARPS + lane] : 0.0f;
+                #pragma unroll
+                for (int off = WARPS / 2; off > 0; off >>= 1) {
+                    v += __shfl_xor(v, off, WARP_SIZE);
+                }
+                if (lane == 0) mmvq_store<OutT>(dst, s * n_rows + row, v);
+            }
+        }
+    } else {
+        #pragma unroll
+        for (int s = 0; s < N; ++s) {
+            const float v = warp_reduce_sum(acc[s]);
+            if (lane == 0) mmvq_store<OutT>(dst, s * n_rows + row, v);
+        }
+    }
+}
+
 template<int THREADS, class OutT>
 static __device__ __forceinline__ void mmvq_reduce_store(float acc, OutT* dst, int row) {
     constexpr int WARPS = THREADS / WARP_SIZE;

@@ -196,6 +196,43 @@ params = """
     const int n_superblocks_per_row"""
 body = "mmvq_q5_k_gate_up_dp4a_row<256>(gate_w, up_w, y, gate_out, up_out, n_rows_gate, n_rows_up, n_superblocks_per_row);"
 
+# Q8_0 batched MMVQ — one weight row × N Q8_1 activation columns (slot-major),
+# N=2/3/4 compile-time. The weight read is amortized across the N slots (the
+# mirror of gate+up). Same stem/entries as the retired hand kernel.
+[[kernel]]
+stem = "mmvq_q8_0_batched"
+includes = ["quant_traits.cuh", "mmvq.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q8_0_q8_1_batched_n2"
+params = """
+    const flambeau_block_q8_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_dp4a_batched_row<Q8_0, 256, 2>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q8_0_q8_1_batched_n3"
+params = """
+    const flambeau_block_q8_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_dp4a_batched_row<Q8_0, 256, 3>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q8_0_q8_1_batched_n4"
+params = """
+    const flambeau_block_q8_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_dp4a_batched_row<Q8_0, 256, 4>(x, y, dst, n_rows, n_blocks_per_row);"
+
 # Q4_0 single-row MMVQ — legacy 4-bit (nibble unpack + (q-8) bias correction).
 # One module carries both the F32 dst entry (scratch-then-cast path) and the
 # F16-dst entry (mmvq_q4_0_kv_decode_f16 / mmvq_f16_direct).
