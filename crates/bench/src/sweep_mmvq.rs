@@ -896,13 +896,14 @@ pub enum BatchedDtype {
     Q6K,
     Q5K,
     Q8_0RowTile,
+    Q4_0RowTile,
 }
 
 impl BatchedDtype {
     pub fn name(self) -> &'static str {
         match self {
             BatchedDtype::Q8_0 | BatchedDtype::Q8_0RowTile => "Q8_0",
-            BatchedDtype::Q4_0 => "Q4_0",
+            BatchedDtype::Q4_0 | BatchedDtype::Q4_0RowTile => "Q4_0",
             BatchedDtype::Q4_1 => "Q4_1",
             BatchedDtype::Q4K => "Q4_K",
             BatchedDtype::Q6K => "Q6_K",
@@ -912,7 +913,7 @@ impl BatchedDtype {
     fn weight_dtype(self) -> Dtype {
         match self {
             BatchedDtype::Q8_0 | BatchedDtype::Q8_0RowTile => Dtype::Q8_0Dp4a,
-            BatchedDtype::Q4_0 => Dtype::Q4_0,
+            BatchedDtype::Q4_0 | BatchedDtype::Q4_0RowTile => Dtype::Q4_0,
             BatchedDtype::Q4_1 => Dtype::Q4_1Dp4a,
             BatchedDtype::Q4K => Dtype::Q4K,
             BatchedDtype::Q6K => Dtype::Q6K,
@@ -928,6 +929,7 @@ impl BatchedDtype {
             BatchedDtype::Q6K => "qmatmul_q6_k_mmvq_batched",
             BatchedDtype::Q5K => "qmatmul_q5_k_r2_mmvq_batched",
             BatchedDtype::Q8_0RowTile => "qmatmul_q8_0_mmvq_row_tile_batched",
+            BatchedDtype::Q4_0RowTile => "qmatmul_q4_0_mmvq_row_tile_batched",
         }
     }
     fn kernel_stem(self) -> &'static str {
@@ -939,6 +941,7 @@ impl BatchedDtype {
             BatchedDtype::Q6K => "mmvq_q6_k_batched",
             BatchedDtype::Q5K => "mmvq_q5_k_r2_batched",
             BatchedDtype::Q8_0RowTile => "mmvq_q8_0_row_tile_batched",
+            BatchedDtype::Q4_0RowTile => "mmvq_q4_0_row_tile_batched",
         }
     }
     fn launch_threads(self) -> u32 {
@@ -946,16 +949,17 @@ impl BatchedDtype {
             BatchedDtype::Q8_0
             | BatchedDtype::Q4_0
             | BatchedDtype::Q4_1
-            | BatchedDtype::Q8_0RowTile => 256,
+            | BatchedDtype::Q8_0RowTile
+            | BatchedDtype::Q4_0RowTile => 256,
             BatchedDtype::Q4K | BatchedDtype::Q6K | BatchedDtype::Q5K => 64,
         }
     }
     /// Output rows computed per block: 2 for the r2 Q5_K kernel, 4 for the
-    /// wave64 row-tile (over-launches harmlessly on wave32's R=8), 1 otherwise.
+    /// wave64 row-tiles (over-launches harmlessly on wave32's R=8), 1 otherwise.
     fn rows_per_block(self) -> u32 {
         match self {
             BatchedDtype::Q5K => 2,
-            BatchedDtype::Q8_0RowTile => 4,
+            BatchedDtype::Q8_0RowTile | BatchedDtype::Q4_0RowTile => 4,
             _ => 1,
         }
     }
@@ -982,6 +986,9 @@ impl BatchedDtype {
             (BatchedDtype::Q8_0RowTile, 2) => "flambeau_mmvq_q8_0_row_tile_dp4a_q8_1_batched_n2",
             (BatchedDtype::Q8_0RowTile, 3) => "flambeau_mmvq_q8_0_row_tile_dp4a_q8_1_batched_n3",
             (BatchedDtype::Q8_0RowTile, 4) => "flambeau_mmvq_q8_0_row_tile_dp4a_q8_1_batched_n4",
+            (BatchedDtype::Q4_0RowTile, 2) => "flambeau_mmvq_q4_0_row_tile_dp4a_q8_1_batched_n2",
+            (BatchedDtype::Q4_0RowTile, 3) => "flambeau_mmvq_q4_0_row_tile_dp4a_q8_1_batched_n3",
+            (BatchedDtype::Q4_0RowTile, 4) => "flambeau_mmvq_q4_0_row_tile_dp4a_q8_1_batched_n4",
             _ => unreachable!("batched n_slots outside [2,4]"),
         }
     }
