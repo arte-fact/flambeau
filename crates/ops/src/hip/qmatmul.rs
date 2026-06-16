@@ -1618,8 +1618,8 @@ impl Recipe {
         // Single-row Q8_0 dispatch rows are aliased to the t128_vdr2 kernel
         // (≥+3 % on Qwen3.6-27B-Q8_0 and Qwen3.5-27B-Q8_0).
         let impl_id = match impl_id {
-            "qmatmul_q8_0_mmvq_single_row_gfx906" => "qmatmul_q8_0_mmvq_t128_vdr2_gfx906",
-            "qmatmul_q8_0_mmvq_dp4a_vdr2_gfx906" => "qmatmul_q8_0_mmvq_t128_vdr2_gfx906",
+            "qmatmul_q8_0_mmvq_single_row_gfx906" => "qmatmul_q8_0_mmvq_t128_vdr2",
+            "qmatmul_q8_0_mmvq_dp4a_vdr2" => "qmatmul_q8_0_mmvq_t128_vdr2",
             other => other,
         };
         Ok(match impl_id {
@@ -1639,7 +1639,7 @@ impl Recipe {
                 rows_per_block: 1,
                 mmq_tile: (0, 0),
             },
-            "qmatmul_q8_0_mmvq_dp4a_vdr2_gfx906" => Self {
+            "qmatmul_q8_0_mmvq_dp4a_vdr2" => Self {
                 kind: RecipeKind::Mmvq,
                 stem: "mmvq_q8_0_dp4a_vdr2",
                 entry: "flambeau_mmvq_q8_0_dp4a_vdr2_q8_1",
@@ -1663,7 +1663,7 @@ impl Recipe {
                 rows_per_block: 1,
                 mmq_tile: (0, 0),
             },
-            "qmatmul_q8_0_mmvq_t128_vdr2_gfx906" => Self {
+            "qmatmul_q8_0_mmvq_t128_vdr2" => Self {
                 kind: RecipeKind::Mmvq,
                 stem: "mmvq_q8_0_t128_vdr2",
                 entry: "flambeau_mmvq_q8_0_t128_vdr2_q8_1",

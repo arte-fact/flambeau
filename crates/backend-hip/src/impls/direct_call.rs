@@ -244,11 +244,16 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
         impl_id: "qmatmul_q8_0_mmvq_dp4a",
         cert_rel_path: "certs/hip/gfx906/qmatmul_q8_0_mmvq_dp4a.json",
     },
-    // Q8_0 t128 config variant (mmvq_dp4a_row<Q8_0,128>) — an autotune candidate
-    // on both backends, not a standalone dispatch row.
+    // Q8_0 config variants (mmvq_dp4a_row/mmvq_dp4a_vdr_row instantiations) —
+    // autotune candidates on both backends; t128_vdr2 is also the production
+    // decode kernel via the runtime alias, not a standalone dispatch row.
     DirectCallKernel {
         impl_id: "qmatmul_q8_0_mmvq_t128",
         cert_rel_path: "certs/hip/gfx906/qmatmul_q8_0_mmvq_t128.json",
+    },
+    DirectCallKernel {
+        impl_id: "qmatmul_q8_0_mmvq_t128_vdr2",
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q8_0_mmvq_t128_vdr2.json",
     },
     // Q3_K / Q2_K templated mmvq dp4a — not dispatched on HIP (decode uses
     // other rows), kept as the cross-backend bit-match baseline for the sm_86

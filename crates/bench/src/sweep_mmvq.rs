@@ -302,7 +302,7 @@ impl Dtype {
             Dtype::Q4_1R2DP4A => "qmatmul_q4_1_mmvq_r2_dp4a_gfx906",
             Dtype::Q4_1T128 => "qmatmul_q4_1_mmvq_t128_gfx906",
             Dtype::Q8_0T128 => "qmatmul_q8_0_mmvq_t128",
-            Dtype::Q8_0T128VDR2 => "qmatmul_q8_0_mmvq_t128_vdr2_gfx906",
+            Dtype::Q8_0T128VDR2 => "qmatmul_q8_0_mmvq_t128_vdr2",
             Dtype::Iq4Nl => "qmatmul_iq4_nl_mmvq_single_row_gfx906",
             Dtype::Iq4NlR2 => "qmatmul_iq4_nl_mmvq_nw1_r2_gfx906",
             Dtype::Iq4NlDp4a => "qmatmul_iq4_nl_mmvq_dp4a",
@@ -916,27 +916,36 @@ fn emit_dispatch(
     // One `[[qmatmul]]` block per dtype, keyed by `dtype` name so the table is
     // a merge: re-emit only the dtypes in this run, preserving rows for any
     // other dtype already in the table (the table is built up one dtype at a
-    // time and must not clobber prior rows). Within a dtype, group by the
-    // winning impl and emit an m-range predicate when the autotune picked
-    // different impls at different m.
-    let mut by_dtype: BTreeMap<&'static str, BTreeMap<&'static str, (usize, usize)>> =
-        BTreeMap::new();
+    // time and must not clobber prior rows). Within a dtype the winners are
+    // turned into DISJOINT contiguous m-runs: the impl that wins at grid point
+    // `m` holds for `[m, next_grid_m)`, the last run is open-ended, and
+    // consecutive same-impl points merge. This stays correct even when the
+    // winning impl is non-monotonic in m (wins, loses, wins again → three
+    // disjoint rows, not two overlapping ones).
+    let mut by_dtype: BTreeMap<&'static str, Vec<(usize, &'static str)>> = BTreeMap::new();
     for &(m, d) in winners {
-        let impls = by_dtype.entry(d.name()).or_default();
-        let e = impls.entry(d.impl_id()).or_insert((m, m));
-        e.0 = e.0.min(m);
-        e.1 = e.1.max(m);
+        by_dtype.entry(d.name()).or_default().push((m, d.impl_id()));
     }
 
     let mut blocks: BTreeMap<String, String> = BTreeMap::new();
-    for (dtype, impls) in &by_dtype {
-        let single = impls.len() == 1;
+    for (dtype, pts) in &by_dtype {
+        let mut pts = pts.clone();
+        pts.sort_by_key(|&(m, _)| m);
+        // Collapse consecutive same-impl grid points into runs of (m_start, impl).
+        let mut runs: Vec<(usize, &str)> = Vec::new();
+        for (m, impl_id) in pts {
+            if runs.last().map(|&(_, i)| i) != Some(impl_id) {
+                runs.push((m, impl_id));
+            }
+        }
         let mut block = String::new();
-        for (impl_id, (m_min, m_max)) in impls {
-            let m_pred = if single {
+        for (i, &(m_start, impl_id)) in runs.iter().enumerate() {
+            let m_pred = if runs.len() == 1 {
                 "any".to_string()
+            } else if i + 1 < runs.len() {
+                format!("{m_start}..{}", runs[i + 1].0)
             } else {
-                format!("{m_min}..{}", m_max + 1)
+                format!("{m_start}..any")
             };
             write!(
                 block,

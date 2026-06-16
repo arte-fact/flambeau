@@ -50,6 +50,22 @@ template<> struct quant_traits<Q8_0> {
         const int yi = load_int_b2(by.qs, j);
         return (float) bx.d * (float) by.d * (float) dp4a(xi, yi, 0);
     }
+
+    // VDR variant: one thread owns `grp`'s VDR consecutive int32 lanes, chains
+    // VDR dp4a into one int32 sum, then a single block-scale multiply (vs VDR
+    // float multiplies in `partial`). For VDR=1 this is identical to `partial`.
+    template<int VDR>
+    static __device__ __forceinline__ float
+    partial_vdr(const block_t& bx, const flambeau_block_q8_1& by, int grp) {
+        int sumi = 0;
+        #pragma unroll
+        for (int i = 0; i < VDR; ++i) {
+            const int xi = load_int_b2(bx.qs, grp * VDR + i);
+            const int yi = load_int_b2(by.qs, grp * VDR + i);
+            sumi = dp4a(xi, yi, sumi);
+        }
+        return (float) bx.d * (float) by.d * (float) sumi;
+    }
 };
 
 template<> struct quant_traits<Q4_0> {

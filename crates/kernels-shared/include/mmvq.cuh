@@ -37,3 +37,34 @@ static __device__ __forceinline__ void mmvq_dp4a_row(
     }
     mmvq_reduce_store<THREADS, OutT>(acc, dst, row);
 }
+
+// VDR variant of mmvq_dp4a_row: each thread owns `VDR` consecutive int32 lanes
+// of a block (`IPB/VDR` threads per block), chaining VDR dp4a into one int sum
+// before the block-scale multiply — fewer float ops + a tighter dp4a register
+// chain (better ILP). `quant_traits<Q>::partial_vdr<VDR>` carries the per-dtype
+// work. VDR=1 reproduces `mmvq_dp4a_row` exactly.
+template<class Q, int THREADS, int VDR, class OutT = float>
+static __device__ __forceinline__ void mmvq_dp4a_vdr_row(
+    const typename quant_traits<Q>::block_t* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    OutT* __restrict__ dst,
+    int n_rows, int n_blocks_per_row)
+{
+    using T = quant_traits<Q>;
+    constexpr int TPB  = T::INT32_PER_BLOCK / VDR;   // threads per quant block
+    constexpr int STEP = THREADS / TPB;              // blocks advanced per iter
+
+    const int row = blockIdx.x;
+    if (row >= n_rows) return;
+
+    const int tid = threadIdx.x;
+    const int grp = tid & (TPB - 1);                 // int32-pair slot in a block
+    const int b0  = tid / TPB;
+
+    const typename T::block_t* xrow = x + (size_t) row * n_blocks_per_row;
+    float acc = 0.0f;
+    for (int b = b0; b < n_blocks_per_row; b += STEP) {
+        acc += T::template partial_vdr<VDR>(xrow[b], y[b], grp);
+    }
+    mmvq_reduce_store<THREADS, OutT>(acc, dst, row);
+}
