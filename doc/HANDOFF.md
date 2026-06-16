@@ -14,7 +14,16 @@ sm_86) is built and `feature/cuda-decouple` is pulled in.
 > generic `mmvq_dp4a_nrow_row` + `mmvq_reduce_store_group<GROUP>` are the reusable
 > infra for the heavy-decode K-quant r2/r4 (Q4KR2/Q6KR4 DO win as hand kernels).
 >
-> **P2b = mmvq FUSION (`gate_up`/`batched`/`row_tile`).** First slice DONE:
+> **P2b = mmvq FUSION (`gate_up`/`batched`/`row_tile`).** `gate_up` slices done:
+> **Q8_0** (`dcac582`) + **Q4_0** (`685bc7c`-next) — each its own neutral body
+> reusing the shared two-output reduce (Q8_0 via the generic VDR skeleton; Q4_0
+> its own `mmvq_q4_0_gate_up.cuh`: nibble unpack + `(q-8)` dp4a bias, the same
+> shell). Both certed cross-backend (`--dtype {Q8_0,Q4_0}_gate_up`; max_rel_err
+> 2e-3 / 2.6e-4, HIP↔CUDA equal), same stem/entry → ops/runtime untouched, hand
+> `.cu` retired, bench-reference registered. **NEXT gate_up:** Q4_1 (Q4_0 + `m`
+> offset, no `(q-8)`) and Q5_K (super-block 5-bit, own body). Pattern below.
+>
+> *(first gate_up slice writeup)*
 > **Q8_0 `gate_up`** (dense FFN decode kernel) templated onto a neutral skeleton
 > `mmvq_gate_up_dp4a_vdr_row<Q,THREADS,VDR,OutT>` (`mmvq_gate_up.cuh`) + new
 > two-output reduce `mmvq_reduce_store_gate_up<THREADS>` + a shared `load_q8_1_
