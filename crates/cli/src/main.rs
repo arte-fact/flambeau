@@ -1260,8 +1260,9 @@ fn autotune(arch: &str, op: &str, dtype: &str, emit: bool) -> Result<()> {
             "Q4_1" => vec![Dtype::Q4_1Dp4a],
             "Q5_0" => vec![Dtype::Q5_0],
             "Q5_1" => vec![Dtype::Q5_1],
+            "Q6_K" => vec![Dtype::Q6KDP4A],
             other => anyhow::bail!(
-                "autotune: only --dtype Q8_0 / Q4_0 / Q4_1 / Q5_0 / Q5_1 are wired so far (got {other:?})"
+                "autotune: only --dtype Q8_0 / Q4_0 / Q4_1 / Q5_0 / Q5_1 / Q6_K are wired so far (got {other:?})"
             ),
         };
         let m_grid = [1usize, 8, 16];
@@ -1304,15 +1305,17 @@ fn sweep_cuda(op: &str, dtype: &str) -> Result<()> {
         "Q4_1" => vec![Dtype::Q4_1Dp4a],
         "Q5_0" => vec![Dtype::Q5_0],
         "Q5_1" => vec![Dtype::Q5_1],
+        "Q6_K" => vec![Dtype::Q6KDP4A],
         "all" => vec![
             Dtype::Q8_0Dp4a,
             Dtype::Q4_0,
             Dtype::Q4_1Dp4a,
             Dtype::Q5_0,
             Dtype::Q5_1,
+            Dtype::Q6KDP4A,
         ],
         other => {
-            anyhow::bail!("--arch sm_86: only Q8_0 / Q4_0 / Q4_1 / Q5_0 / Q5_1 mmvq dp4a are ported to CUDA so far (got {other:?})")
+            anyhow::bail!("--arch sm_86: only Q8_0 / Q4_0 / Q4_1 / Q5_0 / Q5_1 / Q6_K mmvq dp4a are ported to CUDA so far (got {other:?})")
         }
     };
     let root = repo_root();
