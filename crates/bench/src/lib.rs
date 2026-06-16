@@ -16,7 +16,7 @@ pub mod backend;
 #[cfg(any(feature = "hip", feature = "cuda"))]
 pub mod harness;
 
-#[cfg(feature = "hip")]
+#[cfg(any(feature = "hip", feature = "cuda"))]
 pub mod sweep_mmvq;
 
 #[cfg(feature = "hip")]

@@ -936,8 +936,16 @@ fn find_simple_sweep(op: &str) -> Option<SweepFn> {
 
 fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
     let op = op.unwrap_or("qmatmul");
+
+    #[cfg(feature = "cuda_sweep")]
+    if arch == "sm_86" {
+        return sweep_cuda(op, dtype);
+    }
+
     if arch != "gfx906" {
-        anyhow::bail!("only --arch gfx906 is implemented (got {arch:?})");
+        anyhow::bail!(
+            "only --arch gfx906 (and sm_86 with --features cuda_sweep) is implemented (got {arch:?})"
+        );
     }
 
     #[cfg(feature = "hip_sweep")]
@@ -972,6 +980,7 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                         Dtype::Q6KR4,
                     ],
                     "Q8_0" => vec![Dtype::Q8_0],
+                    "Q8_0_dp4a" => vec![Dtype::Q8_0Dp4a],
                     "Q4_K" => vec![Dtype::Q4K, Dtype::Q4KR2, Dtype::Q4KR2Dp4a],
                     "Q4_K_r2_dp4a" => vec![Dtype::Q4KR2Dp4a],
                     "Q5_K" => vec![Dtype::Q5K, Dtype::Q5KR2, Dtype::Q5KDp4a, Dtype::Q5KR2Dp4a],
@@ -1025,7 +1034,7 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                 let root = repo_root();
                 for d in dtypes {
                     let spec = SweepSpec::v1_3_default(d);
-                    let cert = run_sweep(&spec, &root)?;
+                    let cert = run_sweep::<flambeau_bench::backend::Hip>(&spec, &root, arch)?;
                     println!(
                         "sweep {} ({}): pass={} shapes={} rig={}",
                         op,
@@ -1212,6 +1221,38 @@ fn pmc_probe(kernel: &str, m: usize, k: usize, n: usize) -> Result<()> {
         let _ = (kernel, m, k, n);
         anyhow::bail!("rebuild with --features hip_sweep");
     }
+}
+
+#[cfg(feature = "cuda_sweep")]
+fn sweep_cuda(op: &str, dtype: &str) -> Result<()> {
+    use flambeau_bench::backend::Cuda;
+    use flambeau_bench::sweep_mmvq::{run_sweep, Dtype, SweepSpec};
+
+    if op != "qmatmul" {
+        anyhow::bail!(
+            "--arch sm_86: only --op qmatmul (mmvq) has CUDA kernels; other ops are gfx906-only"
+        );
+    }
+    let dtypes: Vec<Dtype> = match dtype {
+        "Q8_0" | "Q8_0_dp4a" | "all" => vec![Dtype::Q8_0Dp4a],
+        other => {
+            anyhow::bail!("--arch sm_86: only Q8_0 mmvq dp4a is ported to CUDA so far (got {other:?})")
+        }
+    };
+    let root = repo_root();
+    for d in dtypes {
+        let spec = SweepSpec::v1_3_default(d);
+        let cert = run_sweep::<Cuda>(&spec, &root, "sm_86")?;
+        println!(
+            "sweep {} ({}): pass={} shapes={} rig={}",
+            op,
+            d.name(),
+            cert.pass,
+            cert.results.len(),
+            cert.rig
+        );
+    }
+    Ok(())
 }
 
 fn pmc_refresh(arch: &str) -> Result<()> {

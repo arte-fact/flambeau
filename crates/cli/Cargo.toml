@@ -14,6 +14,10 @@ default = []
 # Enables the HIP-backed `flambeau sweep --arch gfx906` path — requires
 # ROCm/hipcc at build time and real MI50 hardware at run time.
 hip_sweep = ["flambeau-bench/hip"]
+# Enables the CUDA-backed `flambeau sweep --arch sm_86` path (RTX 3090) —
+# requires nvcc at build time + an NVIDIA GPU at run time. Compose with
+# hip_sweep to build one binary that drives both rigs.
+cuda_sweep = ["flambeau-bench/cuda"]
 # Enables `flambeau serve` — loads a real model on HIP devices.
 hip_serve = ["flambeau-server/hip"]
 # Enables debug FLAMBEAU_* env-var reads (probes, dumps, traces).

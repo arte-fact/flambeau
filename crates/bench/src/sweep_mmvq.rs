@@ -9,7 +9,7 @@
 //! activation quant round-trip. See `project_v1_3_q8_0_landed.md` for the
 //! derivation.
 
-#![cfg(feature = "hip")]
+#![cfg(any(feature = "hip", feature = "cuda"))]
 #![expect(
     clippy::undocumented_unsafe_blocks,
     reason = "sweep harness — every unsafe block is a kernel launch or a memcpy_async \
@@ -19,12 +19,8 @@
 
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
-use flambeau_backend_hip::{
-    device_count, FuncAttributes, HipDevice, HipKernel, HipModule, KernelArgs, LaunchCfg,
-};
-use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
-use flambeau_kernels_hip as kernels;
+use anyhow::{anyhow, Result};
+use flambeau_core::{CopyDirection, Device, DevicePtr, LaunchCfg, Stream};
 use flambeau_quant::{
     dequantize_into, BlockIq1M, BlockIq1S, BlockIq2S, BlockIq2Xs, BlockIq2Xxs, BlockIq3S,
     BlockIq3Xxs, BlockIq4Nl, BlockIq4Xs, BlockQ2K, BlockQ3K, BlockQ4K, BlockQ4_1, BlockQ5K,
@@ -32,8 +28,9 @@ use flambeau_quant::{
 };
 use half::f16;
 
+use crate::backend::{BenchBackend, LaunchArgs};
 use crate::cert::{now_utc_iso8601, Cert, PmcSnapshot, ShapeResult, SCHEMA_VERSION};
-use crate::harness::{alloc_and_upload, max_rel_err_with_floor, rig, seeded_f32_range};
+use crate::harness::{alloc_and_upload, max_rel_err_with_floor, rig_for, seeded_f32_range};
 
 const QK8: usize = QK8_0;
 
@@ -118,6 +115,9 @@ pub enum Dtype {
     /// C9-followup t128 + VDR=2 combined (the kernel that should beat
     /// vdr2-alone where t128-alone lost).
     Q8_0T128VDR2,
+    /// Templated 256-thread single-row Q8_0 DP4A (`mmvq_dp4a_row<Q8_0, 256>`).
+    /// The cross-backend pilot kernel — certified on both gfx906 and sm_86.
+    Q8_0Dp4a,
     /// native IQ4_NL single-row MMVQ.
     Iq4Nl,
     /// native IQ4_NL r2 multi-row MMVQ.
@@ -201,7 +201,7 @@ pub enum Dtype {
 impl Dtype {
     pub fn name(self) -> &'static str {
         match self {
-            Dtype::Q8_0 | Dtype::Q8_0T128 | Dtype::Q8_0T128VDR2 => "Q8_0",
+            Dtype::Q8_0 | Dtype::Q8_0T128 | Dtype::Q8_0T128VDR2 | Dtype::Q8_0Dp4a => "Q8_0",
             Dtype::Q2K | Dtype::Q2KR2 | Dtype::Q2KDp4a | Dtype::Q2KR2Dp4a => "Q2_K",
             Dtype::Q3K | Dtype::Q3KR2 | Dtype::Q3KDp4a | Dtype::Q3KR2Dp4a => "Q3_K",
             Dtype::Q4K | Dtype::Q4KR2 | Dtype::Q4KR2Dp4a => "Q4_K",
@@ -223,7 +223,9 @@ impl Dtype {
 
     pub fn ggml(self) -> GgmlDType {
         match self {
-            Dtype::Q8_0 | Dtype::Q8_0T128 | Dtype::Q8_0T128VDR2 => GgmlDType::Q8_0,
+            Dtype::Q8_0 | Dtype::Q8_0T128 | Dtype::Q8_0T128VDR2 | Dtype::Q8_0Dp4a => {
+                GgmlDType::Q8_0
+            }
             Dtype::Q2K | Dtype::Q2KR2 | Dtype::Q2KDp4a | Dtype::Q2KR2Dp4a => GgmlDType::Q2K,
             Dtype::Q3K | Dtype::Q3KR2 | Dtype::Q3KDp4a | Dtype::Q3KR2Dp4a => GgmlDType::Q3K,
             Dtype::Q4K | Dtype::Q4KR2 | Dtype::Q4KR2Dp4a => GgmlDType::Q4K,
@@ -246,6 +248,7 @@ impl Dtype {
     fn impl_id(self) -> &'static str {
         match self {
             Dtype::Q8_0 => "qmatmul_q8_0_mmvq_single_row_gfx906",
+            Dtype::Q8_0Dp4a => "qmatmul_q8_0_mmvq_dp4a",
             Dtype::Q2K => "qmatmul_q2_K_mmvq_single_row_gfx906",
             Dtype::Q2KR2 => "qmatmul_q2_K_mmvq_nw1_r2_gfx906",
             Dtype::Q2KDp4a => "qmatmul_q2_K_mmvq_dp4a_gfx906",
@@ -304,6 +307,7 @@ impl Dtype {
     fn kernel_stem(self) -> &'static str {
         match self {
             Dtype::Q8_0 => "mmvq_q8_0",
+            Dtype::Q8_0Dp4a => "mmvq_q8_0_dp4a",
             Dtype::Q8_0T128 => "mmvq_q8_0_t128",
             Dtype::Q8_0T128VDR2 => "mmvq_q8_0_t128_vdr2",
             Dtype::Q2K => "mmvq_q2_k",
@@ -362,6 +366,7 @@ impl Dtype {
     fn kernel_entry(self) -> &'static str {
         match self {
             Dtype::Q8_0 => "flambeau_mmvq_q8_0_q8_1",
+            Dtype::Q8_0Dp4a => "flambeau_mmvq_q8_0_dp4a_q8_1",
             Dtype::Q2K => "flambeau_mmvq_q2_K_q8_1",
             Dtype::Q2KR2 => "flambeau_mmvq_q2_K_r2_q8_1",
             Dtype::Q2KDp4a => "flambeau_mmvq_q2_k_dp4a_q8_1",
@@ -419,7 +424,9 @@ impl Dtype {
 
     fn block_size_bytes(self) -> usize {
         match self {
-            Dtype::Q8_0 | Dtype::Q8_0T128 | Dtype::Q8_0T128VDR2 => std::mem::size_of::<BlockQ8_0>(),
+            Dtype::Q8_0 | Dtype::Q8_0T128 | Dtype::Q8_0T128VDR2 | Dtype::Q8_0Dp4a => {
+                std::mem::size_of::<BlockQ8_0>()
+            }
             Dtype::Q2K | Dtype::Q2KR2 | Dtype::Q2KDp4a | Dtype::Q2KR2Dp4a => std::mem::size_of::<BlockQ2K>(),
             Dtype::Q3K | Dtype::Q3KR2 | Dtype::Q3KDp4a | Dtype::Q3KR2Dp4a => std::mem::size_of::<BlockQ3K>(),
             Dtype::Q4K | Dtype::Q4KR2 | Dtype::Q4KR2Dp4a => std::mem::size_of::<BlockQ4K>(),
@@ -447,7 +454,7 @@ impl Dtype {
 
     fn launch_threads(self) -> u32 {
         match self {
-            Dtype::Q8_0 | Dtype::Q4_1 | Dtype::Q4_1R2DP4A | Dtype::Q8K | Dtype::Q5KDp4a | Dtype::Q3KDp4a | Dtype::Q2KDp4a | Dtype::Iq4XsDp4a | Dtype::Iq4NlDp4a | Dtype::Iq3SDp4a | Dtype::Iq3XxsDp4a | Dtype::Iq2SDp4a | Dtype::Iq2XsDp4a | Dtype::Iq2XxsDp4a | Dtype::Iq1SDp4a | Dtype::Iq1MDp4a => 256,
+            Dtype::Q8_0 | Dtype::Q8_0Dp4a | Dtype::Q4_1 | Dtype::Q4_1R2DP4A | Dtype::Q8K | Dtype::Q5KDp4a | Dtype::Q3KDp4a | Dtype::Q2KDp4a | Dtype::Iq4XsDp4a | Dtype::Iq4NlDp4a | Dtype::Iq3SDp4a | Dtype::Iq3XxsDp4a | Dtype::Iq2SDp4a | Dtype::Iq2XsDp4a | Dtype::Iq2XxsDp4a | Dtype::Iq1SDp4a | Dtype::Iq1MDp4a => 256,
             Dtype::Q4_1T128 | Dtype::Q8_0T128 | Dtype::Q8_0T128VDR2 => 128,
             _ => 64,
         }
@@ -503,19 +510,12 @@ impl SweepSpec {
     }
 }
 
-pub fn run_sweep(spec: &SweepSpec, repo_root: &Path) -> Result<Cert> {
-    let n = device_count().context("hipGetDeviceCount")?;
-    if n < 1 {
-        bail!("no HIP devices on this host — sweep needs gfx906");
-    }
-
-    let dev = HipDevice::new(0)?;
-    dev.bind()?;
+pub fn run_sweep<B: BenchBackend>(spec: &SweepSpec, repo_root: &Path, arch: &str) -> Result<Cert> {
+    let dev = B::new_device(0)?;
 
     // Capture the kernel's static PMC once per sweep — it's shape-independent
-    // on gfx906 MMVQ (no runtime specialisation), so one query covers every
-    // `ShapeResult` below.
-    let pmc = capture_static_pmc(&dev, spec.dtype)?;
+    // (no runtime specialisation), so one query covers every `ShapeResult`.
+    let pmc = capture_static_pmc::<B>(&dev, spec.dtype)?;
 
     let mut results = Vec::new();
     for &m in &spec.m_grid {
@@ -524,7 +524,7 @@ pub fn run_sweep(spec: &SweepSpec, repo_root: &Path) -> Result<Cert> {
                 .seed
                 .wrapping_add((m as u64).wrapping_mul(0x1234567))
                 .wrapping_add((k as u64).wrapping_mul(0x9E3779B97F4A7C15));
-            let (got, reference) = run_shape(&dev, spec.dtype, m, k, seed)?;
+            let (got, reference) = run_shape::<B>(&dev, spec.dtype, m, k, seed)?;
             let max_rel_err = max_rel_err_with_floor(&got, &reference, (k as f32).sqrt());
             let tolerance = cert_tol(k);
             results.push(ShapeResult {
@@ -549,12 +549,12 @@ pub fn run_sweep(spec: &SweepSpec, repo_root: &Path) -> Result<Cert> {
 
     let pass = results.iter().all(|r| r.pass);
 
-    let rig = rig();
+    let rig = rig_for(arch);
     let cert = Cert {
         schema_version: SCHEMA_VERSION,
         impl_id: spec.dtype.impl_id().to_string(),
-        backend: "hip".to_string(),
-        arch: "gfx906".to_string(),
+        backend: dev.backend().to_string(),
+        arch: arch.to_string(),
         op: "qmatmul_mmvq".to_string(),
         dtype_weight: spec.dtype.name().to_string(),
         dtype_activation: "Q8_1".to_string(),
@@ -579,30 +579,17 @@ pub fn run_sweep(spec: &SweepSpec, repo_root: &Path) -> Result<Cert> {
 
 // ---- PMC capture ----------------------------------------------------------
 
-fn capture_static_pmc(dev: &HipDevice, dtype: Dtype) -> Result<PmcSnapshot> {
-    let bytes = kernels::hsaco(dtype.kernel_stem())
-        .ok_or_else(|| anyhow::anyhow!("{} kernel not compiled", dtype.kernel_stem()))?;
-    let module = HipModule::load(dev.id(), bytes)?;
-    let kernel: HipKernel<'_> = module.kernel(dtype.kernel_entry())?;
-    let attrs: FuncAttributes = kernel.attributes()?;
-
-    let pmc = PmcSnapshot {
-        vgpr_count: Some(attrs.num_regs),
-        sgpr_count: None, // hipFuncGetAttribute doesn't expose SGPR;
-        // captures it from the .hsaco ELF via inspect-hsaco
-        // once that CLI lands.
-        waves_per_simd: Some(attrs.gfx906_waves_per_simd()),
-        mem_busy_pct: None,  // Phase B (rocprof wrapper).
-        valu_busy_pct: None, // Phase B.
-    };
+fn capture_static_pmc<B: BenchBackend>(dev: &B::Device, dtype: Dtype) -> Result<PmcSnapshot> {
+    let bytes = B::image(dtype.kernel_stem())
+        .ok_or_else(|| anyhow!("{} kernel not compiled", dtype.kernel_stem()))?;
+    let module = B::load(dev, bytes)?;
+    let kernel = B::kernel(&module, dtype.kernel_entry())?;
+    let pmc = B::attributes(&kernel)?;
 
     tracing::info!(
         target: "flambeau_bench::sweep_mmvq",
         dtype = dtype.name(),
-        vgpr = attrs.num_regs,
-        shared_bytes = attrs.shared_size_bytes,
-        local_bytes = attrs.local_size_bytes,
-        max_tpb = attrs.max_threads_per_block,
+        vgpr = pmc.vgpr_count.unwrap_or(0),
         waves_per_simd = pmc.waves_per_simd.unwrap_or(0),
         "static PMC captured"
     );
@@ -612,21 +599,21 @@ fn capture_static_pmc(dev: &HipDevice, dtype: Dtype) -> Result<PmcSnapshot> {
 
 // ---- per-shape runner -----------------------------------------------------
 
-fn run_shape(
-    dev: &HipDevice,
+fn run_shape<B: BenchBackend>(
+    dev: &B::Device,
     dtype: Dtype,
     m: usize,
     k: usize,
     seed: u64,
 ) -> Result<(Vec<f32>, Vec<f32>)> {
-    let q_bytes = kernels::hsaco("quantize_q8_1")
-        .ok_or_else(|| anyhow::anyhow!("quantize_q8_1 not compiled"))?;
-    let m_bytes = kernels::hsaco(dtype.kernel_stem())
-        .ok_or_else(|| anyhow::anyhow!("{} kernel not compiled", dtype.kernel_stem()))?;
-    let q_module = HipModule::load(dev.id(), q_bytes)?;
-    let m_module = HipModule::load(dev.id(), m_bytes)?;
-    let k_quantize: HipKernel<'_> = q_module.kernel("flambeau_quantize_row_q8_1")?;
-    let k_mmvq: HipKernel<'_> = m_module.kernel(dtype.kernel_entry())?;
+    let q_bytes =
+        B::image("quantize_q8_1").ok_or_else(|| anyhow!("quantize_q8_1 not compiled"))?;
+    let m_bytes = B::image(dtype.kernel_stem())
+        .ok_or_else(|| anyhow!("{} kernel not compiled", dtype.kernel_stem()))?;
+    let q_module = B::load(dev, q_bytes)?;
+    let m_module = B::load(dev, m_bytes)?;
+    let k_quantize = B::kernel(&q_module, "flambeau_quantize_row_q8_1")?;
+    let k_mmvq = B::kernel(&m_module, dtype.kernel_entry())?;
 
     let block_elems = dtype.block_elem_count();
     assert_eq!(
@@ -662,12 +649,12 @@ fn run_shape(
         let n_elems = k as i32;
         let d_y_f32_ptr: u64 = d_y_f32.as_usize() as u64;
         let d_y_q8_1_ptr: u64 = d_y_q8_1.as_usize() as u64;
-        let mut args = KernelArgs::new();
-        args.push(&d_y_f32_ptr);
-        args.push(&d_y_q8_1_ptr);
-        args.push(&n_elems);
+        let mut args = <B::Args<'_>>::default();
+        args.push_arg(&d_y_f32_ptr);
+        args.push_arg(&d_y_q8_1_ptr);
+        args.push_arg(&n_elems);
         let cfg = LaunchCfg::one_d(y_q8_1_blocks as u32, QK8 as u32);
-        unsafe { k_quantize.launch(stream, cfg, args)? };
+        B::launch(&k_quantize, stream, cfg, args)?;
         stream.synchronize()?;
     }
 
@@ -680,16 +667,16 @@ fn run_shape(
         let d_x_ptr: u64 = d_x.as_usize() as u64;
         let d_y_q8_1_ptr: u64 = d_y_q8_1.as_usize() as u64;
         let d_dst_ptr: u64 = d_dst.as_usize() as u64;
-        let mut args = KernelArgs::new();
-        args.push(&d_x_ptr);
-        args.push(&d_y_q8_1_ptr);
-        args.push(&d_dst_ptr);
-        args.push(&m_i);
-        args.push(&n_units);
+        let mut args = <B::Args<'_>>::default();
+        args.push_arg(&d_x_ptr);
+        args.push_arg(&d_y_q8_1_ptr);
+        args.push_arg(&d_dst_ptr);
+        args.push_arg(&m_i);
+        args.push_arg(&n_units);
         let rpb = dtype.rows_per_block();
         let grid = (m as u32).div_ceil(rpb);
         let cfg = LaunchCfg::one_d(grid, dtype.launch_threads());
-        unsafe { k_mmvq.launch(stream, cfg, args)? };
+        B::launch(&k_mmvq, stream, cfg, args)?;
         stream.synchronize()?;
     }
 
@@ -741,7 +728,7 @@ fn tame_scales(dtype: Dtype, raw: Vec<u8>) -> Vec<u8> {
     for i in 0..nblocks {
         let block = &mut r[i * bs..(i + 1) * bs];
         match dtype {
-            Dtype::Q8_0 | Dtype::Q8_0T128 | Dtype::Q8_0T128VDR2 => {
+            Dtype::Q8_0 | Dtype::Q8_0T128 | Dtype::Q8_0T128VDR2 | Dtype::Q8_0Dp4a => {
                 // BlockQ8_0: d (f16, 2 bytes) + qs[32]. Scale ≈ 0.01 to 0.11.
                 let d = f16::from_f32((block[0] as f32 / 255.0) * 0.1 + 0.01);
                 block[0..2].copy_from_slice(&d.to_bits().to_le_bytes());
