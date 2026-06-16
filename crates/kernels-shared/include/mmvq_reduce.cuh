@@ -160,6 +160,28 @@ static __device__ __forceinline__ void mmvq_reduce_store_rowtile_batched(
     }
 }
 
+// Per-warp 2-output N-way reduce for the fused gate+up row-tiled batched kernel:
+// each warp owns one output row and reduces its N gate + N up column
+// accumulators across its own lanes, writing the slot-major
+// `gate_out[c*n_rows_gate+row]` / `up_out[c*n_rows_up+row]` (separate strides —
+// the FFN gate/up projections may differ in row count). `do_gate`/`do_up` are
+// uniform within a warp (one row), so the `warp_reduce_sum` calls stay
+// convergent. `lane` is the warp-local lane.
+template<int N, class OutT>
+static __device__ __forceinline__ void mmvq_reduce_store_rowtile_gate_up_batched(
+    float (&acc_g)[N], float (&acc_u)[N], OutT* gate_out, OutT* up_out,
+    int row, int n_rows_gate, int n_rows_up, bool do_gate, bool do_up, int lane) {
+    #pragma unroll
+    for (int c = 0; c < N; ++c) {
+        const float vg = do_gate ? warp_reduce_sum(acc_g[c]) : 0.0f;
+        const float vu = do_up   ? warp_reduce_sum(acc_u[c]) : 0.0f;
+        if (lane == 0) {
+            if (do_gate) mmvq_store<OutT>(gate_out, c * n_rows_gate + row, vg);
+            if (do_up)   mmvq_store<OutT>(up_out,   c * n_rows_up   + row, vu);
+        }
+    }
+}
+
 template<int THREADS, class OutT>
 static __device__ __forceinline__ void mmvq_reduce_store(float acc, OutT* dst, int row) {
     constexpr int WARPS = THREADS / WARP_SIZE;

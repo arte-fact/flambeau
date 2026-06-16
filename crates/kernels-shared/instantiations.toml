@@ -528,6 +528,52 @@ params = """
     const int n_sb_per_row"""
 body = "mmvq_q5_k_row_tile_batched_row<256, 4>(x, y, dst, n_rows, n_sb_per_row);"
 
+# Q4_0 fused gate+up row-tiled batched MMVQ — the triple fusion (2 outputs × R
+# rows × N cols). Own neutral body (mmvq_q4_0_gate_up_row_tile.cuh). Same
+# stem/entries as the retired hand kernel; grid = ceil(max(rows_gate,rows_up)/4).
+[[kernel]]
+stem = "mmvq_q4_0_gate_up_row_tile_batched"
+includes = ["quant_traits.cuh", "mmvq_q4_0_gate_up_row_tile.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_0_gate_up_row_tile_dp4a_q8_1_batched_n2"
+params = """
+    const flambeau_block_q4_0* __restrict__ gate_w,
+    const flambeau_block_q4_0* __restrict__ up_w,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ gate_out,
+    float* __restrict__ up_out,
+    const int n_rows_gate,
+    const int n_rows_up,
+    const int n_blocks_per_row"""
+body = "mmvq_q4_0_gate_up_row_tile_batched_row<256, 2>(gate_w, up_w, y, gate_out, up_out, n_rows_gate, n_rows_up, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_0_gate_up_row_tile_dp4a_q8_1_batched_n3"
+params = """
+    const flambeau_block_q4_0* __restrict__ gate_w,
+    const flambeau_block_q4_0* __restrict__ up_w,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ gate_out,
+    float* __restrict__ up_out,
+    const int n_rows_gate,
+    const int n_rows_up,
+    const int n_blocks_per_row"""
+body = "mmvq_q4_0_gate_up_row_tile_batched_row<256, 3>(gate_w, up_w, y, gate_out, up_out, n_rows_gate, n_rows_up, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_0_gate_up_row_tile_dp4a_q8_1_batched_n4"
+params = """
+    const flambeau_block_q4_0* __restrict__ gate_w,
+    const flambeau_block_q4_0* __restrict__ up_w,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ gate_out,
+    float* __restrict__ up_out,
+    const int n_rows_gate,
+    const int n_rows_up,
+    const int n_blocks_per_row"""
+body = "mmvq_q4_0_gate_up_row_tile_batched_row<256, 4>(gate_w, up_w, y, gate_out, up_out, n_rows_gate, n_rows_up, n_blocks_per_row);"
+
 # Q4_0 single-row MMVQ — legacy 4-bit (nibble unpack + (q-8) bias correction).
 # One module carries both the F32 dst entry (scratch-then-cast path) and the
 # F16-dst entry (mmvq_q4_0_kv_decode_f16 / mmvq_f16_direct).

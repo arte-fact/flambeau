@@ -56,10 +56,27 @@ sm_86) is built and `feature/cuda-decouple` is pulled in.
 > 2row_batched<N>`, and drops the hand kernel's dead `s_y_s` staging. All certed
 > both backends (err ≤1.5e-2, HIP↔CUDA equal); 3 hand `.cu` retired,
 > `BatchedDtype::{Q8_0,Q4_0,Q5K}RowTile`. NB the manifest can't carry the hand
-> `__launch_bounds__(256,1)` (perf-only; revisit if hot). **NEXT P2b:** the
-> `*_gate_up_row_tile_*` combos (2 outputs × N cols × R rows — gate_up + row_tile
-> fused; `mmvq_q4_0_gate_up_row_tile_batched.cu`). Then **P2c mmq** (4-warp
-> LDS-tiled prefill lever) + **P2d** indexed_moe.
+> `__launch_bounds__(256,1)` (perf-only; revisit if hot). The
+> `*_gate_up_row_tile_*` combo is also **DONE** — `mmvq_q4_0_gate_up_row_tile.cuh`
+> (triple fusion: 2 outputs × R rows × N cols) + 2-output rowtile reduce
+> `mmvq_reduce_store_rowtile_gate_up_batched<N>` + new harness path
+> `GateUpBatchedDtype`/`run_gate_up_batched_sweep` (got = gate `[N][m]` ++ up
+> `[N][m]`); cert both backends err 4.4e-4, HIP↔CUDA equal.
+>
+> ### **mmvq FUSION COMPLETE (all P2a + P2b mmvq done).**
+> Every dense mmvq kernel — 20 single-row dtypes + Q8_0 {t128,vdr2,r2,r4} configs
+> (P2a) + 14 fusion kernels (P2b: gate_up ×4, batched ×6, row_tile ×3, gate_up×
+> row_tile ×1) — is templated cross-backend, certed HIP+CUDA, hand `.cu` retired,
+> ops/runtime untouched. cert-check hip 82 / cuda 20. Reusable infra: skeletons
+> `mmvq_dp4a_row`/`_vdr_row`/`_nrow_row`/`_batched_row`, `mmvq_gate_up.cuh`, the
+> reduce family (`mmvq_reduce_store`/`_group`/`_2row`/`_gate_up`/`_batched`/
+> `_2row_batched`/`_rowtile_batched`/`_rowtile_gate_up_batched`), `load_int_b2`/
+> `load_q8_1_ints`, multi-entry codegen, and the sweep
+> `GateUpDtype`/`BatchedDtype`/`GateUpBatchedDtype` harness paths.
+>
+> **NEXT = P2c mmq** (the 4-warp LDS-tiled prefill lever — a genuine multi-
+> session sub-phase, the gold-standard prefill kernel per CLAUDE.md; two tiling
+> skeletons sharing `quant_traits` + Q8_1 quantize). Then **P2d** indexed_moe.
 >
 > *(first gate_up slice writeup)*
 > **Q8_0 `gate_up`** (dense FFN decode kernel) templated onto a neutral skeleton

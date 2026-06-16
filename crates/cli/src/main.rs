@@ -995,6 +995,19 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     );
                     return Ok(());
                 }
+                if let Some(gb) = gate_up_batched_dtype(dtype) {
+                    use flambeau_bench::sweep_mmvq::run_gate_up_batched_sweep;
+                    let root = repo_root();
+                    let cert = run_gate_up_batched_sweep::<flambeau_bench::backend::Hip>(gb, &root, arch)?;
+                    println!(
+                        "sweep qmatmul_gate_up_batched ({}): pass={} shapes={} rig={}",
+                        gb.name(),
+                        cert.pass,
+                        cert.results.len(),
+                        cert.rig
+                    );
+                    return Ok(());
+                }
                 let dtypes: Vec<Dtype> = match dtype {
                     "all" => vec![
                         Dtype::Q8_0,
@@ -1374,6 +1387,16 @@ fn batched_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::BatchedDtype
     }
 }
 
+/// Map a `--dtype` string to a fused gate+up batched sweep target.
+#[cfg(any(feature = "hip_sweep", feature = "cuda_sweep"))]
+fn gate_up_batched_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::GateUpBatchedDtype> {
+    use flambeau_bench::sweep_mmvq::GateUpBatchedDtype;
+    match dtype {
+        "Q4_0_gate_up_row_tile_batched" => Some(GateUpBatchedDtype::Q4_0RowTile),
+        _ => None,
+    }
+}
+
 #[cfg(feature = "cuda_sweep")]
 fn sweep_cuda(op: &str, dtype: &str) -> Result<()> {
     use flambeau_bench::backend::Cuda;
@@ -1402,6 +1425,18 @@ fn sweep_cuda(op: &str, dtype: &str) -> Result<()> {
         println!(
             "sweep qmatmul_batched ({}): pass={} shapes={} rig={}",
             bd.name(),
+            cert.pass,
+            cert.results.len(),
+            cert.rig
+        );
+        return Ok(());
+    }
+    if let Some(gb) = gate_up_batched_dtype(dtype) {
+        use flambeau_bench::sweep_mmvq::run_gate_up_batched_sweep;
+        let cert = run_gate_up_batched_sweep::<Cuda>(gb, &repo_root(), "sm_86")?;
+        println!(
+            "sweep qmatmul_gate_up_batched ({}): pass={} shapes={} rig={}",
+            gb.name(),
             cert.pass,
             cert.results.len(),
             cert.rig

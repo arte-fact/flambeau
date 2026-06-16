@@ -1301,6 +1301,236 @@ fn run_shape<B: BenchBackend>(
     Ok((got, reference))
 }
 
+// ---- fused gate+up batched (N-slot) sweep ---------------------------------
+
+/// Weight dtype for the fused gate+up batched MMVQ sweep (two weight matrices,
+/// N activation columns, two slot-major outputs). Only Q4_0 (the row-tiled
+/// combo) is templated so far.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateUpBatchedDtype {
+    Q4_0RowTile,
+}
+
+impl GateUpBatchedDtype {
+    pub fn name(self) -> &'static str {
+        match self {
+            GateUpBatchedDtype::Q4_0RowTile => "Q4_0",
+        }
+    }
+    fn weight_dtype(self) -> Dtype {
+        match self {
+            GateUpBatchedDtype::Q4_0RowTile => Dtype::Q4_0,
+        }
+    }
+    fn impl_id(self) -> &'static str {
+        match self {
+            GateUpBatchedDtype::Q4_0RowTile => "qmatmul_q4_0_gate_up_row_tile_mmvq_batched",
+        }
+    }
+    fn kernel_stem(self) -> &'static str {
+        match self {
+            GateUpBatchedDtype::Q4_0RowTile => "mmvq_q4_0_gate_up_row_tile_batched",
+        }
+    }
+    fn kernel_entry(self, n_slots: usize) -> &'static str {
+        match (self, n_slots) {
+            (GateUpBatchedDtype::Q4_0RowTile, 2) => "flambeau_mmvq_q4_0_gate_up_row_tile_dp4a_q8_1_batched_n2",
+            (GateUpBatchedDtype::Q4_0RowTile, 3) => "flambeau_mmvq_q4_0_gate_up_row_tile_dp4a_q8_1_batched_n3",
+            (GateUpBatchedDtype::Q4_0RowTile, 4) => "flambeau_mmvq_q4_0_gate_up_row_tile_dp4a_q8_1_batched_n4",
+            _ => unreachable!("gate_up batched n_slots outside [2,4]"),
+        }
+    }
+    /// Wave64 rows/block (over-launches harmlessly on wave32's R=8).
+    fn rows_per_block(self) -> u32 {
+        4
+    }
+}
+
+pub fn run_gate_up_batched_sweep<B: BenchBackend>(
+    dtype: GateUpBatchedDtype,
+    repo_root: &Path,
+    arch: &str,
+) -> Result<Cert> {
+    let dev = B::new_device(0)?;
+    let bytes = B::image(dtype.kernel_stem())
+        .ok_or_else(|| anyhow!("{} kernel not compiled", dtype.kernel_stem()))?;
+    let module = B::load(&dev, bytes)?;
+    let kernel = B::kernel(&module, dtype.kernel_entry(2))?;
+    let pmc = B::attributes(&kernel)?;
+
+    let m_grid = vec![1usize, 8, 16, 128, 512];
+    let k_grid = vec![2048usize, 5120, 15360];
+    let n_grid = vec![2usize, 3, 4];
+    let seed = 0xC0FFEE_u64;
+
+    let mut results = Vec::new();
+    for &m in &m_grid {
+        for &k in &k_grid {
+            for &n in &n_grid {
+                let s = seed
+                    .wrapping_add((m as u64).wrapping_mul(0x1234567))
+                    .wrapping_add((k as u64).wrapping_mul(0x9E3779B97F4A7C15))
+                    .wrapping_add((n as u64).wrapping_mul(0x85EBCA6B));
+                let (got, reference) = run_shape_gate_up_batched::<B>(&dev, dtype, m, k, n, s)?;
+                let max_rel_err = max_rel_err_with_floor(&got, &reference, (k as f32).sqrt());
+                let tolerance = cert_tol(k);
+                results.push(ShapeResult {
+                    m,
+                    k,
+                    n,
+                    seed: s,
+                    max_rel_err,
+                    tolerance,
+                    pass: max_rel_err <= tolerance,
+                });
+            }
+        }
+    }
+
+    let pass = results.iter().all(|r| r.pass);
+    let cert = Cert {
+        schema_version: SCHEMA_VERSION,
+        impl_id: dtype.impl_id().to_string(),
+        backend: dev.backend().to_string(),
+        arch: arch.to_string(),
+        op: "qmatmul_gate_up_batched_mmvq".to_string(),
+        dtype_weight: dtype.name().to_string(),
+        dtype_activation: "Q8_1".to_string(),
+        tolerance_formula: "|err| <= 3e-2 * max(|ref|, sqrt(k))".to_string(),
+        results,
+        pass,
+        emitted_at: now_utc_iso8601(),
+        rig: rig_for(arch),
+        pmc: Some(pmc),
+    };
+    let written = cert.write_to_disk(repo_root)?;
+    tracing::info!(
+        target: "flambeau_bench::sweep_mmvq",
+        cert = %written.display(), pass = cert.pass, "gate_up batched cert written"
+    );
+    Ok(cert)
+}
+
+/// One (m, k, n_slots) fused gate+up batched shape (n_rows_gate = n_rows_up =
+/// m). Returns `(got, reference)`, each the concatenation of the slot-major
+/// gate output `[n_slots][m]` followed by the up output `[n_slots][m]`.
+fn run_shape_gate_up_batched<B: BenchBackend>(
+    dev: &B::Device,
+    dtype: GateUpBatchedDtype,
+    m: usize,
+    k: usize,
+    n_slots: usize,
+    seed: u64,
+) -> Result<(Vec<f32>, Vec<f32>)> {
+    let q_bytes =
+        B::image("quantize_q8_1").ok_or_else(|| anyhow!("quantize_q8_1 not compiled"))?;
+    let m_bytes = B::image(dtype.kernel_stem())
+        .ok_or_else(|| anyhow!("{} kernel not compiled", dtype.kernel_stem()))?;
+    let q_module = B::load(dev, q_bytes)?;
+    let m_module = B::load(dev, m_bytes)?;
+    let k_quantize = B::kernel(&q_module, "flambeau_quantize_row_q8_1")?;
+    let k_mmvq = B::kernel(&m_module, dtype.kernel_entry(n_slots))?;
+
+    let wd = dtype.weight_dtype();
+    let block_elems = wd.block_elem_count();
+    let block_bytes = wd.block_size_bytes();
+    assert_eq!(k % block_elems, 0, "k {k} must be multiple of block size {block_elems}");
+    let n_blocks = k / block_elems;
+
+    let gate_raw = tame_scales(wd, seeded_bytes(seed, m * n_blocks * block_bytes));
+    let up_raw = tame_scales(wd, seeded_bytes(seed ^ 0xDEAD_BEEF, m * n_blocks * block_bytes));
+    let mut gate_dq = vec![0.0f32; m * k];
+    let mut up_dq = vec![0.0f32; m * k];
+    dequantize_into(wd.ggml(), &gate_raw, &mut gate_dq)?;
+    dequantize_into(wd.ggml(), &up_raw, &mut up_dq)?;
+    let d_gate = alloc_and_upload(dev, gate_raw.as_slice());
+    let d_up = alloc_and_upload(dev, up_raw.as_slice());
+
+    let q8_1_blocks_per_slot = k / QK8;
+    let slot_bytes = q8_1_blocks_per_slot * std::mem::size_of::<BlockQ8_1>();
+    let d_y_q8_1 = dev.alloc(n_slots * slot_bytes)?;
+    let mut y_rt_slots: Vec<Vec<f32>> = Vec::with_capacity(n_slots);
+    for s in 0..n_slots {
+        let y_f32 = seeded_f32_range(seed.wrapping_add(0xA5A5 ^ (s as u64)), k, -1.0, 1.0);
+        let d_y_f32 = alloc_and_upload(dev, y_f32.as_slice());
+        {
+            let stream = dev.default_stream();
+            let n_elems = k as i32;
+            let d_y_f32_ptr: u64 = d_y_f32.as_usize() as u64;
+            let d_slot_ptr: u64 = (d_y_q8_1.as_usize() + s * slot_bytes) as u64;
+            let mut args = <B::Args<'_>>::default();
+            args.push_arg(&d_y_f32_ptr);
+            args.push_arg(&d_slot_ptr);
+            args.push_arg(&n_elems);
+            B::launch(&k_quantize, stream, LaunchCfg::one_d(q8_1_blocks_per_slot as u32, QK8 as u32), args)?;
+            stream.synchronize()?;
+        }
+        unsafe { dev.dealloc(d_y_f32, y_f32.len() * 4)?; }
+        y_rt_slots.push(quantize_q8_1_roundtrip(&y_f32));
+    }
+
+    let d_gate_out = dev.alloc(n_slots * m * 4)?;
+    let d_up_out = dev.alloc(n_slots * m * 4)?;
+    {
+        let stream = dev.default_stream();
+        let n_rows = m as i32;
+        let n_units = n_blocks as i32;
+        let gw_ptr: u64 = d_gate.as_usize() as u64;
+        let uw_ptr: u64 = d_up.as_usize() as u64;
+        let y_ptr: u64 = d_y_q8_1.as_usize() as u64;
+        let go_ptr: u64 = d_gate_out.as_usize() as u64;
+        let uo_ptr: u64 = d_up_out.as_usize() as u64;
+        let mut args = <B::Args<'_>>::default();
+        args.push_arg(&gw_ptr);
+        args.push_arg(&uw_ptr);
+        args.push_arg(&y_ptr);
+        args.push_arg(&go_ptr);
+        args.push_arg(&uo_ptr);
+        args.push_arg(&n_rows);
+        args.push_arg(&n_rows);
+        args.push_arg(&n_units);
+        let grid = (m as u32).div_ceil(dtype.rows_per_block());
+        B::launch(&k_mmvq, stream, LaunchCfg::one_d(grid, 256), args)?;
+        stream.synchronize()?;
+    }
+
+    let mut got = vec![0.0f32; 2 * n_slots * m];
+    unsafe {
+        dev.memcpy_async(
+            dev.default_stream(),
+            CopyDirection::DeviceToHost,
+            DevicePtr(got.as_mut_ptr() as usize),
+            d_gate_out,
+            n_slots * m * 4,
+        )?;
+        dev.memcpy_async(
+            dev.default_stream(),
+            CopyDirection::DeviceToHost,
+            DevicePtr(got.as_mut_ptr() as usize + n_slots * m * 4),
+            d_up_out,
+            n_slots * m * 4,
+        )?;
+    }
+    dev.default_stream().synchronize()?;
+
+    unsafe {
+        dev.dealloc(d_gate, gate_raw.len())?;
+        dev.dealloc(d_up, up_raw.len())?;
+        dev.dealloc(d_y_q8_1, n_slots * slot_bytes)?;
+        dev.dealloc(d_gate_out, n_slots * m * 4)?;
+        dev.dealloc(d_up_out, n_slots * m * 4)?;
+    }
+
+    let mut reference = vec![0.0f32; 2 * n_slots * m];
+    for s in 0..n_slots {
+        let rg = reference_matmul(&gate_dq, &y_rt_slots[s], m, k);
+        let ru = reference_matmul(&up_dq, &y_rt_slots[s], m, k);
+        reference[s * m..(s + 1) * m].copy_from_slice(&rg);
+        reference[n_slots * m + s * m..n_slots * m + (s + 1) * m].copy_from_slice(&ru);
+    }
+    Ok((got, reference))
+}
+
 // ---- autotune: rank candidate variants, emit dispatch rows ----------------
 
 /// Median wall-clock microseconds of one mmvq launch for `dtype` at (m, k),
