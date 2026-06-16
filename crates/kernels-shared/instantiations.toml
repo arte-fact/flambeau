@@ -155,6 +155,26 @@ params = """
     const int n_blocks_per_row"""
 body = "mmvq_q4_0_gate_up_dp4a_row<256>(gate_w, up_w, y, gate_out, up_out, n_rows_gate, n_rows_up, n_blocks_per_row);"
 
+# Q4_1 fused gate+up MMVQ — affine sibling of Q4_0 (`+ m_x·s_y` correction).
+# Own neutral body (mmvq_q4_1_gate_up.cuh) sharing the two-output reduce; same
+# stem/entry as the retired hand kernel.
+[[kernel]]
+stem = "mmvq_q4_1_gate_up_dp4a"
+includes = ["quant_traits.cuh", "mmvq_q4_1_gate_up.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_1_gate_up_dp4a_q8_1"
+params = """
+    const flambeau_block_q4_1* __restrict__ gate_w,
+    const flambeau_block_q4_1* __restrict__ up_w,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ gate_out,
+    float* __restrict__ up_out,
+    const int n_rows_gate,
+    const int n_rows_up,
+    const int n_blocks_per_row"""
+body = "mmvq_q4_1_gate_up_dp4a_row<256>(gate_w, up_w, y, gate_out, up_out, n_rows_gate, n_rows_up, n_blocks_per_row);"
+
 # Q4_0 single-row MMVQ — legacy 4-bit (nibble unpack + (q-8) bias correction).
 # One module carries both the F32 dst entry (scratch-then-cast path) and the
 # F16-dst entry (mmvq_q4_0_kv_decode_f16 / mmvq_f16_direct).

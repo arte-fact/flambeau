@@ -1337,6 +1337,7 @@ fn gate_up_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::GateUpDtype>
     match dtype {
         "Q8_0_gate_up" => Some(GateUpDtype::Q8_0),
         "Q4_0_gate_up" => Some(GateUpDtype::Q4_0),
+        "Q4_1_gate_up" => Some(GateUpDtype::Q4_1),
         _ => None,
     }
 }

@@ -640,6 +640,7 @@ pub fn run_sweep<B: BenchBackend>(spec: &SweepSpec, repo_root: &Path, arch: &str
 pub enum GateUpDtype {
     Q8_0,
     Q4_0,
+    Q4_1,
 }
 
 impl GateUpDtype {
@@ -647,42 +648,48 @@ impl GateUpDtype {
         match self {
             GateUpDtype::Q8_0 => "Q8_0",
             GateUpDtype::Q4_0 => "Q4_0",
+            GateUpDtype::Q4_1 => "Q4_1",
         }
     }
     fn ggml(self) -> GgmlDType {
         match self {
             GateUpDtype::Q8_0 => GgmlDType::Q8_0,
             GateUpDtype::Q4_0 => GgmlDType::Q4_0,
+            GateUpDtype::Q4_1 => GgmlDType::Q4_1,
         }
     }
     fn weight_dtype(self) -> Dtype {
         match self {
             GateUpDtype::Q8_0 => Dtype::Q8_0Dp4a,
             GateUpDtype::Q4_0 => Dtype::Q4_0,
+            GateUpDtype::Q4_1 => Dtype::Q4_1Dp4a,
         }
     }
     fn impl_id(self) -> &'static str {
         match self {
             GateUpDtype::Q8_0 => "qmatmul_q8_0_gate_up_t128_vdr2",
             GateUpDtype::Q4_0 => "qmatmul_q4_0_gate_up_dp4a",
+            GateUpDtype::Q4_1 => "qmatmul_q4_1_gate_up_dp4a",
         }
     }
     fn kernel_stem(self) -> &'static str {
         match self {
             GateUpDtype::Q8_0 => "mmvq_q8_0_gate_up_t128_vdr2",
             GateUpDtype::Q4_0 => "mmvq_q4_0_gate_up_dp4a",
+            GateUpDtype::Q4_1 => "mmvq_q4_1_gate_up_dp4a",
         }
     }
     fn kernel_entry(self) -> &'static str {
         match self {
             GateUpDtype::Q8_0 => "flambeau_mmvq_q8_0_gate_up_t128_vdr2_q8_1",
             GateUpDtype::Q4_0 => "flambeau_mmvq_q4_0_gate_up_dp4a_q8_1",
+            GateUpDtype::Q4_1 => "flambeau_mmvq_q4_1_gate_up_dp4a_q8_1",
         }
     }
     fn launch_threads(self) -> u32 {
         match self {
             GateUpDtype::Q8_0 => 128,
-            GateUpDtype::Q4_0 => 256,
+            GateUpDtype::Q4_0 | GateUpDtype::Q4_1 => 256,
         }
     }
 }
