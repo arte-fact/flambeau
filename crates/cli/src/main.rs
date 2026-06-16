@@ -238,6 +238,21 @@ enum Cmd {
         #[arg(long, default_value = "all")]
         dtype: String,
     },
+    /// Time certified kernel variants per shape and emit autotuned dispatch
+    /// rows to `dispatch/<backend>/<arch>.toml`. gfx906 ranks all compiled
+    /// candidates (a check on the curated table); sm_86 fills the CUDA table.
+    Autotune {
+        #[arg(long)]
+        arch: String,
+        #[arg(long, default_value = "qmatmul")]
+        op: String,
+        #[arg(long, default_value = "Q8_0")]
+        dtype: String,
+        /// Write the dispatch table. Without it, autotune is a dry run that
+        /// only prints the ranking.
+        #[arg(long)]
+        emit: bool,
+    },
     /// Validate that every dispatch row has a matching green cert (+).
     CertCheck {
         #[arg(long, default_value = "gfx906")]
@@ -353,6 +368,7 @@ fn main() -> Result<()> {
             embedding_max_tokens,
         })?,
         Cmd::Sweep { arch, op, dtype } => sweep(&arch, op.as_deref(), &dtype)?,
+        Cmd::Autotune { arch, op, dtype, emit } => autotune(&arch, &op, &dtype, emit)?,
         Cmd::CertCheck { arch, backend } => cert_check(&backend, &arch)?,
         Cmd::PmcProbe { kernel, m, k, n } => pmc_probe(&kernel, m, k, n)?,
         Cmd::PmcRefresh { arch } => pmc_refresh(&arch)?,
@@ -1220,6 +1236,46 @@ fn pmc_probe(kernel: &str, m: usize, k: usize, n: usize) -> Result<()> {
     {
         let _ = (kernel, m, k, n);
         anyhow::bail!("rebuild with --features hip_sweep");
+    }
+}
+
+fn autotune(arch: &str, op: &str, dtype: &str, emit: bool) -> Result<()> {
+    if op != "qmatmul" {
+        anyhow::bail!("autotune currently supports only --op qmatmul (mmvq)");
+    }
+    #[cfg(any(feature = "hip_sweep", feature = "cuda_sweep"))]
+    {
+        use flambeau_bench::sweep_mmvq::{autotune as run, Dtype};
+        let candidates: Vec<Dtype> = match dtype {
+            "Q8_0" => vec![
+                Dtype::Q8_0,
+                Dtype::Q8_0Dp4a,
+                Dtype::Q8_0T128,
+                Dtype::Q8_0T128VDR2,
+            ],
+            other => anyhow::bail!("autotune: only --dtype Q8_0 is wired so far (got {other:?})"),
+        };
+        let m_grid = [1usize, 8, 16];
+        let k_grid = [2048usize, 4096];
+        let root = repo_root();
+        match arch {
+            #[cfg(feature = "hip_sweep")]
+            "gfx906" => {
+                run::<flambeau_bench::backend::Hip>(arch, &candidates, &m_grid, &k_grid, &root, emit)
+            }
+            #[cfg(feature = "cuda_sweep")]
+            "sm_86" => {
+                run::<flambeau_bench::backend::Cuda>(arch, &candidates, &m_grid, &k_grid, &root, emit)
+            }
+            other => anyhow::bail!(
+                "autotune: unsupported --arch {other:?} (need gfx906 / sm_86 with the matching feature)"
+            ),
+        }
+    }
+    #[cfg(not(any(feature = "hip_sweep", feature = "cuda_sweep")))]
+    {
+        let _ = (arch, dtype, emit);
+        anyhow::bail!("autotune requires --features hip_sweep and/or cuda_sweep")
     }
 }
 

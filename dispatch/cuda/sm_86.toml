@@ -1,5 +1,10 @@
-# Dispatch table — CUDA / sm_86 (RTX 3090, Ampere).
-#
-# Each `[[op]]` row maps a (dtype, shape-predicate) to a kernel `impl` and its
-# cert under certs/cuda/sm_86/. Empty until a CUDA kernel certifies; the
-# dispatch_toml_roundtrip + cert_check gates treat an empty table as valid.
+# Dispatch table — cuda / sm_86. Autotuned by `flambeau autotune`
+# (median of timed mmvq launches per shape). Regenerate; do not hand-edit.
+
+[[qmatmul]]
+dtype   = "Q8_0"
+dtype_q = "Q8_1"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "qmatmul_q8_0_mmvq_dp4a"
+cert    = "certs/cuda/sm_86/qmatmul_q8_0_mmvq_dp4a.json"
+notes   = "autotuned"

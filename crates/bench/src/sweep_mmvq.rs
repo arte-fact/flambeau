@@ -17,9 +17,11 @@
               return; invariant is uniform across all sites."
 )]
 
-use std::path::Path;
+use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
+use std::time::Instant;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use flambeau_core::{CopyDirection, Device, DevicePtr, LaunchCfg, Stream};
 use flambeau_quant::{
     dequantize_into, BlockIq1M, BlockIq1S, BlockIq2S, BlockIq2Xs, BlockIq2Xxs, BlockIq3S,
@@ -702,6 +704,203 @@ fn run_shape<B: BenchBackend>(
     let y_rt = quantize_q8_1_roundtrip(&y_f32);
     let reference = reference_matmul(&weights_dequant, &y_rt, m, k);
     Ok((got, reference))
+}
+
+// ---- autotune: rank candidate variants, emit dispatch rows ----------------
+
+/// Median wall-clock microseconds of one mmvq launch for `dtype` at (m, k),
+/// over `iters` timed launches after a short warmup. The activation is
+/// quantized once up front; only the mmvq launch + sync is inside the timed
+/// region. Inputs are arbitrary (these kernels are data-independent in time).
+fn time_mmvq<B: BenchBackend>(
+    dev: &B::Device,
+    dtype: Dtype,
+    m: usize,
+    k: usize,
+    iters: usize,
+) -> Result<f64> {
+    let q_bytes =
+        B::image("quantize_q8_1").ok_or_else(|| anyhow!("quantize_q8_1 not compiled"))?;
+    let m_bytes = B::image(dtype.kernel_stem())
+        .ok_or_else(|| anyhow!("{} kernel not compiled", dtype.kernel_stem()))?;
+    let q_module = B::load(dev, q_bytes)?;
+    let m_module = B::load(dev, m_bytes)?;
+    let k_quantize = B::kernel(&q_module, "flambeau_quantize_row_q8_1")?;
+    let k_mmvq = B::kernel(&m_module, dtype.kernel_entry())?;
+
+    let block_elems = dtype.block_elem_count();
+    let weights_raw = seeded_bytes(0xA17E, m * (k / block_elems) * dtype.block_size_bytes());
+    let y_f32 = seeded_f32_range(0xB22E, k, -1.0, 1.0);
+
+    let d_x = alloc_and_upload(dev, weights_raw.as_slice());
+    let d_y_f32 = alloc_and_upload(dev, y_f32.as_slice());
+
+    let y_q8_1_blocks = k / QK8;
+    let y_q8_1_bytes = y_q8_1_blocks * std::mem::size_of::<BlockQ8_1>();
+    let d_y_q8_1 = dev.alloc(y_q8_1_bytes)?;
+    {
+        let stream = dev.default_stream();
+        let n_elems = k as i32;
+        let d_y_f32_ptr: u64 = d_y_f32.as_usize() as u64;
+        let d_y_q8_1_ptr: u64 = d_y_q8_1.as_usize() as u64;
+        let mut args = <B::Args<'_>>::default();
+        args.push_arg(&d_y_f32_ptr);
+        args.push_arg(&d_y_q8_1_ptr);
+        args.push_arg(&n_elems);
+        B::launch(&k_quantize, stream, LaunchCfg::one_d(y_q8_1_blocks as u32, QK8 as u32), args)?;
+        stream.synchronize()?;
+    }
+    let d_dst = dev.alloc(m * 4)?;
+
+    let m_i = m as i32;
+    let n_units = (k / block_elems) as i32;
+    let d_x_ptr: u64 = d_x.as_usize() as u64;
+    let d_y_q8_1_ptr: u64 = d_y_q8_1.as_usize() as u64;
+    let d_dst_ptr: u64 = d_dst.as_usize() as u64;
+    let cfg = LaunchCfg::one_d((m as u32).div_ceil(dtype.rows_per_block()), dtype.launch_threads());
+    let stream = dev.default_stream();
+
+    let launch = || {
+        let mut args = <B::Args<'_>>::default();
+        args.push_arg(&d_x_ptr);
+        args.push_arg(&d_y_q8_1_ptr);
+        args.push_arg(&d_dst_ptr);
+        args.push_arg(&m_i);
+        args.push_arg(&n_units);
+        B::launch(&k_mmvq, stream, cfg, args)
+    };
+
+    for _ in 0..3 {
+        launch()?;
+    }
+    stream.synchronize()?;
+
+    let mut samples = Vec::with_capacity(iters);
+    for _ in 0..iters {
+        let t = Instant::now();
+        launch()?;
+        stream.synchronize()?;
+        samples.push(t.elapsed().as_secs_f64() * 1e6);
+    }
+    samples.sort_by(|a, b| a.partial_cmp(b).expect("timing has no NaN"));
+
+    // SAFETY: each ptr came from a successful alloc above; the stream is synced.
+    unsafe {
+        dev.dealloc(d_x, weights_raw.len())?;
+        dev.dealloc(d_y_f32, y_f32.len() * 4)?;
+        dev.dealloc(d_y_q8_1, y_q8_1_bytes)?;
+        dev.dealloc(d_dst, m * 4)?;
+    }
+    Ok(samples[samples.len() / 2])
+}
+
+/// Time every compiled `candidate` variant across the (m, k) grid, pick the
+/// fastest per shape, print the ranking, and — when `emit` — write the winning
+/// rows to `dispatch/<backend>/<arch>.toml`. Candidates whose kernel image
+/// isn't compiled for this backend are skipped (so CUDA ranks only the ported
+/// variants).
+pub fn autotune<B: BenchBackend>(
+    arch: &str,
+    candidates: &[Dtype],
+    m_grid: &[usize],
+    k_grid: &[usize],
+    repo_root: &Path,
+    emit: bool,
+) -> Result<()> {
+    let dev = B::new_device(0)?;
+    let backend = dev.backend();
+    let iters = 50;
+
+    let avail: Vec<Dtype> = candidates
+        .iter()
+        .copied()
+        .filter(|d| B::image(d.kernel_stem()).is_some())
+        .collect();
+    if avail.is_empty() {
+        bail!("autotune {backend}/{arch}: no candidate kernels compiled");
+    }
+    let names: Vec<&str> = avail.iter().map(|d| d.impl_id()).collect();
+    println!(
+        "autotune {backend}/{arch}: {} candidate(s): {}",
+        avail.len(),
+        names.join(", ")
+    );
+
+    let mut winners: Vec<(usize, Dtype)> = Vec::new();
+    for &m in m_grid {
+        for &k in k_grid {
+            let mut best: Option<(Dtype, f64)> = None;
+            for &d in &avail {
+                let us = time_mmvq::<B>(&dev, d, m, k, iters)?;
+                println!("  m={m:<5} k={k:<6} {:<34} {us:8.2} us", d.impl_id());
+                if best.is_none_or(|(_, b)| us < b) {
+                    best = Some((d, us));
+                }
+            }
+            let (wd, wus) = best.expect("at least one candidate");
+            println!("    -> winner m={m} k={k}: {} ({wus:.2} us)", wd.impl_id());
+            winners.push((m, wd));
+        }
+    }
+
+    if emit {
+        let path = emit_dispatch(arch, backend, &winners, repo_root)?;
+        println!("emitted {}", path.display());
+    } else {
+        println!("(dry run — pass --emit to write dispatch/{backend}/{arch}.toml)");
+    }
+    Ok(())
+}
+
+/// Hand-format the autotuned `[[qmatmul]]` rows (one per winning dtype, with an
+/// m-range predicate) into `dispatch/<backend>/<arch>.toml`. `DispatchRow` is
+/// deserialize-only, so the table is generated text, not serde output.
+fn emit_dispatch(
+    arch: &str,
+    backend: &str,
+    winners: &[(usize, Dtype)],
+    repo_root: &Path,
+) -> Result<PathBuf> {
+    use std::collections::BTreeMap;
+
+    let mut by_impl: BTreeMap<&'static str, (Dtype, usize, usize)> = BTreeMap::new();
+    for &(m, d) in winners {
+        let e = by_impl.entry(d.impl_id()).or_insert((d, m, m));
+        e.1 = e.1.min(m);
+        e.2 = e.2.max(m);
+    }
+    let single = by_impl.len() == 1;
+
+    let mut s = String::new();
+    writeln!(
+        s,
+        "# Dispatch table — {backend} / {arch}. Autotuned by `flambeau autotune`\n\
+         # (median of timed mmvq launches per shape). Regenerate; do not hand-edit."
+    )
+    .expect("write to String is infallible");
+    for (impl_id, (d, m_min, m_max)) in &by_impl {
+        let m_pred = if single {
+            "any".to_string()
+        } else {
+            format!("{m_min}..{}", m_max + 1)
+        };
+        write!(
+            s,
+            "\n[[qmatmul]]\n\
+             dtype   = \"{}\"\n\
+             dtype_q = \"Q8_1\"\n\
+             shape   = {{ m = \"{m_pred}\", k = \"any\", n = \"any\" }}\n\
+             impl    = \"{impl_id}\"\n\
+             cert    = \"certs/{backend}/{arch}/{impl_id}.json\"\n\
+             notes   = \"autotuned\"\n",
+            d.name()
+        )
+        .expect("write to String is infallible");
+    }
+
+    let path = repo_root.join(format!("dispatch/{backend}/{arch}.toml"));
+    std::fs::write(&path, s).with_context(|| format!("write {}", path.display()))?;
+    Ok(path)
 }
 
 // ---- helpers (shared with the ad-hoc tests) -------------------------------
