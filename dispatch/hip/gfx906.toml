@@ -240,8 +240,8 @@ notes   = "V2.2.d fix 1 — wave64 MMQ port of candle's `mul_mat_q5_K_gfx906_v2`
 dtype   = "Q6_K"
 dtype_q = "Q8_1"
 shape   = { m = "1..31", k = "any", n = "any" }
-impl    = "qmatmul_q6_K_mmvq_dp4a_gfx906"
-cert    = "certs/hip/gfx906/qmatmul_q6_K_mmvq_dp4a_gfx906.json"
+impl    = "qmatmul_q6_k_mmvq_dp4a"
+cert    = "certs/hip/gfx906/qmatmul_q6_k_mmvq_dp4a.json"
 notes   = "V1.6 DP4A single-row Q6_K (3.24× per-call win on LM-head). V2.3.d.1: certed directly instead of via runtime intercept under the r4 scalar cert, and fixed a 32-bit unsigned-subtract borrow-chain bug in the (raw - 32) step — same class as V2.3.b.4's mmq_q6_K_wave64 fix. Uses the DP4A bias-correction identity (raw · y − 32 · Σy)."
 
 [[qmatmul]]

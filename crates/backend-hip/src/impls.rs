@@ -491,7 +491,7 @@ mod tests {
         // Q6_K MMVQ decode dispatch is the DP4A kernel directly
         // (runtime intercept removed after the borrow-chain bug was fixed).
         let d = dispatch_qmatmul(&cfg(QDtype::Q6_K, QDtype::Q8_1, 1)).unwrap();
-        assert_eq!(d.impl_id, "qmatmul_q6_K_mmvq_dp4a_gfx906");
+        assert_eq!(d.impl_id, "qmatmul_q6_k_mmvq_dp4a");
     }
 
     #[test]

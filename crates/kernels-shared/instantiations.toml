@@ -116,3 +116,29 @@ params = """
     const int n_rows,
     const int n_blocks_per_row"""
 body = "mmvq_dp4a_row<Q5_1, 256, fb_fp16_t>(x, y, dst, n_rows, n_blocks_per_row);"
+
+# Q6_K single-row MMVQ — first K-quant (super-block, 64 threads/row). Its own
+# templated body (super-block iqs scheme) rather than the flat mmvq_dp4a_row.
+[[kernel]]
+stem = "mmvq_q6_k_dp4a"
+includes = ["mmvq_q6_k.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q6_k_dp4a_q8_1"
+params = """
+    const flambeau_block_q6_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_q6_k_dp4a_row<float>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q6_k_dp4a_q8_1_f16"
+params = """
+    const flambeau_block_q6_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_q6_k_dp4a_row<fb_fp16_t>(x, y, dst, n_rows, n_superblocks_per_row);"

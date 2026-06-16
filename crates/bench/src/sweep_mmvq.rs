@@ -296,7 +296,7 @@ impl Dtype {
             Dtype::Q5KDp4a => "qmatmul_q5_K_mmvq_dp4a_gfx906",
             Dtype::Q5KR2Dp4a => "qmatmul_q5_K_mmvq_r2_dp4a_gfx906",
             Dtype::Q6KR4 => "qmatmul_q6_K_mmvq_nw1_r4_gfx906",
-            Dtype::Q6KDP4A => "qmatmul_q6_K_mmvq_dp4a_gfx906",
+            Dtype::Q6KDP4A => "qmatmul_q6_k_mmvq_dp4a",
             Dtype::Q4_1 => "qmatmul_q4_1_mmvq_dp4a_gfx906",
             Dtype::Q4_1R2 => "qmatmul_q4_1_mmvq_nw1_r2_gfx906",
             Dtype::Q4_1R2DP4A => "qmatmul_q4_1_mmvq_r2_dp4a_gfx906",

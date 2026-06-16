@@ -209,13 +209,13 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         // also fixed a 32-bit unsigned-subtract borrow-chain bug in it
         // (same class as mmq_q6_K_wave64 fix). Now dispatched
         // directly, intercept removed.
-        impl_id: "qmatmul_q6_K_mmvq_dp4a_gfx906",
+        impl_id: "qmatmul_q6_k_mmvq_dp4a",
         backend: "hip",
         arch: "gfx906",
         dtype_weight: QDtype::Q6_K,
         dtype_activation: QDtype::Q8_1,
         m_range: (1, 31),
-        cert_rel_path: "certs/hip/gfx906/qmatmul_q6_K_mmvq_dp4a_gfx906.json",
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q6_k_mmvq_dp4a.json",
     },
     KernelDescriptor {
         op_name: "QMatMul",
