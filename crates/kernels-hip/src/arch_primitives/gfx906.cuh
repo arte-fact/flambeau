@@ -150,6 +150,15 @@ static __device__ __forceinline__ int gfx906_dp4a(int a, int b, int c) {
     return __builtin_amdgcn_sdot4(a, b, c, false);
 }
 
+// Neutral primitive names for the backend-neutral kernels-shared templates
+// (mmvq.cuh / quant_traits.cuh), mirroring what kernels-cuda/sm_80.cuh exposes.
+// The arch-specific bodies stay above; only the names cross into shared code.
+static __device__ __forceinline__ float warp_reduce_sum(float x)         { return gfx906_warp_reduce_sum(x); }
+static __device__ __forceinline__ float half_warp_reduce_sum(float x)    { return gfx906_half_warp_reduce_sum(x); }
+static __device__ __forceinline__ float quarter_warp_reduce_sum(float x) { return gfx906_quarter_warp_reduce_sum(x); }
+static __device__ __forceinline__ float eighth_warp_reduce_sum(float x)  { return gfx906_eighth_warp_reduce_sum(x); }
+static __device__ __forceinline__ int   dp4a(int a, int b, int c)        { return gfx906_dp4a(a, b, c); }
+
 #else  // non-HIP fallback, should never be reached in V1
 
 static __device__ __forceinline__ float gfx906_warp_reduce_sum(float x) {
