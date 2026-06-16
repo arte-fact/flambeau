@@ -15,9 +15,23 @@ static __device__ __forceinline__ int load_int_b2(const int8_t* p, int i) {
     return (int) u[2 * i] | ((int) u[2 * i + 1] << 16);
 }
 
+// Expand 4 consecutive bits of `qh` starting at `start` into 4 bytes (each 0
+// or 1) packed into an int32 — the 5th-bit plane for Q5_0/Q5_1, fed to `dp4a`.
+static __device__ __forceinline__ int expand_bits4(unsigned int qh, int start) {
+    int out = 0;
+    out |= ((qh >> (start + 0)) & 1u);
+    out |= ((qh >> (start + 1)) & 1u) << 8;
+    out |= ((qh >> (start + 2)) & 1u) << 16;
+    out |= ((qh >> (start + 3)) & 1u) << 24;
+    return out;
+}
+
 // Weight-dtype tag types.
 struct Q8_0 {};
 struct Q4_0 {};
+struct Q4_1 {};
+struct Q5_0 {};
+struct Q5_1 {};
 
 template<class Q> struct quant_traits;
 
@@ -61,5 +75,77 @@ template<> struct quant_traits<Q4_0> {
         sumi     = dp4a(vi_hi, u_hi, sumi);
         const float d_x = (float) bx.d;
         return sumi * (d_x * (float) by.d) - 8.0f * d_x * (float) by.s * 0.25f;
+    }
+};
+
+template<> struct quant_traits<Q4_1> {
+    using block_t = flambeau_block_q4_1;
+    static constexpr int INT32_PER_BLOCK = QK4_1 / 8;
+
+    // Q4_1 carries a per-block min: y = d*q + m, q in [0,15]. The dot folds
+    // m*Σy via the Q8_1 header `s` (= d_y·Σy_qs): + m_x·s_y per block, split
+    // across the 4 lanes by 0.25.
+    static __device__ __forceinline__ float
+    partial(const block_t& bx, const flambeau_block_q8_1& by, int j) {
+        const int v     = load_int_b2((const int8_t*) bx.qs, j);
+        const int vi_lo = (v >> 0) & 0x0F0F0F0F;
+        const int vi_hi = (v >> 4) & 0x0F0F0F0F;
+        const int u_lo  = load_int_b2(by.qs, j);
+        const int u_hi  = load_int_b2(by.qs, j + 4);
+        int sumi = dp4a(vi_lo, u_lo, 0);
+        sumi     = dp4a(vi_hi, u_hi, sumi);
+        return sumi * ((float) bx.d * (float) by.d) + (float) bx.m * (float) by.s * 0.25f;
+    }
+};
+
+template<> struct quant_traits<Q5_0> {
+    using block_t = flambeau_block_q5_0;
+    static constexpr int INT32_PER_BLOCK = QK5_0 / 8;
+
+    // Q5_0: 5-bit, zero-point -16. The 5th bit of each element lives in the
+    // 32-bit `qh` plane; expand_bits4 unpacks it into a dp4a-able byte plane.
+    // (q5-16)·y = nibble·y + 16·bit·y - 16·Σy → -16·d_x·s_y correction, /4.
+    static __device__ __forceinline__ float
+    partial(const block_t& bx, const flambeau_block_q8_1& by, int j) {
+        const int v     = load_int_b2((const int8_t*) bx.qs, j);
+        const int vi_lo = (v >> 0) & 0x0F0F0F0F;
+        const int vi_hi = (v >> 4) & 0x0F0F0F0F;
+        const int u_lo  = load_int_b2(by.qs, j);
+        const int u_hi  = load_int_b2(by.qs, j + 4);
+        const unsigned int qh = (unsigned int) load_int_b2((const int8_t*) bx.qh, 0);
+        const int bit_lo = expand_bits4(qh, j * 4);
+        const int bit_hi = expand_bits4(qh, j * 4 + 16);
+        int sumi_nib = dp4a(vi_lo, u_lo, 0);
+        sumi_nib     = dp4a(vi_hi, u_hi, sumi_nib);
+        int sumi_bit = dp4a(bit_lo, u_lo, 0);
+        sumi_bit     = dp4a(bit_hi, u_hi, sumi_bit);
+        const float d_x = (float) bx.d;
+        return (sumi_nib + 16 * sumi_bit) * (d_x * (float) by.d)
+             - 16.0f * d_x * (float) by.s * 0.25f;
+    }
+};
+
+template<> struct quant_traits<Q5_1> {
+    using block_t = flambeau_block_q5_1;
+    static constexpr int INT32_PER_BLOCK = QK5_1 / 8;
+
+    // Q5_1: 5-bit with min. y = d*q5 + m, q5 in [0,31]. nibble + 5th-bit plane
+    // (expand_bits4) + the m_x·s_y min fold (/4 across lanes).
+    static __device__ __forceinline__ float
+    partial(const block_t& bx, const flambeau_block_q8_1& by, int j) {
+        const int v     = load_int_b2((const int8_t*) bx.qs, j);
+        const int vi_lo = (v >> 0) & 0x0F0F0F0F;
+        const int vi_hi = (v >> 4) & 0x0F0F0F0F;
+        const int u_lo  = load_int_b2(by.qs, j);
+        const int u_hi  = load_int_b2(by.qs, j + 4);
+        const unsigned int qh = (unsigned int) load_int_b2((const int8_t*) bx.qh, 0);
+        const int bit_lo = expand_bits4(qh, j * 4);
+        const int bit_hi = expand_bits4(qh, j * 4 + 16);
+        int sumi_nib = dp4a(vi_lo, u_lo, 0);
+        sumi_nib     = dp4a(vi_hi, u_hi, sumi_nib);
+        int sumi_bit = dp4a(bit_lo, u_lo, 0);
+        sumi_bit     = dp4a(bit_hi, u_hi, sumi_bit);
+        return (sumi_nib + 16 * sumi_bit) * ((float) bx.d * (float) by.d)
+             + (float) bx.m * (float) by.s * 0.25f;
     }
 };

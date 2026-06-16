@@ -50,3 +50,69 @@ params = """
     const int n_rows,
     const int n_blocks_per_row"""
 body = "mmvq_dp4a_row<Q4_0, 256, fb_fp16_t>(x, y, dst, n_rows, n_blocks_per_row);"
+
+# Q4_1 single-row MMVQ — legacy 4-bit with per-block min (y = d*q + m).
+# Base kernel is F32-only (the F16-dst Q4_1 path is a separate t128 kernel).
+[[kernel]]
+stem = "mmvq_q4_1"
+includes = ["quant_traits.cuh", "mmvq.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_1_q8_1"
+params = """
+    const flambeau_block_q4_1* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_dp4a_row<Q4_1, 256>(x, y, dst, n_rows, n_blocks_per_row);"
+
+# Q5_0 single-row MMVQ — 5-bit, zero-point -16 (5th bit in the qh plane).
+[[kernel]]
+stem = "mmvq_q5_0"
+includes = ["quant_traits.cuh", "mmvq.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q5_0_q8_1"
+params = """
+    const flambeau_block_q5_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_dp4a_row<Q5_0, 256>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q5_0_q8_1_f16"
+params = """
+    const flambeau_block_q5_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_dp4a_row<Q5_0, 256, fb_fp16_t>(x, y, dst, n_rows, n_blocks_per_row);"
+
+# Q5_1 single-row MMVQ — 5-bit with per-block min (y = d*q5 + m).
+[[kernel]]
+stem = "mmvq_q5_1"
+includes = ["quant_traits.cuh", "mmvq.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q5_1_q8_1"
+params = """
+    const flambeau_block_q5_1* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_dp4a_row<Q5_1, 256>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q5_1_q8_1_f16"
+params = """
+    const flambeau_block_q5_1* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_dp4a_row<Q5_1, 256, fb_fp16_t>(x, y, dst, n_rows, n_blocks_per_row);"
