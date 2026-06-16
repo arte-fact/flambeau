@@ -93,26 +93,39 @@ sm_86) is built and `feature/cuda-decouple` is pulled in.
 > green (cuda 9, hip 82). Also fixed the P1 orphan-cert test + removed a stray
 > cert copy.
 >
-> **Remaining: Q4_K (r2) + Q8_K.**
-> - **Q4_K** — its only dp4a is `Q4KR2Dp4a` (64 threads = 1 wave64, **2 rows/
->   block**; each row owned by 32 lanes — `row_hi=lane>>5`, `lane_lo=lane&31`).
->   The hand kernel reduces each row with `gfx906_half_warp_reduce_sum` (32-lane
->   DPP). **Do NOT use the neutral `half_warp_reduce_sum`** — on wave32 it's a
->   16-lane reduce, wrong here. The portable fix is a 32-lane butterfly that is a
->   sub-warp on wave64 and a full warp on wave32:
->   `for (off=16; off>0; off>>=1) v += __shfl_xor(v, off, 32); if (lane_lo==0) store(dst,row,v)`
->   — correct on both (no LDS/cross-warp: on wave32 the two rows are two separate
->   warps). Wrap it as `mmvq_reduce_store_2row<OutT>`. **Bit-match caveat:** the
->   DPP half-warp reduce and the `__shfl_xor` butterfly may differ in the last
->   ULPs (different instruction path, same butterfly order) → the HIP cert
->   max_rel_err may NOT be byte-identical (still well within tol). Verify; if it
->   shifts, that's expected, not a regression — note it. Q4_K IS dispatch-
->   referenced (production decode), so re-cert carefully. `Q4KR2Dp4a` impl_id =
->   `qmatmul_q4_K_mmvq_dp4a_gfx906` (check the full ref set incl. backend
->   registry + dispatch — it has a real HIP cert, unlike Q2/Q3).
-> - **Q8_K** — activation-side; the weight mmvq is unusual, do last.
-> After the K-quants: the `ROWS`/`THREADS`/`VDR` config variants and **IQ**
-> quants, then P2b fusion.
+> **ALL K-quants DONE** — Q4_K (`a6cb930`) + Q8_K (`cf4efaa`) landed.
+> - **Q4_K** (production decode kernel, `r2`/2-row) bit-matched **byte-identical**:
+>   the `__shfl_xor(v, off, 32)` butterfly in *ascending* offset order
+>   (1,2,4,8,16) exactly reproduces gfx906's DPP `half_warp_reduce_sum` add
+>   order — no ULP shift. New shared `mmvq_reduce_store_2row<OutT>` in
+>   `mmvq_reduce.cuh` (width-32 = sub-warp on wave64, full warp on wave32 since
+>   the 2 rows are 2 warps; no LDS). CUDA pass validated wave32.
+> - **Q8_K** (simplest K-quant) reused `mmvq_reduce_store<256>`, byte-identical.
+>
+> **cuda/sm_86 = 11 mmvq rows** (Q2/Q3/Q4/Q5/Q6/Q8_K + Q4_0/Q4_1/Q5_0/Q5_1/
+> Q8_0); cert-check green (cuda 11, hip 82). Every standard GGUF weight quant is
+> now templated on both backends from one source.
+>
+> **NEXT (P2a tail → P2b):**
+> - **IQ quants** — `IQ1_S/M`, `IQ2_XXS/XS/S`, `IQ3_XXS/S`, `IQ4_NL/XS`: each has
+>   `mmvq_*` + `*_dp4a` + `*_r2` variants (already in the `Dtype` enum, suffixed
+>   impl_ids). Codebook grid lookups via the already-shared `iq_grid.cuh`; port
+>   the 256-thread single-row dp4a ones first (reuse `mmvq_reduce_store<256>`).
+> - **Config variants** — `t128`/`vdr2`/`r2`/`r4`/`gate_up`/`batched`/`row_tile`
+>   MMVQ per dtype (the autotune candidate fan-out — where per-shape autotune
+>   earns its keep). `r2`/`r4` are wave64-shaped → reuse `mmvq_reduce_store_2row`
+>   / add a `_4row` sibling.
+> - Then **P2c mmq** (4-warp LDS-tiled — the big prefill lever) and **P2d**
+>   indexed_moe. See `PORTABILITY-ROADMAP.md`.
+>
+> Per-slice pattern: own neutral `.cuh` (intrinsics → neutral `dp4a`/reduce,
+> misaligned loads → `load_int_b2`), manifest cell (F32+F16), neutralize the
+> `_gfx906` impl_id (full ref set: dispatch + backend registry + any `impls.rs`
+> test assert + `ops` recipe + sweep enum + cli PMC list + cert `git mv`), HIP
+> bit-match (cert max_rel_err unchanged; non-dispatched/uncerted dtypes →
+> register the HIP cert as a bench-reference in `direct_call.rs`), CUDA cert +
+> `autotune --emit`, `cert-check` both. **Rebuild the cli before each sweep** — a
+> stale binary re-emits the pre-rename impl_id cert (hit this on Q8_K).
 
 ## Where we are
 
