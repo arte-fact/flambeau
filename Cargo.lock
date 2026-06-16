@@ -566,7 +566,9 @@ version = "0.1.0-dev"
 dependencies = [
  "anyhow",
  "rayon",
+ "serde",
  "sha2",
+ "toml",
 ]
 
 [[package]]
@@ -575,7 +577,9 @@ version = "0.1.0-dev"
 dependencies = [
  "anyhow",
  "rayon",
+ "serde",
  "sha2",
+ "toml",
 ]
 
 [[package]]

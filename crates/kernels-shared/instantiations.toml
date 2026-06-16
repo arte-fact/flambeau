@@ -1,0 +1,21 @@
+# Backend-neutral kernel instantiation manifest.
+#
+# Each [[kernel]] cell generates one `extern "C" __global__` wrapper `.cu` for
+# BOTH backends (kernels-hip + kernels-cuda) at build time. The build scripts
+# inject the per-backend arch-primitives header ahead of `includes` (gfx906.cuh
+# for HIP, sm_80.cuh for CUDA), so a templated kernel is a cell here — not two
+# hand-written wrappers that drift. `stem` is the catalogue key (what
+# `hsaco(..)` / `cubin(..)` look up); `entry` is the dispatch ABI symbol, which
+# must be identical on both backends.
+
+[[kernel]]
+stem = "mmvq_q8_0_dp4a"
+entry = "flambeau_mmvq_q8_0_dp4a_q8_1"
+includes = ["quant_traits.cuh", "mmvq.cuh"]
+params = """
+    const flambeau_block_q8_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_dp4a_row<Q8_0, 256>(x, y, dst, n_rows, n_blocks_per_row);"

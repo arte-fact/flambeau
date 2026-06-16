@@ -12,6 +12,8 @@ description = "CUDA `.cu` kernel sources compiled to `.cubin` via nvcc in build.
 anyhow.workspace = true
 rayon = "1"
 sha2 = "0.10"
+serde.workspace = true
+toml.workspace = true
 
 [lints]
 workspace = true
