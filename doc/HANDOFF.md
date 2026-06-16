@@ -3,7 +3,18 @@
 Transient working note. Start here when the dev rig (2× MI50 gfx906 + 1× RTX 3090
 sm_86) is built and `feature/cuda-decouple` is pulled in.
 
-> **P1 CLOSED. P2a UNDERWAY (2026-06-16, tip `10d210a`).** Q4_0 is the first
+> **CURRENT STATUS (2026-06-16, tip `db7772e`): P2a mmvq DONE, P2b UNDERWAY.**
+> All 20 GGUF weight quants are templated + certed on both backends
+> (`cuda/sm_86` = 20 mmvq rows; cert-check cuda 20 / hip 82). P2b config variants
+> started: Q8_0 `t128` (`ad68761`) + `vdr2`/VDR-param (`29258e1`) done, **`r2`/`r4`
+> next** (reuse `mmvq_reduce_store_2row`). Two autotune emit bugs fixed (per-m
+> k-collapse + disjoint m-runs). Build kernels with `RAYON_NUM_THREADS=8`
+> (thermal). The detailed phase log + per-slice recipe + rig gotchas are below;
+> read the **P2b** and rig-notes sections. (Historical detail follows.)
+>
+> ---
+>
+> *(history)* **P1 CLOSED. P2a was UNDERWAY at tip `10d210a`.** Q4_0 was the first
 > P2a dtype slice, proven end-to-end exactly like the Q8_0 pilot: templated
 > `quant_traits<Q4_0>` (nibble unpack + (q-8) bias correction) on the now
 > `OutT`-generic `mmvq_dp4a_row` skeleton → HIP **bit-match** (cert max_rel_err
