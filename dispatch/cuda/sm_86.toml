@@ -34,6 +34,14 @@ cert    = "certs/cuda/sm_86/qmatmul_q5_1_mmvq_dp4a.json"
 notes   = "autotuned"
 
 [[qmatmul]]
+dtype   = "Q5_K"
+dtype_q = "Q8_1"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "qmatmul_q5_k_mmvq_dp4a"
+cert    = "certs/cuda/sm_86/qmatmul_q5_k_mmvq_dp4a.json"
+notes   = "autotuned"
+
+[[qmatmul]]
 dtype   = "Q6_K"
 dtype_q = "Q8_1"
 shape   = { m = "any", k = "any", n = "any" }

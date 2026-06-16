@@ -163,7 +163,7 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
     },
     KernelDescriptor {
         op_name: "QMatMul",
-        impl_id: "qmatmul_q5_K_mmvq_dp4a_gfx906",
+        impl_id: "qmatmul_q5_k_mmvq_dp4a",
         backend: "hip",
         arch: "gfx906",
         dtype_weight: QDtype::Q5_K,
@@ -174,7 +174,7 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         // the prior nw1_r2 at the production shape. m>=128 hits the
         // wave64 MMQ kernel below.
         m_range: (1, 31),
-        cert_rel_path: "certs/hip/gfx906/qmatmul_q5_K_mmvq_dp4a_gfx906.json",
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q5_k_mmvq_dp4a.json",
     },
     // Dormant nw1_r2 baseline — preserved for A/B regression checks.
     // m_range=(MAX,MAX) keeps shape-dispatch from picking it; the cert

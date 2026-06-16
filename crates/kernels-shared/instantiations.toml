@@ -142,3 +142,29 @@ params = """
     const int n_rows,
     const int n_superblocks_per_row"""
 body = "mmvq_q6_k_dp4a_row<fb_fp16_t>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+# Q5_K single-row MMVQ — 256 threads, 8×32 sub-blocks, 6-bit packed (sc,m)
+# scales shared with Q4_K (flambeau_q4k_scale_min) + per-element 5th bit.
+[[kernel]]
+stem = "mmvq_q5_k_dp4a"
+includes = ["mmvq_q5_k.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q5_k_dp4a_q8_1"
+params = """
+    const flambeau_block_q5_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_q5_k_dp4a_row<float>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q5_k_dp4a_q8_1_f16"
+params = """
+    const flambeau_block_q5_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_q5_k_dp4a_row<fb_fp16_t>(x, y, dst, n_rows, n_superblocks_per_row);"
