@@ -2,6 +2,14 @@
 # (median of timed mmvq launches per shape). Regenerate; do not hand-edit.
 
 [[qmatmul]]
+dtype   = "Q3_K"
+dtype_q = "Q8_1"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "qmatmul_q3_k_mmvq_dp4a"
+cert    = "certs/cuda/sm_86/qmatmul_q3_k_mmvq_dp4a.json"
+notes   = "autotuned"
+
+[[qmatmul]]
 dtype   = "Q4_0"
 dtype_q = "Q8_1"
 shape   = { m = "any", k = "any", n = "any" }
