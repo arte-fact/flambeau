@@ -3,12 +3,32 @@
 Transient working note. Start here when the dev rig (2× MI50 gfx906 + 1× RTX 3090
 sm_86) is built and `feature/cuda-decouple` is pulled in.
 
-> **P1 IS CLOSED (2026-06-16, tip `5e3ed3f`).** mmvq Q8_0 is proven end-to-end:
-> templated kernel → both backends → bit-match (gfx906) + CPU-ref cert (sm_86) →
-> generic bench → **autotune rank-and-emit** (`dispatch/cuda/sm_86.toml` emitted,
-> cert-check green both arches). **Next = P2** (mmvq all dtypes → fusion → mmq →
-> MoE), now mechanical: add manifest cells + run the autotune loop per family.
-> This doc can be deleted or repurposed as the P2 handoff.
+> **P1 CLOSED. P2a UNDERWAY (2026-06-16, tip `10d210a`).** Q4_0 is the first
+> P2a dtype slice, proven end-to-end exactly like the Q8_0 pilot: templated
+> `quant_traits<Q4_0>` (nibble unpack + (q-8) bias correction) on the now
+> `OutT`-generic `mmvq_dp4a_row` skeleton → HIP **bit-match** (cert max_rel_err
+> byte-identical to the retired hand `mmvq_q4_0.cu`) → CUDA cert (pass/15 on the
+> 3090) → `dispatch/cuda/sm_86.toml` Q4_0 row. cert-check green both
+> (cuda/sm_86 **2 rows**, hip/gfx906 82). Two enabling refactors landed with it
+> (reused by every later dtype): **multi-entry codegen** (a `[[kernel]]` cell now
+> carries N `[[kernel.entry]]` blocks → one module holds both the F32 and
+> F16-dst entries) and **emit_dispatch merge-by-dtype** (autotune `--emit` now
+> preserves other dtypes' rows instead of rewriting the whole table).
+>
+> **The per-dtype loop is now fully mechanical** — for the next Stream-M dtype:
+> 1. add a `quant_traits<Qx>` specialization (`kernels-shared/include/quant_traits.cuh`);
+> 2. add a `[[kernel]]` cell (F32 + F16 entries) to `instantiations.toml`;
+> 3. move the hand `mmvq_qx*.cu` out of `kernels-hip/src/kernels/`, build HIP,
+>    re-cert via its sweep, confirm bit-match (cert max_rel_err unchanged), `git rm`;
+> 4. add `Dtype::Qx` to `sweep_mmvq.rs` (name/ggml/impl_id/stem/entry/bytes/threads
+>    + `tame_scales` arm) and the cli `sweep_cuda`/`autotune` match arms;
+> 5. build CUDA, `sweep --arch sm_86 --dtype Qx`, `autotune --arch sm_86 --emit`,
+>    `cert-check` both.
+>
+> Next dtypes: Q4_1 / Q5_0 / Q5_1 share Q4_0's legacy-quant shape (Q4_1/Q5_1 add
+> the `m` min-offset; Q5_0/Q5_1 add the `qh` 5th-bit plane) — each is one more
+> `quant_traits` specialization + cell. Then the K-quants (super-block scales)
+> and the `ROWS`/`THREADS`/`VDR` config variants per **P2a**, then P2b fusion.
 
 ## Where we are
 
