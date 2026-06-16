@@ -299,6 +299,10 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
         impl_id: "qmatmul_q4_k_mmvq_batched",
         cert_rel_path: "certs/hip/gfx906/qmatmul_q4_k_mmvq_batched.json",
     },
+    DirectCallKernel {
+        impl_id: "qmatmul_q6_k_mmvq_batched",
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q6_k_mmvq_batched.json",
+    },
     // Q3_K / Q2_K templated mmvq dp4a — not dispatched on HIP (decode uses
     // other rows), kept as the cross-backend bit-match baseline for the sm_86
     // certs.
