@@ -1,7 +1,14 @@
 # Handoff — resume on the combined MI50 + 3090 rig
 
 Transient working note. Start here when the dev rig (2× MI50 gfx906 + 1× RTX 3090
-sm_86) is built and `feature/cuda-decouple` is pulled in. Delete once P1 closes.
+sm_86) is built and `feature/cuda-decouple` is pulled in.
+
+> **P1 IS CLOSED (2026-06-16, tip `5e3ed3f`).** mmvq Q8_0 is proven end-to-end:
+> templated kernel → both backends → bit-match (gfx906) + CPU-ref cert (sm_86) →
+> generic bench → **autotune rank-and-emit** (`dispatch/cuda/sm_86.toml` emitted,
+> cert-check green both arches). **Next = P2** (mmvq all dtypes → fusion → mmq →
+> MoE), now mechanical: add manifest cells + run the autotune loop per family.
+> This doc can be deleted or repurposed as the P2 handoff.
 
 ## Where we are
 
