@@ -892,6 +892,7 @@ pub enum BatchedDtype {
     Q8_0,
     Q4_0,
     Q4_1,
+    Q4K,
 }
 
 impl BatchedDtype {
@@ -900,6 +901,7 @@ impl BatchedDtype {
             BatchedDtype::Q8_0 => "Q8_0",
             BatchedDtype::Q4_0 => "Q4_0",
             BatchedDtype::Q4_1 => "Q4_1",
+            BatchedDtype::Q4K => "Q4_K",
         }
     }
     fn weight_dtype(self) -> Dtype {
@@ -907,6 +909,7 @@ impl BatchedDtype {
             BatchedDtype::Q8_0 => Dtype::Q8_0Dp4a,
             BatchedDtype::Q4_0 => Dtype::Q4_0,
             BatchedDtype::Q4_1 => Dtype::Q4_1Dp4a,
+            BatchedDtype::Q4K => Dtype::Q4K,
         }
     }
     fn impl_id(self) -> &'static str {
@@ -914,6 +917,7 @@ impl BatchedDtype {
             BatchedDtype::Q8_0 => "qmatmul_q8_0_mmvq_batched",
             BatchedDtype::Q4_0 => "qmatmul_q4_0_mmvq_batched",
             BatchedDtype::Q4_1 => "qmatmul_q4_1_mmvq_batched",
+            BatchedDtype::Q4K => "qmatmul_q4_k_mmvq_batched",
         }
     }
     fn kernel_stem(self) -> &'static str {
@@ -921,6 +925,13 @@ impl BatchedDtype {
             BatchedDtype::Q8_0 => "mmvq_q8_0_batched",
             BatchedDtype::Q4_0 => "mmvq_q4_0_batched",
             BatchedDtype::Q4_1 => "mmvq_q4_1_batched",
+            BatchedDtype::Q4K => "mmvq_q4_k_batched",
+        }
+    }
+    fn launch_threads(self) -> u32 {
+        match self {
+            BatchedDtype::Q8_0 | BatchedDtype::Q4_0 | BatchedDtype::Q4_1 => 256,
+            BatchedDtype::Q4K => 64,
         }
     }
     fn kernel_entry(self, n_slots: usize) -> &'static str {
@@ -934,6 +945,9 @@ impl BatchedDtype {
             (BatchedDtype::Q4_1, 2) => "flambeau_mmvq_q4_1_q8_1_batched_n2",
             (BatchedDtype::Q4_1, 3) => "flambeau_mmvq_q4_1_q8_1_batched_n3",
             (BatchedDtype::Q4_1, 4) => "flambeau_mmvq_q4_1_q8_1_batched_n4",
+            (BatchedDtype::Q4K, 2) => "flambeau_mmvq_q4_k_q8_1_batched_n2",
+            (BatchedDtype::Q4K, 3) => "flambeau_mmvq_q4_k_q8_1_batched_n3",
+            (BatchedDtype::Q4K, 4) => "flambeau_mmvq_q4_k_q8_1_batched_n4",
             _ => unreachable!("batched n_slots outside [2,4]"),
         }
     }
@@ -1078,7 +1092,7 @@ fn run_shape_batched<B: BenchBackend>(
         args.push_arg(&d_dst_ptr);
         args.push_arg(&n_rows);
         args.push_arg(&n_units);
-        B::launch(&k_mmvq, stream, LaunchCfg::one_d(m as u32, 256), args)?;
+        B::launch(&k_mmvq, stream, LaunchCfg::one_d(m as u32, dtype.launch_threads()), args)?;
         stream.synchronize()?;
     }
 

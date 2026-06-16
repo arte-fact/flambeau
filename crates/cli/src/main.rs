@@ -1364,6 +1364,7 @@ fn batched_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::BatchedDtype
         "Q8_0_batched" => Some(BatchedDtype::Q8_0),
         "Q4_0_batched" => Some(BatchedDtype::Q4_0),
         "Q4_1_batched" => Some(BatchedDtype::Q4_1),
+        "Q4_K_batched" => Some(BatchedDtype::Q4K),
         _ => None,
     }
 }
