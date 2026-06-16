@@ -260,10 +260,18 @@ struct PrefixCacheInner {
 
 /// Floor the clamp never drops below, so a model that nearly fills host
 /// RAM still gets a usable cache. A smaller *requested* cap is honored.
+#[cfg_attr(
+    not(feature = "hip"),
+    allow(dead_code, reason = "used by the hip-gated serve_common; tests run feature-free")
+)]
 const HOST_CACHE_FLOOR_BYTES: usize = 2 * 1024 * 1024 * 1024;
 
 /// Host RAM held back above the resident weights for the OS, request
 /// scratch, and the decode working set.
+#[cfg_attr(
+    not(feature = "hip"),
+    allow(dead_code, reason = "used by the hip-gated serve_common; tests run feature-free")
+)]
 const HOST_CACHE_RESERVE_BYTES: usize = 2 * 1024 * 1024 * 1024;
 
 /// Clamp a requested host-snapshot-cache budget so the live cache plus the
@@ -273,6 +281,10 @@ const HOST_CACHE_RESERVE_BYTES: usize = 2 * 1024 * 1024 * 1024;
 /// below [`HOST_CACHE_FLOOR_BYTES`] unless the request itself is lower.
 /// `resident_weight_bytes` is the GGUF size for TP/hybrid (the mmap stays
 /// mapped after upload) and 0 for PP (the loader drops it post-upload).
+#[cfg_attr(
+    not(feature = "hip"),
+    allow(dead_code, reason = "used by the hip-gated serve_common; tests run feature-free")
+)]
 pub(crate) fn clamp_host_cache_budget(
     requested_bytes: usize,
     mem_total_bytes: usize,

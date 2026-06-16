@@ -55,8 +55,8 @@ fn quantize_q8_1_matches_cpu_reference() {
         }
     }
 
-    let mut ref_d = vec![f16::ZERO; NB];
-    let mut ref_s = vec![f16::ZERO; NB];
+    let mut ref_d = [f16::ZERO; NB];
+    let mut ref_s = [f16::ZERO; NB];
     let mut ref_q = vec![[0i8; QK]; NB];
     for b in 0..NB {
         let (d, s, qs) = ref_block(&x[b * QK..(b + 1) * QK]);

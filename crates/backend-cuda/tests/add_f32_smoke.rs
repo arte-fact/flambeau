@@ -49,7 +49,7 @@ fn add_f32_round_trip() {
     args.push(&y_ptr);
     args.push(&n_i);
 
-    let blocks = ((N + 255) / 256) as u32;
+    let blocks = N.div_ceil(256) as u32;
     kernel
         .launch(stream, LaunchCfg::one_d(blocks, 256), args)
         .expect("launch flambeau_add_f32");

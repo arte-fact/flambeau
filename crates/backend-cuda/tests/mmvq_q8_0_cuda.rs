@@ -65,7 +65,7 @@ fn mmvq_q8_0_matches_cpu_reference() {
     // Weights: [N_ROWS][K] quantized to Q8_0, row-major blocks. Keep per-block
     // (d, qs) for the reference.
     let mut w_bytes = Vec::new();
-    let mut w_d = vec![[f16::ZERO; NB]; N_ROWS];
+    let mut w_d = [[f16::ZERO; NB]; N_ROWS];
     let mut w_q = vec![[[0i8; QK]; NB]; N_ROWS];
     for r in 0..N_ROWS {
         for b in 0..NB {
@@ -88,7 +88,7 @@ fn mmvq_q8_0_matches_cpu_reference() {
     }
 
     // CPU reference: the same quantized dot the kernel computes.
-    let mut dst_ref = vec![0f32; N_ROWS];
+    let mut dst_ref = [0f32; N_ROWS];
     for r in 0..N_ROWS {
         let mut acc = 0.0f32;
         for b in 0..NB {
