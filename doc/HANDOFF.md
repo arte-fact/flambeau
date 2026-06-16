@@ -83,21 +83,27 @@ sm_86) is built and `feature/cuda-decouple` is pulled in.
 > to ~1e-6 (integer-exact dp4a). Also fixed a P1 orphan-cert test failure
 > (`every_cert_on_disk_is_registered`, red since `76e17bc`).
 >
-> Remaining K-quants — **each its own slice** (same recipe as Q6_K, per the
-> rename→port→bit-match→CUDA-cert→emit loop). NOTE the structures differ:
-> - **Q5_K** `Q5KDp4a` (256-thread single-row) — closest to mechanical; shares
->   the 6-bit packed-scale + dmin decode (`get_scale_min_k4`) with Q4_K.
-> - **Q4_K** `Q4KR2Dp4a` is the *r2* (64-thread, **2 rows/block**) variant — its
->   reduce is a **half-warp** reduce, not the full-block `mmvq_reduce_store`; needs
->   a 2-row reduce/store helper (or template `mmvq_reduce_store` over a row-group
->   width). Don't assume it slots into the Q6_K helper unchanged.
-> - **Q2_K/Q3_K** `Q2KDp4a`/`Q3KDp4a` (256-thread) — 2-bit/3-bit + min decode,
->   two dp4a per term (value + broadcast-min). Messier.
+> **Q5_K DONE** (`d93f16d`, both backends in one commit) — 256-thread single-row,
+> reuses `mmvq_reduce_store<256>` + shared `flambeau_q4k_scale_min`; cert
+> max_rel_err byte-identical, CUDA pass/15. cuda/sm_86 → 7 rows. Also removed a
+> stray duplicate cert under `crates/bench/src/certs/` (cruft from `974c9d3`).
+>
+> Remaining K-quants — **each its own slice** (rename→port→bit-match→CUDA-cert
+> →emit). Split by structure:
+> - **Tractable now (single-row, full-block reduce → reuse `mmvq_reduce_store`):**
+>   **Q2_K** `Q2KDp4a` and **Q3_K** `Q3KDp4a` (256-thread). 2-bit/3-bit + min
+>   decode, two dp4a per term (value + broadcast-min). Messier `partial` than
+>   Q5_K but same threading/reduce shape — do these next.
+> - **Harder (`r2`, wave64-shaped):** **Q4_K** — its only dp4a is `Q4KR2Dp4a`
+>   (2 rows/block, **half-warp** reduce). A half-wave64 = 32 threads/row; on CUDA
+>   wave32 that's a full warp, so the 2-row layout + `half_warp_reduce_sum` need a
+>   wave-size-aware redesign (a row-group reduce helper), not a drop-in. Same for
+>   any other `*R2Dp4a` you choose to port. Tackle after the single-row ones.
 > - **Q8_K** — activation-side; the weight mmvq is unusual, do last.
 > Each K-quant dp4a impl_id is still `_gfx906`-suffixed — neutralize per-dtype as
-> you port (the Q6_K commit shows the 6-ref pattern). After the K-quants: the
-> `ROWS`/`THREADS`/`VDR` config variants and **IQ** quants, then P2b fusion
-> (`gate_up`/`batched`/`row_tile`).
+> you port (Q6_K = 6 refs; Q5_K = 7, incl. the cli PMC-refresh target list +
+> watch for stray cert copies). After the K-quants: the `ROWS`/`THREADS`/`VDR`
+> config variants and **IQ** quants, then P2b fusion.
 
 ## Where we are
 
