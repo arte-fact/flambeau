@@ -1271,8 +1271,10 @@ fn autotune(arch: &str, op: &str, dtype: &str, emit: bool) -> Result<()> {
             "IQ2_XXS" => vec![Dtype::Iq2XxsDp4a],
             "IQ3_XXS" => vec![Dtype::Iq3XxsDp4a],
             "IQ3_S" => vec![Dtype::Iq3SDp4a],
+            "IQ2_XS" => vec![Dtype::Iq2XsDp4a],
+            "IQ2_S" => vec![Dtype::Iq2SDp4a],
             other => anyhow::bail!(
-                "autotune: only --dtype Q8_0 / Q4_0 / Q4_1 / Q5_0 / Q5_1 / Q2_K / Q3_K / Q4_K / Q5_K / Q6_K / Q8_K / IQ4_NL / IQ4_XS / IQ2_XXS / IQ3_XXS / IQ3_S are wired so far (got {other:?})"
+                "autotune: only --dtype Q8_0 / Q4_0 / Q4_1 / Q5_0 / Q5_1 / Q2_K / Q3_K / Q4_K / Q5_K / Q6_K / Q8_K / IQ4_NL / IQ4_XS / IQ2_XXS / IQ3_XXS / IQ3_S / IQ2_XS / IQ2_S are wired so far (got {other:?})"
             ),
         };
         let m_grid = [1usize, 8, 16];
@@ -1326,6 +1328,8 @@ fn sweep_cuda(op: &str, dtype: &str) -> Result<()> {
         "IQ2_XXS" => vec![Dtype::Iq2XxsDp4a],
         "IQ3_XXS" => vec![Dtype::Iq3XxsDp4a],
         "IQ3_S" => vec![Dtype::Iq3SDp4a],
+        "IQ2_XS" => vec![Dtype::Iq2XsDp4a],
+        "IQ2_S" => vec![Dtype::Iq2SDp4a],
         "all" => vec![
             Dtype::Q8_0Dp4a,
             Dtype::Q4_0,
@@ -1343,9 +1347,11 @@ fn sweep_cuda(op: &str, dtype: &str) -> Result<()> {
             Dtype::Iq2XxsDp4a,
             Dtype::Iq3XxsDp4a,
             Dtype::Iq3SDp4a,
+            Dtype::Iq2XsDp4a,
+            Dtype::Iq2SDp4a,
         ],
         other => {
-            anyhow::bail!("--arch sm_86: only Q8_0 / Q4_0 / Q4_1 / Q5_0 / Q5_1 / Q2_K / Q3_K / Q4_K / Q5_K / Q6_K / Q8_K / IQ4_NL / IQ4_XS / IQ2_XXS / IQ3_XXS / IQ3_S mmvq dp4a are ported to CUDA so far (got {other:?})")
+            anyhow::bail!("--arch sm_86: only Q8_0 / Q4_0 / Q4_1 / Q5_0 / Q5_1 / Q2_K / Q3_K / Q4_K / Q5_K / Q6_K / Q8_K / IQ4_NL / IQ4_XS / IQ2_XXS / IQ3_XXS / IQ3_S / IQ2_XS / IQ2_S mmvq dp4a are ported to CUDA so far (got {other:?})")
         }
     };
     let root = repo_root();
