@@ -244,11 +244,16 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
         impl_id: "qmatmul_q8_0_mmvq_dp4a",
         cert_rel_path: "certs/hip/gfx906/qmatmul_q8_0_mmvq_dp4a.json",
     },
-    // Q3_K templated mmvq dp4a — not dispatched on HIP (Q3_K decode uses other
-    // rows), kept as the cross-backend bit-match baseline for the sm_86 cert.
+    // Q3_K / Q2_K templated mmvq dp4a — not dispatched on HIP (decode uses
+    // other rows), kept as the cross-backend bit-match baseline for the sm_86
+    // certs.
     DirectCallKernel {
         impl_id: "qmatmul_q3_k_mmvq_dp4a",
         cert_rel_path: "certs/hip/gfx906/qmatmul_q3_k_mmvq_dp4a.json",
+    },
+    DirectCallKernel {
+        impl_id: "qmatmul_q2_k_mmvq_dp4a",
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q2_k_mmvq_dp4a.json",
     },
     // single-row MMVQ references. Production dispatches r2/r4/dp4a at
     // m < 128 for the K-quants; the single_row kernels stay as cross-check
