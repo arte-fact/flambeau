@@ -145,20 +145,25 @@ sm_86) is built and `feature/cuda-decouple` is pulled in.
 > "two rows match the same shape" build error). The autotune now picks the per-m
 > winner by **best total time across the k-grid**, not per-(m,k). Candidate sets
 > are **arch-aware** (`sm_86` = CUDA-ported subset). Mechanics for the rest:
-> - **`t128`** for other dtypes (Q4_0/Q4_1 have hand t128) = same trivial
->   `<Q,128>` instantiation. `vdr2` needs a **VDR template param** on the skeleton
->   (2 dp4a per pair-slot, 4 threads/block) — a real skeleton extension, the next
->   design step. `r2`/`r4` are wave64-shaped → reuse `mmvq_reduce_store_2row` /
->   add a `_4row` sibling. `gate_up`/`batched`/`row_tile` change the op signature
->   (2 outputs / N columns) — separate skeletons.
+> - **`vdr2` DONE (`29258e1`)** — added a **VDR template param**:
+>   `quant_traits<Q8_0>::partial_vdr<VDR>` + `mmvq_dp4a_vdr_row<Q,THREADS,VDR,OutT>`
+>   (`IPB/VDR` threads/block, VDR dp4a chained → one scale multiply; VDR=1 ==
+>   `mmvq_dp4a_row`). Both Q8_0 vdr2 kernels templated (bit-identical); t128_vdr2
+>   is the production decode kernel via the runtime alias (gate_up parity test
+>   verifies it). **Second emit fix:** non-monotonic winners in m
+>   (dp4a@1, t128_vdr2@8, dp4a@16) made the impl-grouped emit produce OVERLAPPING
+>   rows; `emit_dispatch` now builds **disjoint contiguous m-runs**. Q8_0 sm_86
+>   variants are within noise (~0.3%) on the 3090 → dp4a wins (single row).
+> - **NEXT: `r2`/`r4`** — wave64-shaped multi-row (2/4 output rows per block).
+>   Reuse `mmvq_reduce_store_2row` (built for Q4_K); a `_4row` sibling for r4.
+>   These are the K-quant config variants (Q4KR2 etc. already exist as hand
+>   kernels). `gate_up`/`batched`/`row_tile` change the op signature (2 outputs /
+>   N columns) — separate skeletons, later.
 > - Because dispatch is m-only, a config variant only earns a dispatch row if it
 >   wins the **per-m aggregate**; otherwise it stays a certified bench-reference
->   candidate (like t128 here). Keep that in mind picking which variants to port.
->
-> **Remaining config variants** — `vdr2`/`r2`/`r4`/`gate_up`/`batched`/`row_tile`
->   MMVQ per dtype (the autotune candidate fan-out — where per-shape autotune
->   earns its keep). `r2`/`r4` are wave64-shaped → reuse `mmvq_reduce_store_2row`
->   / add a `_4row` sibling.
+>   candidate (like t128/t128_vdr2 on the 3090). Two emit bugs are now fixed
+>   (per-m k-collapse + disjoint m-runs) — the autotune emit handles
+>   multi-candidate config variants correctly.
 > - Then **P2c mmq** (4-warp LDS-tiled — the big prefill lever) and **P2d**
 >   indexed_moe. See `PORTABILITY-ROADMAP.md`.
 >
