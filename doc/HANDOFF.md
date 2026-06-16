@@ -102,15 +102,29 @@ sm_86) is built and `feature/cuda-decouple` is pulled in.
 >   the 2 rows are 2 warps; no LDS). CUDA pass validated wave32.
 > - **Q8_K** (simplest K-quant) reused `mmvq_reduce_store<256>`, byte-identical.
 >
-> **cuda/sm_86 = 11 mmvq rows** (Q2/Q3/Q4/Q5/Q6/Q8_K + Q4_0/Q4_1/Q5_0/Q5_1/
-> Q8_0); cert-check green (cuda 11, hip 82). Every standard GGUF weight quant is
-> now templated on both backends from one source.
+> **+ IQ4 family DONE** — IQ4_NL (`e4526c3`) + IQ4_XS (`334d8bd`). Needed a new
+> neutral **`byte_perm`** primitive (codebook LUT permute) in both
+> arch_primitives headers: HIP = `__builtin_amdgcn_perm`; CUDA =
+> `__byte_perm(b,a,packed)` with the byte-per-output selector repacked to
+> nibble-per-output + source operands swapped (valid for selectors 0..7, which
+> is all the LUTs use). HIP byte-identical, CUDA cert validated the translation.
+> IQ4_XS reuses `iq4_nl_table_4` + the shared neutral `flambeau_iq4_xs_scale`.
+>
+> **cuda/sm_86 = 13 mmvq rows** (Q2/Q3/Q4/Q5/Q6/Q8_K + Q4_0/Q4_1/Q5_0/Q5_1/Q8_0
+> + IQ4_NL/IQ4_XS); cert-check green (cuda 13, hip 82). Every standard GGUF
+> weight quant **and** the IQ4 family is now templated on both backends.
 >
 > **NEXT (P2a tail → P2b):**
-> - **IQ quants** — `IQ1_S/M`, `IQ2_XXS/XS/S`, `IQ3_XXS/S`, `IQ4_NL/XS`: each has
->   `mmvq_*` + `*_dp4a` + `*_r2` variants (already in the `Dtype` enum, suffixed
->   impl_ids). Codebook grid lookups via the already-shared `iq_grid.cuh`; port
->   the 256-thread single-row dp4a ones first (reuse `mmvq_reduce_store<256>`).
+> - **IQ1/2/3 quants** — `IQ1_S/M`, `IQ2_XXS/XS/S`, `IQ3_XXS/S` (7 dp4a kernels).
+>   **Verified fully mechanical**: zero HIP intrinsics beyond `sdot4`+reduce, all
+>   256-thread single-row → reuse `mmvq_reduce_store<256>` + neutral `dp4a` +
+>   `load_int_b2`. They decode via the **already-neutral `iq_grid.cuh`** (1127
+>   lines of constant codebook tables, 0 `amdgcn`). Only per-kernel work is
+>   transcribing the (complex, 16–19 grid-ref) body to a neutral `.cuh`.
+>   **CAVEAT: `iq_grid.cuh` has never been nvcc-compiled** — the first IQ-grid
+>   CUDA port should watch for nvcc choking on the big constant-table header
+>   (the IQ4 ones don't use it). Batch-friendly: port all 7 `.cuh`+cells+renames,
+>   one HIP build + 7 sweeps, one CUDA build + 7 sweeps+emits.
 > - **Config variants** — `t128`/`vdr2`/`r2`/`r4`/`gate_up`/`batched`/`row_tile`
 >   MMVQ per dtype (the autotune candidate fan-out — where per-shape autotune
 >   earns its keep). `r2`/`r4` are wave64-shaped → reuse `mmvq_reduce_store_2row`
