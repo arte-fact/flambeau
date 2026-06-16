@@ -28,13 +28,27 @@ sm_86) is built and `feature/cuda-decouple` is pulled in. Delete once P1 closes.
   generates the wrapper `.cu` for both backends; the `mmvq_q8_0_dp4a` wrappers are
   now generated, not hand-written.
 
-**Next P1 item = backend-generic `bench` + `bench autotune`** (genericize bench over
-`core::Device` — it still hard-names `HipDevice` — then the rank/emit loop; run on
-gfx906 to reproduce hand-tuned rows + sm_86 to emit `dispatch/cuda/sm_86.toml`). See
-"Then continue P1" below + `AUTOTUNE.md`. After that the loop is proven end-to-end
-and P2 (mmvq all dtypes → fusion → mmq → MoE) is mechanical via manifest cells.
+- **Bench genericization DONE** (commits `968f6a3` + `76e17bc`): `LaunchCfg` hoisted
+  to `core`; new bench-local `BenchBackend` trait (`crates/bench/src/backend.rs`,
+  impls `Hip`/`Cuda`) abstracts module-load + launch + static attrs; `harness.rs` +
+  `sweep_mmvq.rs` are generic over it; bench `cuda` feature + cli `cuda_sweep` feature
+  + `sweep --arch sm_86` routing (`sweep_cuda`). New `Dtype::Q8_0Dp4a` (arch-neutral
+  impl_id `qmatmul_q8_0_mmvq_dp4a`). **First-ever CUDA cert emitted** —
+  `sweep --arch sm_86 --op qmatmul --dtype Q8_0_dp4a` pass=true/15 on the 3090;
+  gfx906 dp4a sweep also green; gfx906 refactor check holds (single-row cert results
+  byte-identical, only PMC/timestamp churn). Build the combined binary with
+  `--features "hip_sweep cuda_sweep"`. (BenchBackend → `core::Device` promotion still
+  deferred to P5.)
 
-- **Branch `feature/cuda-decouple`** (pushed, tip ~`49ee597`) has it all:
+**Next P1 item = the autotune rank-and-emit loop** (the last P1 gate): on top of the
+generic harness, time the certified mmvq Q8_0 candidate variants per shape bucket and
+write `dispatch/<backend>/<arch>.toml` rows. Run on gfx906 (must REPRODUCE the
+hand-tuned `dispatch/hip/gfx906.toml` rows — a real correctness check) and sm_86 (emit
+`dispatch/cuda/sm_86.toml`, currently an empty placeholder). CUDA has one mmvq
+candidate today (dp4a → trivial rank); HIP has ~10. See `AUTOTUNE.md`. After that P1
+closes and P2 (mmvq all dtypes → fusion → mmq → MoE) is mechanical via manifest cells.
+
+- **Branch `feature/cuda-decouple`** (pushed, tip ~`76e17bc`) has it all:
   - Decoupling A0–A3 — `ForwardEngine<B>`, the backend seams, models/server
     backend-clean. **Validated on gfx906** before this work.
   - CUDA backend B0/B1 + B2-foundation — `cu*` driver core, `add_f32`,
