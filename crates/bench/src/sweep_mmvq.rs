@@ -289,7 +289,7 @@ impl Dtype {
             Dtype::Q4K => "qmatmul_q4_K_mmvq_single_row_gfx906",
             Dtype::Q5K => "qmatmul_q5_K_mmvq_single_row_gfx906",
             Dtype::Q6K => "qmatmul_q6_K_mmvq_single_row_gfx906",
-            Dtype::Q8K => "qmatmul_q8_K_mmvq_single_row_gfx906",
+            Dtype::Q8K => "qmatmul_q8_k_mmvq_single_row",
             Dtype::Q4KR2 => "qmatmul_q4_K_mmvq_nw1_r2_gfx906",
             Dtype::Q4KR2Dp4a => "qmatmul_q4_k_mmvq_dp4a",
             Dtype::Q5KR2 => "qmatmul_q5_K_mmvq_nw1_r2_gfx906",

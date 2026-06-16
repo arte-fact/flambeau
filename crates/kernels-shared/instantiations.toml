@@ -247,3 +247,29 @@ params = """
     const int n_rows,
     const int n_superblocks_per_row"""
 body = "mmvq_q4_k_r2_dp4a_row<fb_fp16_t>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+# Q8_K single-row MMVQ — simplest K-quant (f32 d, no sub-block scales). 256
+# threads, dp4a per Q8_1 sub-block. Used by UD-Q8_K_XL GGUFs.
+[[kernel]]
+stem = "mmvq_q8_k"
+includes = ["mmvq_q8_k.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q8_K_q8_1"
+params = """
+    const flambeau_block_q8_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_super_blocks_per_row"""
+body = "mmvq_q8_k_row<float>(x, y, dst, n_rows, n_super_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q8_K_q8_1_f16"
+params = """
+    const flambeau_block_q8_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_super_blocks_per_row"""
+body = "mmvq_q8_k_row<fb_fp16_t>(x, y, dst, n_rows, n_super_blocks_per_row);"

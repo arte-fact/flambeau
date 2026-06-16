@@ -1735,7 +1735,7 @@ impl Recipe {
                 rows_per_block: 2,
                 mmq_tile: (0, 0),
             },
-            "qmatmul_q8_K_mmvq_single_row_gfx906" => Self {
+            "qmatmul_q8_k_mmvq_single_row" => Self {
                 kind: RecipeKind::Mmvq,
                 stem: "mmvq_q8_k",
                 entry: "flambeau_mmvq_q8_K_q8_1",
