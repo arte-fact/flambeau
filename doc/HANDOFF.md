@@ -24,11 +24,17 @@ sm_86) is built and `feature/cuda-decouple` is pulled in. Delete once P1 closes.
   kernel are thin wrappers (same `flambeau_quantize_row_q8_1` entry). CUDA
   bit-exact vs CPU ref on the 3090. The CUDA activation path is real.
 
-**Next P1 item = the instantiation manifest + codegen** (then backend-generic
-bench) — see "Then continue P1" below. The two pilots prove the templating loop
-end-to-end on both backends.
+- **Instantiation manifest + codegen DONE** (commit `49ee597`): a manifest cell
+  generates the wrapper `.cu` for both backends; the `mmvq_q8_0_dp4a` wrappers are
+  now generated, not hand-written.
 
-- **Branch `feature/cuda-decouple`** (pushed, tip ~`36b7a18`) has it all:
+**Next P1 item = backend-generic `bench` + `bench autotune`** (genericize bench over
+`core::Device` — it still hard-names `HipDevice` — then the rank/emit loop; run on
+gfx906 to reproduce hand-tuned rows + sm_86 to emit `dispatch/cuda/sm_86.toml`). See
+"Then continue P1" below + `AUTOTUNE.md`. After that the loop is proven end-to-end
+and P2 (mmvq all dtypes → fusion → mmq → MoE) is mechanical via manifest cells.
+
+- **Branch `feature/cuda-decouple`** (pushed, tip ~`49ee597`) has it all:
   - Decoupling A0–A3 — `ForwardEngine<B>`, the backend seams, models/server
     backend-clean. **Validated on gfx906** before this work.
   - CUDA backend B0/B1 + B2-foundation — `cu*` driver core, `add_f32`,
@@ -102,9 +108,13 @@ canonical `mmvq_q8_0_dp4a`, bit-identical to the old hand-written kernel.
 - ~~Port `quantize_q8_1` (CUDA) so the activation path is real.~~ ✅ DONE (commit
   `36b7a18`) — now a shared `kernels-shared/include/quantize_q8_1.cuh` device fn
   with thin HIP + CUDA wrappers; CUDA bit-exact vs CPU ref on the 3090.
-- **Instantiation manifest + codegen**: `kernels/instantiations.toml` → a `build.rs`
-  helper that generates the `extern "C"` wrapper `.cu` per cell, for both
-  `kernels-hip` and `kernels-cuda`. Replace the hand-written `mmvq_q8_0` wrappers.
+- ~~Instantiation manifest + codegen~~ ✅ DONE (commit `49ee597`):
+  `crates/kernels-shared/instantiations.toml` declares cells (stem/entry/includes/
+  params/body); both `build.rs` generate the wrapper `.cu` into `OUT_DIR/generated/`
+  (arch header injected: `gfx906.cuh` HIP / `sm_80.cuh` CUDA) and compile them. The
+  hand-written `mmvq_q8_0_dp4a` wrappers are gone. **P2 = add cells to the manifest,
+  not pairs of files.** The codegen helper is duplicated in both `build.rs`
+  (rule-14 2-site OK); a third backend extracts it to a build-helper crate.
 - **Backend-generic `bench` + `bench autotune`** (rank-and-emit): genericize bench
   over `core::Device` (it still hard-names `HipDevice`), then the rank/emit loop.
   Run on gfx906 (must reproduce the hand-tuned rows) and sm_86 (emit
