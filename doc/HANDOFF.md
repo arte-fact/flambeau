@@ -136,8 +136,26 @@ sm_86) is built and `feature/cuda-decouple` is pulled in.
 > uvm was absent segfaults at startup forever — force a relink (`touch
 > crates/cli/src/main.rs`) after the GPU returns.
 >
-> **NEXT (P2b):**
-> - **Config variants** — `t128`/`vdr2`/`r2`/`r4`/`gate_up`/`batched`/`row_tile`
+> **P2b STARTED (`ad68761`)** — config variants + the autotune fix that makes
+> multi-candidate selection actually work. Q8_0 `t128` templated as the trivial
+> `mmvq_dp4a_row<Q8_0,128>` (skeleton already has THREADS); first real
+> multi-candidate CUDA autotune (dp4a-256 vs t128-128). **Key fix: the runtime
+> dispatch is m-only** (`KernelDescriptor.m_range`, NO k-range) — a config
+> variant that wins at one k and loses at another can't be two rows (that's the
+> "two rows match the same shape" build error). The autotune now picks the per-m
+> winner by **best total time across the k-grid**, not per-(m,k). Candidate sets
+> are **arch-aware** (`sm_86` = CUDA-ported subset). Mechanics for the rest:
+> - **`t128`** for other dtypes (Q4_0/Q4_1 have hand t128) = same trivial
+>   `<Q,128>` instantiation. `vdr2` needs a **VDR template param** on the skeleton
+>   (2 dp4a per pair-slot, 4 threads/block) — a real skeleton extension, the next
+>   design step. `r2`/`r4` are wave64-shaped → reuse `mmvq_reduce_store_2row` /
+>   add a `_4row` sibling. `gate_up`/`batched`/`row_tile` change the op signature
+>   (2 outputs / N columns) — separate skeletons.
+> - Because dispatch is m-only, a config variant only earns a dispatch row if it
+>   wins the **per-m aggregate**; otherwise it stays a certified bench-reference
+>   candidate (like t128 here). Keep that in mind picking which variants to port.
+>
+> **Remaining config variants** — `vdr2`/`r2`/`r4`/`gate_up`/`batched`/`row_tile`
 >   MMVQ per dtype (the autotune candidate fan-out — where per-shape autotune
 >   earns its keep). `r2`/`r4` are wave64-shaped → reuse `mmvq_reduce_store_2row`
 >   / add a `_4row` sibling.
