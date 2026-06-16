@@ -9,6 +9,25 @@
 // header, included before this one.
 #include "mmvq_store.cuh"
 
+// Reduce-and-store for the r2 (2 output rows per 64-thread block) MMVQ kernels.
+// Each row is owned by a contiguous 32-lane group — a sub-warp on wave64 (two
+// groups share one warp) or a full warp on wave32 (the two rows are two warps).
+// A width-32 `__shfl_xor` butterfly reduces within the group on both, with no
+// LDS / cross-warp traffic. `32` here is the row-group width (THREADS/ROWS =
+// 64/2), not a wave-size assumption. The ascending offset order (1,2,4,8,16)
+// matches gfx906's DPP `half_warp_reduce_sum` add order so the HIP result stays
+// bit-identical to the hand-written kernel. `lane_lo` is the caller's intra-row
+// lane (`threadIdx.x & 31`).
+template<class OutT>
+static __device__ __forceinline__ void mmvq_reduce_store_2row(
+    float acc, OutT* dst, int row, int lane_lo) {
+    #pragma unroll
+    for (int off = 1; off < 32; off <<= 1) {
+        acc += __shfl_xor(acc, off, 32);
+    }
+    if (lane_lo == 0) mmvq_store<OutT>(dst, row, acc);
+}
+
 template<int THREADS, class OutT>
 static __device__ __forceinline__ void mmvq_reduce_store(float acc, OutT* dst, int row) {
     constexpr int WARPS = THREADS / WARP_SIZE;

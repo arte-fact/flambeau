@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "impl_id": "qmatmul_q4_K_mmvq_dp4a_gfx906",
-  "backend": "hip",
-  "arch": "gfx906",
+  "impl_id": "qmatmul_q4_k_mmvq_dp4a",
+  "backend": "cuda",
+  "arch": "sm_86",
   "op": "qmatmul_mmvq",
   "dtype_weight": "Q4_K",
   "dtype_activation": "Q8_1",
@@ -145,12 +145,12 @@
     }
   ],
   "pass": true,
-  "emitted_at": "2026-06-02T07:41:02Z",
-  "rig": "threadreaper-gfx906",
+  "emitted_at": "2026-06-16T12:42:56Z",
+  "rig": "threadreaper-sm_86",
   "pmc": {
-    "vgpr_count": 24,
+    "vgpr_count": 37,
     "sgpr_count": null,
-    "waves_per_simd": 10,
+    "waves_per_simd": null,
     "mem_busy_pct": null,
     "valu_busy_pct": null
   }

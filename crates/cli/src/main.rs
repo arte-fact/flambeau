@@ -1261,10 +1261,12 @@ fn autotune(arch: &str, op: &str, dtype: &str, emit: bool) -> Result<()> {
             "Q5_0" => vec![Dtype::Q5_0],
             "Q5_1" => vec![Dtype::Q5_1],
             "Q2_K" => vec![Dtype::Q2KDp4a],
-            "Q3_K" => vec![Dtype::Q3KDp4a],            "Q5_K" => vec![Dtype::Q5KDp4a],
+            "Q3_K" => vec![Dtype::Q3KDp4a],
+            "Q4_K" => vec![Dtype::Q4KR2Dp4a],
+            "Q5_K" => vec![Dtype::Q5KDp4a],
             "Q6_K" => vec![Dtype::Q6KDP4A],
             other => anyhow::bail!(
-                "autotune: only --dtype Q8_0 / Q4_0 / Q4_1 / Q5_0 / Q5_1 / Q2_K / Q3_K / Q5_K / Q6_K are wired so far (got {other:?})"
+                "autotune: only --dtype Q8_0 / Q4_0 / Q4_1 / Q5_0 / Q5_1 / Q2_K / Q3_K / Q4_K / Q5_K / Q6_K are wired so far (got {other:?})"
             ),
         };
         let m_grid = [1usize, 8, 16];
@@ -1308,7 +1310,9 @@ fn sweep_cuda(op: &str, dtype: &str) -> Result<()> {
         "Q5_0" => vec![Dtype::Q5_0],
         "Q5_1" => vec![Dtype::Q5_1],
         "Q2_K" => vec![Dtype::Q2KDp4a],
-        "Q3_K" => vec![Dtype::Q3KDp4a],        "Q5_K" => vec![Dtype::Q5KDp4a],
+        "Q3_K" => vec![Dtype::Q3KDp4a],
+        "Q4_K" => vec![Dtype::Q4KR2Dp4a],
+        "Q5_K" => vec![Dtype::Q5KDp4a],
         "Q6_K" => vec![Dtype::Q6KDP4A],
         "all" => vec![
             Dtype::Q8_0Dp4a,
@@ -1317,9 +1321,13 @@ fn sweep_cuda(op: &str, dtype: &str) -> Result<()> {
             Dtype::Q5_0,
             Dtype::Q5_1,
             Dtype::Q2KDp4a,
-            Dtype::Q3KDp4a,            Dtype::Q5KDp4a,            Dtype::Q6KDP4A,        ],
+            Dtype::Q3KDp4a,
+            Dtype::Q4KR2Dp4a,
+            Dtype::Q5KDp4a,
+            Dtype::Q6KDP4A,
+        ],
         other => {
-            anyhow::bail!("--arch sm_86: only Q8_0 / Q4_0 / Q4_1 / Q5_0 / Q5_1 / Q2_K / Q3_K / Q5_K / Q6_K mmvq dp4a are ported to CUDA so far (got {other:?})")
+            anyhow::bail!("--arch sm_86: only Q8_0 / Q4_0 / Q4_1 / Q5_0 / Q5_1 / Q2_K / Q3_K / Q4_K / Q5_K / Q6_K mmvq dp4a are ported to CUDA so far (got {other:?})")
         }
     };
     let root = repo_root();
@@ -1401,7 +1409,7 @@ fn pmc_refresh(arch: &str) -> Result<()> {
                 64,
             ),
             (
-                "qmatmul_q4_K_mmvq_dp4a_gfx906",
+                "qmatmul_q4_k_mmvq_dp4a",
                 "mmvq_q4_k_r2_dp4a",
                 1,
                 2048,
