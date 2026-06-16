@@ -114,17 +114,27 @@ sm_86) is built and `feature/cuda-decouple` is pulled in.
 > + IQ4_NL/IQ4_XS); cert-check green (cuda 13, hip 82). Every standard GGUF
 > weight quant **and** the IQ4 family is now templated on both backends.
 >
+> **+ IQ2_XXS DONE** (`134e225` HIP + `6949ff1` CUDA) — first grid-codebook
+> kernel. **iq_grid.cuh nvcc-compiles + certs clean on the 3090** → the whole
+> IQ-grid CUDA path is proven (the earlier caveat is retired). cuda/sm_86 = 14
+> mmvq rows. (Rig note: hit a `cuInit 999` here because the sandbox was missing
+> `/dev/nvidia-uvm`; root cause + host fix are in memory
+> `reference-dev-rig-nvidia-sandbox`.)
+>
 > **NEXT (P2a tail → P2b):**
-> - **IQ1/2/3 quants** — `IQ1_S/M`, `IQ2_XXS/XS/S`, `IQ3_XXS/S` (7 dp4a kernels).
->   **Verified fully mechanical**: zero HIP intrinsics beyond `sdot4`+reduce, all
->   256-thread single-row → reuse `mmvq_reduce_store<256>` + neutral `dp4a` +
->   `load_int_b2`. They decode via the **already-neutral `iq_grid.cuh`** (1127
->   lines of constant codebook tables, 0 `amdgcn`). Only per-kernel work is
->   transcribing the (complex, 16–19 grid-ref) body to a neutral `.cuh`.
->   **CAVEAT: `iq_grid.cuh` has never been nvcc-compiled** — the first IQ-grid
->   CUDA port should watch for nvcc choking on the big constant-table header
->   (the IQ4 ones don't use it). Batch-friendly: port all 7 `.cuh`+cells+renames,
->   one HIP build + 7 sweeps, one CUDA build + 7 sweeps+emits.
+> - **IQ1/2/3 remaining** — `IQ1_S/M`, `IQ2_XS/S`, `IQ3_XXS/S` (6 dp4a kernels).
+>   **Fully mechanical and de-risked** (IQ2_XXS is the worked template at
+>   `mmvq_iq2_xxs.cuh`): all 256-thread single-row → reuse `mmvq_reduce_store<256>`
+>   + neutral `dp4a` + `load_int_b2` + the neutral `iq_grid.cuh`. Per-kernel care:
+>   each has its own grid (`IQ3XXS_GRID` u32 vs `IQ2XXS_GRID` u64, `IQ3S_GRID`,
+>   `IQ2XS/IQ2S/IQ1S/IQ1M` grids), its own `apply_signs`/`unpack_ksigns` variant
+>   (IQ3_XXS uses the same sign-pack as IQ2_XXS + a `sumi=(ls*sumi+sumi/2)/2`
+>   rounding; IQ3_S/IQ2_S/IQ2_XS carry explicit sign/qh arrays), and `__builtin_
+>   popcount` (both-compiler builtin). Transcribe each body faithfully (swap the
+>   `flambeau_iq*_dp4a`→`dp4a`, reduce→`mmvq_reduce_store<256>`, misaligned int
+>   reads→`load_int_b2`), one neutral `.cuh` each. Batch-friendly. **Low model
+>   relevance** (extreme-compression quants) — fine to defer behind config
+>   variants / mmq if prioritizing impact.
 > - **Config variants** — `t128`/`vdr2`/`r2`/`r4`/`gate_up`/`batched`/`row_tile`
 >   MMVQ per dtype (the autotune candidate fan-out — where per-shape autotune
 >   earns its keep). `r2`/`r4` are wave64-shaped → reuse `mmvq_reduce_store_2row`
