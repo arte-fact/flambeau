@@ -35,13 +35,17 @@ sm_86) is built and `feature/cuda-decouple` is pulled in.
 > shapes; `--dtype Q8_0_batched`); cert both backends err 2.3e-3, HIP↔CUDA equal,
 > bench-reference registered. The CUDA port also fixes the hand kernel's
 > NVIDIA-unsafe `((int*)qs)[i]` (now `load_int_b2` via `partial`).
-> **Q4_0 + Q4_1 batched also done** (`60d5483`-next) — zero new C++, the generic
-> skeleton + their `quant_traits::partial` (which already carries the `(q-8)` /
-> `+m·s_y` bias) covered them; manifest + `BatchedDtype` enum only. Certed both
-> backends (err 4.4e-4 / 2.4e-4, HIP↔CUDA equal). **NEXT batched:** the K-quants
-> (Q4_K / Q5_K-r2 / Q6_K — own super-block bodies, like the gate_up K-quant).
-> Then `row_tile`. Then **P2c mmq** (4-warp LDS-tiled prefill lever) + **P2d**
-> indexed_moe.
+> **ALL plain `batched` DONE** — Q8_0 (`60d5483`) + Q4_0/Q4_1 (`934df12`, zero
+> new C++ via `quant_traits::partial`) + Q4_K (`463157c`) + Q6_K + Q5_K-r2. The
+> 3 K-quants are scalar-FP32 super-block bodies (Q4_K/Q6_K 64t single-row reuse
+> `mmvq_reduce_store_batched`; Q5_K is r2 2-rows/block → new
+> `mmvq_reduce_store_2row_batched<N>`, grid ceil(m/2)). All byte/fp16 loads (no
+> `load_int_b2`). Certed both backends (err ≤1.5e-2, HIP↔CUDA equal); all 6 hand
+> `.cu` retired, ops/runtime untouched, bench-references registered. Harness
+> `BatchedDtype` now carries `launch_threads` (256/64) + `rows_per_block` (1/2).
+> **NEXT P2b: `row_tile`** (`mmvq_*_row_tile_batched.cu` — R output rows/block ×
+> N cols; and the `*_gate_up_row_tile_*` combo). Then **P2c mmq** (4-warp
+> LDS-tiled prefill lever) + **P2d** indexed_moe.
 >
 > *(first gate_up slice writeup)*
 > **Q8_0 `gate_up`** (dense FFN decode kernel) templated onto a neutral skeleton

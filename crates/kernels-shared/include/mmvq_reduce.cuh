@@ -125,6 +125,26 @@ static __device__ __forceinline__ void mmvq_reduce_store_batched(
     }
 }
 
+// N-way variant of the 2-row reduce: a 32-lane row-group reduces N column
+// accumulators with the width-32 `__shfl_xor` butterfly (ascending offsets
+// matching gfx906's DPP half_warp add order, so HIP stays bit-identical to the
+// hand kernel) and writes the slot-major `dst[c*n_rows + row]`. No LDS — each
+// row is a sub-warp on wave64 / a full warp on wave32. `lane_lo` is the caller's
+// intra-row lane (`threadIdx.x & 31`).
+template<int N, class OutT>
+static __device__ __forceinline__ void mmvq_reduce_store_2row_batched(
+    float (&acc)[N], OutT* dst, int row, int n_rows, int lane_lo) {
+    #pragma unroll
+    for (int c = 0; c < N; ++c) {
+        float v = acc[c];
+        #pragma unroll
+        for (int off = 1; off < 32; off <<= 1) {
+            v += __shfl_xor(v, off, 32);
+        }
+        if (lane_lo == 0) mmvq_store<OutT>(dst, c * n_rows + row, v);
+    }
+}
+
 template<int THREADS, class OutT>
 static __device__ __forceinline__ void mmvq_reduce_store(float acc, OutT* dst, int row) {
     constexpr int WARPS = THREADS / WARP_SIZE;
