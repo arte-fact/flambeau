@@ -19,13 +19,22 @@ struct Manifest {
 #[derive(Deserialize)]
 struct KernelCell {
     stem: String,
-    entry: String,
     includes: Vec<String>,
+    entry: Vec<EntrySpec>,
+}
+
+#[derive(Deserialize)]
+struct EntrySpec {
+    name: String,
     params: String,
     body: String,
 }
 
-/// Generate one `extern "C"` wrapper `.cu` per manifest cell into `gen_dir`.
+/// Generate one wrapper `.cu` per manifest cell into `gen_dir`.
+///
+/// Each cell emits one or more `extern "C" __global__` entries sharing the
+/// cell's includes and `.cu` (so a single backend module — e.g. `mmvq_q4_0` —
+/// can carry both its F32 and F16-dst entry points).
 ///
 /// `arch_header` is the calling backend's arch-primitives header
 /// (`gfx906.cuh` for HIP, `sm_80.cuh` for CUDA); it is injected ahead of each
@@ -54,11 +63,13 @@ pub fn generate_instantiations(manifest: &Path, gen_dir: &Path, arch_header: &st
         for inc in &cell.includes {
             writeln!(src, "#include \"{inc}\"").expect("write to String is infallible");
         }
-        writeln!(src, "\nextern \"C\" __global__ void {}(", cell.entry)
-            .expect("write to String is infallible");
-        writeln!(src, "{}\n) {{", cell.params).expect("write to String is infallible");
-        writeln!(src, "    {}", cell.body).expect("write to String is infallible");
-        src.push_str("}\n");
+        for ent in &cell.entry {
+            writeln!(src, "\nextern \"C\" __global__ void {}(", ent.name)
+                .expect("write to String is infallible");
+            writeln!(src, "{}\n) {{", ent.params).expect("write to String is infallible");
+            writeln!(src, "    {}", ent.body).expect("write to String is infallible");
+            src.push_str("}\n");
+        }
 
         let path = gen_dir.join(format!("{}.cu", cell.stem));
         let changed = fs::read_to_string(&path).map(|existing| existing != src).unwrap_or(true);

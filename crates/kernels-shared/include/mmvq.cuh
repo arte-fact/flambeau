@@ -3,17 +3,20 @@
 // activation column -> F32. One thread block per output row; each thread owns
 // one int32 (4 packed quants) of a block; `dp4a` inner product; a warp reduce
 // then an inter-warp reduce through shared memory. `Q` selects the weight dtype
-// via quant_traits; `THREADS` is the block size. The arch primitives it calls
-// (`dp4a`, `warp_reduce_sum`, `__shfl_xor`) come from the backend's
-// arch_primitives header, included before this one. Warp-size agnostic: the
-// block stride and warp count derive from WARP_SIZE.
+// via quant_traits; `THREADS` is the block size; `OutT` is the destination
+// dtype (`float` for the scratch-then-cast path, `fb_fp16_t` for direct F16-dst
+// with saturation). The arch primitives it calls (`dp4a`, `warp_reduce_sum`,
+// `__shfl_xor`) come from the backend's arch_primitives header, included before
+// this one. Warp-size agnostic: the block stride and warp count derive from
+// WARP_SIZE.
 #include "quant_traits.cuh"
+#include "mmvq_store.cuh"
 
-template<class Q, int THREADS>
+template<class Q, int THREADS, class OutT = float>
 static __device__ __forceinline__ void mmvq_dp4a_row(
     const typename quant_traits<Q>::block_t* __restrict__ x,
     const flambeau_block_q8_1* __restrict__ y,
-    float* __restrict__ dst,
+    OutT* __restrict__ dst,
     int n_rows, int n_blocks_per_row)
 {
     using T = quant_traits<Q>;
@@ -47,6 +50,6 @@ static __device__ __forceinline__ void mmvq_dp4a_row(
         for (int off = WARPS / 2; off > 0; off >>= 1) {
             v += __shfl_xor(v, off, WARP_SIZE);
         }
-        if (lane == 0) dst[row] = v;
+        if (lane == 0) mmvq_store<OutT>(dst, row, v);
     }
 }

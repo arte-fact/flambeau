@@ -1,17 +1,21 @@
 # Backend-neutral kernel instantiation manifest.
 #
-# Each [[kernel]] cell generates one `extern "C" __global__` wrapper `.cu` for
-# BOTH backends (kernels-hip + kernels-cuda) at build time. The build scripts
-# inject the per-backend arch-primitives header ahead of `includes` (gfx906.cuh
-# for HIP, sm_80.cuh for CUDA), so a templated kernel is a cell here — not two
+# Each [[kernel]] cell generates one wrapper `.cu` for BOTH backends
+# (kernels-hip + kernels-cuda) at build time. The build scripts inject the
+# per-backend arch-primitives header ahead of `includes` (gfx906.cuh for HIP,
+# sm_80.cuh for CUDA), so a templated kernel is a cell here — not two
 # hand-written wrappers that drift. `stem` is the catalogue key (what
-# `hsaco(..)` / `cubin(..)` look up); `entry` is the dispatch ABI symbol, which
-# must be identical on both backends.
+# `hsaco(..)` / `cubin(..)` look up). A cell carries one or more
+# `[[kernel.entry]]` blocks sharing that `.cu`/module — each `name` is a
+# dispatch ABI symbol, identical on both backends (e.g. an F32 dst entry plus
+# an F16-dst entry).
 
 [[kernel]]
 stem = "mmvq_q8_0_dp4a"
-entry = "flambeau_mmvq_q8_0_dp4a_q8_1"
 includes = ["quant_traits.cuh", "mmvq.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q8_0_dp4a_q8_1"
 params = """
     const flambeau_block_q8_0* __restrict__ x,
     const flambeau_block_q8_1* __restrict__ y,
@@ -19,3 +23,30 @@ params = """
     const int n_rows,
     const int n_blocks_per_row"""
 body = "mmvq_dp4a_row<Q8_0, 256>(x, y, dst, n_rows, n_blocks_per_row);"
+
+# Q4_0 single-row MMVQ — legacy 4-bit (nibble unpack + (q-8) bias correction).
+# One module carries both the F32 dst entry (scratch-then-cast path) and the
+# F16-dst entry (mmvq_q4_0_kv_decode_f16 / mmvq_f16_direct).
+[[kernel]]
+stem = "mmvq_q4_0"
+includes = ["quant_traits.cuh", "mmvq.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_0_q8_1"
+params = """
+    const flambeau_block_q4_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_dp4a_row<Q4_0, 256>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_0_q8_1_f16"
+params = """
+    const flambeau_block_q4_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_dp4a_row<Q4_0, 256, fb_fp16_t>(x, y, dst, n_rows, n_blocks_per_row);"

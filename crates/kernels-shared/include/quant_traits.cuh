@@ -17,6 +17,7 @@ static __device__ __forceinline__ int load_int_b2(const int8_t* p, int i) {
 
 // Weight-dtype tag types.
 struct Q8_0 {};
+struct Q4_0 {};
 
 template<class Q> struct quant_traits;
 
@@ -34,5 +35,31 @@ template<> struct quant_traits<Q8_0> {
         const int xi = load_int_b2(bx.qs, j);
         const int yi = load_int_b2(by.qs, j);
         return (float) bx.d * (float) by.d * (float) dp4a(xi, yi, 0);
+    }
+};
+
+template<> struct quant_traits<Q4_0> {
+    using block_t = flambeau_block_q4_0;
+    // int32s of nibble-packed quants per block: 16 bytes of qs => QK4_0 / 8.
+    static constexpr int INT32_PER_BLOCK = QK4_0 / 8;
+
+    // Float contribution of int32 lane `j` of one Q4_0 weight block. Q4_0 has
+    // zero-point -8 (q in [0,15], y = d*(q-8)); DP4A can't bias packed bytes,
+    // so (q-8)·y = q·y - 8·sum(y), with sum(y)·d_y baked into the Q8_1 header
+    // as `s`. Lane `j` unpacks the 8 quants of one qs int32 into low / high
+    // nibble planes (matching activation int32s `j` and `j+4`) and folds a
+    // quarter of the per-block -8·d_x·s_y correction so the warp-reduce sums to
+    // exactly one correction per block.
+    static __device__ __forceinline__ float
+    partial(const block_t& bx, const flambeau_block_q8_1& by, int j) {
+        const int v     = load_int_b2((const int8_t*) bx.qs, j);
+        const int vi_lo = (v >> 0) & 0x0F0F0F0F;
+        const int vi_hi = (v >> 4) & 0x0F0F0F0F;
+        const int u_lo  = load_int_b2(by.qs, j);
+        const int u_hi  = load_int_b2(by.qs, j + 4);
+        int sumi = dp4a(vi_lo, u_lo, 0);
+        sumi     = dp4a(vi_hi, u_hi, sumi);
+        const float d_x = (float) bx.d;
+        return sumi * (d_x * (float) by.d) - 8.0f * d_x * (float) by.s * 0.25f;
     }
 };
