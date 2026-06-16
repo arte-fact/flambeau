@@ -487,8 +487,10 @@ version = "0.1.0-dev"
 dependencies = [
  "anyhow",
  "bytemuck",
+ "flambeau-backend-cuda",
  "flambeau-backend-hip",
  "flambeau-core",
+ "flambeau-kernels-cuda",
  "flambeau-kernels-hip",
  "flambeau-quant",
  "flambeau-runtime",

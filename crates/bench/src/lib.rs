@@ -10,7 +10,10 @@ pub mod cert;
 pub mod dispatch;
 pub mod pmc;
 
-#[cfg(feature = "hip")]
+#[cfg(any(feature = "hip", feature = "cuda"))]
+pub mod backend;
+
+#[cfg(any(feature = "hip", feature = "cuda"))]
 pub mod harness;
 
 #[cfg(feature = "hip")]

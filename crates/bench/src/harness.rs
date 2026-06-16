@@ -12,9 +12,8 @@
 //!   floor directly — callers that scale with `sqrt(k)` or `sqrt(head_dim)`
 //!   compute their floor at the call site.
 
-#![cfg(feature = "hip")]
+#![cfg(any(feature = "hip", feature = "cuda"))]
 
-use flambeau_backend_hip::HipDevice;
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 
 // splitmix64 constants — matches the sequence every sweep previously
@@ -40,11 +39,18 @@ pub fn hostname() -> Option<String> {
     })
 }
 
-/// The rig identifier that every sweep writes into its cert: the hostname
-/// suffixed with `-gfx906`, or `unknown-gfx906` when hostname lookup fails.
+/// The rig identifier a sweep writes into its cert: `<hostname>-<arch>`, or
+/// `unknown-<arch>` when hostname lookup fails.
+#[must_use]
+pub fn rig_for(arch: &str) -> String {
+    format!("{}-{arch}", hostname().unwrap_or_else(|| "unknown".into()))
+}
+
+/// Back-compat shortcut for the gfx906 rig string (HIP-only sweeps that
+/// predate the arch-parametric harness).
 #[must_use]
 pub fn rig() -> String {
-    format!("{}-gfx906", hostname().unwrap_or_else(|| "unknown".into()))
+    rig_for("gfx906")
 }
 
 /// Allocate `data.len() * size_of::<T>()` bytes on `dev`, copy `data` in,
@@ -54,7 +60,7 @@ pub fn rig() -> String {
 /// which runs in single-threaded test context — a panic here is a broken
 /// fixture, not a runtime bug to bubble up to callers.
 #[must_use]
-pub fn alloc_and_upload<T: Copy>(dev: &HipDevice, data: &[T]) -> DevicePtr {
+pub fn alloc_and_upload<D: Device, T: Copy>(dev: &D, data: &[T]) -> DevicePtr {
     let bytes = std::mem::size_of_val(data);
     let d = dev.alloc(bytes).expect("alloc_and_upload: alloc");
     // SAFETY: `d` owns `bytes`; `data` is `bytes` of valid host memory.
@@ -106,4 +112,3 @@ extern "C" {
     #[link_name = "gethostname"]
     fn libc_gethostname(name: *mut std::os::raw::c_char, len: usize) -> i32;
 }
-// Rust guideline compliant 2026-02-21
