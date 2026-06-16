@@ -37,7 +37,7 @@ fn main() {
         // Generate the templated `extern "C"` wrappers declared in the shared
         // manifest. sm_80.cuh is the baseline arch-primitives header for every
         // sm_8x/9x target.
-        let generated = generate_instantiations(
+        let generated = flambeau_kernels_shared::codegen::generate_instantiations(
             Path::new("../kernels-shared/instantiations.toml"),
             &out_dir.join("generated"),
             "sm_80.cuh",
@@ -108,57 +108,6 @@ fn enumerate_cu_files(dir: &Path) -> Vec<PathBuf> {
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().is_some_and(|x| x == "cu"))
         .collect()
-}
-
-#[derive(serde::Deserialize)]
-struct Manifest {
-    #[serde(default)]
-    kernel: Vec<KernelCell>,
-}
-
-#[derive(serde::Deserialize)]
-struct KernelCell {
-    stem: String,
-    entry: String,
-    includes: Vec<String>,
-    params: String,
-    body: String,
-}
-
-/// Generate one `extern "C"` wrapper `.cu` per manifest cell into `gen_dir`,
-/// injecting `arch_header` (this backend's arch-primitives header) ahead of the
-/// cell's shared includes. Returns the generated paths for the compile set. A
-/// cell's wrapper is rewritten only when its content changes, so unchanged
-/// cells don't churn the build cache.
-fn generate_instantiations(manifest: &Path, gen_dir: &Path, arch_header: &str) -> Vec<PathBuf> {
-    let Ok(text) = fs::read_to_string(manifest) else {
-        return vec![];
-    };
-    let parsed: Manifest = toml::from_str(&text).expect("parse instantiations.toml");
-    fs::create_dir_all(gen_dir).expect("create generated kernel dir");
-    let mut out = Vec::with_capacity(parsed.kernel.len());
-    for cell in &parsed.kernel {
-        let mut src = String::new();
-        src.push_str("// Auto-generated from kernels-shared/instantiations.toml.\n");
-        src.push_str("// Do not edit; change the manifest cell instead.\n");
-        writeln!(src, "#include \"{arch_header}\"").expect("write to String is infallible");
-        for inc in &cell.includes {
-            writeln!(src, "#include \"{inc}\"").expect("write to String is infallible");
-        }
-        writeln!(src, "\nextern \"C\" __global__ void {}(", cell.entry)
-            .expect("write to String is infallible");
-        writeln!(src, "{}\n) {{", cell.params).expect("write to String is infallible");
-        writeln!(src, "    {}", cell.body).expect("write to String is infallible");
-        src.push_str("}\n");
-
-        let path = gen_dir.join(format!("{}.cu", cell.stem));
-        let changed = fs::read_to_string(&path).map(|e| e != src).unwrap_or(true);
-        if changed {
-            fs::write(&path, &src).expect("write generated .cu");
-        }
-        out.push(path);
-    }
-    out
 }
 
 fn find_nvcc(cuda_path: &str) -> Option<PathBuf> {

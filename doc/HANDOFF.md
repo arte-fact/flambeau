@@ -113,8 +113,9 @@ canonical `mmvq_q8_0_dp4a`, bit-identical to the old hand-written kernel.
   params/body); both `build.rs` generate the wrapper `.cu` into `OUT_DIR/generated/`
   (arch header injected: `gfx906.cuh` HIP / `sm_80.cuh` CUDA) and compile them. The
   hand-written `mmvq_q8_0_dp4a` wrappers are gone. **P2 = add cells to the manifest,
-  not pairs of files.** The codegen helper is duplicated in both `build.rs`
-  (rule-14 2-site OK); a third backend extracts it to a build-helper crate.
+  not pairs of files.** The codegen helper lives in `flambeau-kernels-shared`
+  (`codegen` module, next to the manifest); both `build.rs` use it as a
+  build-dependency — one source of truth, a third backend reuses it for free.
 - **Backend-generic `bench` + `bench autotune`** (rank-and-emit): genericize bench
   over `core::Device` (it still hard-names `HipDevice`), then the rank/emit loop.
   Run on gfx906 (must reproduce the hand-tuned rows) and sm_86 (emit

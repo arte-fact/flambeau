@@ -565,10 +565,9 @@ name = "flambeau-kernels-cuda"
 version = "0.1.0-dev"
 dependencies = [
  "anyhow",
+ "flambeau-kernels-shared",
  "rayon",
- "serde",
  "sha2",
- "toml",
 ]
 
 [[package]]
@@ -576,15 +575,18 @@ name = "flambeau-kernels-hip"
 version = "0.1.0-dev"
 dependencies = [
  "anyhow",
+ "flambeau-kernels-shared",
  "rayon",
- "serde",
  "sha2",
- "toml",
 ]
 
 [[package]]
 name = "flambeau-kernels-shared"
 version = "0.1.0-dev"
+dependencies = [
+ "serde",
+ "toml",
+]
 
 [[package]]
 name = "flambeau-model-ops"
