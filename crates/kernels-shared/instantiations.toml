@@ -113,6 +113,27 @@ params = """
     const int n_blocks_per_row"""
 body = "mmvq_dp4a_nrow_row<Q8_0, 64, 4>(x, y, dst, n_rows, n_blocks_per_row);"
 
+# Q8_0 fused gate+up MMVQ — the dense FFN decode kernel. Two weight matrices
+# share one Q8_1 activation read, two outputs. t128 + VDR=2 (mmvq_gate_up_dp4a_
+# vdr_row); same stem/entry as the retired hand kernel so the runtime alias and
+# the ops launcher are unchanged.
+[[kernel]]
+stem = "mmvq_q8_0_gate_up_t128_vdr2"
+includes = ["quant_traits.cuh", "mmvq_gate_up.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q8_0_gate_up_t128_vdr2_q8_1"
+params = """
+    const flambeau_block_q8_0* __restrict__ gate_w,
+    const flambeau_block_q8_0* __restrict__ up_w,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ gate_out,
+    float* __restrict__ up_out,
+    const int n_rows_gate,
+    const int n_rows_up,
+    const int n_blocks_per_row"""
+body = "mmvq_gate_up_dp4a_vdr_row<Q8_0, 128, 2>(gate_w, up_w, y, gate_out, up_out, n_rows_gate, n_rows_up, n_blocks_per_row);"
+
 # Q4_0 single-row MMVQ — legacy 4-bit (nibble unpack + (q-8) bias correction).
 # One module carries both the F32 dst entry (scratch-then-cast path) and the
 # F16-dst entry (mmvq_q4_0_kv_decode_f16 / mmvq_f16_direct).

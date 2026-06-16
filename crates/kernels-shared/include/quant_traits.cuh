@@ -15,6 +15,17 @@ static __device__ __forceinline__ int load_int_b2(const int8_t* p, int i) {
     return (int) u[2 * i] | ((int) u[2 * i + 1] << 16);
 }
 
+// Load `VDR` consecutive int32 lanes of activation group `grp` from a Q8_1
+// block into `yi`. The activation is always Q8_1 regardless of weight dtype, so
+// this is dtype-independent — fused kernels (gate+up) load it once and reuse it
+// across both weight matrices instead of re-reading per weight.
+template<int VDR>
+static __device__ __forceinline__ void
+load_q8_1_ints(const flambeau_block_q8_1& by, int grp, int (&yi)[VDR]) {
+    #pragma unroll
+    for (int i = 0; i < VDR; ++i) yi[i] = load_int_b2(by.qs, grp * VDR + i);
+}
+
 // Expand 4 consecutive bits of `qh` starting at `start` into 4 bytes (each 0
 // or 1) packed into an int32 — the 5th-bit plane for Q5_0/Q5_1, fed to `dp4a`.
 static __device__ __forceinline__ int expand_bits4(unsigned int qh, int start) {
@@ -54,17 +65,27 @@ template<> struct quant_traits<Q8_0> {
     // VDR variant: one thread owns `grp`'s VDR consecutive int32 lanes, chains
     // VDR dp4a into one int32 sum, then a single block-scale multiply (vs VDR
     // float multiplies in `partial`). For VDR=1 this is identical to `partial`.
+    // `partial_vdr` split so a fused caller can supply pre-loaded activation
+    // int32s (`yi`) and `d_y` once and reuse them across gate + up weights.
+    // The dp4a chain order and the single block-scale multiply are unchanged,
+    // so the single-row VDR kernel stays numerically identical.
     template<int VDR>
     static __device__ __forceinline__ float
-    partial_vdr(const block_t& bx, const flambeau_block_q8_1& by, int grp) {
+    partial_vdr_y(const block_t& bx, const int (&yi)[VDR], float d_y, int grp) {
         int sumi = 0;
         #pragma unroll
         for (int i = 0; i < VDR; ++i) {
-            const int xi = load_int_b2(bx.qs, grp * VDR + i);
-            const int yi = load_int_b2(by.qs, grp * VDR + i);
-            sumi = dp4a(xi, yi, sumi);
+            sumi = dp4a(load_int_b2(bx.qs, grp * VDR + i), yi[i], sumi);
         }
-        return (float) bx.d * (float) by.d * (float) sumi;
+        return (float) bx.d * d_y * (float) sumi;
+    }
+
+    template<int VDR>
+    static __device__ __forceinline__ float
+    partial_vdr(const block_t& bx, const flambeau_block_q8_1& by, int grp) {
+        int yi[VDR];
+        load_q8_1_ints<VDR>(by, grp, yi);
+        return partial_vdr_y<VDR>(bx, yi, (float) by.d, grp);
     }
 };
 

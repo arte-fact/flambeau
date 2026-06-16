@@ -45,6 +45,47 @@ static __device__ __forceinline__ void mmvq_reduce_store_group(
     if (lane_lo == 0) mmvq_store<OutT>(dst, row, acc);
 }
 
+// Two-output reduce-and-store for the fused gate+up MMVQ kernel: each thread
+// arrives with its gate and up partials; the block reduces both through one
+// barrier (separate LDS arrays) and the surviving lane writes `gate_out[row]`
+// / `up_out[row]`. `do_gate`/`do_up` gate the asymmetric-row tail (an FFN where
+// the gate and up projections differ in row count). Same warp-then-inter-warp
+// structure as `mmvq_reduce_store`.
+template<int THREADS, class OutT>
+static __device__ __forceinline__ void mmvq_reduce_store_gate_up(
+    float acc_g, float acc_u, OutT* gate_out, OutT* up_out, int row,
+    bool do_gate, bool do_up) {
+    constexpr int WARPS = THREADS / WARP_SIZE;
+    const int lane = threadIdx.x & (WARP_SIZE - 1);
+    acc_g = warp_reduce_sum(acc_g);
+    acc_u = warp_reduce_sum(acc_u);
+    if constexpr (WARPS > 1) {
+        const int warp = threadIdx.x / WARP_SIZE;
+        __shared__ float s_g[WARPS];
+        __shared__ float s_u[WARPS];
+        if (lane == 0) { s_g[warp] = acc_g; s_u[warp] = acc_u; }
+        __syncthreads();
+        if (warp == 0) {
+            float g = (lane < WARPS) ? s_g[lane] : 0.0f;
+            float u = (lane < WARPS) ? s_u[lane] : 0.0f;
+            #pragma unroll
+            for (int off = WARPS / 2; off > 0; off >>= 1) {
+                g += __shfl_xor(g, off, WARP_SIZE);
+                u += __shfl_xor(u, off, WARP_SIZE);
+            }
+            if (lane == 0) {
+                if (do_gate) mmvq_store<OutT>(gate_out, row, g);
+                if (do_up)   mmvq_store<OutT>(up_out, row, u);
+            }
+        }
+    } else {
+        if (lane == 0) {
+            if (do_gate) mmvq_store<OutT>(gate_out, row, acc_g);
+            if (do_up)   mmvq_store<OutT>(up_out, row, acc_u);
+        }
+    }
+}
+
 template<int THREADS, class OutT>
 static __device__ __forceinline__ void mmvq_reduce_store(float acc, OutT* dst, int row) {
     constexpr int WARPS = THREADS / WARP_SIZE;

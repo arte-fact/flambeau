@@ -3,24 +3,35 @@
 Transient working note. Start here when the dev rig (2× MI50 gfx906 + 1× RTX 3090
 sm_86) is built and `feature/cuda-decouple` is pulled in.
 
-> **CURRENT STATUS (2026-06-16): P2a mmvq DONE, P2b Q8_0 config-variants DONE.**
+> **CURRENT STATUS (2026-06-16): P2a mmvq DONE; P2b (mmvq fusion) STARTED.**
 > All 20 GGUF weight quants are templated + certed on both backends
-> (`cuda/sm_86` = 20 mmvq rows; cert-check cuda 20 / hip 82). P2b config variants
-> for Q8_0: `t128` (`ad68761`) + `vdr2`/VDR-param (`29258e1`) + `r2`/`r4`
-> (generic `mmvq_dp4a_nrow_row` + `mmvq_reduce_store_group<GROUP>`) all done.
-> **`r2`/`r4` are NULL for Q8_0 on both backends** (dp4a/t128_vdr2 win:
-> gfx906 ~12.5µs vs r2 ~19–27 / r4 ~26–41; sm_86 6.6 vs 7.5/8–10) — Q8_0 is
-> dense/cheap-decode so the 256-thread single-row dp4a's memory-level
-> parallelism beats the 64-thread wave64-DPP multi-row layout. Kept certified as
-> bench-reference / autotune candidates (not dispatched); the generic nrow
-> skeleton is the reusable infra for templating the heavy-decode K-quant r2/r4
-> (Q4KR2/Q6KR4, which DO win as hand kernels). Two autotune emit bugs fixed
-> (per-m k-collapse + disjoint m-runs). **Q8_0 config-variant sweep is now
-> exhausted** — next is either templating the K-quant r2/r4 onto the nrow
-> skeleton (consolidation) or **P2c mmq** (4-warp LDS-tiled, the big prefill
-> lever). Build kernels with `RAYON_NUM_THREADS=8` (thermal). The detailed phase
-> log + per-slice recipe + rig gotchas are below; read the **P2b** and rig-notes
-> sections. (Historical detail follows.)
+> (`cuda/sm_86` = 20 mmvq rows; cert-check cuda 20 / hip 82). **P2a is done**:
+> all dtypes + the Q8_0 ROWS/DP4A/THREADS configs (`t128` `ad68761`, `vdr2`
+> `29258e1`, `r2`/`r4` `685bc7c`). Roadmap note: ROWS/DP4A/THREADS configs ARE
+> P2a (not P2b) — `r2`/`r4` were NULL for Q8_0 on both backends (dp4a/t128_vdr2
+> win; Q8_0 is dense/cheap-decode so 256-thread single-row MLP beats the
+> 64-thread wave64-DPP layout), kept as certified bench-reference candidates; the
+> generic `mmvq_dp4a_nrow_row` + `mmvq_reduce_store_group<GROUP>` are the reusable
+> infra for the heavy-decode K-quant r2/r4 (Q4KR2/Q6KR4 DO win as hand kernels).
+>
+> **P2b = mmvq FUSION (`gate_up`/`batched`/`row_tile`).** First slice DONE:
+> **Q8_0 `gate_up`** (dense FFN decode kernel) templated onto a neutral skeleton
+> `mmvq_gate_up_dp4a_vdr_row<Q,THREADS,VDR,OutT>` (`mmvq_gate_up.cuh`) + new
+> two-output reduce `mmvq_reduce_store_gate_up<THREADS>` + a shared `load_q8_1_
+> ints<VDR>` / `quant_traits<Q8_0>::partial_vdr_y` split so the fused caller
+> reads the Q8_1 activation ONCE and reuses it across gate+up (the bandwidth win)
+> — the single-row `partial_vdr` routes through it and stays bit-identical. Same
+> stem/entry (`mmvq_q8_0_gate_up_t128_vdr2`) → ops launcher + runtime untouched;
+> hand `.cu` retired. **First formal cert for this kernel** (it had no test/cert
+> before) on BOTH backends via a new sweep gate_up path (`run_gate_up_sweep` /
+> `GateUpDtype` in `sweep_mmvq.rs`, `--dtype Q8_0_gate_up`); max_rel_err ~2e-3,
+> HIP↔CUDA numerically equal. Registered as a bench-reference (launched directly,
+> not via a dispatch row). cert-check green (hip 82 / cuda 20).
+> **NEXT P2b:** other dense `gate_up` dtypes (Q4_0/Q4_1/Q5_K hand kernels exist),
+> then `batched` (N>1 columns) + `row_tile` (separate skeletons — different op
+> signature). Then **P2c mmq** (4-warp LDS-tiled prefill lever) + **P2d**
+> indexed_moe. Build kernels with `RAYON_NUM_THREADS=8` (thermal). Detailed phase
+> log + per-slice recipe + rig gotchas below. (Historical detail follows.)
 >
 > ---
 >

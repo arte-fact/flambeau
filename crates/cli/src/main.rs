@@ -969,6 +969,19 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
         match op {
             "qmatmul" => {
                 use flambeau_bench::sweep_mmvq::{run_sweep, Dtype, SweepSpec};
+                if let Some(gu) = gate_up_dtype(dtype) {
+                    use flambeau_bench::sweep_mmvq::run_gate_up_sweep;
+                    let root = repo_root();
+                    let cert = run_gate_up_sweep::<flambeau_bench::backend::Hip>(gu, &root, arch)?;
+                    println!(
+                        "sweep qmatmul_gate_up ({}): pass={} shapes={} rig={}",
+                        gu.name(),
+                        cert.pass,
+                        cert.results.len(),
+                        cert.rig
+                    );
+                    return Ok(());
+                }
                 let dtypes: Vec<Dtype> = match dtype {
                     "all" => vec![
                         Dtype::Q8_0,
@@ -1317,6 +1330,16 @@ fn autotune(arch: &str, op: &str, dtype: &str, emit: bool) -> Result<()> {
     }
 }
 
+/// Map a `--dtype` string to a fused gate+up sweep target, if it names one.
+#[cfg(any(feature = "hip_sweep", feature = "cuda_sweep"))]
+fn gate_up_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::GateUpDtype> {
+    use flambeau_bench::sweep_mmvq::GateUpDtype;
+    match dtype {
+        "Q8_0_gate_up" => Some(GateUpDtype::Q8_0),
+        _ => None,
+    }
+}
+
 #[cfg(feature = "cuda_sweep")]
 fn sweep_cuda(op: &str, dtype: &str) -> Result<()> {
     use flambeau_bench::backend::Cuda;
@@ -1326,6 +1349,18 @@ fn sweep_cuda(op: &str, dtype: &str) -> Result<()> {
         anyhow::bail!(
             "--arch sm_86: only --op qmatmul (mmvq) has CUDA kernels; other ops are gfx906-only"
         );
+    }
+    if let Some(gu) = gate_up_dtype(dtype) {
+        use flambeau_bench::sweep_mmvq::run_gate_up_sweep;
+        let cert = run_gate_up_sweep::<Cuda>(gu, &repo_root(), "sm_86")?;
+        println!(
+            "sweep qmatmul_gate_up ({}): pass={} shapes={} rig={}",
+            gu.name(),
+            cert.pass,
+            cert.results.len(),
+            cert.rig
+        );
+        return Ok(());
     }
     let dtypes: Vec<Dtype> = match dtype {
         "Q8_0" | "Q8_0_dp4a" => vec![Dtype::Q8_0Dp4a],
