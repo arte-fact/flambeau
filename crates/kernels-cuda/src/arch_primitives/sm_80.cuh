@@ -44,3 +44,17 @@ static __device__ __forceinline__ float fast_exp2(float x) { return exp2f(x); }
 static __device__ __forceinline__ float fast_exp(float x) { return exp2f(x * FLAMBEAU_LOG2E); }
 
 static __device__ __forceinline__ int dp4a(int a, int b, int c) { return __dp4a(a, b, c); }
+
+// Byte-select permute for codebook LUTs (IQ4_NL/XS), matching gfx906.cuh's
+// `byte_perm`: out.byte[i] = src8[sel.byte[i]], src8 = {b.0..3 (low), a.0..3
+// (high)}. amdgcn_perm takes a byte-per-output selector; __byte_perm takes a
+// nibble-per-output selector with source {x.0..3, y.0..3}. So x=b, y=a and pack
+// each selector byte's low 3 bits into nibble i. Valid for selectors 0..7 (the
+// LUTs never use the 8..15 special bytes).
+static __device__ __forceinline__ unsigned int byte_perm(unsigned int a, unsigned int b, unsigned int sel) {
+    const unsigned int packed = (sel & 0x7u)
+                              | (((sel >> 8) & 0x7u) << 4)
+                              | (((sel >> 16) & 0x7u) << 8)
+                              | (((sel >> 24) & 0x7u) << 12);
+    return __byte_perm(b, a, packed);
+}

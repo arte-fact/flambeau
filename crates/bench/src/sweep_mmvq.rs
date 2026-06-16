@@ -305,7 +305,7 @@ impl Dtype {
             Dtype::Q8_0T128VDR2 => "qmatmul_q8_0_mmvq_t128_vdr2_gfx906",
             Dtype::Iq4Nl => "qmatmul_iq4_nl_mmvq_single_row_gfx906",
             Dtype::Iq4NlR2 => "qmatmul_iq4_nl_mmvq_nw1_r2_gfx906",
-            Dtype::Iq4NlDp4a => "qmatmul_iq4_nl_mmvq_dp4a_gfx906",
+            Dtype::Iq4NlDp4a => "qmatmul_iq4_nl_mmvq_dp4a",
             Dtype::Iq4Xs => "qmatmul_iq4_xs_mmvq_single_row_gfx906",
             Dtype::Iq4XsR2 => "qmatmul_iq4_xs_mmvq_nw1_r2_gfx906",
             Dtype::Iq4XsDp4a => "qmatmul_iq4_xs_mmvq_dp4a_gfx906",

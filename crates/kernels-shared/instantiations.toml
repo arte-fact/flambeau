@@ -273,3 +273,29 @@ params = """
     const int n_rows,
     const int n_super_blocks_per_row"""
 body = "mmvq_q8_k_row<fb_fp16_t>(x, y, dst, n_rows, n_super_blocks_per_row);"
+
+# IQ4_NL single-row MMVQ — 32-elem block, 16-entry non-linear codebook via the
+# neutral byte_perm LUT. First codebook (perm-based) kernel.
+[[kernel]]
+stem = "mmvq_iq4_nl_dp4a"
+includes = ["mmvq_iq4_nl.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq4_nl_dp4a_q8_1"
+params = """
+    const flambeau_block_iq4_nl* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_iq4_nl_dp4a_row<float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq4_nl_dp4a_q8_1_f16"
+params = """
+    const flambeau_block_iq4_nl* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_iq4_nl_dp4a_row<fb_fp16_t>(x, y, dst, n_rows, n_blocks_per_row);"

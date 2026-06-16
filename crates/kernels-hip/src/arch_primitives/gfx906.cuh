@@ -159,6 +159,14 @@ static __device__ __forceinline__ float quarter_warp_reduce_sum(float x) { retur
 static __device__ __forceinline__ float eighth_warp_reduce_sum(float x)  { return gfx906_eighth_warp_reduce_sum(x); }
 static __device__ __forceinline__ int   dp4a(int a, int b, int c)        { return gfx906_dp4a(a, b, c); }
 
+// Byte-select permute for codebook LUTs (IQ4_NL/XS). out.byte[i] =
+// src8[sel.byte[i]] where src8 = {b.0..3 (low), a.0..3 (high)}; selector bytes
+// are 0..7 (the LUTs never use the 8..15 special selectors). sm_80.cuh mirrors
+// this via __byte_perm with the selector repacked to nibbles.
+static __device__ __forceinline__ unsigned int byte_perm(unsigned int a, unsigned int b, unsigned int sel) {
+    return __builtin_amdgcn_perm(a, b, sel);
+}
+
 #else  // non-HIP fallback, should never be reached in V1
 
 static __device__ __forceinline__ float gfx906_warp_reduce_sum(float x) {
