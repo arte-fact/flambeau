@@ -68,23 +68,23 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
     // the sweep/cert harness.
     KernelDescriptor {
         op_name: "QMatMul",
-        impl_id: "qmatmul_iq3_xxs_mmvq_dp4a_gfx906",
+        impl_id: "qmatmul_iq3_xxs_mmvq_dp4a",
         backend: "hip",
         arch: "gfx906",
         dtype_weight: QDtype::IQ3_XXS,
         dtype_activation: QDtype::Q8_1,
         m_range: (1, 31),
-        cert_rel_path: "certs/hip/gfx906/qmatmul_iq3_xxs_mmvq_dp4a_gfx906.json",
+        cert_rel_path: "certs/hip/gfx906/qmatmul_iq3_xxs_mmvq_dp4a.json",
     },
     KernelDescriptor {
         op_name: "QMatMul",
-        impl_id: "qmatmul_iq3_s_mmvq_dp4a_gfx906",
+        impl_id: "qmatmul_iq3_s_mmvq_dp4a",
         backend: "hip",
         arch: "gfx906",
         dtype_weight: QDtype::IQ3_S,
         dtype_activation: QDtype::Q8_1,
         m_range: (1, 31),
-        cert_rel_path: "certs/hip/gfx906/qmatmul_iq3_s_mmvq_dp4a_gfx906.json",
+        cert_rel_path: "certs/hip/gfx906/qmatmul_iq3_s_mmvq_dp4a.json",
     },
     KernelDescriptor {
         op_name: "QMatMul",

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "impl_id": "qmatmul_iq3_xxs_mmvq_dp4a_gfx906",
+  "impl_id": "qmatmul_iq3_xxs_mmvq_dp4a",
   "backend": "hip",
   "arch": "gfx906",
   "op": "qmatmul_mmvq",
@@ -145,7 +145,7 @@
     }
   ],
   "pass": true,
-  "emitted_at": "2026-06-02T09:53:03Z",
+  "emitted_at": "2026-06-16T13:45:02Z",
   "rig": "threadreaper-gfx906",
   "pmc": {
     "vgpr_count": 21,

@@ -351,3 +351,53 @@ params = """
     const int n_rows,
     const int n_superblocks_per_row"""
 body = "mmvq_iq2_xxs_dp4a_row<fb_fp16_t>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+# IQ3_XXS single-row MMVQ — u32 IQ3XXS_GRID + ksigns LUT (reuses IQ2_XXS signs).
+[[kernel]]
+stem = "mmvq_iq3_xxs_dp4a"
+includes = ["mmvq_iq3_xxs.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq3_xxs_dp4a_q8_1"
+params = """
+    const flambeau_block_iq3_xxs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_iq3_xxs_dp4a_row<float>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq3_xxs_dp4a_q8_1_f16"
+params = """
+    const flambeau_block_iq3_xxs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_iq3_xxs_dp4a_row<fb_fp16_t>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+# IQ3_S single-row MMVQ — 9-bit IQ3S_GRID index + explicit sign bytes/scales.
+[[kernel]]
+stem = "mmvq_iq3_s_dp4a"
+includes = ["mmvq_iq3_s.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq3_s_dp4a_q8_1"
+params = """
+    const flambeau_block_iq3_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_iq3_s_dp4a_row<float>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq3_s_dp4a_q8_1_f16"
+params = """
+    const flambeau_block_iq3_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_iq3_s_dp4a_row<fb_fp16_t>(x, y, dst, n_rows, n_superblocks_per_row);"
