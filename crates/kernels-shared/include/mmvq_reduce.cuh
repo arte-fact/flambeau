@@ -28,6 +28,23 @@ static __device__ __forceinline__ void mmvq_reduce_store_2row(
     if (lane_lo == 0) mmvq_store<OutT>(dst, row, acc);
 }
 
+// Width-GROUP generalisation of the 2-row reduce for the multi-row skeleton: a
+// contiguous GROUP-lane group owns one output row and reduces with a width-GROUP
+// `__shfl_xor` butterfly (no LDS). GROUP = THREADS/ROWS (32 for r2, 16 for r4).
+// On wave64 each group is a sub-warp; on wave32 a group is one warp (r2) or a
+// half-warp (r4) — the explicit width keeps the reduce inside the group either
+// way. Ascending offsets (1,2,…,GROUP/2) match gfx906's DPP add order. `lane_lo`
+// is the caller's intra-group lane (`threadIdx.x & (GROUP-1)`).
+template<int GROUP, class OutT>
+static __device__ __forceinline__ void mmvq_reduce_store_group(
+    float acc, OutT* dst, int row, int lane_lo) {
+    #pragma unroll
+    for (int off = 1; off < GROUP; off <<= 1) {
+        acc += __shfl_xor(acc, off, GROUP);
+    }
+    if (lane_lo == 0) mmvq_store<OutT>(dst, row, acc);
+}
+
 template<int THREADS, class OutT>
 static __device__ __forceinline__ void mmvq_reduce_store(float acc, OutT* dst, int row) {
     constexpr int WARPS = THREADS / WARP_SIZE;

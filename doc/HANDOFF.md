@@ -3,14 +3,24 @@
 Transient working note. Start here when the dev rig (2× MI50 gfx906 + 1× RTX 3090
 sm_86) is built and `feature/cuda-decouple` is pulled in.
 
-> **CURRENT STATUS (2026-06-16, tip `db7772e`): P2a mmvq DONE, P2b UNDERWAY.**
+> **CURRENT STATUS (2026-06-16): P2a mmvq DONE, P2b Q8_0 config-variants DONE.**
 > All 20 GGUF weight quants are templated + certed on both backends
 > (`cuda/sm_86` = 20 mmvq rows; cert-check cuda 20 / hip 82). P2b config variants
-> started: Q8_0 `t128` (`ad68761`) + `vdr2`/VDR-param (`29258e1`) done, **`r2`/`r4`
-> next** (reuse `mmvq_reduce_store_2row`). Two autotune emit bugs fixed (per-m
-> k-collapse + disjoint m-runs). Build kernels with `RAYON_NUM_THREADS=8`
-> (thermal). The detailed phase log + per-slice recipe + rig gotchas are below;
-> read the **P2b** and rig-notes sections. (Historical detail follows.)
+> for Q8_0: `t128` (`ad68761`) + `vdr2`/VDR-param (`29258e1`) + `r2`/`r4`
+> (generic `mmvq_dp4a_nrow_row` + `mmvq_reduce_store_group<GROUP>`) all done.
+> **`r2`/`r4` are NULL for Q8_0 on both backends** (dp4a/t128_vdr2 win:
+> gfx906 ~12.5µs vs r2 ~19–27 / r4 ~26–41; sm_86 6.6 vs 7.5/8–10) — Q8_0 is
+> dense/cheap-decode so the 256-thread single-row dp4a's memory-level
+> parallelism beats the 64-thread wave64-DPP multi-row layout. Kept certified as
+> bench-reference / autotune candidates (not dispatched); the generic nrow
+> skeleton is the reusable infra for templating the heavy-decode K-quant r2/r4
+> (Q4KR2/Q6KR4, which DO win as hand kernels). Two autotune emit bugs fixed
+> (per-m k-collapse + disjoint m-runs). **Q8_0 config-variant sweep is now
+> exhausted** — next is either templating the K-quant r2/r4 onto the nrow
+> skeleton (consolidation) or **P2c mmq** (4-warp LDS-tiled, the big prefill
+> lever). Build kernels with `RAYON_NUM_THREADS=8` (thermal). The detailed phase
+> log + per-slice recipe + rig gotchas are below; read the **P2b** and rig-notes
+> sections. (Historical detail follows.)
 >
 > ---
 >
@@ -165,11 +175,18 @@ sm_86) is built and `feature/cuda-decouple` is pulled in.
 >   (dp4a@1, t128_vdr2@8, dp4a@16) made the impl-grouped emit produce OVERLAPPING
 >   rows; `emit_dispatch` now builds **disjoint contiguous m-runs**. Q8_0 sm_86
 >   variants are within noise (~0.3%) on the 3090 → dp4a wins (single row).
-> - **NEXT: `r2`/`r4`** — wave64-shaped multi-row (2/4 output rows per block).
->   Reuse `mmvq_reduce_store_2row` (built for Q4_K); a `_4row` sibling for r4.
->   These are the K-quant config variants (Q4KR2 etc. already exist as hand
->   kernels). `gate_up`/`batched`/`row_tile` change the op signature (2 outputs /
->   N columns) — separate skeletons, later.
+> - **`r2`/`r4` DONE — NULL for Q8_0.** Generic `mmvq_dp4a_nrow_row<Q,THREADS,
+>   ROWS,OutT>` (one block = ROWS output rows, `THREADS/ROWS` lanes/row, shares
+>   the Q8_1 activation reads) + width-templated `mmvq_reduce_store_group<GROUP>`
+>   (generalises the Q4_K `_2row`; 32 for r2, 16 for r4). Certed both backends
+>   (`r2`/`r4` max_rel_err ~1.6e-3, HIP↔CUDA bit-identical). Autotune null on
+>   BOTH: dp4a/t128_vdr2 win at every m (Q8_0 dense + cheap-decode → 256-thread
+>   MLP beats the 64-thread wave64-DPP layout). Kept as bench-reference /
+>   autotune candidates; no dispatch row earned (tables unchanged). The skeleton
+>   is the reusable template path for the heavy-decode K-quant r2/r4 (Q4KR2 /
+>   Q6KR4 hand kernels DO win — porting them onto the nrow skeleton is the
+>   consolidation follow-up). `gate_up`/`batched`/`row_tile` change the op
+>   signature (2 outputs / N columns) — separate skeletons, later.
 > - Because dispatch is m-only, a config variant only earns a dispatch row if it
 >   wins the **per-m aggregate**; otherwise it stays a certified bench-reference
 >   candidate (like t128/t128_vdr2 on the 3090). Two emit bugs are now fixed

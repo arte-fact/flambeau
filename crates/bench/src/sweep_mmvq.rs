@@ -130,6 +130,13 @@ pub enum Dtype {
     /// C9-followup t128 + VDR=2 combined (the kernel that should beat
     /// vdr2-alone where t128-alone lost).
     Q8_0T128VDR2,
+    /// r2 multi-row Q8_0 (`mmvq_dp4a_nrow_row<Q8_0, 64, 2>`): one 64-thread
+    /// block computes 2 output rows (32 lanes each), sharing the Q8_1
+    /// activation reads. Autotune config variant vs the single-row dp4a.
+    Q8_0R2,
+    /// r4 multi-row Q8_0 (`mmvq_dp4a_nrow_row<Q8_0, 64, 4>`): 4 output rows
+    /// per 64-thread block (16 lanes each), quarter-warp reduce.
+    Q8_0R4,
     /// Templated 256-thread single-row Q8_0 DP4A (`mmvq_dp4a_row<Q8_0, 256>`).
     /// The cross-backend pilot kernel — certified on both gfx906 and sm_86.
     Q8_0Dp4a,
@@ -216,7 +223,7 @@ pub enum Dtype {
 impl Dtype {
     pub fn name(self) -> &'static str {
         match self {
-            Dtype::Q8_0 | Dtype::Q8_0T128 | Dtype::Q8_0T128VDR2 | Dtype::Q8_0Dp4a => "Q8_0",
+            Dtype::Q8_0 | Dtype::Q8_0T128 | Dtype::Q8_0T128VDR2 | Dtype::Q8_0R2 | Dtype::Q8_0R4 | Dtype::Q8_0Dp4a => "Q8_0",
             Dtype::Q4_0 => "Q4_0",
             Dtype::Q5_0 => "Q5_0",
             Dtype::Q5_1 => "Q5_1",
@@ -243,7 +250,7 @@ impl Dtype {
 
     pub fn ggml(self) -> GgmlDType {
         match self {
-            Dtype::Q8_0 | Dtype::Q8_0T128 | Dtype::Q8_0T128VDR2 | Dtype::Q8_0Dp4a => {
+            Dtype::Q8_0 | Dtype::Q8_0T128 | Dtype::Q8_0T128VDR2 | Dtype::Q8_0R2 | Dtype::Q8_0R4 | Dtype::Q8_0Dp4a => {
                 GgmlDType::Q8_0
             }
             Dtype::Q4_0 => GgmlDType::Q4_0,
@@ -303,6 +310,8 @@ impl Dtype {
             Dtype::Q4_1T128 => "qmatmul_q4_1_mmvq_t128_gfx906",
             Dtype::Q8_0T128 => "qmatmul_q8_0_mmvq_t128",
             Dtype::Q8_0T128VDR2 => "qmatmul_q8_0_mmvq_t128_vdr2",
+            Dtype::Q8_0R2 => "qmatmul_q8_0_mmvq_r2",
+            Dtype::Q8_0R4 => "qmatmul_q8_0_mmvq_r4",
             Dtype::Iq4Nl => "qmatmul_iq4_nl_mmvq_single_row_gfx906",
             Dtype::Iq4NlR2 => "qmatmul_iq4_nl_mmvq_nw1_r2_gfx906",
             Dtype::Iq4NlDp4a => "qmatmul_iq4_nl_mmvq_dp4a",
@@ -343,6 +352,8 @@ impl Dtype {
             Dtype::Q5_1 => "mmvq_q5_1",
             Dtype::Q8_0T128 => "mmvq_q8_0_t128",
             Dtype::Q8_0T128VDR2 => "mmvq_q8_0_t128_vdr2",
+            Dtype::Q8_0R2 => "mmvq_q8_0_r2",
+            Dtype::Q8_0R4 => "mmvq_q8_0_r4",
             Dtype::Q2K => "mmvq_q2_k",
             Dtype::Q2KR2 => "mmvq_q2_k_r2",
             Dtype::Q2KDp4a => "mmvq_q2_k_dp4a",
@@ -429,6 +440,8 @@ impl Dtype {
             Dtype::Q4_1T128 => "flambeau_mmvq_q4_1_t128_q8_1",
             Dtype::Q8_0T128 => "flambeau_mmvq_q8_0_t128_q8_1",
             Dtype::Q8_0T128VDR2 => "flambeau_mmvq_q8_0_t128_vdr2_q8_1",
+            Dtype::Q8_0R2 => "flambeau_mmvq_q8_0_r2_q8_1",
+            Dtype::Q8_0R4 => "flambeau_mmvq_q8_0_r4_q8_1",
             Dtype::Iq4Nl => "flambeau_mmvq_iq4_nl_q8_1",
             Dtype::Iq4NlR2 => "flambeau_mmvq_iq4_nl_r2_q8_1",
             Dtype::Iq4NlDp4a => "flambeau_mmvq_iq4_nl_dp4a_q8_1",
@@ -461,7 +474,7 @@ impl Dtype {
 
     fn block_size_bytes(self) -> usize {
         match self {
-            Dtype::Q8_0 | Dtype::Q8_0T128 | Dtype::Q8_0T128VDR2 | Dtype::Q8_0Dp4a => {
+            Dtype::Q8_0 | Dtype::Q8_0T128 | Dtype::Q8_0T128VDR2 | Dtype::Q8_0R2 | Dtype::Q8_0R4 | Dtype::Q8_0Dp4a => {
                 std::mem::size_of::<BlockQ8_0>()
             }
             Dtype::Q4_0 => std::mem::size_of::<BlockQ4_0>(),
@@ -504,8 +517,9 @@ impl Dtype {
     /// `gridDim.x` = `n_rows / rows_per_block` (rounded up).
     fn rows_per_block(self) -> u32 {
         match self {
-            Dtype::Q6KR4 => 4,
-            Dtype::Q2KR2
+            Dtype::Q6KR4 | Dtype::Q8_0R4 => 4,
+            Dtype::Q8_0R2
+            | Dtype::Q2KR2
             | Dtype::Q2KR2Dp4a
             | Dtype::Q3KR2
             | Dtype::Q3KR2Dp4a
@@ -1019,7 +1033,7 @@ fn tame_scales(dtype: Dtype, raw: Vec<u8>) -> Vec<u8> {
     for i in 0..nblocks {
         let block = &mut r[i * bs..(i + 1) * bs];
         match dtype {
-            Dtype::Q8_0 | Dtype::Q8_0T128 | Dtype::Q8_0T128VDR2 | Dtype::Q8_0Dp4a => {
+            Dtype::Q8_0 | Dtype::Q8_0T128 | Dtype::Q8_0T128VDR2 | Dtype::Q8_0R2 | Dtype::Q8_0R4 | Dtype::Q8_0Dp4a => {
                 // BlockQ8_0: d (f16, 2 bytes) + qs[32]. Scale ≈ 0.01 to 0.11.
                 let d = f16::from_f32((block[0] as f32 / 255.0) * 0.1 + 0.01);
                 block[0..2].copy_from_slice(&d.to_bits().to_le_bytes());

@@ -68,3 +68,39 @@ static __device__ __forceinline__ void mmvq_dp4a_vdr_row(
     }
     mmvq_reduce_store<THREADS, OutT>(acc, dst, row);
 }
+
+// Multi-row config variant of mmvq_dp4a_row: one block computes `ROWS` output
+// rows (a `THREADS/ROWS`-lane group per row), so the y (activation) reads are
+// shared across ROWS weight rows and the grid shrinks by ROWS. r2 = 2 rows × 32
+// lanes, r4 = 4 rows × 16 lanes on a 64-thread (one gfx906 wave) block. The
+// per-row group reduces with a width-(THREADS/ROWS) butterfly through
+// `mmvq_reduce_store_group` (no LDS). `LANES = THREADS/ROWS` must be a power of
+// two and a multiple of `INT32_PER_BLOCK`.
+template<class Q, int THREADS, int ROWS, class OutT = float>
+static __device__ __forceinline__ void mmvq_dp4a_nrow_row(
+    const typename quant_traits<Q>::block_t* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    OutT* __restrict__ dst,
+    int n_rows, int n_blocks_per_row)
+{
+    using T = quant_traits<Q>;
+    constexpr int IPB   = T::INT32_PER_BLOCK;
+    constexpr int LANES = THREADS / ROWS;        // lanes per output row
+    constexpr int STEP  = LANES / IPB;           // blocks advanced per iter
+
+    const int tid     = threadIdx.x;
+    const int row_grp = tid / LANES;             // 0..ROWS-1
+    const int lane_lo = tid & (LANES - 1);       // intra-row lane
+    const int j       = lane_lo & (IPB - 1);     // int32 index within a block
+    const int b0      = lane_lo / IPB;
+
+    const int row = blockIdx.x * ROWS + row_grp;
+    if (row >= n_rows) return;
+
+    const typename T::block_t* xrow = x + (size_t) row * n_blocks_per_row;
+    float acc = 0.0f;
+    for (int b = b0; b < n_blocks_per_row; b += STEP) {
+        acc += T::partial(xrow[b], y[b], j);
+    }
+    mmvq_reduce_store_group<LANES, OutT>(acc, dst, row, lane_lo);
+}

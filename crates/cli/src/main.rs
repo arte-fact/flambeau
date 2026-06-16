@@ -997,6 +997,8 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     ],
                     "Q8_0" => vec![Dtype::Q8_0],
                     "Q8_0_dp4a" => vec![Dtype::Q8_0Dp4a],
+                    "Q8_0_r2" => vec![Dtype::Q8_0R2],
+                    "Q8_0_r4" => vec![Dtype::Q8_0R4],
                     "Q4_K" => vec![Dtype::Q4K, Dtype::Q4KR2, Dtype::Q4KR2Dp4a],
                     "Q4_K_r2_dp4a" => vec![Dtype::Q4KR2Dp4a],
                     "Q5_K" => vec![Dtype::Q5K, Dtype::Q5KR2, Dtype::Q5KDp4a, Dtype::Q5KR2Dp4a],
@@ -1250,12 +1252,20 @@ fn autotune(arch: &str, op: &str, dtype: &str, emit: bool) -> Result<()> {
         // variants, so the candidate set for sm_86 is the ported subset.
         let cuda = arch == "sm_86";
         let candidates: Vec<Dtype> = match dtype {
-            "Q8_0" if cuda => vec![Dtype::Q8_0Dp4a, Dtype::Q8_0T128, Dtype::Q8_0T128VDR2],
+            "Q8_0" if cuda => vec![
+                Dtype::Q8_0Dp4a,
+                Dtype::Q8_0T128,
+                Dtype::Q8_0T128VDR2,
+                Dtype::Q8_0R2,
+                Dtype::Q8_0R4,
+            ],
             "Q8_0" => vec![
                 Dtype::Q8_0,
                 Dtype::Q8_0Dp4a,
                 Dtype::Q8_0T128,
                 Dtype::Q8_0T128VDR2,
+                Dtype::Q8_0R2,
+                Dtype::Q8_0R4,
             ],
             // The legacy quants are each a single productionised kernel (no
             // shape-dependent variant choice) — a degenerate one-candidate
@@ -1321,6 +1331,8 @@ fn sweep_cuda(op: &str, dtype: &str) -> Result<()> {
         "Q8_0" | "Q8_0_dp4a" => vec![Dtype::Q8_0Dp4a],
         "Q8_0_t128" => vec![Dtype::Q8_0T128],
         "Q8_0_t128_vdr2" => vec![Dtype::Q8_0T128VDR2],
+        "Q8_0_r2" => vec![Dtype::Q8_0R2],
+        "Q8_0_r4" => vec![Dtype::Q8_0R4],
         "Q4_0" => vec![Dtype::Q4_0],
         "Q4_1" => vec![Dtype::Q4_1Dp4a],
         "Q5_0" => vec![Dtype::Q5_0],
