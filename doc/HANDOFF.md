@@ -25,10 +25,21 @@ sm_86) is built and `feature/cuda-decouple` is pulled in.
 > 5. build CUDA, `sweep --arch sm_86 --dtype Qx`, `autotune --arch sm_86 --emit`,
 >    `cert-check` both.
 >
-> Next dtypes: Q4_1 / Q5_0 / Q5_1 share Q4_0's legacy-quant shape (Q4_1/Q5_1 add
-> the `m` min-offset; Q5_0/Q5_1 add the `qh` 5th-bit plane) — each is one more
-> `quant_traits` specialization + cell. Then the K-quants (super-block scales)
-> and the `ROWS`/`THREADS`/`VDR` config variants per **P2a**, then P2b fusion.
+> **All four legacy quants done** (Q4_0 `17d2f8d`/`10d210a`; Q4_1/Q5_0/Q5_1
+> `3bd4e94`/`ffe53ce`). `dispatch/cuda/sm_86.toml` now has 5 mmvq rows; hip
+> dispatch unchanged (HIP bit-matched via the bespoke sweeps). Shared
+> `expand_bits4` handles the Q5 5th-bit plane; `load_int_b2` is the CUDA-safe
+> reader for every odd-offset field (Q5_0's `qh` at block-offset 2 faults a
+> 4-byte read on NVIDIA). Bit-match held for all (Q5_0/Q5_1 cert max_rel_err
+> byte-identical despite the templated kernel using fewer VGPRs — 23 vs 29).
+>
+> Next dtypes: the **K-quants** (Q2_K…Q6_K, Q8_K) — these have super-block
+> scales (sub-block `d`/`dmin` plus packed 4/6-bit scale arrays), so each
+> `quant_traits` `partial` is more involved than the legacy flat blocks (closer
+> to the per-superblock dp4a in the existing `mmvq_q*_k_dp4a.cu`); they're
+> already in the generic `Dtype` enum (suffixed gfx906 impl_ids) but not
+> templated and not CUDA-ported. Then the `ROWS`/`THREADS`/`VDR` config variants
+> and **IQ** quants, then P2b fusion (`gate_up`/`batched`/`row_tile`).
 
 ## Where we are
 
