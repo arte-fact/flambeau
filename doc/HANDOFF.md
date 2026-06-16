@@ -34,10 +34,13 @@ sm_86) is built and `feature/cuda-decouple` is pulled in.
 > harness path `BatchedDtype`/`run_batched_sweep` (sweeps m×k×n_slots = 45
 > shapes; `--dtype Q8_0_batched`); cert both backends err 2.3e-3, HIP↔CUDA equal,
 > bench-reference registered. The CUDA port also fixes the hand kernel's
-> NVIDIA-unsafe `((int*)qs)[i]` (now `load_int_b2` via `partial`). **NEXT
-> batched:** Q4_0/Q4_1 (reuse the skeleton via their `quant_traits::partial`),
-> then K-quant batched (Q4_K/Q5_K-r2/Q6_K — own super-block bodies). Then
-> `row_tile`. Then **P2c mmq** (4-warp LDS-tiled prefill lever) + **P2d**
+> NVIDIA-unsafe `((int*)qs)[i]` (now `load_int_b2` via `partial`).
+> **Q4_0 + Q4_1 batched also done** (`60d5483`-next) — zero new C++, the generic
+> skeleton + their `quant_traits::partial` (which already carries the `(q-8)` /
+> `+m·s_y` bias) covered them; manifest + `BatchedDtype` enum only. Certed both
+> backends (err 4.4e-4 / 2.4e-4, HIP↔CUDA equal). **NEXT batched:** the K-quants
+> (Q4_K / Q5_K-r2 / Q6_K — own super-block bodies, like the gate_up K-quant).
+> Then `row_tile`. Then **P2c mmq** (4-warp LDS-tiled prefill lever) + **P2d**
 > indexed_moe.
 >
 > *(first gate_up slice writeup)*
