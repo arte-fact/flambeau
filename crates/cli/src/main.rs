@@ -1575,6 +1575,7 @@ fn moe_gate_up_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::MoeGateU
     match dtype {
         "Q8_0_gate_up_moe_mmvq" => Some(MoeGateUpDtype::Q8_0),
         "Q4_0_gate_up_moe_mmvq" => Some(MoeGateUpDtype::Q4_0),
+        "Q4_K_gate_up_moe_mmvq" => Some(MoeGateUpDtype::Q4K),
         _ => None,
     }
 }

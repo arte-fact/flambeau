@@ -2460,6 +2460,7 @@ fn run_shape_moe_mmvq<B: BenchBackend>(
 pub enum MoeGateUpDtype {
     Q8_0,
     Q4_0,
+    Q4K,
 }
 
 impl MoeGateUpDtype {
@@ -2467,30 +2468,43 @@ impl MoeGateUpDtype {
         match self {
             MoeGateUpDtype::Q8_0 => "Q8_0",
             MoeGateUpDtype::Q4_0 => "Q4_0",
+            MoeGateUpDtype::Q4K => "Q4_K",
         }
     }
     fn weight_dtype(self) -> Dtype {
         match self {
             MoeGateUpDtype::Q8_0 => Dtype::Q8_0Dp4a,
             MoeGateUpDtype::Q4_0 => Dtype::Q4_0,
+            MoeGateUpDtype::Q4K => Dtype::Q4K,
         }
     }
     fn impl_id(self) -> &'static str {
         match self {
             MoeGateUpDtype::Q8_0 => "indexed_moe_mmvq_q8_0_gate_up",
             MoeGateUpDtype::Q4_0 => "indexed_moe_mmvq_q4_0_gate_up",
+            MoeGateUpDtype::Q4K => "indexed_moe_mmvq_q4_k_gate_up",
         }
     }
     fn kernel_stem(self) -> &'static str {
         match self {
             MoeGateUpDtype::Q8_0 => "indexed_moe_mmvq_q8_0_gate_up_dp4a",
             MoeGateUpDtype::Q4_0 => "indexed_moe_mmvq_q4_0_gate_up_dp4a",
+            MoeGateUpDtype::Q4K => "indexed_moe_mmvq_q4_k_gate_up",
         }
     }
     fn kernel_entry(self) -> &'static str {
         match self {
             MoeGateUpDtype::Q8_0 => "flambeau_indexed_moe_mmvq_q8_0_gate_up_dp4a_q8_1",
             MoeGateUpDtype::Q4_0 => "flambeau_indexed_moe_mmvq_q4_0_gate_up_dp4a_q8_1",
+            MoeGateUpDtype::Q4K => "flambeau_indexed_moe_mmvq_q4_k_gate_up_q8_1",
+        }
+    }
+    /// Block thread count. The dp4a variants are 256t (4 lanes/block); the Q4_K
+    /// scalar dequant kernel is one wave64 (64t) per output row.
+    fn launch_threads(self) -> u32 {
+        match self {
+            MoeGateUpDtype::Q8_0 | MoeGateUpDtype::Q4_0 => 256,
+            MoeGateUpDtype::Q4K => 64,
         }
     }
 }
@@ -2657,7 +2671,7 @@ fn run_shape_moe_gate_up<B: BenchBackend>(
         args.push_arg(&nb_i);
         let cfg = LaunchCfg {
             grid: (n_rows as u32, (n_tokens * top_k) as u32, 1),
-            block: (256, 1, 1),
+            block: (dtype.launch_threads(), 1, 1),
             shared_bytes: 0,
         };
         B::launch(&k_mmvq, stream, cfg, args)?;
