@@ -2762,6 +2762,358 @@ fn run_shape_moe_gate_up<B: BenchBackend>(
     Ok((got_g, got_u, ref_g, ref_u))
 }
 
+/// Register-tiled prefill MoE MMQ kernels (tile8): MMQ_Y=64 weight rows × TILE_N=8
+/// sorted slot-columns per block, each thread computing its row's 8 outputs from
+/// registers (no LDS / no cross-thread comms). Experts are pre-sorted + padded-to-8
+/// (`sorted_pair_idx_padded` / `padded_offsets`). `gate_up` variants fuse two
+/// weights (13-arg ABI, per-token activation); `down` variants take one weight
+/// (11-arg ABI, per-pair activation).
+#[derive(Clone, Copy)]
+pub enum MoeMmqTile8Dtype {
+    Q8_0GateUp,
+    Q8_0Down,
+}
+
+impl MoeMmqTile8Dtype {
+    pub fn name(self) -> &'static str {
+        match self {
+            MoeMmqTile8Dtype::Q8_0GateUp => "Q8_0_gate_up",
+            MoeMmqTile8Dtype::Q8_0Down => "Q8_0_down",
+        }
+    }
+    fn weight_dtype(self) -> Dtype {
+        match self {
+            MoeMmqTile8Dtype::Q8_0GateUp | MoeMmqTile8Dtype::Q8_0Down => Dtype::Q8_0Dp4a,
+        }
+    }
+    fn gate_up(self) -> bool {
+        matches!(self, MoeMmqTile8Dtype::Q8_0GateUp)
+    }
+    fn impl_id(self) -> &'static str {
+        match self {
+            MoeMmqTile8Dtype::Q8_0GateUp => "indexed_moe_mmq_q8_0_gate_up_tile8",
+            MoeMmqTile8Dtype::Q8_0Down => "indexed_moe_mmq_q8_0_down_tile8",
+        }
+    }
+    fn kernel_stem(self) -> &'static str {
+        match self {
+            MoeMmqTile8Dtype::Q8_0GateUp => "indexed_moe_mmq_q8_0_gate_up_tile8_dp4a",
+            MoeMmqTile8Dtype::Q8_0Down => "indexed_moe_mmq_q8_0_down_tile8_dp4a",
+        }
+    }
+    fn kernel_entry(self) -> &'static str {
+        match self {
+            MoeMmqTile8Dtype::Q8_0GateUp => "flambeau_indexed_moe_mmq_q8_0_gate_up_tile8_dp4a_q8_1",
+            MoeMmqTile8Dtype::Q8_0Down => "flambeau_indexed_moe_mmq_q8_0_down_tile8_dp4a_q8_1",
+        }
+    }
+}
+
+/// Host build of the pad-to-8 expert sort (`sorted_pair_idx_padded`,
+/// `padded_offsets`): pairs grouped by expert, each expert's range padded to a
+/// multiple of 8 by repeating its last real pair index. Mirrors the on-device
+/// `flambeau_moe_sort_*_padded` output.
+fn build_padded_sort(expert_ids: &[i32], n_experts: usize) -> (Vec<i32>, Vec<i32>) {
+    let mut groups: Vec<Vec<i32>> = vec![Vec::new(); n_experts];
+    for (pair, &e) in expert_ids.iter().enumerate() {
+        groups[e as usize].push(pair as i32);
+    }
+    let mut sorted_padded = Vec::new();
+    let mut padded_offsets = vec![0i32];
+    for g in &groups {
+        let padded_count = (g.len() + 7) & !7;
+        sorted_padded.extend_from_slice(g);
+        if let Some(&last) = g.last() {
+            for _ in g.len()..padded_count {
+                sorted_padded.push(last);
+            }
+        }
+        padded_offsets.push(sorted_padded.len() as i32);
+    }
+    (sorted_padded, padded_offsets)
+}
+
+pub fn run_moe_mmq_tile8_sweep<B: BenchBackend>(
+    dtype: MoeMmqTile8Dtype,
+    repo_root: &Path,
+    arch: &str,
+) -> Result<Cert> {
+    let dev = B::new_device(0)?;
+    let pmc = {
+        let bytes = B::image(dtype.kernel_stem())
+            .ok_or_else(|| anyhow!("{} kernel not compiled", dtype.kernel_stem()))?;
+        let module = B::load(&dev, bytes)?;
+        let kernel = B::kernel(&module, dtype.kernel_entry())?;
+        B::attributes(&kernel)?
+    };
+
+    let n_experts = 4usize;
+    // tile8 targets the n_tokens >= 32 prefill regime.
+    let cases = [
+        (32usize, 4usize, 256usize, 2048usize),
+        (128, 4, 256, 2048),
+        (32, 4, 64, 768),
+    ];
+
+    let mut results = Vec::new();
+    for (n_tokens, top_k, n_rows, k) in cases {
+        let seed = 0xDEC0DE_u64
+            .wrapping_add((n_tokens as u64).wrapping_mul(53))
+            .wrapping_add((top_k as u64).wrapping_mul(17))
+            .wrapping_add((n_rows as u64).wrapping_mul(7));
+        let (got, reference) =
+            run_shape_moe_mmq_tile8::<B>(&dev, dtype, n_experts, n_rows, k, top_k, n_tokens, seed)?;
+        let max_rel_err = max_rel_err_with_floor(&got, &reference, (k as f32).sqrt());
+        let tolerance = cert_tol(k);
+        results.push(ShapeResult {
+            m: n_tokens,
+            k,
+            n: n_rows,
+            seed,
+            max_rel_err,
+            tolerance,
+            pass: max_rel_err <= tolerance,
+        });
+    }
+
+    let pass = results.iter().all(|r| r.pass);
+    let cert = Cert {
+        schema_version: SCHEMA_VERSION,
+        impl_id: dtype.impl_id().to_string(),
+        backend: dev.backend().to_string(),
+        arch: arch.to_string(),
+        op: "indexed_moe_mmq_tile8".to_string(),
+        dtype_weight: "Q8_0".to_string(),
+        dtype_activation: "Q8_1".to_string(),
+        tolerance_formula: "|err| <= 3e-2 * max(|ref|, sqrt(k))  (tile8 register-tiled MoE MMQ)"
+            .to_string(),
+        results,
+        pass,
+        emitted_at: now_utc_iso8601(),
+        rig: rig_for(arch),
+        pmc: Some(pmc),
+    };
+    let written = cert.write_to_disk(repo_root)?;
+    tracing::info!(
+        target: "flambeau_bench::sweep_mmvq",
+        cert = %written.display(), pass = cert.pass, "indexed-moe tile8 cert written"
+    );
+    Ok(cert)
+}
+
+/// One tile8 MoE MMQ shape. For `gate_up`: two weights, per-token activation,
+/// outputs `[n_pairs][n_rows]` for gate+up (compared together). For `down`: one
+/// weight, per-pair activation, output `[n_pairs][n_rows]`. Returns
+/// `(got, reference)` over the flattened output(s).
+#[expect(clippy::too_many_arguments, reason = "MoE shape carries 7 independent dims")]
+fn run_shape_moe_mmq_tile8<B: BenchBackend>(
+    dev: &B::Device,
+    dtype: MoeMmqTile8Dtype,
+    n_experts: usize,
+    n_rows: usize,
+    k: usize,
+    top_k: usize,
+    n_tokens: usize,
+    seed: u64,
+) -> Result<(Vec<f32>, Vec<f32>)> {
+    let gate_up = dtype.gate_up();
+    let n_pairs = n_tokens * top_k;
+    let n_act_rows = if gate_up { n_tokens } else { n_pairs };
+
+    let q_bytes =
+        B::image("quantize_q8_1").ok_or_else(|| anyhow!("quantize_q8_1 not compiled"))?;
+    let m_bytes = B::image(dtype.kernel_stem())
+        .ok_or_else(|| anyhow!("{} kernel not compiled", dtype.kernel_stem()))?;
+    let q_module = B::load(dev, q_bytes)?;
+    let m_module = B::load(dev, m_bytes)?;
+    let k_quantize = B::kernel(&q_module, "flambeau_quantize_row_q8_1")?;
+    let k_mmq = B::kernel(&m_module, dtype.kernel_entry())?;
+
+    let wd = dtype.weight_dtype();
+    let block_elems = wd.block_elem_count();
+    let block_bytes = wd.block_size_bytes();
+    assert_eq!(k % block_elems, 0);
+    let n_blocks = k / block_elems;
+
+    // Expert weights [n_experts][n_rows][k] (gate; up only for gate_up).
+    let gate_raw =
+        tame_scales(wd, seeded_bytes(seed, n_experts * n_rows * n_blocks * block_bytes));
+    let mut gate_dq = vec![0.0f32; n_experts * n_rows * k];
+    dequantize_into(wd.ggml(), &gate_raw, &mut gate_dq)?;
+    let d_gate = alloc_and_upload(dev, gate_raw.as_slice());
+    let (up_raw, up_dq, d_up) = if gate_up {
+        let raw = tame_scales(
+            wd,
+            seeded_bytes(seed ^ 0xDEAD_BEEF, n_experts * n_rows * n_blocks * block_bytes),
+        );
+        let mut dq = vec![0.0f32; n_experts * n_rows * k];
+        dequantize_into(wd.ggml(), &raw, &mut dq)?;
+        let d = alloc_and_upload(dev, raw.as_slice());
+        (raw, dq, Some(d))
+    } else {
+        (Vec::new(), Vec::new(), None)
+    };
+
+    // Activation [n_act_rows][k] → Q8_1.
+    let act_f32 = seeded_f32_range(seed.wrapping_add(0xA5A5A5A5), n_act_rows * k, -1.0, 1.0);
+    let d_act = alloc_and_upload(dev, act_f32.as_slice());
+    let total_y_blocks = n_act_rows * k / QK8;
+    let y_bytes = total_y_blocks * std::mem::size_of::<BlockQ8_1>();
+    let d_y = dev.alloc(y_bytes)?;
+    {
+        let stream = dev.default_stream();
+        let n_elems = (n_act_rows * k) as i32;
+        let d_act_ptr: u64 = d_act.as_usize() as u64;
+        let d_y_ptr: u64 = d_y.as_usize() as u64;
+        let mut args = <B::Args<'_>>::default();
+        args.push_arg(&d_act_ptr);
+        args.push_arg(&d_y_ptr);
+        args.push_arg(&n_elems);
+        B::launch(&k_quantize, stream, LaunchCfg::one_d(total_y_blocks as u32, QK8 as u32), args)?;
+        stream.synchronize()?;
+    }
+
+    // Expert routing per pair + the pad-to-8 sort.
+    let expert_ids: Vec<i32> = (0..n_pairs)
+        .map(|i| {
+            let h = (i as u64)
+                .wrapping_mul(0x9E3779B97F4A7C15)
+                .wrapping_add(seed.wrapping_mul(0x12345));
+            ((h >> 32) as u32 % n_experts as u32) as i32
+        })
+        .collect();
+    let (sorted_padded, padded_offsets) = build_padded_sort(&expert_ids, n_experts);
+    let padded_total = *padded_offsets.last().unwrap() as usize;
+    let d_ids = alloc_and_upload(dev, expert_ids.as_slice());
+    let d_sorted = alloc_and_upload(dev, sorted_padded.as_slice());
+    let d_pofs = alloc_and_upload(dev, padded_offsets.as_slice());
+
+    let out_elems = n_pairs * n_rows;
+    let d_out = dev.alloc(out_elems * 4)?;
+    let d_up_out = if gate_up { Some(dev.alloc(out_elems * 4)?) } else { None };
+
+    {
+        let stream = dev.default_stream();
+        // Kernel sees n_tokens (=n_act_rows for down) + top_k (=1 for down).
+        let n_rows_i = n_rows as i32;
+        let n_tokens_i = n_act_rows as i32;
+        let top_k_i = if gate_up { top_k as i32 } else { 1 };
+        let nb_i = n_blocks as i32;
+        let n_experts_i = n_experts as i32;
+        let g_ptr: u64 = d_gate.as_usize() as u64;
+        let y_ptr: u64 = d_y.as_usize() as u64;
+        let e_ptr: u64 = d_ids.as_usize() as u64;
+        let s_ptr: u64 = d_sorted.as_usize() as u64;
+        let po_ptr: u64 = d_pofs.as_usize() as u64;
+        let o_ptr: u64 = d_out.as_usize() as u64;
+        let mut args = <B::Args<'_>>::default();
+        args.push_arg(&g_ptr);
+        let u_ptr: u64 = d_up.map_or(0, |p| p.as_usize() as u64);
+        let uo_ptr: u64 = d_up_out.map_or(0, |p| p.as_usize() as u64);
+        if gate_up {
+            args.push_arg(&u_ptr);
+        }
+        args.push_arg(&y_ptr);
+        args.push_arg(&e_ptr);
+        args.push_arg(&s_ptr);
+        args.push_arg(&po_ptr);
+        args.push_arg(&o_ptr);
+        if gate_up {
+            args.push_arg(&uo_ptr);
+        }
+        args.push_arg(&n_rows_i);
+        args.push_arg(&n_tokens_i);
+        args.push_arg(&top_k_i);
+        args.push_arg(&nb_i);
+        args.push_arg(&n_experts_i);
+        let grid_y = (padded_total.div_ceil(8)) as u32;
+        let cfg = LaunchCfg {
+            grid: ((n_rows as u32).div_ceil(64), grid_y.max(1), 1),
+            block: (64, 1, 1),
+            shared_bytes: 0,
+        };
+        B::launch(&k_mmq, stream, cfg, args)?;
+        stream.synchronize()?;
+    }
+
+    let mut got = vec![0.0f32; out_elems];
+    let mut got_up = vec![0.0f32; out_elems];
+    unsafe {
+        dev.memcpy_async(
+            dev.default_stream(),
+            CopyDirection::DeviceToHost,
+            DevicePtr(got.as_mut_ptr() as usize),
+            d_out,
+            out_elems * 4,
+        )?;
+        if let Some(p) = d_up_out {
+            dev.memcpy_async(
+                dev.default_stream(),
+                CopyDirection::DeviceToHost,
+                DevicePtr(got_up.as_mut_ptr() as usize),
+                p,
+                out_elems * 4,
+            )?;
+        }
+    }
+    dev.default_stream().synchronize()?;
+
+    unsafe {
+        dev.dealloc(d_gate, gate_raw.len())?;
+        if let Some(p) = d_up {
+            dev.dealloc(p, up_raw.len())?;
+        }
+        dev.dealloc(d_act, act_f32.len() * 4)?;
+        dev.dealloc(d_y, y_bytes)?;
+        dev.dealloc(d_ids, expert_ids.len() * 4)?;
+        dev.dealloc(d_sorted, sorted_padded.len() * 4)?;
+        dev.dealloc(d_pofs, padded_offsets.len() * 4)?;
+        dev.dealloc(d_out, out_elems * 4)?;
+        if let Some(p) = d_up_out {
+            dev.dealloc(p, out_elems * 4)?;
+        }
+    }
+
+    // Reference: per pair, dot the selected expert's weight row with the
+    // Q8_1-roundtripped activation. For gate_up the activation is the pair's
+    // token row; for down it's the pair's own row. gate+up errors are folded
+    // together (concatenated) so one cert covers both outputs.
+    let mut reference = vec![0.0f32; out_elems];
+    let mut ref_up = vec![0.0f32; out_elems];
+    let mut rt_cache: Vec<Option<Vec<f32>>> = vec![None; n_act_rows];
+    for p in 0..n_pairs {
+        let expert = expert_ids[p] as usize;
+        let act_row = if gate_up { p / top_k } else { p };
+        if rt_cache[act_row].is_none() {
+            rt_cache[act_row] =
+                Some(quantize_q8_1_roundtrip(&act_f32[act_row * k..(act_row + 1) * k]));
+        }
+        let y_rt = rt_cache[act_row].as_ref().unwrap();
+        let gbase = &gate_dq[expert * n_rows * k..(expert + 1) * n_rows * k];
+        let g_out = reference_matmul(gbase, y_rt, n_rows, k);
+        for row in 0..n_rows {
+            reference[p * n_rows + row] = g_out[row];
+        }
+        if gate_up {
+            let ubase = &up_dq[expert * n_rows * k..(expert + 1) * n_rows * k];
+            let u_out = reference_matmul(ubase, y_rt, n_rows, k);
+            for row in 0..n_rows {
+                ref_up[p * n_rows + row] = u_out[row];
+            }
+        }
+    }
+
+    if gate_up {
+        let mut got_all = got;
+        got_all.extend_from_slice(&got_up);
+        let mut ref_all = reference;
+        ref_all.extend_from_slice(&ref_up);
+        Ok((got_all, ref_all))
+    } else {
+        Ok((got, reference))
+    }
+}
+
 /// 4-warp LDS-tiled MMQ kernels. Distinct from `MmqGemmDtype` because they use
 /// the runtime's 6-arg ABI `(vx, vy, dst, n_rows, n_batches, n_blocks_per_row)`
 /// and a full MMQ_Y×MMQ_X output tile per block (not one-thread-per-row), so the

@@ -1,61 +1,32 @@
-// indexed_moe_mmq_q8_0_gate_up_tile8_dp4a — fused gate+up MoE MMQ
-// for Q8_0 expert weights.
-// Direct sibling of `indexed_moe_mmq_q4_0_gate_up_tile8_dp4a.cu`
-// with the nibble-unpack and (q-8) bias correction removed. Q8_0 is already
-// signed/centred so the inner formula collapses to
-// sums[c] += x_d · d_y · sumi.
-// Q8_0 block: {fp16 d, int8 qs[32]} = 8 × int32 of signed quants per block.
-// n_blocks_per_row = hidden / 32 (QK8_0 == QK8_1 == 32), same stride as
-// the activation's Q8_1 blocks → one weight block ↔ one activation block
-// in the k-loop.
-// shipped Q8_0 indexed-MoE MMVQ (256 threads, 1 output/block).
-// On Qwen3.6-35B-A3B-UD-Q8_K_XL prefill L=512 that kernel held 77 % of
-// GPU time — the sole dominant hotspot. Tile8 delivers 64 rows
-// × 8 slot-cols = 512 outputs per block with one weight-tile decode per
-// thread per block, matching Q4_K structural win (~3× per-kernel).
-// Launch:
-// grid = (⌈n_rows / 64⌉, padded_total / 8, 1)
-// block = (64, 1, 1)
+#pragma once
+// Templated fused gate+up Q8_0 indexed-MoE MMQ, tile8 (register-tiled prefill).
+// MMQ_Y=64 weight rows (one per thread) × TILE_N=8 slot-columns per block: each
+// thread holds its row's Q8_0 weight block (8 int32) in registers and runs the
+// dp4a against 8 sorted slot activations, writing 8 gate + 8 up outputs — no LDS,
+// no cross-thread comms, so the block height is a logical tile (MMQ_Y), NOT a
+// hardware warp (correct on wave64 AND wave32). Experts are pre-sorted +
+// padded-to-8 (`sorted_pair_idx_padded` / `padded_offsets`) so all 8 slots in a
+// block share one expert. Q8_0 is signed/centred → the dot collapses to
+// `x_d·d_y·sumi`. Backend-neutral: `dp4a` from the arch header; weight qs (block
+// offset 2) loads through `load_int_b2`. `OutT` is the destination dtype.
+#include "quant_traits.cuh"
 
-#include "block_quant.cuh"
-#include <hip/hip_runtime.h>
-#include <hip/hip_fp16.h>
-#include <stdint.h>
-
-#ifndef WARP_SIZE
-#define WARP_SIZE 64
-#endif
-#ifndef QK8_0
-#define QK8_0 32
-#endif
-#ifndef QK8_1
-#define QK8_1 32
-#endif
-
-#define MMQ_Y 64
-#define TILE_N 8
-
-static __device__ __forceinline__ int dp4a(int a, int b, int c) {
-    return __builtin_amdgcn_sdot4(a, b, c, false);
-}
-
-extern "C" __global__ __launch_bounds__(WARP_SIZE, 1)
-void flambeau_indexed_moe_mmq_q8_0_gate_up_tile8_dp4a_q8_1(
+template<class OutT = float>
+static __device__ __forceinline__ void indexed_moe_mmq_q8_0_gate_up_tile8_row(
     const flambeau_block_q8_0* __restrict__ gate_w,
     const flambeau_block_q8_0* __restrict__ up_w,
     const flambeau_block_q8_1* __restrict__ y,
     const int* __restrict__ expert_ids,
     const int* __restrict__ sorted_pair_idx_padded,
-    const int* __restrict__ padded_offsets,          // [n_experts + 1]
-    float*      __restrict__ gate_out,
-    float*      __restrict__ up_out,
-    const int n_rows,
-    const int n_tokens,
-    const int top_k,
-    const int n_blocks_per_row,
-    const int n_experts
-) {
-    const int tile_m = blockIdx.x * WARP_SIZE;
+    const int* __restrict__ padded_offsets,
+    OutT* __restrict__ gate_out,
+    OutT* __restrict__ up_out,
+    int n_rows, int n_tokens, int top_k, int n_blocks_per_row, int n_experts)
+{
+    constexpr int MMQ_Y  = 64;
+    constexpr int TILE_N = 8;
+
+    const int tile_m = blockIdx.x * MMQ_Y;
     const int tile_n = blockIdx.y * TILE_N;
     const int tid    = threadIdx.x;
 
@@ -67,8 +38,6 @@ void flambeau_indexed_moe_mmq_q8_0_gate_up_tile8_dp4a_q8_1(
     const int row     = tile_m + tid;
     const bool row_ok = (row < n_rows);
 
-    // All 8 slots in this block share the same expert (pad-to-8
-    // invariant, enforced by moe_sort_by_expert_padded).
     const int first_pair = sorted_pair_idx_padded[tile_n];
     const int expert = expert_ids[first_pair];
 
@@ -89,8 +58,6 @@ void flambeau_indexed_moe_mmq_q8_0_gate_up_tile8_dp4a_q8_1(
     for (int c = 0; c < TILE_N; ++c) { sums_gate[c] = 0.0f; sums_up[c] = 0.0f; }
 
     for (int ib = 0; ib < n_blocks_per_row; ++ib) {
-        // Load Q8_0 weight blocks for this thread's row: 8 × int32 each
-        // direct from qs[], no nibble decode, no sub-block scales.
         float g_d = 0.0f, u_d = 0.0f;
         int g_v[8] = {0};
         int u_v[8] = {0};
@@ -100,12 +67,10 @@ void flambeau_indexed_moe_mmq_q8_0_gate_up_tile8_dp4a_q8_1(
             const flambeau_block_q8_0* ubx = &up_w[w_row_off];
             g_d = (float) gbx->d;
             u_d = (float) ubx->d;
-            const int* g_ql = (const int*) gbx->qs;
-            const int* u_ql = (const int*) ubx->qs;
             #pragma unroll
             for (int j = 0; j < 8; ++j) {
-                g_v[j] = g_ql[j];
-                u_v[j] = u_ql[j];
+                g_v[j] = load_int_b2((const int8_t*) gbx->qs, j);
+                u_v[j] = load_int_b2((const int8_t*) ubx->qs, j);
             }
         }
 
@@ -114,16 +79,14 @@ void flambeau_indexed_moe_mmq_q8_0_gate_up_tile8_dp4a_q8_1(
             const flambeau_block_q8_1* by =
                 &y[(size_t) slot_token[c] * n_blocks_per_row + ib];
             const float d8 = (float) by->d;
-            const int* y_packed = (const int*) by->qs;
 
             int sumi_g = 0, sumi_u = 0;
             #pragma unroll
             for (int j = 0; j < 8; ++j) {
-                const int y_j = y_packed[j];
+                const int y_j = load_int_b2(by->qs, j);
                 sumi_g = dp4a(g_v[j], y_j, sumi_g);
                 sumi_u = dp4a(u_v[j], y_j, sumi_u);
             }
-            // Q8_0 is signed/centred → no (q - 8) bias, no by->s term.
             sums_gate[c] += g_d * d8 * (float) sumi_g;
             sums_up[c]   += u_d * d8 * (float) sumi_u;
         }
