@@ -3,7 +3,7 @@
 Transient working note. Start here when the dev rig (2× MI50 gfx906 + 1× RTX 3090
 sm_86) is built and `feature/cuda-decouple` is pulled in.
 
-> **CURRENT STATUS (2026-06-17, tip `8d91b12`): dense mmvq + ENTIRE dense mmq
+> **CURRENT STATUS (2026-06-17, tip `2b087df`): dense mmvq + ENTIRE dense mmq
 > family COMPLETE cross-backend. P2d indexed_moe STARTED — the plain-row MMVQ
 > family (Q8_0 pilot + Q4_0/Q4_1/Q5_0/Q5_1) is DONE cross-backend.** cert-check
 > green hip 82 / cuda 20 throughout.
@@ -22,12 +22,24 @@ sm_86) is built and `feature/cuda-decouple` is pulled in.
 >   `run_shape_moe_mmvq<B>` in `sweep_mmvq.rs` (8-arg ABI, expert-routed
 >   reference); `--dtype <dt>_moe_mmvq`. HIP↔CUDA errs match ~1e-7 (reduce
 >   lane-order, same as dense mmvq).
-> - **NEXT in P2d:** the K-quant r2_dp4a MoE MMVQ (Q4_K r2/r4, Q5_K, Q6_K, Q2_K,
->   Q3_K) — own super-block bodies (not `quant_traits::partial`), the multi-row
->   64-thread pattern (`indexed_moe_mmvq_nrow_row` is the reduce shape; bodies
->   mirror the dense `mmvq_q{4,5,6,2,3}_k.cuh`). Then the gate_up MMVQ fusion
->   variants, then the 40 `*_tile8_dp4a` + `*_turbo` MMQ kernels (DS4 logical-
->   lanes playbook from the dense 4warp_lds work carries over).
+> - **P2d K-quant r2/r4 MoE MMVQ — DONE.** Q4_K r2+r4 (`ec9bcc3`) + Q5_K/Q6_K/
+>   Q2_K/Q3_K r2 (`2b087df`). Each a faithful port of the hand r2_dp4a kernel
+>   (2 rows/64t, 32-lane groups; Q4_K-r4 = 4 rows/16-lane) into one neutral
+>   `indexed_moe_mmvq_q*_k.cuh`. Cross-backend fixes vs the hand kernels: every
+>   int read → `load_int_b2` (NVIDIA faults on misaligned 4-byte ql/qh/qs); the
+>   half/quarter-warp DPP reduce → `mmvq_reduce_store_group<32/16>` (width-N
+>   within-warp shuffle, correct on wave64 sub-warp AND wave32 full-warp). Q4_K
+>   shares `flambeau_q4k_subblock_dot` across r2+r4. All HIP↔CUDA BIT-IDENTICAL
+>   (group reduce is shuffle-only). `--dtype Q{4,5,6,2,3}_K_r{2,4}_moe_mmvq`,
+>   neutral bench-refs `indexed_moe_mmvq_q*_k_r{2,4}`. **The entire indexed-MoE
+>   MMVQ DECODE family (plain-row + K-quant r2/r4) is now cross-backend.**
+> - **NEXT in P2d:** (1) IQ\* MoE MMVQ (iq1_s/iq1_m/iq2_s/iq2_xs/iq2_xxs/iq3_s/
+>   iq3_xxs/iq4_nl/iq4_xs — plain + r2_dp4a; reuse `iq_grid.cuh` + the shared
+>   sign/pack helpers from the dense IQ mmvq work); (2) the gate_up MMVQ fusion
+>   variants (q4_0/q8_0/q4_k × r2/r4/sorted/dp4a configs — reuse the dense
+>   `mmvq_reduce_store_gate_up` + a MoE addressing wrapper); (3) the ~40
+>   `*_tile8_dp4a` + `*_turbo` MMQ prefill kernels (DS4 logical-lanes playbook
+>   from the dense 4warp_lds work carries over directly).
 > - **DS4 4-warp_lds — Q4_0 (`3867eab`) + Q4_1 (`2ce63cc`) + Q4_K turbo
 >   (`58f52f0`) DONE.** The hardest sub-family (MMQ_Y=128, DS4 144-B activation,
 >   dynamic LDS, double-buffered Y). **The breakthrough: the hand kernels'
