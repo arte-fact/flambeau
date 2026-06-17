@@ -12,6 +12,9 @@
 #include "quant_traits.cuh"
 #include "mmvq_reduce.cuh"
 
+// Forward: the fused gate+up r4 sorted-reorder variant lives at the bottom of
+// this header (it reuses flambeau_q4k_subblock_dot defined just below).
+
 // One Q4_K super-block × one int32 slice (`iqs`) of its `pair_idx` sub-block
 // pair → the (low, high)-nibble contribution to the row dot.
 static __device__ __forceinline__ float flambeau_q4k_subblock_dot(
@@ -126,4 +129,63 @@ static __device__ __forceinline__ void indexed_moe_mmvq_q4_k_r4_dp4a_row(
 
     const int dst_idx = (int) (((size_t) token * top_k + slot_idx) * n_rows + row);
     mmvq_reduce_store_group<16, OutT>(acc, dst, dst_idx, lane_lo);
+}
+
+// Fused gate+up Q4_K MoE MMVQ, r4 (4 rows/16-lane groups) with a sorted-reorder
+// of blockIdx.y: `sorted_pair_idx[block.y]` → the original (token, slot) pair,
+// so blocks adjacent in grid.y share weight-tile L2 residency (the experts are
+// pre-sorted). Reuses `flambeau_q4k_subblock_dot` for both weights; the two
+// outputs reduce through two width-16 group butterflies.
+template<class OutT = float>
+static __device__ __forceinline__ void indexed_moe_mmvq_q4_k_gate_up_r4_sorted_dp4a_row(
+    const flambeau_block_q4_K* __restrict__ gate_w,
+    const flambeau_block_q4_K* __restrict__ up_w,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    const int* __restrict__ sorted_pair_idx,
+    OutT* __restrict__ gate_out,
+    OutT* __restrict__ up_out,
+    int n_rows, int n_tokens, int top_k, int n_sb_per_row)
+{
+    const int row_quad     = blockIdx.x;
+    const int slot_ordered = blockIdx.y;
+    const int slot         = sorted_pair_idx[slot_ordered];
+    const int token        = slot / top_k;
+    const int slot_idx      = slot - token * top_k;
+    if (token >= n_tokens) return;
+
+    const int lane    = threadIdx.x;       // 0..63
+    const int row_idx = lane >> 4;         // 0..3
+    const int lane_lo = lane & 15;         // 0..15
+
+    const int row = row_quad * 4 + row_idx;
+    if (row >= n_rows) return;
+
+    const int expert = expert_ids[(size_t) token * top_k + slot_idx];
+    const flambeau_block_q4_K* gate_row =
+        gate_w + (((size_t) expert * n_rows) + row) * n_sb_per_row;
+    const flambeau_block_q4_K* up_row =
+        up_w + (((size_t) expert * n_rows) + row) * n_sb_per_row;
+    const flambeau_block_q8_1* y_row = y + (size_t) token * n_sb_per_row * 8;
+
+    const int pair_idx = lane_lo >> 2;     // 0..3
+    const int iqs_base = lane_lo & 3;      // 0..3
+    const int sub_lo   = pair_idx * 2;
+    const int sub_hi   = sub_lo + 1;
+
+    float acc_gate = 0.0f, acc_up = 0.0f;
+    for (int b = 0; b < n_sb_per_row; ++b) {
+        const flambeau_block_q4_K* gbk = gate_row + b;
+        const flambeau_block_q4_K* ubk = up_row + b;
+        #pragma unroll
+        for (int ipair = 0; ipair < 2; ++ipair) {
+            const int iqs = iqs_base + ipair * 4;
+            acc_gate += flambeau_q4k_subblock_dot(gbk, y_row, b, pair_idx, iqs, sub_lo, sub_hi);
+            acc_up   += flambeau_q4k_subblock_dot(ubk, y_row, b, pair_idx, iqs, sub_lo, sub_hi);
+        }
+    }
+
+    const int dst_idx = (int) (((size_t) token * top_k + slot_idx) * n_rows + row);
+    mmvq_reduce_store_group<16, OutT>(acc_gate, gate_out, dst_idx, lane_lo);
+    mmvq_reduce_store_group<16, OutT>(acc_up, up_out, dst_idx, lane_lo);
 }

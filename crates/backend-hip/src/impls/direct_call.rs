@@ -594,4 +594,8 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
         impl_id: "indexed_moe_mmvq_q4_k_gate_up",
         cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q4_k_gate_up.json",
     },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmvq_q4_k_gate_up_r4_sorted",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q4_k_gate_up_r4_sorted.json",
+    },
 ];
