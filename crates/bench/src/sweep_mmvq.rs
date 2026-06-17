@@ -1748,6 +1748,7 @@ pub enum MmqGemmDtype {
     Q5_1Wave64,
     Q6KWave64,
     Q4KWave64,
+    Q5KWave64,
 }
 
 impl MmqGemmDtype {
@@ -1760,6 +1761,7 @@ impl MmqGemmDtype {
             MmqGemmDtype::Q5_1Wave64 => "Q5_1",
             MmqGemmDtype::Q6KWave64 => "Q6_K",
             MmqGemmDtype::Q4KWave64 => "Q4_K",
+            MmqGemmDtype::Q5KWave64 => "Q5_K",
         }
     }
     fn weight_dtype(self) -> Dtype {
@@ -1771,6 +1773,7 @@ impl MmqGemmDtype {
             MmqGemmDtype::Q5_1Wave64 => Dtype::Q5_1,
             MmqGemmDtype::Q6KWave64 => Dtype::Q6K,
             MmqGemmDtype::Q4KWave64 => Dtype::Q4K,
+            MmqGemmDtype::Q5KWave64 => Dtype::Q5K,
         }
     }
     fn impl_id(self) -> &'static str {
@@ -1782,6 +1785,7 @@ impl MmqGemmDtype {
             MmqGemmDtype::Q5_1Wave64 => "qmatmul_q5_1_mmq_wave64",
             MmqGemmDtype::Q6KWave64 => "qmatmul_q6_k_mmq_wave64",
             MmqGemmDtype::Q4KWave64 => "qmatmul_q4_k_mmq_wave64",
+            MmqGemmDtype::Q5KWave64 => "qmatmul_q5_k_mmq_wave64",
         }
     }
     fn kernel_stem(self) -> &'static str {
@@ -1793,6 +1797,7 @@ impl MmqGemmDtype {
             MmqGemmDtype::Q5_1Wave64 => "mmq_q5_1_wave64",
             MmqGemmDtype::Q6KWave64 => "mmq_q6_K_wave64",
             MmqGemmDtype::Q4KWave64 => "mmq_q4_K_wave64",
+            MmqGemmDtype::Q5KWave64 => "mmq_q5_K_wave64",
         }
     }
     fn kernel_entry(self) -> &'static str {
@@ -1804,6 +1809,7 @@ impl MmqGemmDtype {
             MmqGemmDtype::Q5_1Wave64 => "flambeau_mmq_q5_1_wave64_q8_1",
             MmqGemmDtype::Q6KWave64 => "flambeau_mmq_q6_K_wave64_q8_1",
             MmqGemmDtype::Q4KWave64 => "flambeau_mmq_q4_K_wave64_q8_1",
+            MmqGemmDtype::Q5KWave64 => "flambeau_mmq_q5_K_wave64_q8_1",
         }
     }
     /// (MMQ_Y rows/block, TILE_N cols/block) — the grid tiling.

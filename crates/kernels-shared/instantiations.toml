@@ -712,6 +712,24 @@ params = """
     const int nrows_dst"""
 body = "mmq_q4_k_wave64_row<64, 8>(vx, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst);"
 
+# Q5_K single-pass tiled MMQ (prefill GEMM) — Q4_K super-block decode plus the
+# 5th-bit plane from qh. Same stem/entry as the retired hand kernel.
+[[kernel]]
+stem = "mmq_q5_K_wave64"
+includes = ["quant_traits.cuh", "mmq_q5_k_wave64.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_q5_K_wave64_q8_1"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int nrows_y,
+    const int nrows_dst"""
+body = "mmq_q5_k_wave64_row<64, 8>(vx, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst);"
+
 # Q4_0 single-row MMVQ — legacy 4-bit (nibble unpack + (q-8) bias correction).
 # One module carries both the F32 dst entry (scratch-then-cast path) and the
 # F16-dst entry (mmvq_q4_0_kv_decode_f16 / mmvq_f16_direct).
