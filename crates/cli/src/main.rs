@@ -1545,6 +1545,14 @@ fn moe_mmvq_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::MoeMmvqDtyp
         "Q2_K_r2_moe_mmvq" => Some(MoeMmvqDtype::Q2KR2),
         "Q3_K_r2_moe_mmvq" => Some(MoeMmvqDtype::Q3KR2),
         "IQ4_NL_r2_moe_mmvq" => Some(MoeMmvqDtype::Iq4NlR2),
+        "IQ4_XS_r2_moe_mmvq" => Some(MoeMmvqDtype::Iq4XsR2),
+        "IQ2_XXS_r2_moe_mmvq" => Some(MoeMmvqDtype::Iq2XxsR2),
+        "IQ2_XS_r2_moe_mmvq" => Some(MoeMmvqDtype::Iq2XsR2),
+        "IQ2_S_r2_moe_mmvq" => Some(MoeMmvqDtype::Iq2SR2),
+        "IQ3_XXS_r2_moe_mmvq" => Some(MoeMmvqDtype::Iq3XxsR2),
+        "IQ3_S_r2_moe_mmvq" => Some(MoeMmvqDtype::Iq3SR2),
+        "IQ1_S_r2_moe_mmvq" => Some(MoeMmvqDtype::Iq1SR2),
+        "IQ1_M_r2_moe_mmvq" => Some(MoeMmvqDtype::Iq1MR2),
         _ => None,
     }
 }

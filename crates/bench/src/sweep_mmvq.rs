@@ -2095,6 +2095,14 @@ pub enum MoeMmvqDtype {
     Q2KR2,
     Q3KR2,
     Iq4NlR2,
+    Iq4XsR2,
+    Iq2XxsR2,
+    Iq2XsR2,
+    Iq2SR2,
+    Iq3XxsR2,
+    Iq3SR2,
+    Iq1SR2,
+    Iq1MR2,
 }
 
 impl MoeMmvqDtype {
@@ -2111,6 +2119,14 @@ impl MoeMmvqDtype {
             MoeMmvqDtype::Q2KR2 => "Q2_K",
             MoeMmvqDtype::Q3KR2 => "Q3_K",
             MoeMmvqDtype::Iq4NlR2 => "IQ4_NL",
+            MoeMmvqDtype::Iq4XsR2 => "IQ4_XS",
+            MoeMmvqDtype::Iq2XxsR2 => "IQ2_XXS",
+            MoeMmvqDtype::Iq2XsR2 => "IQ2_XS",
+            MoeMmvqDtype::Iq2SR2 => "IQ2_S",
+            MoeMmvqDtype::Iq3XxsR2 => "IQ3_XXS",
+            MoeMmvqDtype::Iq3SR2 => "IQ3_S",
+            MoeMmvqDtype::Iq1SR2 => "IQ1_S",
+            MoeMmvqDtype::Iq1MR2 => "IQ1_M",
         }
     }
     fn weight_dtype(self) -> Dtype {
@@ -2126,6 +2142,14 @@ impl MoeMmvqDtype {
             MoeMmvqDtype::Q2KR2 => Dtype::Q2K,
             MoeMmvqDtype::Q3KR2 => Dtype::Q3K,
             MoeMmvqDtype::Iq4NlR2 => Dtype::Iq4Nl,
+            MoeMmvqDtype::Iq4XsR2 => Dtype::Iq4Xs,
+            MoeMmvqDtype::Iq2XxsR2 => Dtype::Iq2Xxs,
+            MoeMmvqDtype::Iq2XsR2 => Dtype::Iq2Xs,
+            MoeMmvqDtype::Iq2SR2 => Dtype::Iq2S,
+            MoeMmvqDtype::Iq3XxsR2 => Dtype::Iq3Xxs,
+            MoeMmvqDtype::Iq3SR2 => Dtype::Iq3S,
+            MoeMmvqDtype::Iq1SR2 => Dtype::Iq1S,
+            MoeMmvqDtype::Iq1MR2 => Dtype::Iq1M,
         }
     }
     fn impl_id(self) -> &'static str {
@@ -2142,6 +2166,14 @@ impl MoeMmvqDtype {
             MoeMmvqDtype::Q2KR2 => "indexed_moe_mmvq_q2_k_r2",
             MoeMmvqDtype::Q3KR2 => "indexed_moe_mmvq_q3_k_r2",
             MoeMmvqDtype::Iq4NlR2 => "indexed_moe_mmvq_iq4_nl_r2",
+            MoeMmvqDtype::Iq4XsR2 => "indexed_moe_mmvq_iq4_xs_r2",
+            MoeMmvqDtype::Iq2XxsR2 => "indexed_moe_mmvq_iq2_xxs_r2",
+            MoeMmvqDtype::Iq2XsR2 => "indexed_moe_mmvq_iq2_xs_r2",
+            MoeMmvqDtype::Iq2SR2 => "indexed_moe_mmvq_iq2_s_r2",
+            MoeMmvqDtype::Iq3XxsR2 => "indexed_moe_mmvq_iq3_xxs_r2",
+            MoeMmvqDtype::Iq3SR2 => "indexed_moe_mmvq_iq3_s_r2",
+            MoeMmvqDtype::Iq1SR2 => "indexed_moe_mmvq_iq1_s_r2",
+            MoeMmvqDtype::Iq1MR2 => "indexed_moe_mmvq_iq1_m_r2",
         }
     }
     fn kernel_stem(self) -> &'static str {
@@ -2158,6 +2190,14 @@ impl MoeMmvqDtype {
             MoeMmvqDtype::Q2KR2 => "indexed_moe_mmvq_q2_k_r2_dp4a",
             MoeMmvqDtype::Q3KR2 => "indexed_moe_mmvq_q3_k_r2_dp4a",
             MoeMmvqDtype::Iq4NlR2 => "indexed_moe_mmvq_iq4_nl_r2_dp4a",
+            MoeMmvqDtype::Iq4XsR2 => "indexed_moe_mmvq_iq4_xs_r2_dp4a",
+            MoeMmvqDtype::Iq2XxsR2 => "indexed_moe_mmvq_iq2_xxs_r2_dp4a",
+            MoeMmvqDtype::Iq2XsR2 => "indexed_moe_mmvq_iq2_xs_r2_dp4a",
+            MoeMmvqDtype::Iq2SR2 => "indexed_moe_mmvq_iq2_s_r2_dp4a",
+            MoeMmvqDtype::Iq3XxsR2 => "indexed_moe_mmvq_iq3_xxs_r2_dp4a",
+            MoeMmvqDtype::Iq3SR2 => "indexed_moe_mmvq_iq3_s_r2_dp4a",
+            MoeMmvqDtype::Iq1SR2 => "indexed_moe_mmvq_iq1_s_r2_dp4a",
+            MoeMmvqDtype::Iq1MR2 => "indexed_moe_mmvq_iq1_m_r2_dp4a",
         }
     }
     fn kernel_entry(self) -> &'static str {
@@ -2174,6 +2214,14 @@ impl MoeMmvqDtype {
             MoeMmvqDtype::Q2KR2 => "flambeau_indexed_moe_mmvq_q2_k_r2_dp4a_q8_1",
             MoeMmvqDtype::Q3KR2 => "flambeau_indexed_moe_mmvq_q3_k_r2_dp4a_q8_1",
             MoeMmvqDtype::Iq4NlR2 => "flambeau_indexed_moe_mmvq_iq4_nl_r2_dp4a_q8_1",
+            MoeMmvqDtype::Iq4XsR2 => "flambeau_indexed_moe_mmvq_iq4_xs_r2_dp4a_q8_1",
+            MoeMmvqDtype::Iq2XxsR2 => "flambeau_indexed_moe_mmvq_iq2_xxs_r2_dp4a_q8_1",
+            MoeMmvqDtype::Iq2XsR2 => "flambeau_indexed_moe_mmvq_iq2_xs_r2_dp4a_q8_1",
+            MoeMmvqDtype::Iq2SR2 => "flambeau_indexed_moe_mmvq_iq2_s_r2_dp4a_q8_1",
+            MoeMmvqDtype::Iq3XxsR2 => "flambeau_indexed_moe_mmvq_iq3_xxs_r2_dp4a_q8_1",
+            MoeMmvqDtype::Iq3SR2 => "flambeau_indexed_moe_mmvq_iq3_s_r2_dp4a_q8_1",
+            MoeMmvqDtype::Iq1SR2 => "flambeau_indexed_moe_mmvq_iq1_s_r2_dp4a_q8_1",
+            MoeMmvqDtype::Iq1MR2 => "flambeau_indexed_moe_mmvq_iq1_m_r2_dp4a_q8_1",
         }
     }
     /// (threads/block, rows/block). Plain per-row kernels own one output row per
@@ -2191,7 +2239,15 @@ impl MoeMmvqDtype {
             | MoeMmvqDtype::Q6KR2
             | MoeMmvqDtype::Q2KR2
             | MoeMmvqDtype::Q3KR2
-            | MoeMmvqDtype::Iq4NlR2 => (64, 2),
+            | MoeMmvqDtype::Iq4NlR2
+            | MoeMmvqDtype::Iq4XsR2
+            | MoeMmvqDtype::Iq2XxsR2
+            | MoeMmvqDtype::Iq2XsR2
+            | MoeMmvqDtype::Iq2SR2
+            | MoeMmvqDtype::Iq3XxsR2
+            | MoeMmvqDtype::Iq3SR2
+            | MoeMmvqDtype::Iq1SR2
+            | MoeMmvqDtype::Iq1MR2 => (64, 2),
             MoeMmvqDtype::Q4KR4 => (64, 4),
         }
     }

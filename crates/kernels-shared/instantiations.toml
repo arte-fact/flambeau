@@ -1821,3 +1821,139 @@ params = """
     const int top_k,
     const int n_blocks_per_row"""
 body = "indexed_moe_mmvq_iq4_nl_r2_dp4a_row<float>(x, y, expert_ids, dst, n_rows, n_tokens, top_k, n_blocks_per_row);"
+
+[[kernel]]
+stem = "indexed_moe_mmvq_iq4_xs_r2_dp4a"
+includes = ["indexed_moe_mmvq_iq4_xs.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmvq_iq4_xs_r2_dp4a_q8_1"
+params = """
+    const flambeau_block_iq4_xs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_sb_per_row"""
+body = "indexed_moe_mmvq_iq4_xs_r2_dp4a_row<float>(x, y, expert_ids, dst, n_rows, n_tokens, top_k, n_sb_per_row);"
+
+[[kernel]]
+stem = "indexed_moe_mmvq_iq2_xxs_r2_dp4a"
+includes = ["indexed_moe_mmvq_iq2_xxs.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmvq_iq2_xxs_r2_dp4a_q8_1"
+params = """
+    const flambeau_block_iq2_xxs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_sb_per_row"""
+body = "indexed_moe_mmvq_iq2_xxs_r2_dp4a_row<float>(x, y, expert_ids, dst, n_rows, n_tokens, top_k, n_sb_per_row);"
+
+[[kernel]]
+stem = "indexed_moe_mmvq_iq2_xs_r2_dp4a"
+includes = ["indexed_moe_mmvq_iq2_xs.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmvq_iq2_xs_r2_dp4a_q8_1"
+params = """
+    const flambeau_block_iq2_xs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_sb_per_row"""
+body = "indexed_moe_mmvq_iq2_xs_r2_dp4a_row<float>(x, y, expert_ids, dst, n_rows, n_tokens, top_k, n_sb_per_row);"
+
+[[kernel]]
+stem = "indexed_moe_mmvq_iq2_s_r2_dp4a"
+includes = ["indexed_moe_mmvq_iq2_s.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmvq_iq2_s_r2_dp4a_q8_1"
+params = """
+    const flambeau_block_iq2_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_sb_per_row"""
+body = "indexed_moe_mmvq_iq2_s_r2_dp4a_row<float>(x, y, expert_ids, dst, n_rows, n_tokens, top_k, n_sb_per_row);"
+
+[[kernel]]
+stem = "indexed_moe_mmvq_iq3_xxs_r2_dp4a"
+includes = ["indexed_moe_mmvq_iq3_xxs.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmvq_iq3_xxs_r2_dp4a_q8_1"
+params = """
+    const flambeau_block_iq3_xxs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_sb_per_row"""
+body = "indexed_moe_mmvq_iq3_xxs_r2_dp4a_row<float>(x, y, expert_ids, dst, n_rows, n_tokens, top_k, n_sb_per_row);"
+
+[[kernel]]
+stem = "indexed_moe_mmvq_iq3_s_r2_dp4a"
+includes = ["indexed_moe_mmvq_iq3_s.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmvq_iq3_s_r2_dp4a_q8_1"
+params = """
+    const flambeau_block_iq3_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_sb_per_row"""
+body = "indexed_moe_mmvq_iq3_s_r2_dp4a_row<float>(x, y, expert_ids, dst, n_rows, n_tokens, top_k, n_sb_per_row);"
+
+[[kernel]]
+stem = "indexed_moe_mmvq_iq1_s_r2_dp4a"
+includes = ["indexed_moe_mmvq_iq1_s.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmvq_iq1_s_r2_dp4a_q8_1"
+params = """
+    const flambeau_block_iq1_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_sb_per_row"""
+body = "indexed_moe_mmvq_iq1_s_r2_dp4a_row<float>(x, y, expert_ids, dst, n_rows, n_tokens, top_k, n_sb_per_row);"
+
+[[kernel]]
+stem = "indexed_moe_mmvq_iq1_m_r2_dp4a"
+includes = ["indexed_moe_mmvq_iq1_m.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmvq_iq1_m_r2_dp4a_q8_1"
+params = """
+    const flambeau_block_iq1_m* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_sb_per_row"""
+body = "indexed_moe_mmvq_iq1_m_r2_dp4a_row<float>(x, y, expert_ids, dst, n_rows, n_tokens, top_k, n_sb_per_row);"
