@@ -1487,6 +1487,7 @@ fn mmq_4warp_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::Mmq4WarpDt
     use flambeau_bench::sweep_mmvq::Mmq4WarpDtype;
     match dtype {
         "Q8_0_mmq_4warp" => Some(Mmq4WarpDtype::Q8_0),
+        "Q4_K_mmq_4warp" => Some(Mmq4WarpDtype::Q4K),
         _ => None,
     }
 }

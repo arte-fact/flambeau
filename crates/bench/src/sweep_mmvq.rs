@@ -2084,38 +2084,45 @@ fn run_shape_mmq_gemm<B: BenchBackend>(
 #[derive(Clone, Copy)]
 pub enum Mmq4WarpDtype {
     Q8_0,
+    Q4K,
 }
 
 impl Mmq4WarpDtype {
     pub fn name(self) -> &'static str {
         match self {
             Mmq4WarpDtype::Q8_0 => "Q8_0",
+            Mmq4WarpDtype::Q4K => "Q4_K",
         }
     }
     fn weight_dtype(self) -> Dtype {
         match self {
             Mmq4WarpDtype::Q8_0 => Dtype::Q8_0Dp4a,
+            Mmq4WarpDtype::Q4K => Dtype::Q4K,
         }
     }
     fn impl_id(self) -> &'static str {
         match self {
             Mmq4WarpDtype::Q8_0 => "qmatmul_q8_0_mmq_4warp",
+            Mmq4WarpDtype::Q4K => "qmatmul_q4_k_mmq_4warp",
         }
     }
     fn kernel_stem(self) -> &'static str {
         match self {
             Mmq4WarpDtype::Q8_0 => "mmq_q8_0_4warp",
+            Mmq4WarpDtype::Q4K => "mmq_q4_K_4warp",
         }
     }
     fn kernel_entry(self) -> &'static str {
         match self {
             Mmq4WarpDtype::Q8_0 => "flambeau_mmq_q8_0_4warp_q8_1",
+            Mmq4WarpDtype::Q4K => "flambeau_mmq_q4_K_4warp_q8_1",
         }
     }
     /// (MMQ_Y rows/block, MMQ_X cols/block, threads/block).
     fn tile(self) -> (u32, u32, u32) {
         match self {
             Mmq4WarpDtype::Q8_0 => (32, 8, 256),
+            Mmq4WarpDtype::Q4K => (16, 8, 128),
         }
     }
 }
@@ -2235,7 +2242,7 @@ fn run_shape_mmq_4warp<B: BenchBackend>(
         let stream = dev.default_stream();
         let n_rows_i = n_rows as i32;
         let n_batches_i = n_cols as i32;
-        let n_bpr_i = (k / QK8) as i32;
+        let n_bpr_i = n_blocks as i32;
         let d_x_ptr: u64 = d_x.as_usize() as u64;
         let d_y_ptr: u64 = d_y_q8_1.as_usize() as u64;
         let d_dst_ptr: u64 = d_dst.as_usize() as u64;

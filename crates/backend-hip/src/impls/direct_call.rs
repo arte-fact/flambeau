@@ -357,6 +357,10 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
         cert_rel_path: "certs/hip/gfx906/qmatmul_q8_0_mmq_4warp.json",
     },
     DirectCallKernel {
+        impl_id: "qmatmul_q4_k_mmq_4warp",
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q4_k_mmq_4warp.json",
+    },
+    DirectCallKernel {
         impl_id: "qmatmul_q4_0_mmq_wave64",
         cert_rel_path: "certs/hip/gfx906/qmatmul_q4_0_mmq_wave64.json",
     },

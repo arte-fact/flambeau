@@ -989,6 +989,23 @@ params = """
     const int n_blocks_per_row"""
 body = "mmq_q8_0_4warp_row<32, 8>(vx, vy, dst, n_rows, n_batches, n_blocks_per_row);"
 
+# Q4_K 4-warp LDS-tiled MMQ (prefill GEMM), F32-tile variant — MMQ_Y=16 × MMQ_X=8,
+# 128 threads, dequant super-block into LDS then F32 dot. Same stem/entry as the
+# retired hand kernel.
+[[kernel]]
+stem = "mmq_q4_K_4warp"
+includes = ["quant_traits.cuh", "mmq_q4_k_4warp.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_q4_K_4warp_q8_1"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_batches,
+    const int n_sb_per_row"""
+body = "mmq_q4_k_4warp_row<16, 8, 128>(vx, vy, dst, n_rows, n_batches, n_sb_per_row);"
+
 # F16 weight × Q8_1 activation — single-row MMVQ (F16 layers in UD-Q8_K_XL).
 [[kernel]]
 stem = "mmvq_f16_q8_1"
