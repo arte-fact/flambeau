@@ -1068,6 +1068,19 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     );
                     return Ok(());
                 }
+                if let Some(gu) = moe_gate_up_dtype(dtype) {
+                    use flambeau_bench::sweep_mmvq::run_moe_gate_up_sweep;
+                    let root = repo_root();
+                    let cert = run_moe_gate_up_sweep::<flambeau_bench::backend::Hip>(gu, &root, arch)?;
+                    println!(
+                        "sweep indexed_moe_mmvq_gate_up ({}): pass={} shapes={} rig={}",
+                        gu.name(),
+                        cert.pass,
+                        cert.results.len(),
+                        cert.rig
+                    );
+                    return Ok(());
+                }
                 if let Some(fk) = f16_sweep_kind(dtype) {
                     use flambeau_bench::sweep_mmvq_f16::run_f16_sweep;
                     let root = repo_root();
@@ -1557,6 +1570,15 @@ fn moe_mmvq_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::MoeMmvqDtyp
     }
 }
 
+fn moe_gate_up_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::MoeGateUpDtype> {
+    use flambeau_bench::sweep_mmvq::MoeGateUpDtype;
+    match dtype {
+        "Q8_0_gate_up_moe_mmvq" => Some(MoeGateUpDtype::Q8_0),
+        "Q4_0_gate_up_moe_mmvq" => Some(MoeGateUpDtype::Q4_0),
+        _ => None,
+    }
+}
+
 fn f16_sweep_kind(dtype: &str) -> Option<flambeau_bench::sweep_mmvq_f16::F16SweepKind> {
     use flambeau_bench::sweep_mmvq_f16::F16SweepKind;
     match dtype {
@@ -1655,6 +1677,18 @@ fn sweep_cuda(op: &str, dtype: &str) -> Result<()> {
         println!(
             "sweep indexed_moe_mmvq ({}): pass={} shapes={} rig={}",
             md.name(),
+            cert.pass,
+            cert.results.len(),
+            cert.rig
+        );
+        return Ok(());
+    }
+    if let Some(gu) = moe_gate_up_dtype(dtype) {
+        use flambeau_bench::sweep_mmvq::run_moe_gate_up_sweep;
+        let cert = run_moe_gate_up_sweep::<Cuda>(gu, &repo_root(), "sm_86")?;
+        println!(
+            "sweep indexed_moe_mmvq_gate_up ({}): pass={} shapes={} rig={}",
+            gu.name(),
             cert.pass,
             cert.results.len(),
             cert.rig

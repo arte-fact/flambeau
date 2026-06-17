@@ -1957,3 +1957,43 @@ params = """
     const int top_k,
     const int n_sb_per_row"""
 body = "indexed_moe_mmvq_iq1_m_r2_dp4a_row<float>(x, y, expert_ids, dst, n_rows, n_tokens, top_k, n_sb_per_row);"
+
+# Fused gate+up indexed-MoE MMVQ (10-arg ABI: gate_w, up_w, y, expert_ids,
+# gate_out, up_out, n_rows, n_tokens, top_k, n_blocks_per_row).
+[[kernel]]
+stem = "indexed_moe_mmvq_q8_0_gate_up_dp4a"
+includes = ["quant_traits.cuh", "indexed_moe_mmvq.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmvq_q8_0_gate_up_dp4a_q8_1"
+params = """
+    const flambeau_block_q8_0* __restrict__ gate_w,
+    const flambeau_block_q8_0* __restrict__ up_w,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    float* __restrict__ gate_out,
+    float* __restrict__ up_out,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_blocks_per_row"""
+body = "indexed_moe_mmvq_gate_up_vdr_row<Q8_0, 256, 2>(gate_w, up_w, y, expert_ids, gate_out, up_out, n_rows, n_tokens, top_k, n_blocks_per_row);"
+
+[[kernel]]
+stem = "indexed_moe_mmvq_q4_0_gate_up_dp4a"
+includes = ["indexed_moe_mmvq_q4_0_gate_up.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmvq_q4_0_gate_up_dp4a_q8_1"
+params = """
+    const flambeau_block_q4_0* __restrict__ gate_w,
+    const flambeau_block_q4_0* __restrict__ up_w,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    float* __restrict__ gate_out,
+    float* __restrict__ up_out,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_blocks_per_row"""
+body = "indexed_moe_mmvq_q4_0_gate_up_dp4a_row<256>(gate_w, up_w, y, expert_ids, gate_out, up_out, n_rows, n_tokens, top_k, n_blocks_per_row);"

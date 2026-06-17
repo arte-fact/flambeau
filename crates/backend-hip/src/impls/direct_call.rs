@@ -582,4 +582,12 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
         impl_id: "indexed_moe_mmvq_iq1_m_r2",
         cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_iq1_m_r2.json",
     },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmvq_q8_0_gate_up",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q8_0_gate_up.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmvq_q4_0_gate_up",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q4_0_gate_up.json",
+    },
 ];
