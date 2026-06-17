@@ -3,7 +3,7 @@
 Transient working note. Start here when the dev rig (2× MI50 gfx906 + 1× RTX 3090
 sm_86) is built and `feature/cuda-decouple` is pulled in.
 
-> **CURRENT STATUS (2026-06-17, tip `8ba750e`): dense mmvq + ENTIRE dense mmq
+> **CURRENT STATUS (2026-06-17, tip `cb935c4`): dense mmvq + ENTIRE dense mmq
 > family COMPLETE cross-backend. P2d indexed_moe STARTED — the plain-row MMVQ
 > family (Q8_0 pilot + Q4_0/Q4_1/Q5_0/Q5_1) is DONE cross-backend.** cert-check
 > green hip 82 / cuda 20 throughout.
@@ -44,12 +44,27 @@ sm_86) is built and `feature/cuda-decouple` is pulled in.
 >   orphans — `cfg(unverified)`/delete candidates, NOT yet templated). All 9 IQ
 >   HIP↔CUDA BIT-IDENTICAL. `--dtype <IQ>_r2_moe_mmvq`. **The ENTIRE indexed-MoE
 >   MMVQ family (plain-row + K-quant r2/r4 + IQ\* r2) is now cross-backend.**
-> - **NEXT in P2d:** (1) the gate_up MMVQ fusion variants (q4_0/q8_0/q4_k ×
->   r2/r4/sorted/dp4a configs — reuse the dense `mmvq_reduce_store_gate_up` + a
->   MoE addressing wrapper); (2) the ~40 `*_tile8_dp4a` + `*_turbo` MMQ prefill
->   kernels (DS4 logical-lanes playbook from the dense 4warp_lds work carries
->   over directly). (3) Cleanup: the 9 orphan plain IQ MoE `.cu` +
->   `quantize_f16_q8_1_mmq.cu`.
+> - **P2d gate_up MMVQ fusion — DONE (all live).** Q8_0 + Q4_0 `_gate_up_dp4a`
+>   (`aa0e16d`), Q4_K plain `_gate_up` (`338da13`, dispatch row), Q4_K
+>   `_gate_up_r4_sorted_dp4a` (`cb935c4`, ops). Q8_0 rides a new
+>   `indexed_moe_mmvq_gate_up_vdr_row<Q,THREADS,VDR>` skeleton (foundational
+>   header; `load_q8_1_ints` once + `partial_vdr_y` ×2 + `mmvq_reduce_store_gate_up`);
+>   Q4_0 its own nibble body; Q4_K plain scalar (64t, `mmvq_reduce_store_gate_up<64>`);
+>   r4_sorted reuses `flambeau_q4k_subblock_dot` for both weights + 2× width-16
+>   group reduce + a `sorted_pair_idx` remap. New 10/11-arg harness
+>   `MoeGateUpDtype` / `run_moe_gate_up_sweep<B>` / `run_shape_moe_gate_up<B>`
+>   (two weights/outputs, expert-routed 2-weight reference, `launch_threads()` /
+>   `rows_per_block()` / `sorted()` hooks). `--dtype <dt>_gate_up_moe_mmvq`
+>   (+`_r4_sorted`). q8_0/q4_0/q4_k-plain ~1e-7/1e-6 (cross-warp FP accum order);
+>   r4_sorted BIT-IDENTICAL. The unreferenced q4_k gate_up variants
+>   (`_dp4a`/`_r2_dp4a`/`_r4_dp4a`/`_r8_dp4a`) are autotune orphans, NOT templated.
+> - **NEXT in P2d:** (1) the ~40 `indexed_moe_mmq_*_{gate_up,down}_tile8_dp4a` +
+>   `*_turbo` MMQ prefill kernels — the DS4 logical-lanes playbook from the dense
+>   4warp_lds work (logical `MMQ_LDS_LANES`, `fb_fp16_t` pairs, `mmq_prefetch_*`
+>   seam, kernel-faithful harness) carries over directly. Cert harness today is
+>   the HIP-only `sweep_moe.rs` (generic tile8); needs a `BenchBackend`-generic
+>   path like the mmvq one. (2) Cleanup: the 9 orphan plain IQ MoE `.cu`, the 4
+>   orphan q4_k gate_up variants, `quantize_f16_q8_1_mmq.cu`.
 > - **DS4 4-warp_lds — Q4_0 (`3867eab`) + Q4_1 (`2ce63cc`) + Q4_K turbo
 >   (`58f52f0`) DONE.** The hardest sub-family (MMQ_Y=128, DS4 144-B activation,
 >   dynamic LDS, double-buffered Y). **The breakthrough: the hand kernels'
