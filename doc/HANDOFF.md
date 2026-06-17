@@ -3,9 +3,9 @@
 Transient working note. Start here when the dev rig (2× MI50 gfx906 + 1× RTX 3090
 sm_86) is built and `feature/cuda-decouple` is pulled in.
 
-> **CURRENT STATUS (2026-06-17, tip `6d50c7a`): mmvq COMPLETE; P2c single-pass
-> mmq COMPLETE; only the 4-warp LDS-tiled mmq remains.**
-> cert-check green hip 82 / cuda 20 throughout.
+> **CURRENT STATUS (2026-06-17, tip `0fbeccf`): mmvq COMPLETE; P2c single-pass
+> mmq COMPLETE; tile16 + F16 family COMPLETE; only the 4-warp LDS-tiled mmq
+> remains.** cert-check green hip 82 / cuda 20 throughout.
 > - **P2a mmvq** (20 dtypes + Q8_0 t128/vdr2/r2/r4 configs) — DONE.
 > - **P2b mmvq FUSION** — **COMPLETE.** gate_up ×4 (Q8_0/Q4_0/Q4_1/Q5_K) +
 >   batched ×6 (Q8_0/Q4_0/Q4_1/Q4_K/Q6_K/Q5_K-r2) + row_tile ×3
@@ -31,17 +31,33 @@ sm_86) is built and `feature/cuda-decouple` is pulled in.
 >     `flambeau_iq1m_reassemble_d`).
 >   All ride the `MmqGemmDtype` harness path (no per-K-quant skeleton — rule 14
 >   respected; each decode differs). `--dtype <DT>_mmq_wave64`.
-> - **NEXT (the real multi-session work):** the **4-warp LDS-tiled** prefill
->   kernels — `mmq_q8_0_4warp`, `mmq_q4_0_4warp_lds`, `mmq_q4_1_4warp_lds`,
->   `mmq_q4_K_4warp`, `mmq_q4_K_turbo`, `mmq_q6_K_4warp` (the gold-standard
->   prefill lever per CLAUDE.md: real LDS tiling + cp.async-vs-prefetch seaming →
->   expect a warp-restructure per kernel, NOT one-session ports), plus the
->   stragglers `mmq_q8_0_wave64_tile16`, the F16 mmq (`mmq_f16_q8_1`,
->   `mmq_f16_tile`), and the DS4 MMQ activation quantizers
->   (`quantize_q8_1_mmq`, `quantize_f16_q8_1_mmq`). Then **P2d** indexed_moe.
->   Build kernels with `RAYON_NUM_THREADS=8` (thermal); rebuild the cli before
->   each sweep. **Per-slice recipe + harness/skeleton details in the P2c section
->   below.**
+> - **tile16 + F16 family — COMPLETE.**
+>   - **Q8_0 wave64 tile16** (`d68ec34`): pure skeleton re-instantiation
+>     `mmq_wave64_row<Q8_0,64,16>` (doubles activation cols/block); zero new C++.
+>     `MmqGemmDtype::Q8_0Wave64Tile16` (`tile()=(64,16)`), `--dtype
+>     Q8_0_mmq_wave64_tile16`, impl_id `qmatmul_q8_0_mmq_wave64_tile16`.
+>   - **F16-weight family** (`0fbeccf`): `mmvq_f16` + `mmq_f16` (multi-row) +
+>     `mmq_f16_tile` (register-resident tile-M). New `mmvq_f16.cuh` (shared
+>     `flambeau_f16_q8_1_acc` dot + `mmvq_f16_q8_1_row<THREADS>` via the
+>     warp-agnostic `mmvq_reduce_store`) + `mmq_f16.cuh` (`mmq_f16_q8_1_tile`,
+>     `mmq_f16_tile_row<MMQ_Y,TILE_N>`). **Required genericizing
+>     `sweep_mmvq_f16.rs` over `BenchBackend`** (`run_f16_{mmvq,mmq,mmq_tile}_
+>     sweep<B>` + `F16SweepKind` dispatcher + shared CPU `f16_q8_1_reference`;
+>     dropped the HIP-only gate + the 3 legacy `OP_SWEEPS` entries; routed
+>     `--dtype F16_{mmvq,mmq,mmq_tile}` through the gfx906 arm AND `sweep_cuda`).
+>     Certed both backends (err ~1e-6 vs F32 ref; tile bit-identical, mmvq/mmq
+>     differ only in wave64-vs-wave32 reduce lane order), impl_ids
+>     `qmatmul_f16_{mmvq,mmq,mmq_tile}`.
+> - **NEXT (the real multi-session work — the ONLY dense mmq left):** the
+>   **4-warp LDS-tiled** prefill kernels — `mmq_q8_0_4warp`,
+>   `mmq_q4_0_4warp_lds`, `mmq_q4_1_4warp_lds`, `mmq_q4_K_4warp`,
+>   `mmq_q4_K_turbo`, `mmq_q6_K_4warp` (the gold-standard prefill lever per
+>   CLAUDE.md: real LDS tiling + cp.async-vs-prefetch seaming → expect a
+>   warp-restructure per kernel, NOT one-session ports), plus their coupled DS4
+>   144-B MMQ activation quantizers (`quantize_q8_1_mmq`,
+>   `quantize_f16_q8_1_mmq`). Then **P2d** indexed_moe. Build kernels with
+>   `RAYON_NUM_THREADS=8` (thermal); rebuild the cli before each sweep.
+>   **Per-slice recipe + harness/skeleton details in the P2c section below.**
 >
 > *(detailed completion log — gate_up/batched/row_tile/mmq slices, recipes, rig
 > gotchas — follows below; the per-section text is current.)*
