@@ -2094,6 +2094,7 @@ pub enum MoeMmvqDtype {
     Q6KR2,
     Q2KR2,
     Q3KR2,
+    Iq4NlR2,
 }
 
 impl MoeMmvqDtype {
@@ -2109,6 +2110,7 @@ impl MoeMmvqDtype {
             MoeMmvqDtype::Q6KR2 => "Q6_K",
             MoeMmvqDtype::Q2KR2 => "Q2_K",
             MoeMmvqDtype::Q3KR2 => "Q3_K",
+            MoeMmvqDtype::Iq4NlR2 => "IQ4_NL",
         }
     }
     fn weight_dtype(self) -> Dtype {
@@ -2123,6 +2125,7 @@ impl MoeMmvqDtype {
             MoeMmvqDtype::Q6KR2 => Dtype::Q6K,
             MoeMmvqDtype::Q2KR2 => Dtype::Q2K,
             MoeMmvqDtype::Q3KR2 => Dtype::Q3K,
+            MoeMmvqDtype::Iq4NlR2 => Dtype::Iq4Nl,
         }
     }
     fn impl_id(self) -> &'static str {
@@ -2138,6 +2141,7 @@ impl MoeMmvqDtype {
             MoeMmvqDtype::Q6KR2 => "indexed_moe_mmvq_q6_k_r2",
             MoeMmvqDtype::Q2KR2 => "indexed_moe_mmvq_q2_k_r2",
             MoeMmvqDtype::Q3KR2 => "indexed_moe_mmvq_q3_k_r2",
+            MoeMmvqDtype::Iq4NlR2 => "indexed_moe_mmvq_iq4_nl_r2",
         }
     }
     fn kernel_stem(self) -> &'static str {
@@ -2153,6 +2157,7 @@ impl MoeMmvqDtype {
             MoeMmvqDtype::Q6KR2 => "indexed_moe_mmvq_q6_k_r2_dp4a",
             MoeMmvqDtype::Q2KR2 => "indexed_moe_mmvq_q2_k_r2_dp4a",
             MoeMmvqDtype::Q3KR2 => "indexed_moe_mmvq_q3_k_r2_dp4a",
+            MoeMmvqDtype::Iq4NlR2 => "indexed_moe_mmvq_iq4_nl_r2_dp4a",
         }
     }
     fn kernel_entry(self) -> &'static str {
@@ -2168,6 +2173,7 @@ impl MoeMmvqDtype {
             MoeMmvqDtype::Q6KR2 => "flambeau_indexed_moe_mmvq_q6_k_r2_dp4a_q8_1",
             MoeMmvqDtype::Q2KR2 => "flambeau_indexed_moe_mmvq_q2_k_r2_dp4a_q8_1",
             MoeMmvqDtype::Q3KR2 => "flambeau_indexed_moe_mmvq_q3_k_r2_dp4a_q8_1",
+            MoeMmvqDtype::Iq4NlR2 => "flambeau_indexed_moe_mmvq_iq4_nl_r2_dp4a_q8_1",
         }
     }
     /// (threads/block, rows/block). Plain per-row kernels own one output row per
@@ -2184,7 +2190,8 @@ impl MoeMmvqDtype {
             | MoeMmvqDtype::Q5KR2
             | MoeMmvqDtype::Q6KR2
             | MoeMmvqDtype::Q2KR2
-            | MoeMmvqDtype::Q3KR2 => (64, 2),
+            | MoeMmvqDtype::Q3KR2
+            | MoeMmvqDtype::Iq4NlR2 => (64, 2),
             MoeMmvqDtype::Q4KR4 => (64, 4),
         }
     }

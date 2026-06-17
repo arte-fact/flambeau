@@ -1802,3 +1802,22 @@ params = """
     const int top_k,
     const int n_sb_per_row"""
 body = "indexed_moe_mmvq_q3_k_r2_dp4a_row<float>(x, y, expert_ids, dst, n_rows, n_tokens, top_k, n_sb_per_row);"
+
+# IQ* indexed-MoE MMVQ r2_dp4a — codebook bodies reuse the dense mmvq_iq*.cuh
+# LUT/sign helpers; the ops layer calls only these r2_dp4a entries.
+[[kernel]]
+stem = "indexed_moe_mmvq_iq4_nl_r2_dp4a"
+includes = ["indexed_moe_mmvq_iq4_nl.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmvq_iq4_nl_r2_dp4a_q8_1"
+params = """
+    const flambeau_block_iq4_nl* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_blocks_per_row"""
+body = "indexed_moe_mmvq_iq4_nl_r2_dp4a_row<float>(x, y, expert_ids, dst, n_rows, n_tokens, top_k, n_blocks_per_row);"
