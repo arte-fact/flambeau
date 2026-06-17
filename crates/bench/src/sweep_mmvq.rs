@@ -2085,6 +2085,7 @@ fn run_shape_mmq_gemm<B: BenchBackend>(
 pub enum Mmq4WarpDtype {
     Q8_0,
     Q4K,
+    Q6K,
 }
 
 impl Mmq4WarpDtype {
@@ -2092,30 +2093,35 @@ impl Mmq4WarpDtype {
         match self {
             Mmq4WarpDtype::Q8_0 => "Q8_0",
             Mmq4WarpDtype::Q4K => "Q4_K",
+            Mmq4WarpDtype::Q6K => "Q6_K",
         }
     }
     fn weight_dtype(self) -> Dtype {
         match self {
             Mmq4WarpDtype::Q8_0 => Dtype::Q8_0Dp4a,
             Mmq4WarpDtype::Q4K => Dtype::Q4K,
+            Mmq4WarpDtype::Q6K => Dtype::Q6K,
         }
     }
     fn impl_id(self) -> &'static str {
         match self {
             Mmq4WarpDtype::Q8_0 => "qmatmul_q8_0_mmq_4warp",
             Mmq4WarpDtype::Q4K => "qmatmul_q4_k_mmq_4warp",
+            Mmq4WarpDtype::Q6K => "qmatmul_q6_k_mmq_4warp",
         }
     }
     fn kernel_stem(self) -> &'static str {
         match self {
             Mmq4WarpDtype::Q8_0 => "mmq_q8_0_4warp",
             Mmq4WarpDtype::Q4K => "mmq_q4_K_4warp",
+            Mmq4WarpDtype::Q6K => "mmq_q6_K_4warp",
         }
     }
     fn kernel_entry(self) -> &'static str {
         match self {
             Mmq4WarpDtype::Q8_0 => "flambeau_mmq_q8_0_4warp_q8_1",
             Mmq4WarpDtype::Q4K => "flambeau_mmq_q4_K_4warp_q8_1",
+            Mmq4WarpDtype::Q6K => "flambeau_mmq_q6_K_4warp_q8_1",
         }
     }
     /// (MMQ_Y rows/block, MMQ_X cols/block, threads/block).
@@ -2123,6 +2129,7 @@ impl Mmq4WarpDtype {
         match self {
             Mmq4WarpDtype::Q8_0 => (32, 8, 256),
             Mmq4WarpDtype::Q4K => (16, 8, 128),
+            Mmq4WarpDtype::Q6K => (16, 8, 128),
         }
     }
 }
