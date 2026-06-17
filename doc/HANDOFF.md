@@ -107,10 +107,17 @@ sm_86) is built and `feature/cuda-decouple` is pulled in.
 >    Q8_0/Q4_0/Q4_1 vs 2-dp4a Q5_0/Q5_1 nibble+5th-bit). Refactor validated
 >    non-regressive (Q8_0/Q4_0 certs byte-identical). All certed both backends
 >    (err ≤2.8e-3, HIP↔CUDA equal), `MmqGemmDtype::{...}Wave64`, impl_ids
->    neutralized, hand `.cu` retired. **Remaining wave64:** the **K-quants**
->    (Q4_K/Q5_K/Q6_K/Q2_K/Q3_K/Q8_K) + **IQ\*** — super-block decode spanning the
->    K-tile, structurally more divergent → own bodies (or a 2nd K-quant mmq
->    skeleton), same `MmqGemmDtype` harness. Assess each like the mmvq K-quants.
+>    neutralized, hand `.cu` retired. **K-quants started — Q6_K done**
+>    (`mmq_q6_k_wave64.cuh`, own body: 8 sub-blocks/super-block, `q=ql|qh<<4`,
+>    `(raw−32)·y` bias, per-16 i8 scales; `MmqGemmDtype::Q6KWave64`, cert both
+>    backends err 6.0e-3, HIP↔CUDA equal). **The harness already handles K-quants**
+>    (any weight block size — `run_shape_mmq_gemm` uses `weight_dtype` block size +
+>    k/32 activation). The wave-leak is just `tile_m=blockIdx.x*WARP_SIZE` →
+>    `MMQ_Y`; loads → `load_int_b2` (block_q6_K 210 B → odd super-blocks non-mul-4).
+>    **Remaining wave64:** Q4_K/Q5_K/Q2_K/Q3_K/Q8_K (own bodies, port from the hand
+>    `mmq_<dt>_wave64.cu` the same way) + **IQ\***. Then the genuinely-hard
+>    **4-warp LDS-tiled** kernels (`mmq_q8_0_4warp` / `mmq_q4_K_turbo`, real LDS
+>    tiling + cp.async-vs-prefetch seaming — the prefill perf lever).
 > 1. **Genericize `sweep_mmq.rs` over `BenchBackend`** (`run_sweep<B>`/
 >    `run_shape<B>`/`capture_static_pmc<B>` — currently HIP-bound via `HipDevice`/
 >    `kernels::hsaco`). It's large + branchy (mmq-layout 4warp/turbo, wave64
