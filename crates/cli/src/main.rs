@@ -1041,6 +1041,19 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     );
                     return Ok(());
                 }
+                if dtype == "Q4_0_mmq_4warp_lds" {
+                    use flambeau_bench::sweep_mmvq::run_mmq_4warp_lds_sweep;
+                    let root = repo_root();
+                    let cert =
+                        run_mmq_4warp_lds_sweep::<flambeau_bench::backend::Hip>(&root, arch)?;
+                    println!(
+                        "sweep qmatmul_mmq_4warp_lds (Q4_0): pass={} shapes={} rig={}",
+                        cert.pass,
+                        cert.results.len(),
+                        cert.rig
+                    );
+                    return Ok(());
+                }
                 if let Some(fk) = f16_sweep_kind(dtype) {
                     use flambeau_bench::sweep_mmvq_f16::run_f16_sweep;
                     let root = repo_root();
@@ -1579,6 +1592,17 @@ fn sweep_cuda(op: &str, dtype: &str) -> Result<()> {
         println!(
             "sweep qmatmul_mmq_4warp ({}): pass={} shapes={} rig={}",
             wd.name(),
+            cert.pass,
+            cert.results.len(),
+            cert.rig
+        );
+        return Ok(());
+    }
+    if dtype == "Q4_0_mmq_4warp_lds" {
+        use flambeau_bench::sweep_mmvq::run_mmq_4warp_lds_sweep;
+        let cert = run_mmq_4warp_lds_sweep::<Cuda>(&repo_root(), "sm_86")?;
+        println!(
+            "sweep qmatmul_mmq_4warp_lds (Q4_0): pass={} shapes={} rig={}",
             cert.pass,
             cert.results.len(),
             cert.rig

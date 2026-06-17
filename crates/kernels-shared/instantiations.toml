@@ -989,6 +989,26 @@ params = """
     const int n_blocks_per_row"""
 body = "mmq_q8_0_4warp_row<32, 8>(vx, vy, dst, n_rows, n_batches, n_blocks_per_row);"
 
+# Q4_0 4-warp LDS-tiled MMQ (dense-prefill perf kernel), DS4 144-B activation —
+# MMQ_Y=128 × MMQ_X=64, logical 64-wide lanes, dynamic LDS. Same stem/entry as
+# the retired hand kernel.
+[[kernel]]
+stem = "mmq_q4_0_4warp_lds"
+includes = ["quant_traits.cuh", "mmq_q4_0_4warp_lds.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_q4_0_4warp_lds_q8_1"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int stride_col_y,
+    const int stride_row_x,
+    const int nrows_dst"""
+body = "mmq_q4_0_4warp_lds_row<64, 128, 4>(vx, vy, dst, ncols_x, nrows_x, ncols_y, stride_col_y, stride_row_x, nrows_dst);"
+
 # Q4_K 4-warp LDS-tiled MMQ (prefill GEMM), F32-tile variant — MMQ_Y=16 × MMQ_X=8,
 # 128 threads, dequant super-block into LDS then F32 dot. Same stem/entry as the
 # retired hand kernel.
