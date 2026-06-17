@@ -1630,3 +1630,71 @@ params = """
     const int top_k,
     const int n_blocks_per_row"""
 body = "indexed_moe_mmvq_vdr_row<Q8_0, 256, 2>(x, y, expert_ids, dst, n_rows, n_tokens, top_k, n_blocks_per_row);"
+
+[[kernel]]
+stem = "indexed_moe_mmvq_q4_0"
+includes = ["quant_traits.cuh", "indexed_moe_mmvq.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmvq_q4_0_q8_1"
+params = """
+    const flambeau_block_q4_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_blocks_per_row"""
+body = "indexed_moe_mmvq_row<Q4_0, 256>(x, y, expert_ids, dst, n_rows, n_tokens, top_k, n_blocks_per_row);"
+
+[[kernel]]
+stem = "indexed_moe_mmvq_q4_1"
+includes = ["quant_traits.cuh", "indexed_moe_mmvq.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmvq_q4_1_q8_1"
+params = """
+    const flambeau_block_q4_1* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_blocks_per_row"""
+body = "indexed_moe_mmvq_row<Q4_1, 256>(x, y, expert_ids, dst, n_rows, n_tokens, top_k, n_blocks_per_row);"
+
+[[kernel]]
+stem = "indexed_moe_mmvq_q5_0"
+includes = ["quant_traits.cuh", "indexed_moe_mmvq.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmvq_q5_0_q8_1"
+params = """
+    const flambeau_block_q5_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_blocks_per_row"""
+body = "indexed_moe_mmvq_row<Q5_0, 256>(x, y, expert_ids, dst, n_rows, n_tokens, top_k, n_blocks_per_row);"
+
+[[kernel]]
+stem = "indexed_moe_mmvq_q5_1"
+includes = ["quant_traits.cuh", "indexed_moe_mmvq.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmvq_q5_1_q8_1"
+params = """
+    const flambeau_block_q5_1* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_blocks_per_row"""
+body = "indexed_moe_mmvq_row<Q5_1, 256>(x, y, expert_ids, dst, n_rows, n_tokens, top_k, n_blocks_per_row);"
