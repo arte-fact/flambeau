@@ -7,6 +7,7 @@
 // (block-quant unpack math, softmax math) stay in kernels-shared/include.
 
 #include <hip/hip_runtime.h>
+#include "mmq_prefetch.cuh"
 
 #ifndef WARP_SIZE
 #define WARP_SIZE 64
@@ -166,6 +167,13 @@ static __device__ __forceinline__ int   dp4a(int a, int b, int c)        { retur
 static __device__ __forceinline__ unsigned int byte_perm(unsigned int a, unsigned int b, unsigned int sel) {
     return __builtin_amdgcn_perm(a, b, sel);
 }
+
+// Neutral L2-prefetch seam for the LDS-tiled MMQ kernels. gfx906 issues real
+// global_load_dword hints (mmq_prefetch.cuh); sm_80.cuh provides no-ops. The
+// shared kernel calls these names so the prefetch stays a backend detail.
+static __device__ __forceinline__ int  mmq_prefetch_y_next(const int* p)                { return gfx906_prefetch_y_next(p); }
+static __device__ __forceinline__ int  mmq_prefetch_x_next(const char* b, int o, int s) { return gfx906_prefetch_x_next(b, o, s); }
+static __device__ __forceinline__ void mmq_prefetch_consume(int v)                      { gfx906_prefetch_consume(v); }
 
 #else  // non-HIP fallback, should never be reached in V1
 

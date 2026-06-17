@@ -58,3 +58,10 @@ static __device__ __forceinline__ unsigned int byte_perm(unsigned int a, unsigne
                               | (((sel >> 24) & 0x7u) << 12);
     return __byte_perm(b, a, packed);
 }
+
+// Neutral L2-prefetch seam for the LDS-tiled MMQ kernels — no-ops on CUDA
+// (correctness-first; cp.async staging is a perf follow-up). gfx906.cuh issues
+// real global_load_dword hints; signatures mirror it exactly.
+static __device__ __forceinline__ int  mmq_prefetch_y_next(const int*)            { return 0; }
+static __device__ __forceinline__ int  mmq_prefetch_x_next(const char*, int, int) { return 0; }
+static __device__ __forceinline__ void mmq_prefetch_consume(int)                   {}
