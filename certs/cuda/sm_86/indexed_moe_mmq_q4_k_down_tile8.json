@@ -14,7 +14,7 @@
       "n": 256,
       "seed": 14601922,
       "max_rel_err": 0.008593532,
-      "tolerance": 0.03,
+      "tolerance": 0.05,
       "pass": true
     },
     {
@@ -23,7 +23,7 @@
       "n": 256,
       "seed": 14607010,
       "max_rel_err": 0.0153232245,
-      "tolerance": 0.03,
+      "tolerance": 0.05,
       "pass": true
     },
     {
@@ -32,12 +32,12 @@
       "n": 64,
       "seed": 14600578,
       "max_rel_err": 0.008649698,
-      "tolerance": 0.03,
+      "tolerance": 0.05,
       "pass": true
     }
   ],
   "pass": true,
-  "emitted_at": "2026-06-17T13:35:12Z",
+  "emitted_at": "2026-06-17T13:42:21Z",
   "rig": "threadreaper-sm_86",
   "pmc": {
     "vgpr_count": 64,

@@ -2294,3 +2294,45 @@ params = """
     const int n_sb_per_row,
     const int n_experts"""
 body = "indexed_moe_mmq_q4_k_down_tile8_row<float>(down_w, y, expert_ids, sorted_pair_idx_padded, padded_offsets, dst, n_rows, n_tokens, top_k, n_sb_per_row, n_experts);"
+
+[[kernel]]
+stem = "indexed_moe_mmq_q5_k_gate_up_tile8_dp4a"
+includes = ["indexed_moe_mmq_q5_k_tile8.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmq_q5_k_gate_up_tile8_dp4a_q8_1"
+params = """
+    const flambeau_block_q5_K* __restrict__ gate_w,
+    const flambeau_block_q5_K* __restrict__ up_w,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    const int* __restrict__ sorted_pair_idx_padded,
+    const int* __restrict__ padded_offsets,
+    float* __restrict__ gate_out,
+    float* __restrict__ up_out,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_sb_per_row,
+    const int n_experts"""
+body = "indexed_moe_mmq_q5_k_gate_up_tile8_row<float>(gate_w, up_w, y, expert_ids, sorted_pair_idx_padded, padded_offsets, gate_out, up_out, n_rows, n_tokens, top_k, n_sb_per_row, n_experts);"
+
+[[kernel]]
+stem = "indexed_moe_mmq_q5_k_down_tile8_dp4a"
+includes = ["indexed_moe_mmq_q5_k_tile8.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmq_q5_k_down_tile8_dp4a_q8_1"
+params = """
+    const flambeau_block_q5_K* __restrict__ down_w,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    const int* __restrict__ sorted_pair_idx_padded,
+    const int* __restrict__ padded_offsets,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_sb_per_row,
+    const int n_experts"""
+body = "indexed_moe_mmq_q5_k_down_tile8_row<float>(down_w, y, expert_ids, sorted_pair_idx_padded, padded_offsets, dst, n_rows, n_tokens, top_k, n_sb_per_row, n_experts);"
