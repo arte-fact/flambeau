@@ -1458,6 +1458,7 @@ fn mmq_gemm_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::MmqGemmDtyp
         "IQ3_S_mmq_wave64" => Some(MmqGemmDtype::Iq3SWave64),
         "IQ1_S_mmq_wave64" => Some(MmqGemmDtype::Iq1SWave64),
         "IQ1_M_mmq_wave64" => Some(MmqGemmDtype::Iq1MWave64),
+        "Q8_0_mmq_wave64_tile16" => Some(MmqGemmDtype::Q8_0Wave64Tile16),
         _ => None,
     }
 }

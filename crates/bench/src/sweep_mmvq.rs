@@ -1761,6 +1761,7 @@ pub enum MmqGemmDtype {
     Iq3SWave64,
     Iq1SWave64,
     Iq1MWave64,
+    Q8_0Wave64Tile16,
 }
 
 impl MmqGemmDtype {
@@ -1786,6 +1787,7 @@ impl MmqGemmDtype {
             MmqGemmDtype::Iq3SWave64 => "IQ3_S",
             MmqGemmDtype::Iq1SWave64 => "IQ1_S",
             MmqGemmDtype::Iq1MWave64 => "IQ1_M",
+            MmqGemmDtype::Q8_0Wave64Tile16 => "Q8_0",
         }
     }
     fn weight_dtype(self) -> Dtype {
@@ -1810,6 +1812,7 @@ impl MmqGemmDtype {
             MmqGemmDtype::Iq3SWave64 => Dtype::Iq3S,
             MmqGemmDtype::Iq1SWave64 => Dtype::Iq1S,
             MmqGemmDtype::Iq1MWave64 => Dtype::Iq1M,
+            MmqGemmDtype::Q8_0Wave64Tile16 => Dtype::Q8_0Dp4a,
         }
     }
     fn impl_id(self) -> &'static str {
@@ -1834,6 +1837,7 @@ impl MmqGemmDtype {
             MmqGemmDtype::Iq3SWave64 => "qmatmul_iq3_s_mmq_wave64",
             MmqGemmDtype::Iq1SWave64 => "qmatmul_iq1_s_mmq_wave64",
             MmqGemmDtype::Iq1MWave64 => "qmatmul_iq1_m_mmq_wave64",
+            MmqGemmDtype::Q8_0Wave64Tile16 => "qmatmul_q8_0_mmq_wave64_tile16",
         }
     }
     fn kernel_stem(self) -> &'static str {
@@ -1858,6 +1862,7 @@ impl MmqGemmDtype {
             MmqGemmDtype::Iq3SWave64 => "mmq_iq3_s_wave64",
             MmqGemmDtype::Iq1SWave64 => "mmq_iq1_s_wave64",
             MmqGemmDtype::Iq1MWave64 => "mmq_iq1_m_wave64",
+            MmqGemmDtype::Q8_0Wave64Tile16 => "mmq_q8_0_wave64_tile16",
         }
     }
     fn kernel_entry(self) -> &'static str {
@@ -1882,11 +1887,15 @@ impl MmqGemmDtype {
             MmqGemmDtype::Iq3SWave64 => "flambeau_mmq_iq3_s_wave64_q8_1",
             MmqGemmDtype::Iq1SWave64 => "flambeau_mmq_iq1_s_wave64_q8_1",
             MmqGemmDtype::Iq1MWave64 => "flambeau_mmq_iq1_m_wave64_q8_1",
+            MmqGemmDtype::Q8_0Wave64Tile16 => "flambeau_mmq_q8_0_wave64_tile16_q8_1",
         }
     }
     /// (MMQ_Y rows/block, TILE_N cols/block) — the grid tiling.
     fn tile(self) -> (u32, u32) {
-        (64, 8)
+        match self {
+            MmqGemmDtype::Q8_0Wave64Tile16 => (64, 16),
+            _ => (64, 8),
+        }
     }
 }
 
