@@ -3,16 +3,33 @@
 Transient working note. Start here when the dev rig (2× MI50 gfx906 + 1× RTX 3090
 sm_86) is built and `feature/cuda-decouple` is pulled in.
 
-> **CURRENT STATUS (2026-06-16): P2a mmvq DONE; P2b (mmvq fusion) STARTED.**
-> All 20 GGUF weight quants are templated + certed on both backends
-> (`cuda/sm_86` = 20 mmvq rows; cert-check cuda 20 / hip 82). **P2a is done**:
-> all dtypes + the Q8_0 ROWS/DP4A/THREADS configs (`t128` `ad68761`, `vdr2`
-> `29258e1`, `r2`/`r4` `685bc7c`). Roadmap note: ROWS/DP4A/THREADS configs ARE
-> P2a (not P2b) — `r2`/`r4` were NULL for Q8_0 on both backends (dp4a/t128_vdr2
-> win; Q8_0 is dense/cheap-decode so 256-thread single-row MLP beats the
-> 64-thread wave64-DPP layout), kept as certified bench-reference candidates; the
-> generic `mmvq_dp4a_nrow_row` + `mmvq_reduce_store_group<GROUP>` are the reusable
-> infra for the heavy-decode K-quant r2/r4 (Q4KR2/Q6KR4 DO win as hand kernels).
+> **CURRENT STATUS (2026-06-17, tip `a24ccf7`): mmvq COMPLETE; P2c mmq UNDERWAY.**
+> cert-check green hip 82 / cuda 20 throughout.
+> - **P2a mmvq** (20 dtypes + Q8_0 t128/vdr2/r2/r4 configs) — DONE.
+> - **P2b mmvq FUSION** — **COMPLETE.** gate_up ×4 (Q8_0/Q4_0/Q4_1/Q5_K) +
+>   batched ×6 (Q8_0/Q4_0/Q4_1/Q4_K/Q6_K/Q5_K-r2) + row_tile ×3
+>   (Q8_0/Q4_0/Q5_K) + gate_up×row_tile ×1 (Q4_0). All templated cross-backend,
+>   hand `.cu` retired, ops/runtime untouched. Reusable: the reduce family
+>   (`mmvq_reduce_store{,_group,_2row,_gate_up,_batched,_2row_batched,
+>   _rowtile_batched,_rowtile_gate_up_batched}`) + `GateUpDtype`/`BatchedDtype`/
+>   `GateUpBatchedDtype` harness paths in `sweep_mmvq.rs`.
+> - **P2c mmq** — UNDERWAY. Done: oracle pilot (`a014f31`, proved the 2D-grid
+>   `B::launch` + wave32 reduce path); the 5 simple-dtype `mmq_<dt>_wave64`
+>   (Q8_0/Q4_0/Q4_1/Q5_0/Q5_1) via the shared **`mmq_wave64_row<Q,64,8>`**
+>   skeleton + `quant_traits<Q>` mmq policy (`3dab36e`); K-quants **Q6_K**
+>   (`e9ad87a`) + **Q4_K** (`a24ccf7`) (own super-block bodies on the same
+>   `MmqGemmDtype` harness). All certed both backends, HIP↔CUDA identical.
+> - **NEXT:** remaining wave64 K-quants **Q5_K/Q2_K/Q3_K/Q8_K + IQ\*** (mechanical
+>   — port each hand `mmq_<dt>_wave64.cu`: `WARP_SIZE→MMQ_Y`, `dp4a`,
+>   `load_int_b2`; own `.cuh`, add a `MmqGemmDtype` variant + cli key + bench-ref),
+>   then the genuinely-hard **4-warp LDS-tiled** prefill kernels
+>   (`mmq_q8_0_4warp` / `mmq_q4_K_turbo` — real LDS tiling + cp.async-vs-prefetch
+>   seaming, the prefill perf lever), then **P2d** indexed_moe. **Per-slice recipe
+>   + the harness/skeleton details are in the P2c section below.** Build kernels
+>   with `RAYON_NUM_THREADS=8` (thermal); rebuild the cli before each sweep.
+>
+> *(detailed completion log — gate_up/batched/row_tile/mmq slices, recipes, rig
+> gotchas — follows below; the per-section text is current.)*
 >
 > **P2b = mmvq FUSION (`gate_up`/`batched`/`row_tile`).** **All dense `gate_up`
 > DONE** — Q8_0 (`dcac582`) + Q4_0 (`eb4e1c7`) + Q4_1 (`fa6e752`) + Q5_K — each
