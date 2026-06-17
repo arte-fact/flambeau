@@ -87,6 +87,24 @@ template<> struct quant_traits<Q8_0> {
         load_q8_1_ints<VDR>(by, grp, yi);
         return partial_vdr_y<VDR>(bx, yi, (float) by.d, grp);
     }
+
+    // MMQ tiled-GEMM policy: decode one weight block to its 8 packed int32 +
+    // scale once per row, then `mmq_partial` does the per-column 8-dp4a + scale.
+    struct mmq_weight { int v[8]; float d; };
+    static __device__ __forceinline__ mmq_weight mmq_decode(const block_t& bx) {
+        mmq_weight w;
+        w.d = (float) bx.d;
+        #pragma unroll
+        for (int j = 0; j < 8; ++j) w.v[j] = load_int_b2(bx.qs, j);
+        return w;
+    }
+    static __device__ __forceinline__ float
+    mmq_partial(const mmq_weight& w, const flambeau_block_q8_1& by) {
+        int sumi = 0;
+        #pragma unroll
+        for (int j = 0; j < 8; ++j) sumi = dp4a(w.v[j], load_int_b2(by.qs, j), sumi);
+        return w.d * (float) by.d * (float) sumi;
+    }
 };
 
 template<> struct quant_traits<Q4_0> {
@@ -113,6 +131,26 @@ template<> struct quant_traits<Q4_0> {
         const float d_x = (float) bx.d;
         return sumi * (d_x * (float) by.d) - 8.0f * d_x * (float) by.s * 0.25f;
     }
+
+    struct mmq_weight { int v[8]; float d; };
+    static __device__ __forceinline__ mmq_weight mmq_decode(const block_t& bx) {
+        mmq_weight w;
+        w.d = (float) bx.d;
+        #pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            const int qw = load_int_b2((const int8_t*) bx.qs, j);
+            w.v[j]     = qw & 0x0F0F0F0F;
+            w.v[j + 4] = (qw >> 4) & 0x0F0F0F0F;
+        }
+        return w;
+    }
+    static __device__ __forceinline__ float
+    mmq_partial(const mmq_weight& w, const flambeau_block_q8_1& by) {
+        int sumi = 0;
+        #pragma unroll
+        for (int j = 0; j < 8; ++j) sumi = dp4a(w.v[j], load_int_b2(by.qs, j), sumi);
+        return w.d * ((float) by.d * (float) sumi - 8.0f * (float) by.s);
+    }
 };
 
 template<> struct quant_traits<Q4_1> {
@@ -132,6 +170,27 @@ template<> struct quant_traits<Q4_1> {
         int sumi = dp4a(vi_lo, u_lo, 0);
         sumi     = dp4a(vi_hi, u_hi, sumi);
         return sumi * ((float) bx.d * (float) by.d) + (float) bx.m * (float) by.s * 0.25f;
+    }
+
+    struct mmq_weight { int v[8]; float d; float m; };
+    static __device__ __forceinline__ mmq_weight mmq_decode(const block_t& bx) {
+        mmq_weight w;
+        w.d = (float) bx.d;
+        w.m = (float) bx.m;
+        #pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            const int qw = load_int_b2((const int8_t*) bx.qs, j);
+            w.v[j]     = qw & 0x0F0F0F0F;
+            w.v[j + 4] = (qw >> 4) & 0x0F0F0F0F;
+        }
+        return w;
+    }
+    static __device__ __forceinline__ float
+    mmq_partial(const mmq_weight& w, const flambeau_block_q8_1& by) {
+        int sumi = 0;
+        #pragma unroll
+        for (int j = 0; j < 8; ++j) sumi = dp4a(w.v[j], load_int_b2(by.qs, j), sumi);
+        return w.d * (float) by.d * (float) sumi + w.m * (float) by.s;
     }
 };
 
@@ -160,6 +219,36 @@ template<> struct quant_traits<Q5_0> {
         return (sumi_nib + 16 * sumi_bit) * (d_x * (float) by.d)
              - 16.0f * d_x * (float) by.s * 0.25f;
     }
+
+    struct mmq_weight { int v_nib[8]; int v_bit[8]; float d; };
+    static __device__ __forceinline__ mmq_weight mmq_decode(const block_t& bx) {
+        mmq_weight w;
+        w.d = (float) bx.d;
+        #pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            const int qw = load_int_b2((const int8_t*) bx.qs, j);
+            w.v_nib[j]     = qw & 0x0F0F0F0F;
+            w.v_nib[j + 4] = (qw >> 4) & 0x0F0F0F0F;
+        }
+        const unsigned int qh = (unsigned int) load_int_b2((const int8_t*) bx.qh, 0);
+        #pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            w.v_bit[j]     = expand_bits4(qh, j * 4);
+            w.v_bit[j + 4] = expand_bits4(qh, j * 4 + 16);
+        }
+        return w;
+    }
+    static __device__ __forceinline__ float
+    mmq_partial(const mmq_weight& w, const flambeau_block_q8_1& by) {
+        int sn = 0, sb = 0;
+        #pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            const int yj = load_int_b2(by.qs, j);
+            sn = dp4a(w.v_nib[j], yj, sn);
+            sb = dp4a(w.v_bit[j], yj, sb);
+        }
+        return w.d * ((float) by.d * (float) (sn + 16 * sb) - 16.0f * (float) by.s);
+    }
 };
 
 template<> struct quant_traits<Q5_1> {
@@ -184,5 +273,36 @@ template<> struct quant_traits<Q5_1> {
         sumi_bit     = dp4a(bit_hi, u_hi, sumi_bit);
         return (sumi_nib + 16 * sumi_bit) * ((float) bx.d * (float) by.d)
              + (float) bx.m * (float) by.s * 0.25f;
+    }
+
+    struct mmq_weight { int v_nib[8]; int v_bit[8]; float d; float m; };
+    static __device__ __forceinline__ mmq_weight mmq_decode(const block_t& bx) {
+        mmq_weight w;
+        w.d = (float) bx.d;
+        w.m = (float) bx.m;
+        #pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            const int qw = load_int_b2((const int8_t*) bx.qs, j);
+            w.v_nib[j]     = qw & 0x0F0F0F0F;
+            w.v_nib[j + 4] = (qw >> 4) & 0x0F0F0F0F;
+        }
+        const unsigned int qh = (unsigned int) load_int_b2((const int8_t*) bx.qh, 0);
+        #pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            w.v_bit[j]     = expand_bits4(qh, j * 4);
+            w.v_bit[j + 4] = expand_bits4(qh, j * 4 + 16);
+        }
+        return w;
+    }
+    static __device__ __forceinline__ float
+    mmq_partial(const mmq_weight& w, const flambeau_block_q8_1& by) {
+        int sn = 0, sb = 0;
+        #pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            const int yj = load_int_b2(by.qs, j);
+            sn = dp4a(w.v_nib[j], yj, sn);
+            sb = dp4a(w.v_bit[j], yj, sb);
+        }
+        return w.d * (float) by.d * (float) (sn + 16 * sb) + w.m * (float) by.s;
     }
 };

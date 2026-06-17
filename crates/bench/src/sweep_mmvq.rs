@@ -1743,6 +1743,9 @@ fn run_shape_mmq_oracle<B: BenchBackend>(
 pub enum MmqGemmDtype {
     Q8_0Wave64,
     Q4_0Wave64,
+    Q4_1Wave64,
+    Q5_0Wave64,
+    Q5_1Wave64,
 }
 
 impl MmqGemmDtype {
@@ -1750,37 +1753,50 @@ impl MmqGemmDtype {
         match self {
             MmqGemmDtype::Q8_0Wave64 => "Q8_0",
             MmqGemmDtype::Q4_0Wave64 => "Q4_0",
+            MmqGemmDtype::Q4_1Wave64 => "Q4_1",
+            MmqGemmDtype::Q5_0Wave64 => "Q5_0",
+            MmqGemmDtype::Q5_1Wave64 => "Q5_1",
         }
     }
     fn weight_dtype(self) -> Dtype {
         match self {
             MmqGemmDtype::Q8_0Wave64 => Dtype::Q8_0Dp4a,
             MmqGemmDtype::Q4_0Wave64 => Dtype::Q4_0,
+            MmqGemmDtype::Q4_1Wave64 => Dtype::Q4_1Dp4a,
+            MmqGemmDtype::Q5_0Wave64 => Dtype::Q5_0,
+            MmqGemmDtype::Q5_1Wave64 => Dtype::Q5_1,
         }
     }
     fn impl_id(self) -> &'static str {
         match self {
             MmqGemmDtype::Q8_0Wave64 => "qmatmul_q8_0_mmq_wave64",
             MmqGemmDtype::Q4_0Wave64 => "qmatmul_q4_0_mmq_wave64",
+            MmqGemmDtype::Q4_1Wave64 => "qmatmul_q4_1_mmq_wave64",
+            MmqGemmDtype::Q5_0Wave64 => "qmatmul_q5_0_mmq_wave64",
+            MmqGemmDtype::Q5_1Wave64 => "qmatmul_q5_1_mmq_wave64",
         }
     }
     fn kernel_stem(self) -> &'static str {
         match self {
             MmqGemmDtype::Q8_0Wave64 => "mmq_q8_0_wave64",
             MmqGemmDtype::Q4_0Wave64 => "mmq_q4_0_wave64",
+            MmqGemmDtype::Q4_1Wave64 => "mmq_q4_1_wave64",
+            MmqGemmDtype::Q5_0Wave64 => "mmq_q5_0_wave64",
+            MmqGemmDtype::Q5_1Wave64 => "mmq_q5_1_wave64",
         }
     }
     fn kernel_entry(self) -> &'static str {
         match self {
             MmqGemmDtype::Q8_0Wave64 => "flambeau_mmq_q8_0_wave64_q8_1",
             MmqGemmDtype::Q4_0Wave64 => "flambeau_mmq_q4_0_wave64_q8_1",
+            MmqGemmDtype::Q4_1Wave64 => "flambeau_mmq_q4_1_wave64_q8_1",
+            MmqGemmDtype::Q5_0Wave64 => "flambeau_mmq_q5_0_wave64_q8_1",
+            MmqGemmDtype::Q5_1Wave64 => "flambeau_mmq_q5_1_wave64_q8_1",
         }
     }
     /// (MMQ_Y rows/block, TILE_N cols/block) — the grid tiling.
     fn tile(self) -> (u32, u32) {
-        match self {
-            MmqGemmDtype::Q8_0Wave64 | MmqGemmDtype::Q4_0Wave64 => (64, 8),
-        }
+        (64, 8)
     }
 }
 

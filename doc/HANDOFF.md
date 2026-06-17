@@ -100,16 +100,17 @@ sm_86) is built and `feature/cuda-decouple` is pulled in.
 > super-block — into the inner loop). Do those next; they're NOT the hard part.
 >
 > **NEXT P2c (the real work — multi-session):**
-> 0. **Template the rest of `mmq_<dt>_wave64`** — **Q8_0 + Q4_0 done**
->    (`MmqGemmDtype::{Q8_0,Q4_0}Wave64`, certed both backends err 2.8e-3 / 3.8e-4,
->    own neutral `.cuh` each). Remaining: Q4_1/Q5_0/Q5_1 (simple 32-elem blocks —
->    Q4_1 `+m` affine, Q5_0/Q5_1 5th-bit plane via `expand_bits4`; the **3rd simple
->    dtype is the rule-14 trigger** → fold Q8_0/Q4_0/Q4_1/Q5_0/Q5_1 into a shared
->    `mmq_wave64_row<Q,MMQ_Y,TILE_N>` via a `quant_traits` mmq-decode method:
->    decode-weight-once `{v[8], x_d[, m]}` then per-col partial), then the K-quants
->    (Q4_K/Q5_K/Q6_K/Q2_K/Q3_K/Q8_K — super-block decode, more divergent, own
->    bodies) + IQ*. All reuse the `MmqGemmDtype` harness + `MMQ_Y`/`TILE_N` tiling;
->    mechanical (independent threads, no LDS).
+> 0. **`mmq_<dt>_wave64` — all 5 simple 32-elem dtypes DONE** (Q8_0/Q4_0/Q4_1/
+>    Q5_0/Q5_1) via the shared skeleton `mmq_wave64_row<Q,MMQ_Y=64,TILE_N=8>`
+>    (`mmq_wave64.cuh`) + a `quant_traits<Q>` mmq policy (`mmq_weight` struct +
+>    `mmq_decode` once/row + `mmq_partial` per-col, encapsulating the 1-dp4a
+>    Q8_0/Q4_0/Q4_1 vs 2-dp4a Q5_0/Q5_1 nibble+5th-bit). Refactor validated
+>    non-regressive (Q8_0/Q4_0 certs byte-identical). All certed both backends
+>    (err ≤2.8e-3, HIP↔CUDA equal), `MmqGemmDtype::{...}Wave64`, impl_ids
+>    neutralized, hand `.cu` retired. **Remaining wave64:** the **K-quants**
+>    (Q4_K/Q5_K/Q6_K/Q2_K/Q3_K/Q8_K) + **IQ\*** — super-block decode spanning the
+>    K-tile, structurally more divergent → own bodies (or a 2nd K-quant mmq
+>    skeleton), same `MmqGemmDtype` harness. Assess each like the mmvq K-quants.
 > 1. **Genericize `sweep_mmq.rs` over `BenchBackend`** (`run_sweep<B>`/
 >    `run_shape<B>`/`capture_static_pmc<B>` — currently HIP-bound via `HipDevice`/
 >    `kernels::hsaco`). It's large + branchy (mmq-layout 4warp/turbo, wave64

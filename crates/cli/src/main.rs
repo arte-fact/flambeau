@@ -1440,6 +1440,9 @@ fn mmq_gemm_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::MmqGemmDtyp
     match dtype {
         "Q8_0_mmq_wave64" => Some(MmqGemmDtype::Q8_0Wave64),
         "Q4_0_mmq_wave64" => Some(MmqGemmDtype::Q4_0Wave64),
+        "Q4_1_mmq_wave64" => Some(MmqGemmDtype::Q4_1Wave64),
+        "Q5_0_mmq_wave64" => Some(MmqGemmDtype::Q5_0Wave64),
+        "Q5_1_mmq_wave64" => Some(MmqGemmDtype::Q5_1Wave64),
         _ => None,
     }
 }
