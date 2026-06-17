@@ -91,10 +91,20 @@ sm_86) is built and `feature/cuda-decouple` is pulled in.
 >     K-quants 5e-2 (documented Q8_1-activation noise on cancellation-heavy prefill
 >     rows — Q5_K down hit 0.0315; Q6_K/Q2_K/Q3_K all well within at ≤1.7e-3),
 >     simple block quants 3e-2. `MoeMmqTile8Dtype` now 20 variants.
-> - **NEXT in P2d:** (1) IQ\* tile8 (×{gate_up,down} = 18 — codebook decode into
->   registers). (2) The 2 Q4_K `_lds_tiled` (ex-turbo) 4-warp LDS-tiled MoE
->   kernels — DS4 logical-lanes playbook from the dense `mmq_q4_k_lds_tiled.cuh`.
->   (3) Cleanup: 9 orphan plain IQ MoE `.cu`, 4 orphan q4_k gate_up variants,
+>   - **IQ\* tile8 DONE** (9/9, `4776f7f`): iq4_nl/iq4_xs/iq2_xxs/iq2_xs/iq2_s/
+>     iq3_xxs/iq3_s/iq1_s/iq1_m × {gate_up,down} = 18 kernels, each a verbatim
+>     port of the hand codebook decode (LUT/grid/KSIGNS/apply_signs, IQ1 delta,
+>     IQ1_M scale reassembly) onto the register-tiled tile8 scaffold. File-local
+>     helpers lifted with `flambeau_<dt>_` prefixes; raw 4-byte qs/aux/y →
+>     load_int_b2; neutral dp4a. Generic shape driver already sizes per block
+>     (iq4_nl 32-elem, rest super-block) — no driver change. All 18 BIT-IDENTICAL
+>     (worst max_rel_err 0.015, inside the 5e-2 IQ envelope). `MoeMmqTile8Dtype`
+>     now 38 variants. **The ENTIRE tile8 MMQ prefill family (simple + K-quant +
+>     IQ\*) is now cross-backend.**
+> - **NEXT in P2d:** (1) The 2 Q4_K `_lds_tiled` (ex-turbo) 4-warp LDS-tiled MoE
+>   kernels (`indexed_moe_mmq_q4_k_{gate_up,down}_lds_tiled.cu`) — DS4
+>   logical-lanes playbook from the dense `mmq_q4_k_lds_tiled.cuh`. (2) Cleanup:
+>   9 orphan plain (scalar) IQ MoE `.cu`, 4 orphan q4_k gate_up mmvq variants,
 >   `quantize_f16_q8_1_mmq.cu`.
 > - **DS4 4-warp_lds — Q4_0 (`3867eab`) + Q4_1 (`2ce63cc`) + Q4_K turbo
 >   (`58f52f0`) DONE.** The hardest sub-family (MMQ_Y=128, DS4 144-B activation,
