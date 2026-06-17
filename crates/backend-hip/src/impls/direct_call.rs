@@ -530,4 +530,20 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
         impl_id: "indexed_moe_mmvq_q4_k_r4",
         cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q4_k_r4.json",
     },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmvq_q5_k_r2",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q5_k_r2.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmvq_q6_k_r2",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q6_k_r2.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmvq_q2_k_r2",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q2_k_r2.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmvq_q3_k_r2",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q3_k_r2.json",
+    },
 ];

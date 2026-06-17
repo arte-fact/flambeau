@@ -2090,6 +2090,10 @@ pub enum MoeMmvqDtype {
     Q5_1,
     Q4KR2,
     Q4KR4,
+    Q5KR2,
+    Q6KR2,
+    Q2KR2,
+    Q3KR2,
 }
 
 impl MoeMmvqDtype {
@@ -2101,6 +2105,10 @@ impl MoeMmvqDtype {
             MoeMmvqDtype::Q5_0 => "Q5_0",
             MoeMmvqDtype::Q5_1 => "Q5_1",
             MoeMmvqDtype::Q4KR2 | MoeMmvqDtype::Q4KR4 => "Q4_K",
+            MoeMmvqDtype::Q5KR2 => "Q5_K",
+            MoeMmvqDtype::Q6KR2 => "Q6_K",
+            MoeMmvqDtype::Q2KR2 => "Q2_K",
+            MoeMmvqDtype::Q3KR2 => "Q3_K",
         }
     }
     fn weight_dtype(self) -> Dtype {
@@ -2111,6 +2119,10 @@ impl MoeMmvqDtype {
             MoeMmvqDtype::Q5_0 => Dtype::Q5_0,
             MoeMmvqDtype::Q5_1 => Dtype::Q5_1,
             MoeMmvqDtype::Q4KR2 | MoeMmvqDtype::Q4KR4 => Dtype::Q4K,
+            MoeMmvqDtype::Q5KR2 => Dtype::Q5K,
+            MoeMmvqDtype::Q6KR2 => Dtype::Q6K,
+            MoeMmvqDtype::Q2KR2 => Dtype::Q2K,
+            MoeMmvqDtype::Q3KR2 => Dtype::Q3K,
         }
     }
     fn impl_id(self) -> &'static str {
@@ -2122,6 +2134,10 @@ impl MoeMmvqDtype {
             MoeMmvqDtype::Q5_1 => "indexed_moe_mmvq_q5_1",
             MoeMmvqDtype::Q4KR2 => "indexed_moe_mmvq_q4_k_r2",
             MoeMmvqDtype::Q4KR4 => "indexed_moe_mmvq_q4_k_r4",
+            MoeMmvqDtype::Q5KR2 => "indexed_moe_mmvq_q5_k_r2",
+            MoeMmvqDtype::Q6KR2 => "indexed_moe_mmvq_q6_k_r2",
+            MoeMmvqDtype::Q2KR2 => "indexed_moe_mmvq_q2_k_r2",
+            MoeMmvqDtype::Q3KR2 => "indexed_moe_mmvq_q3_k_r2",
         }
     }
     fn kernel_stem(self) -> &'static str {
@@ -2133,6 +2149,10 @@ impl MoeMmvqDtype {
             MoeMmvqDtype::Q5_1 => "indexed_moe_mmvq_q5_1",
             MoeMmvqDtype::Q4KR2 => "indexed_moe_mmvq_q4_k_r2_dp4a",
             MoeMmvqDtype::Q4KR4 => "indexed_moe_mmvq_q4_k_r4_dp4a",
+            MoeMmvqDtype::Q5KR2 => "indexed_moe_mmvq_q5_k_r2_dp4a",
+            MoeMmvqDtype::Q6KR2 => "indexed_moe_mmvq_q6_k_r2_dp4a",
+            MoeMmvqDtype::Q2KR2 => "indexed_moe_mmvq_q2_k_r2_dp4a",
+            MoeMmvqDtype::Q3KR2 => "indexed_moe_mmvq_q3_k_r2_dp4a",
         }
     }
     fn kernel_entry(self) -> &'static str {
@@ -2144,6 +2164,10 @@ impl MoeMmvqDtype {
             MoeMmvqDtype::Q5_1 => "flambeau_indexed_moe_mmvq_q5_1_q8_1",
             MoeMmvqDtype::Q4KR2 => "flambeau_indexed_moe_mmvq_q4_k_r2_dp4a_q8_1",
             MoeMmvqDtype::Q4KR4 => "flambeau_indexed_moe_mmvq_q4_k_r4_dp4a_q8_1",
+            MoeMmvqDtype::Q5KR2 => "flambeau_indexed_moe_mmvq_q5_k_r2_dp4a_q8_1",
+            MoeMmvqDtype::Q6KR2 => "flambeau_indexed_moe_mmvq_q6_k_r2_dp4a_q8_1",
+            MoeMmvqDtype::Q2KR2 => "flambeau_indexed_moe_mmvq_q2_k_r2_dp4a_q8_1",
+            MoeMmvqDtype::Q3KR2 => "flambeau_indexed_moe_mmvq_q3_k_r2_dp4a_q8_1",
         }
     }
     /// (threads/block, rows/block). Plain per-row kernels own one output row per
@@ -2156,7 +2180,11 @@ impl MoeMmvqDtype {
             | MoeMmvqDtype::Q4_1
             | MoeMmvqDtype::Q5_0
             | MoeMmvqDtype::Q5_1 => (256, 1),
-            MoeMmvqDtype::Q4KR2 => (64, 2),
+            MoeMmvqDtype::Q4KR2
+            | MoeMmvqDtype::Q5KR2
+            | MoeMmvqDtype::Q6KR2
+            | MoeMmvqDtype::Q2KR2
+            | MoeMmvqDtype::Q3KR2 => (64, 2),
             MoeMmvqDtype::Q4KR4 => (64, 4),
         }
     }
