@@ -574,6 +574,24 @@ params = """
     const int n_blocks_per_row"""
 body = "mmvq_q4_0_gate_up_row_tile_batched_row<256, 4>(gate_w, up_w, y, gate_out, up_out, n_rows_gate, n_rows_up, n_blocks_per_row);"
 
+# Q8_0 MMQ correctness oracle — one output element per {n_rows, n_batches} grid
+# block (batched dot). The cross-backend MMQ pilot (P2c); reuses the warp-size-
+# agnostic mmvq reduce. Same stem/entry as the retired hand kernel.
+[[kernel]]
+stem = "mmq_q8_0_oracle"
+includes = ["quant_traits.cuh", "mmq_q8_0_oracle.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmq_q8_0_oracle_q8_1"
+params = """
+    const flambeau_block_q8_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_batches,
+    const int n_blocks_per_row"""
+body = "mmq_q8_0_oracle_row<256>(x, y, dst, n_rows, n_batches, n_blocks_per_row);"
+
 # Q4_0 single-row MMVQ — legacy 4-bit (nibble unpack + (q-8) bias correction).
 # One module carries both the F32 dst entry (scratch-then-cast path) and the
 # F16-dst entry (mmvq_q4_0_kv_decode_f16 / mmvq_f16_direct).

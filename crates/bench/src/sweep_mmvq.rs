@@ -1531,6 +1531,209 @@ fn run_shape_gate_up_batched<B: BenchBackend>(
     Ok((got, reference))
 }
 
+// ---- MMQ oracle (batched dot, 2D grid) sweep ------------------------------
+
+/// Weight dtype for the MMQ correctness-oracle sweep (`dst[batch,row] =
+/// Σ_k x[row,k]·y[batch,k]`, one element per `{n_rows,n_batches}` grid block).
+/// The cross-backend MMQ pilot — only Q8_0 so far.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MmqOracleDtype {
+    Q8_0,
+}
+
+impl MmqOracleDtype {
+    pub fn name(self) -> &'static str {
+        match self {
+            MmqOracleDtype::Q8_0 => "Q8_0",
+        }
+    }
+    fn weight_dtype(self) -> Dtype {
+        match self {
+            MmqOracleDtype::Q8_0 => Dtype::Q8_0Dp4a,
+        }
+    }
+    fn impl_id(self) -> &'static str {
+        match self {
+            MmqOracleDtype::Q8_0 => "qmatmul_q8_0_mmq_oracle",
+        }
+    }
+    fn kernel_stem(self) -> &'static str {
+        match self {
+            MmqOracleDtype::Q8_0 => "mmq_q8_0_oracle",
+        }
+    }
+    fn kernel_entry(self) -> &'static str {
+        match self {
+            MmqOracleDtype::Q8_0 => "flambeau_mmq_q8_0_oracle_q8_1",
+        }
+    }
+}
+
+pub fn run_mmq_oracle_sweep<B: BenchBackend>(
+    dtype: MmqOracleDtype,
+    repo_root: &Path,
+    arch: &str,
+) -> Result<Cert> {
+    let dev = B::new_device(0)?;
+    let bytes = B::image(dtype.kernel_stem())
+        .ok_or_else(|| anyhow!("{} kernel not compiled", dtype.kernel_stem()))?;
+    let module = B::load(&dev, bytes)?;
+    let kernel = B::kernel(&module, dtype.kernel_entry())?;
+    let pmc = B::attributes(&kernel)?;
+
+    let m_grid = vec![1usize, 8, 16, 128, 512];
+    let k_grid = vec![2048usize, 5120, 15360];
+    let n_grid = vec![1usize, 2, 4];
+    let seed = 0xC0FFEE_u64;
+
+    let mut results = Vec::new();
+    for &m in &m_grid {
+        for &k in &k_grid {
+            for &n in &n_grid {
+                let s = seed
+                    .wrapping_add((m as u64).wrapping_mul(0x1234567))
+                    .wrapping_add((k as u64).wrapping_mul(0x9E3779B97F4A7C15))
+                    .wrapping_add((n as u64).wrapping_mul(0xDEADBEEF));
+                let (got, reference) = run_shape_mmq_oracle::<B>(&dev, dtype, m, k, n, s)?;
+                let max_rel_err = max_rel_err_with_floor(&got, &reference, (k as f32).sqrt());
+                let tolerance = cert_tol(k);
+                results.push(ShapeResult {
+                    m,
+                    k,
+                    n,
+                    seed: s,
+                    max_rel_err,
+                    tolerance,
+                    pass: max_rel_err <= tolerance,
+                });
+            }
+        }
+    }
+
+    let pass = results.iter().all(|r| r.pass);
+    let cert = Cert {
+        schema_version: SCHEMA_VERSION,
+        impl_id: dtype.impl_id().to_string(),
+        backend: dev.backend().to_string(),
+        arch: arch.to_string(),
+        op: "qmatmul_mmq".to_string(),
+        dtype_weight: dtype.name().to_string(),
+        dtype_activation: "Q8_1".to_string(),
+        tolerance_formula: "|err| <= 3e-2 * max(|ref|, sqrt(k))".to_string(),
+        results,
+        pass,
+        emitted_at: now_utc_iso8601(),
+        rig: rig_for(arch),
+        pmc: Some(pmc),
+    };
+    let written = cert.write_to_disk(repo_root)?;
+    tracing::info!(
+        target: "flambeau_bench::sweep_mmvq",
+        cert = %written.display(), pass = cert.pass, "mmq oracle cert written"
+    );
+    Ok(cert)
+}
+
+/// One (m=n_rows, k, n=n_batches) oracle shape. Returns `(got, reference)`,
+/// batch-major `[n_batches][n_rows]`.
+fn run_shape_mmq_oracle<B: BenchBackend>(
+    dev: &B::Device,
+    dtype: MmqOracleDtype,
+    m: usize,
+    k: usize,
+    n_batches: usize,
+    seed: u64,
+) -> Result<(Vec<f32>, Vec<f32>)> {
+    let q_bytes =
+        B::image("quantize_q8_1").ok_or_else(|| anyhow!("quantize_q8_1 not compiled"))?;
+    let m_bytes = B::image(dtype.kernel_stem())
+        .ok_or_else(|| anyhow!("{} kernel not compiled", dtype.kernel_stem()))?;
+    let q_module = B::load(dev, q_bytes)?;
+    let m_module = B::load(dev, m_bytes)?;
+    let k_quantize = B::kernel(&q_module, "flambeau_quantize_row_q8_1")?;
+    let k_mmq = B::kernel(&m_module, dtype.kernel_entry())?;
+
+    let wd = dtype.weight_dtype();
+    let block_elems = wd.block_elem_count();
+    let block_bytes = wd.block_size_bytes();
+    assert_eq!(k % block_elems, 0, "k {k} must be multiple of block size {block_elems}");
+    let n_blocks = k / block_elems;
+
+    let weights_raw = tame_scales(wd, seeded_bytes(seed, m * n_blocks * block_bytes));
+    let mut weights_dequant = vec![0.0f32; m * k];
+    dequantize_into(wd.ggml(), &weights_raw, &mut weights_dequant)?;
+    let d_x = alloc_and_upload(dev, weights_raw.as_slice());
+
+    let q8_1_blocks_per_batch = k / QK8;
+    let batch_bytes = q8_1_blocks_per_batch * std::mem::size_of::<BlockQ8_1>();
+    let d_y_q8_1 = dev.alloc(n_batches * batch_bytes)?;
+    let mut y_rt_batches: Vec<Vec<f32>> = Vec::with_capacity(n_batches);
+    for bt in 0..n_batches {
+        let y_f32 = seeded_f32_range(seed.wrapping_add(0xA5A5 ^ (bt as u64)), k, -1.0, 1.0);
+        let d_y_f32 = alloc_and_upload(dev, y_f32.as_slice());
+        {
+            let stream = dev.default_stream();
+            let n_elems = k as i32;
+            let d_y_f32_ptr: u64 = d_y_f32.as_usize() as u64;
+            let d_batch_ptr: u64 = (d_y_q8_1.as_usize() + bt * batch_bytes) as u64;
+            let mut args = <B::Args<'_>>::default();
+            args.push_arg(&d_y_f32_ptr);
+            args.push_arg(&d_batch_ptr);
+            args.push_arg(&n_elems);
+            B::launch(&k_quantize, stream, LaunchCfg::one_d(q8_1_blocks_per_batch as u32, QK8 as u32), args)?;
+            stream.synchronize()?;
+        }
+        unsafe { dev.dealloc(d_y_f32, y_f32.len() * 4)?; }
+        y_rt_batches.push(quantize_q8_1_roundtrip(&y_f32));
+    }
+
+    let d_dst = dev.alloc(n_batches * m * 4)?;
+    {
+        let stream = dev.default_stream();
+        let n_rows = m as i32;
+        let n_batch_i = n_batches as i32;
+        let n_units = n_blocks as i32;
+        let d_x_ptr: u64 = d_x.as_usize() as u64;
+        let d_y_ptr: u64 = d_y_q8_1.as_usize() as u64;
+        let d_dst_ptr: u64 = d_dst.as_usize() as u64;
+        let mut args = <B::Args<'_>>::default();
+        args.push_arg(&d_x_ptr);
+        args.push_arg(&d_y_ptr);
+        args.push_arg(&d_dst_ptr);
+        args.push_arg(&n_rows);
+        args.push_arg(&n_batch_i);
+        args.push_arg(&n_units);
+        let cfg = LaunchCfg { grid: (m as u32, n_batches as u32, 1), block: (256, 1, 1), shared_bytes: 0 };
+        B::launch(&k_mmq, stream, cfg, args)?;
+        stream.synchronize()?;
+    }
+
+    let mut got = vec![0.0f32; n_batches * m];
+    unsafe {
+        dev.memcpy_async(
+            dev.default_stream(),
+            CopyDirection::DeviceToHost,
+            DevicePtr(got.as_mut_ptr() as usize),
+            d_dst,
+            n_batches * m * 4,
+        )?;
+    }
+    dev.default_stream().synchronize()?;
+
+    unsafe {
+        dev.dealloc(d_x, weights_raw.len())?;
+        dev.dealloc(d_y_q8_1, n_batches * batch_bytes)?;
+        dev.dealloc(d_dst, n_batches * m * 4)?;
+    }
+
+    let mut reference = vec![0.0f32; n_batches * m];
+    for bt in 0..n_batches {
+        let r = reference_matmul(&weights_dequant, &y_rt_batches[bt], m, k);
+        reference[bt * m..(bt + 1) * m].copy_from_slice(&r);
+    }
+    Ok((got, reference))
+}
+
 // ---- autotune: rank candidate variants, emit dispatch rows ----------------
 
 /// Median wall-clock microseconds of one mmvq launch for `dtype` at (m, k),

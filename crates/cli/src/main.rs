@@ -1008,6 +1008,19 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     );
                     return Ok(());
                 }
+                if let Some(od) = mmq_oracle_dtype(dtype) {
+                    use flambeau_bench::sweep_mmvq::run_mmq_oracle_sweep;
+                    let root = repo_root();
+                    let cert = run_mmq_oracle_sweep::<flambeau_bench::backend::Hip>(od, &root, arch)?;
+                    println!(
+                        "sweep qmatmul_mmq_oracle ({}): pass={} shapes={} rig={}",
+                        od.name(),
+                        cert.pass,
+                        cert.results.len(),
+                        cert.rig
+                    );
+                    return Ok(());
+                }
                 let dtypes: Vec<Dtype> = match dtype {
                     "all" => vec![
                         Dtype::Q8_0,
@@ -1397,6 +1410,16 @@ fn gate_up_batched_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::Gate
     }
 }
 
+/// Map a `--dtype` string to an MMQ correctness-oracle sweep target.
+#[cfg(any(feature = "hip_sweep", feature = "cuda_sweep"))]
+fn mmq_oracle_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::MmqOracleDtype> {
+    use flambeau_bench::sweep_mmvq::MmqOracleDtype;
+    match dtype {
+        "Q8_0_mmq_oracle" => Some(MmqOracleDtype::Q8_0),
+        _ => None,
+    }
+}
+
 #[cfg(feature = "cuda_sweep")]
 fn sweep_cuda(op: &str, dtype: &str) -> Result<()> {
     use flambeau_bench::backend::Cuda;
@@ -1437,6 +1460,18 @@ fn sweep_cuda(op: &str, dtype: &str) -> Result<()> {
         println!(
             "sweep qmatmul_gate_up_batched ({}): pass={} shapes={} rig={}",
             gb.name(),
+            cert.pass,
+            cert.results.len(),
+            cert.rig
+        );
+        return Ok(());
+    }
+    if let Some(od) = mmq_oracle_dtype(dtype) {
+        use flambeau_bench::sweep_mmvq::run_mmq_oracle_sweep;
+        let cert = run_mmq_oracle_sweep::<Cuda>(od, &repo_root(), "sm_86")?;
+        println!(
+            "sweep qmatmul_mmq_oracle ({}): pass={} shapes={} rig={}",
+            od.name(),
             cert.pass,
             cert.results.len(),
             cert.rig

@@ -74,9 +74,34 @@ sm_86) is built and `feature/cuda-decouple` is pulled in.
 > `load_q8_1_ints`, multi-entry codegen, and the sweep
 > `GateUpDtype`/`BatchedDtype`/`GateUpBatchedDtype` harness paths.
 >
-> **NEXT = P2c mmq** (the 4-warp LDS-tiled prefill lever — a genuine multi-
-> session sub-phase, the gold-standard prefill kernel per CLAUDE.md; two tiling
-> skeletons sharing `quant_traits` + Q8_1 quantize). Then **P2d** indexed_moe.
+> **P2c mmq STARTED — Q8_0 oracle (cross-backend pilot) done.** The MMQ
+> correctness oracle (`dst[batch,row]=Σ_k x·y`, 2D `{n_rows,n_batches}` grid, one
+> output element/block — a batched dot) templated to `mmq_q8_0_oracle.cuh`:
+> `sub=tid/32` equals the wave64 `warp*2+lane_hi`, so it reuses the warp-agnostic
+> `mmvq_reduce_store<256>` and **bit-matches on HIP**. Proves the cross-backend
+> mmq path — the 2D-grid generic launch (`LaunchCfg{grid:(m,n,1)}` via
+> `B::launch`) and the wave32 reduce. Added a small additive generic sweep path
+> (`MmqOracleDtype`/`run_mmq_oracle_sweep` in `sweep_mmvq.rs`, `--dtype
+> Q8_0_mmq_oracle`); cert both backends err 2.0e-3, HIP↔CUDA equal,
+> impl_id neutralized (`qmatmul_q8_0_mmq_oracle`), bench-reference registered.
+>
+> **NEXT P2c (the real work — multi-session):**
+> 1. **Genericize `sweep_mmq.rs` over `BenchBackend`** (`run_sweep<B>`/
+>    `run_shape<B>`/`capture_static_pmc<B>` — currently HIP-bound via `HipDevice`/
+>    `kernels::hsaco`). It's large + branchy (mmq-layout 4warp/turbo, wave64
+>    family, oracle launch variants); keep every HIP `Dtype` green (regression
+>    test = HIP certs unchanged). The additive oracle path proved the harness
+>    primitives; this folds mmq proper onto them.
+> 2. **Template the real kernels** — `mmq_<dt>_wave64` (single-pass tiled) then
+>    the 4-warp LDS-tiled (`mmq_q8_0_4warp` / `mmq_q4_K_turbo`, the gold-standard
+>    prefill lever per CLAUDE.md). These are **heavily wave64-LDS** → expect a
+>    warp-restructure per kernel (the roadmap's "two tiling skeletons"; cp.async
+>    on CUDA vs prefetch on HIP, seamed). NOT one-session ports.
+> 3. **Neutralize the legacy `_gfx906` mmq impl_ids** (the oracle's old
+>    `qmatmul_q8_0_mmq_oracle_gfx906` in `sweep_mmq.rs` + git mv cert; batch with
+>    the wave64 ids) as each kernel goes cross-backend.
+>
+> Then **P2d** indexed_moe (expert gather/bucket). See `PORTABILITY-ROADMAP.md`.
 >
 > *(first gate_up slice writeup)*
 > **Q8_0 `gate_up`** (dense FFN decode kernel) templated onto a neutral skeleton
