@@ -2307,6 +2307,7 @@ fn run_shape_mmq_4warp<B: BenchBackend>(
 pub enum Mmq4WarpLdsDtype {
     Q4_0,
     Q4_1,
+    Q4K,
 }
 
 impl Mmq4WarpLdsDtype {
@@ -2314,37 +2315,63 @@ impl Mmq4WarpLdsDtype {
         match self {
             Mmq4WarpLdsDtype::Q4_0 => "Q4_0",
             Mmq4WarpLdsDtype::Q4_1 => "Q4_1",
+            Mmq4WarpLdsDtype::Q4K => "Q4_K",
         }
     }
     fn weight_dtype(self) -> Dtype {
         match self {
             Mmq4WarpLdsDtype::Q4_0 => Dtype::Q4_0,
             Mmq4WarpLdsDtype::Q4_1 => Dtype::Q4_1Dp4a,
+            Mmq4WarpLdsDtype::Q4K => Dtype::Q4K,
         }
     }
     fn block_bytes(self) -> usize {
         match self {
             Mmq4WarpLdsDtype::Q4_0 => 18,
             Mmq4WarpLdsDtype::Q4_1 => 20,
+            Mmq4WarpLdsDtype::Q4K => 144,
         }
     }
     fn kernel_stem(self) -> &'static str {
         match self {
             Mmq4WarpLdsDtype::Q4_0 => "mmq_q4_0_4warp_lds",
             Mmq4WarpLdsDtype::Q4_1 => "mmq_q4_1_4warp_lds",
+            Mmq4WarpLdsDtype::Q4K => "mmq_q4_K_turbo",
         }
     }
     fn kernel_entry(self) -> &'static str {
         match self {
             Mmq4WarpLdsDtype::Q4_0 => "flambeau_mmq_q4_0_4warp_lds_q8_1",
             Mmq4WarpLdsDtype::Q4_1 => "flambeau_mmq_q4_1_4warp_lds_q8_1",
+            Mmq4WarpLdsDtype::Q4K => "flambeau_mmq_q4_K_turbo_q8_1",
         }
     }
     fn impl_id(self) -> &'static str {
         match self {
             Mmq4WarpLdsDtype::Q4_0 => "qmatmul_q4_0_mmq_4warp_lds",
             Mmq4WarpLdsDtype::Q4_1 => "qmatmul_q4_1_mmq_4warp_lds",
+            Mmq4WarpLdsDtype::Q4K => "qmatmul_q4_k_mmq_turbo",
         }
+    }
+    /// (MMQ_X cols/block, dynamic-LDS bytes). MMQ_Y is 128 for all.
+    fn launch(self) -> (u32, u32) {
+        match self {
+            // tile_y 64*36 + x_qs 128*33 + x_dm 128*8 (half2) ints = 7584 → 30336 B.
+            Mmq4WarpLdsDtype::Q4_0 | Mmq4WarpLdsDtype::Q4_1 => (64, 30336),
+            // tile_y 16*36 + x_qs 4224 + x_dm 128 + x_sc 528 = 5456 ints → 21824 B.
+            Mmq4WarpLdsDtype::Q4K => (16, 21824),
+        }
+    }
+}
+
+/// Q4_K 6-bit packed min for sub-block `j` from the 12-byte `scales` (mirrors
+/// `flambeau_q4k_scale_min`'s `m` output; the kernel's vec_dot multiplies it by
+/// `dmin`).
+fn q4k_min(j: usize, q: &[u8]) -> u8 {
+    if j < 4 {
+        q[j + 4] & 63
+    } else {
+        (q[j + 4] >> 4) | ((q[j] >> 6) << 4)
     }
 }
 
@@ -2491,11 +2518,9 @@ fn run_shape_mmq_4warp_lds<B: BenchBackend>(
         args.push_arg(&stride_col_y);
         args.push_arg(&stride_row_x);
         args.push_arg(&nrows_dst);
-        // Dynamic LDS: tile_y (GGML_PAD(64*36,256)=2304) + x_qs (128*33=4224)
-        // + x_dm (128*8+32=1056 half2) ints = 7584 ints = 30336 B.
-        let shared_bytes = (2304 + 4224 + 1056) * 4;
+        let (mmq_x, shared_bytes) = dtype.launch();
         let cfg = LaunchCfg {
-            grid: ((n_rows as u32).div_ceil(128), (n_cols as u32).div_ceil(64), 1),
+            grid: ((n_rows as u32).div_ceil(128), (n_cols as u32).div_ceil(mmq_x), 1),
             block: (64, 4, 1),
             shared_bytes,
         };
@@ -2527,6 +2552,48 @@ fn run_shape_mmq_4warp_lds<B: BenchBackend>(
     // fp16 d, qs) → d_x·(d_y·sumi − 8·ssum); Q4_1 block (20: fp16 d, fp16 m, qs)
     // → d_x·d_y·sumi + m_x·ssum. Weight d_x/m_x + nibbles decoded from the raw
     // bytes (GGML element order — low nibble e<16, high nibble e+16).
+    if matches!(dtype, Mmq4WarpLdsDtype::Q4K) {
+        // Q4_K super-block affine over DS4 activation. Reuse w_dequant (correct
+        // GGML dequant) for the dot term; per 32-elem sub-block the kernel adds
+        // d_y·Σ(w·q8) + dmin·m·(d_y·Σq8 − ssum). dmin + the 6-bit m[sub] decoded
+        // from the raw block (144 B: d, dmin fp16, scales[12], qs[128]).
+        let mut reference = vec![0.0f32; n_cols * n_rows];
+        for c in 0..n_cols {
+            let col = &act_f32[c * k..(c + 1) * k];
+            for row in 0..n_rows {
+                let mut acc = 0.0f64;
+                for sup in 0..n_blocks {
+                    let bb = (row * n_blocks + sup) * 144;
+                    let dmin = f16::from_le_bytes([weights_raw[bb + 2], weights_raw[bb + 3]]).to_f32();
+                    let scales = &weights_raw[bb + 4..bb + 16];
+                    for sub in 0..8usize {
+                        let m_sub = q4k_min(sub, scales) as f32;
+                        let e0 = sup * 256 + sub * 32;
+                        let xs = &col[e0..e0 + 32];
+                        let amax = xs.iter().fold(0.0f32, |mx, &v| mx.max(v.abs()));
+                        let d_y = amax / 127.0;
+                        let ssum: f32 = xs.iter().sum();
+                        let mut sum_wq8 = 0.0f64;
+                        let mut sum_q8 = 0.0f64;
+                        for e in 0..32usize {
+                            let q8 = if d_y != 0.0 {
+                                (xs[e] / d_y).round().clamp(-127.0, 127.0)
+                            } else {
+                                0.0
+                            };
+                            sum_wq8 += w_dequant[row * k + e0 + e] as f64 * q8 as f64;
+                            sum_q8 += q8 as f64;
+                        }
+                        acc += d_y as f64 * sum_wq8
+                            + dmin as f64 * m_sub as f64 * (d_y as f64 * sum_q8 - ssum as f64);
+                    }
+                }
+                reference[c * n_rows + row] = acc as f32;
+            }
+        }
+        return Ok((got, reference));
+    }
+
     let _ = &w_dequant;
     let is_q4_1 = matches!(dtype, Mmq4WarpLdsDtype::Q4_1);
     let qs_off = if is_q4_1 { 4 } else { 2 };
