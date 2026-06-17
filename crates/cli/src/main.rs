@@ -1021,6 +1021,19 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     );
                     return Ok(());
                 }
+                if let Some(gd) = mmq_gemm_dtype(dtype) {
+                    use flambeau_bench::sweep_mmvq::run_mmq_gemm_sweep;
+                    let root = repo_root();
+                    let cert = run_mmq_gemm_sweep::<flambeau_bench::backend::Hip>(gd, &root, arch)?;
+                    println!(
+                        "sweep qmatmul_mmq_gemm ({}): pass={} shapes={} rig={}",
+                        gd.name(),
+                        cert.pass,
+                        cert.results.len(),
+                        cert.rig
+                    );
+                    return Ok(());
+                }
                 let dtypes: Vec<Dtype> = match dtype {
                     "all" => vec![
                         Dtype::Q8_0,
@@ -1420,6 +1433,16 @@ fn mmq_oracle_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::MmqOracle
     }
 }
 
+/// Map a `--dtype` string to a tiled MMQ GEMM sweep target.
+#[cfg(any(feature = "hip_sweep", feature = "cuda_sweep"))]
+fn mmq_gemm_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::MmqGemmDtype> {
+    use flambeau_bench::sweep_mmvq::MmqGemmDtype;
+    match dtype {
+        "Q8_0_mmq_wave64" => Some(MmqGemmDtype::Q8_0Wave64),
+        _ => None,
+    }
+}
+
 #[cfg(feature = "cuda_sweep")]
 fn sweep_cuda(op: &str, dtype: &str) -> Result<()> {
     use flambeau_bench::backend::Cuda;
@@ -1472,6 +1495,18 @@ fn sweep_cuda(op: &str, dtype: &str) -> Result<()> {
         println!(
             "sweep qmatmul_mmq_oracle ({}): pass={} shapes={} rig={}",
             od.name(),
+            cert.pass,
+            cert.results.len(),
+            cert.rig
+        );
+        return Ok(());
+    }
+    if let Some(gd) = mmq_gemm_dtype(dtype) {
+        use flambeau_bench::sweep_mmvq::run_mmq_gemm_sweep;
+        let cert = run_mmq_gemm_sweep::<Cuda>(gd, &repo_root(), "sm_86")?;
+        println!(
+            "sweep qmatmul_mmq_gemm ({}): pass={} shapes={} rig={}",
+            gd.name(),
             cert.pass,
             cert.results.len(),
             cert.rig

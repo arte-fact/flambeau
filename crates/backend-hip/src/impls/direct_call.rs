@@ -328,6 +328,12 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
         impl_id: "qmatmul_q8_0_mmq_oracle",
         cert_rel_path: "certs/hip/gfx906/qmatmul_q8_0_mmq_oracle.json",
     },
+    // Q8_0 single-pass tiled MMQ GEMM (cross-backend); HIP dispatch uses the
+    // legacy _gfx906 row, this is the neutral cross-backend cert.
+    DirectCallKernel {
+        impl_id: "qmatmul_q8_0_mmq_wave64",
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q8_0_mmq_wave64.json",
+    },
     // Q3_K / Q2_K templated mmvq dp4a — not dispatched on HIP (decode uses
     // other rows), kept as the cross-backend bit-match baseline for the sm_86
     // certs.

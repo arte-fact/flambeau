@@ -85,7 +85,25 @@ sm_86) is built and `feature/cuda-decouple` is pulled in.
 > Q8_0_mmq_oracle`); cert both backends err 2.0e-3, HIP↔CUDA equal,
 > impl_id neutralized (`qmatmul_q8_0_mmq_oracle`), bench-reference registered.
 >
+> **Q8_0 `wave64` tiled GEMM done — first REAL cross-backend mmq kernel.** The
+> single-pass tiled MMQ (`mmq_q8_0_wave64`, dense-attention prefill ~19% of 35B
+> prefill): a `MMQ_Y×TILE_N` (64×8) output tile per block, **each thread owns one
+> weight row and loops its TILE_N cols — no LDS, no cross-lane reduce, so it's
+> embarrassingly parallel.** The only wave-leak was `tile_m = blockIdx.x *
+> WARP_SIZE`; templating on `MMQ_Y` (tile height = block thread count, a design
+> constant) makes it warp-agnostic (`mmq_q8_0_wave64.cuh`, neutral `dp4a` +
+> `load_int_b2`). New full-GEMM harness path `MmqGemmDtype`/`run_mmq_gemm_sweep`
+> (`--dtype Q8_0_mmq_wave64`, sweeps n_rows×n_cols×k); cert both backends err
+> 2.8e-3, HIP↔CUDA equal, impl_id `qmatmul_q8_0_mmq_wave64`, bench-ref. **The
+> whole `mmq_<dt>_wave64` family should template the same clean way** (independent
+> threads; just swap the per-block dequant — Q4_0 nibble+bias, K-quants
+> super-block — into the inner loop). Do those next; they're NOT the hard part.
+>
 > **NEXT P2c (the real work — multi-session):**
+> 0. **Template the rest of `mmq_<dt>_wave64`** (Q4_0/Q4_1/Q5_0/Q5_1/Q4_K/Q5_K/
+>    Q6_K/Q2_K/Q3_K/Q8_K/IQ*) — mechanical, like the mmvq dtype loop. Each its own
+>    neutral `.cuh` (or a shared skeleton if the dequant factors), reusing the
+>    `MmqGemmDtype` harness + `MMQ_Y`/`TILE_N` tiling.
 > 1. **Genericize `sweep_mmq.rs` over `BenchBackend`** (`run_sweep<B>`/
 >    `run_shape<B>`/`capture_static_pmc<B>` — currently HIP-bound via `HipDevice`/
 >    `kernels::hsaco`). It's large + branchy (mmq-layout 4warp/turbo, wave64

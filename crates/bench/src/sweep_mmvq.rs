@@ -1734,6 +1734,227 @@ fn run_shape_mmq_oracle<B: BenchBackend>(
     Ok((got, reference))
 }
 
+// ---- MMQ tiled GEMM sweep -------------------------------------------------
+
+/// Weight dtype for the single-pass tiled MMQ GEMM sweep (`dst[col,row] =
+/// Σ_k x[row,k]·y[col,k]`, a `MMQ_Y×TILE_N` output tile per block). Only the
+/// Q8_0 wave64 kernel is templated so far.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MmqGemmDtype {
+    Q8_0Wave64,
+}
+
+impl MmqGemmDtype {
+    pub fn name(self) -> &'static str {
+        match self {
+            MmqGemmDtype::Q8_0Wave64 => "Q8_0",
+        }
+    }
+    fn weight_dtype(self) -> Dtype {
+        match self {
+            MmqGemmDtype::Q8_0Wave64 => Dtype::Q8_0Dp4a,
+        }
+    }
+    fn impl_id(self) -> &'static str {
+        match self {
+            MmqGemmDtype::Q8_0Wave64 => "qmatmul_q8_0_mmq_wave64",
+        }
+    }
+    fn kernel_stem(self) -> &'static str {
+        match self {
+            MmqGemmDtype::Q8_0Wave64 => "mmq_q8_0_wave64",
+        }
+    }
+    fn kernel_entry(self) -> &'static str {
+        match self {
+            MmqGemmDtype::Q8_0Wave64 => "flambeau_mmq_q8_0_wave64_q8_1",
+        }
+    }
+    /// (MMQ_Y rows/block, TILE_N cols/block) — the grid tiling.
+    fn tile(self) -> (u32, u32) {
+        match self {
+            MmqGemmDtype::Q8_0Wave64 => (64, 8),
+        }
+    }
+}
+
+pub fn run_mmq_gemm_sweep<B: BenchBackend>(
+    dtype: MmqGemmDtype,
+    repo_root: &Path,
+    arch: &str,
+) -> Result<Cert> {
+    let dev = B::new_device(0)?;
+    let bytes = B::image(dtype.kernel_stem())
+        .ok_or_else(|| anyhow!("{} kernel not compiled", dtype.kernel_stem()))?;
+    let module = B::load(&dev, bytes)?;
+    let kernel = B::kernel(&module, dtype.kernel_entry())?;
+    let pmc = B::attributes(&kernel)?;
+
+    // (n_rows = weight rows / output dim, n_cols = prefill token batch, k).
+    let rows_grid = vec![64usize, 256, 4096];
+    let cols_grid = vec![1usize, 8, 16];
+    let k_grid = vec![2048usize, 4096];
+    let seed = 0xC0FFEE_u64;
+
+    let mut results = Vec::new();
+    for &n_rows in &rows_grid {
+        for &n_cols in &cols_grid {
+            for &k in &k_grid {
+                let s = seed
+                    .wrapping_add((n_rows as u64).wrapping_mul(0x1234567))
+                    .wrapping_add((n_cols as u64).wrapping_mul(0x85EBCA6B))
+                    .wrapping_add((k as u64).wrapping_mul(0x9E3779B97F4A7C15));
+                let (got, reference) = run_shape_mmq_gemm::<B>(&dev, dtype, n_rows, n_cols, k, s)?;
+                let max_rel_err = max_rel_err_with_floor(&got, &reference, (k as f32).sqrt());
+                let tolerance = cert_tol(k);
+                results.push(ShapeResult {
+                    m: n_rows,
+                    k,
+                    n: n_cols,
+                    seed: s,
+                    max_rel_err,
+                    tolerance,
+                    pass: max_rel_err <= tolerance,
+                });
+            }
+        }
+    }
+
+    let pass = results.iter().all(|r| r.pass);
+    let cert = Cert {
+        schema_version: SCHEMA_VERSION,
+        impl_id: dtype.impl_id().to_string(),
+        backend: dev.backend().to_string(),
+        arch: arch.to_string(),
+        op: "qmatmul_mmq".to_string(),
+        dtype_weight: dtype.name().to_string(),
+        dtype_activation: "Q8_1".to_string(),
+        tolerance_formula: "|err| <= 3e-2 * max(|ref|, sqrt(k))".to_string(),
+        results,
+        pass,
+        emitted_at: now_utc_iso8601(),
+        rig: rig_for(arch),
+        pmc: Some(pmc),
+    };
+    let written = cert.write_to_disk(repo_root)?;
+    tracing::info!(
+        target: "flambeau_bench::sweep_mmvq",
+        cert = %written.display(), pass = cert.pass, "mmq gemm cert written"
+    );
+    Ok(cert)
+}
+
+/// One (n_rows, n_cols, k) tiled MMQ GEMM shape. Weight `[n_rows][k]` Q8_0,
+/// activation `[n_cols][k]` Q8_1, output `dst[col*n_rows + row]`. Returns
+/// `(got, reference)`.
+fn run_shape_mmq_gemm<B: BenchBackend>(
+    dev: &B::Device,
+    dtype: MmqGemmDtype,
+    n_rows: usize,
+    n_cols: usize,
+    k: usize,
+    seed: u64,
+) -> Result<(Vec<f32>, Vec<f32>)> {
+    let q_bytes =
+        B::image("quantize_q8_1").ok_or_else(|| anyhow!("quantize_q8_1 not compiled"))?;
+    let m_bytes = B::image(dtype.kernel_stem())
+        .ok_or_else(|| anyhow!("{} kernel not compiled", dtype.kernel_stem()))?;
+    let q_module = B::load(dev, q_bytes)?;
+    let m_module = B::load(dev, m_bytes)?;
+    let k_quantize = B::kernel(&q_module, "flambeau_quantize_row_q8_1")?;
+    let k_mmq = B::kernel(&m_module, dtype.kernel_entry())?;
+
+    let wd = dtype.weight_dtype();
+    let block_elems = wd.block_elem_count();
+    let block_bytes = wd.block_size_bytes();
+    assert_eq!(k % block_elems, 0, "k {k} must be multiple of block size {block_elems}");
+    let n_blocks = k / block_elems;
+
+    let weights_raw = tame_scales(wd, seeded_bytes(seed, n_rows * n_blocks * block_bytes));
+    let mut w_dequant = vec![0.0f32; n_rows * k];
+    dequantize_into(wd.ggml(), &weights_raw, &mut w_dequant)?;
+    let d_x = alloc_and_upload(dev, weights_raw.as_slice());
+
+    // Activation: n_cols rows of k, quantized flat → [n_cols][k/QK8] Q8_1 blocks.
+    let act_f32 = seeded_f32_range(seed.wrapping_add(0xA5A5A5A5), n_cols * k, -1.0, 1.0);
+    let d_act = alloc_and_upload(dev, act_f32.as_slice());
+    let total_y_blocks = n_cols * k / QK8;
+    let y_bytes = total_y_blocks * std::mem::size_of::<BlockQ8_1>();
+    let d_y_q8_1 = dev.alloc(y_bytes)?;
+    {
+        let stream = dev.default_stream();
+        let n_elems = (n_cols * k) as i32;
+        let d_act_ptr: u64 = d_act.as_usize() as u64;
+        let d_y_q8_1_ptr: u64 = d_y_q8_1.as_usize() as u64;
+        let mut args = <B::Args<'_>>::default();
+        args.push_arg(&d_act_ptr);
+        args.push_arg(&d_y_q8_1_ptr);
+        args.push_arg(&n_elems);
+        B::launch(&k_quantize, stream, LaunchCfg::one_d(total_y_blocks as u32, QK8 as u32), args)?;
+        stream.synchronize()?;
+    }
+
+    let d_dst = dev.alloc(n_cols * n_rows * 4)?;
+    {
+        let stream = dev.default_stream();
+        let ncols_x = k as i32;
+        let nrows_x = n_rows as i32;
+        let ncols_y = n_cols as i32;
+        let nrows_y = k as i32;
+        let nrows_dst = n_rows as i32;
+        let d_x_ptr: u64 = d_x.as_usize() as u64;
+        let d_y_ptr: u64 = d_y_q8_1.as_usize() as u64;
+        let d_dst_ptr: u64 = d_dst.as_usize() as u64;
+        let mut args = <B::Args<'_>>::default();
+        args.push_arg(&d_x_ptr);
+        args.push_arg(&d_y_ptr);
+        args.push_arg(&d_dst_ptr);
+        args.push_arg(&ncols_x);
+        args.push_arg(&nrows_x);
+        args.push_arg(&ncols_y);
+        args.push_arg(&nrows_y);
+        args.push_arg(&nrows_dst);
+        let (mmq_y, tile_n) = dtype.tile();
+        let cfg = LaunchCfg {
+            grid: ((n_rows as u32).div_ceil(mmq_y), (n_cols as u32).div_ceil(tile_n), 1),
+            block: (mmq_y, 1, 1),
+            shared_bytes: 0,
+        };
+        B::launch(&k_mmq, stream, cfg, args)?;
+        stream.synchronize()?;
+    }
+
+    let mut got = vec![0.0f32; n_cols * n_rows];
+    unsafe {
+        dev.memcpy_async(
+            dev.default_stream(),
+            CopyDirection::DeviceToHost,
+            DevicePtr(got.as_mut_ptr() as usize),
+            d_dst,
+            n_cols * n_rows * 4,
+        )?;
+    }
+    dev.default_stream().synchronize()?;
+
+    unsafe {
+        dev.dealloc(d_x, weights_raw.len())?;
+        dev.dealloc(d_act, act_f32.len() * 4)?;
+        dev.dealloc(d_y_q8_1, y_bytes)?;
+        dev.dealloc(d_dst, n_cols * n_rows * 4)?;
+    }
+
+    // Reference: dst[col*n_rows + row] = w_dequant[row] · y_rt[col].
+    let mut reference = vec![0.0f32; n_cols * n_rows];
+    for c in 0..n_cols {
+        let y_rt = quantize_q8_1_roundtrip(&act_f32[c * k..(c + 1) * k]);
+        let col_out = reference_matmul(&w_dequant, &y_rt, n_rows, k);
+        for row in 0..n_rows {
+            reference[c * n_rows + row] = col_out[row];
+        }
+    }
+    Ok((got, reference))
+}
+
 // ---- autotune: rank candidate variants, emit dispatch rows ----------------
 
 /// Median wall-clock microseconds of one mmvq launch for `dtype` at (m, k),
