@@ -3,9 +3,10 @@
 Transient working note. Start here when the dev rig (2× MI50 gfx906 + 1× RTX 3090
 sm_86) is built and `feature/cuda-decouple` is pulled in.
 
-> **CURRENT STATUS (2026-06-17, tip `0fbeccf`): mmvq COMPLETE; P2c single-pass
-> mmq COMPLETE; tile16 + F16 family COMPLETE; only the 4-warp LDS-tiled mmq
-> remains.** cert-check green hip 82 / cuda 20 throughout.
+> **CURRENT STATUS (2026-06-17, tip `0cf00e6`): mmvq COMPLETE; P2c single-pass
+> mmq COMPLETE; tile16 + F16 family COMPLETE; standard-Q8_1 4-warp COMPLETE;
+> only the DS4-activation 4-warp_lds trio remains.** cert-check green hip 82 /
+> cuda 20 throughout.
 > - **P2a mmvq** (20 dtypes + Q8_0 t128/vdr2/r2/r4 configs) — DONE.
 > - **P2b mmvq FUSION** — **COMPLETE.** gate_up ×4 (Q8_0/Q4_0/Q4_1/Q5_K) +
 >   batched ×6 (Q8_0/Q4_0/Q4_1/Q4_K/Q6_K/Q5_K-r2) + row_tile ×3
@@ -48,14 +49,51 @@ sm_86) is built and `feature/cuda-decouple` is pulled in.
 >     Certed both backends (err ~1e-6 vs F32 ref; tile bit-identical, mmvq/mmq
 >     differ only in wave64-vs-wave32 reduce lane order), impl_ids
 >     `qmatmul_f16_{mmvq,mmq,mmq_tile}`.
-> - **NEXT (the real multi-session work — the ONLY dense mmq left):** the
->   **4-warp LDS-tiled** prefill kernels — `mmq_q8_0_4warp`,
->   `mmq_q4_0_4warp_lds`, `mmq_q4_1_4warp_lds`, `mmq_q4_K_4warp`,
->   `mmq_q4_K_turbo`, `mmq_q6_K_4warp` (the gold-standard prefill lever per
->   CLAUDE.md: real LDS tiling + cp.async-vs-prefetch seaming → expect a
->   warp-restructure per kernel, NOT one-session ports), plus their coupled DS4
->   144-B MMQ activation quantizers (`quantize_q8_1_mmq`,
->   `quantize_f16_q8_1_mmq`). Then **P2d** indexed_moe. Build kernels with
+> - **Standard-Q8_1 4-warp LDS-tiled — COMPLETE** (these read the standard 36-B
+>   `flambeau_block_q8_1`, NOT DS4). New dedicated **`Mmq4WarpDtype` +
+>   `run_mmq_4warp_sweep<B>`** harness path in `sweep_mmvq.rs` — the 4-warp ABI is
+>   the runtime's **6-arg** `(vx,vy,dst,n_rows,n_batches,n_blocks_per_row)` + a
+>   full `MMQ_Y×MMQ_X` output tile per block, so it can't ride the 8-arg
+>   one-thread-per-row `MmqGemmDtype` path. `--dtype <DT>_mmq_4warp`. 3rd ABI arg
+>   = weight-blocks-per-row (`k/block_elems`). The wave-leak in all three was the
+>   **thread→tile map** (`warp*8+lane/8` / `if(warp==0)`); since the output tile
+>   is exactly `MMQ_Y*MMQ_X` = block threads, a **tid-based map**
+>   (`tid/MMQ_X`, `tid%MMQ_X`) is warp-agnostic.
+>   - **Q8_0** (`f118837`): dp4a-tiled, MMQ_Y=32/MMQ_X=8/256t, `mmq_q8_0_4warp.cuh`
+>     (`load_int_b2` staged LDS). impl_id `qmatmul_q8_0_mmq_4warp`.
+>   - **Q4_K** (`d7b9bf6`) + **Q6_K** (`0cf00e6`): **F32-tile** variants
+>     (dequant super-block into LDS as F32, then F32 dot), MMQ_Y=16/MMQ_X=8/128t,
+>     `mmq_q{4,6}_k_4warp.cuh`. These had **no wave-leak at all** (already
+>     tid-based + byte reads) — trivial templates. impl_ids
+>     `qmatmul_q{4,6}_k_mmq_4warp`.
+> - **NEXT (the genuinely-hard multi-session work — the ONLY dense mmq left):**
+>   the **DS4-activation 4-warp_lds** trio — `mmq_q4_0_4warp_lds`,
+>   `mmq_q4_1_4warp_lds` (MMQ_Y=128, MMQ_X=64), `mmq_q4_K_turbo` (MMQ_Y=128,
+>   MMQ_X=16) — plus their coupled **DS4 144-B activation quantizers**
+>   (`quantize_q8_1_mmq`, `quantize_f16_q8_1_mmq`). These are dispatched
+>   production prefill kernels (own `m>=128`). **Why hard (assessed by reading
+>   `mmq_q4_0_4warp_lds.cu`):**
+>   1. **2D block `(WARP_SIZE, MMQ_NWARPS)` = (64,4), tiling built entirely around
+>      wave64** — `threadIdx.x` is the 0..63 lane, `threadIdx.y` the warp; every
+>      tile stride is `for i0 in 0..MMQ_Y step WARP_SIZE`, `i = i0+threadIdx.x`.
+>      A wave32 port needs a full tiling-geometry rethink (the block becomes
+>      (32,4)=128t and the `MMQ_Y/WARP_SIZE` sum-slot layout shifts).
+>   2. **gfx906-only prefetch intrinsics** (`gfx906_prefetch_{x,y}_next`,
+>      `_consume` from `mmq_prefetch.cuh`) — need the neutral **cp.async (CUDA) vs
+>      prefetch (HIP) seam** the roadmap calls for. On CUDA they don't exist.
+>   3. **DS4 quantizer first** — the kernels consume the 144-B `block_q8_1_mmq`
+>      (4× sub-block `(d, ssum)` half2 + 128 i8). `quantize_q8_1_mmq` is actually
+>      **already warp-agnostic** (`__shfl_xor(v,m,32)` 32-wide reduce, `sub=tid/32`)
+>      — neutralize `__float2int_rn`→`rintf` + `__floats2half2_rn`→two `fb_fp16_t`
+>      writes (`ds[sub*2+0]=d; ds[sub*2+1]=ssum;`), like `quantize_q8_1.cuh`.
+>      Needs a dedicated harness (different activation layout + the DS4 quantize
+>      kernel) — extend `Mmq4WarpDtype` with a `ds4: bool` + a quantize-stem hook,
+>      or add a parallel `MmqDs4Dtype` path. `int4` vectorized Y loads need 16-B
+>      alignment (144 = 9×16, OK per block).
+>   4. **`__half2`** dm/ds packing — use two `fb_fp16_t` or a neutral half2 shim.
+>   Recommend: DS4 quantizer (+ its harness wiring) FIRST so it's exercised, then
+>   one 4warp_lds kernel (Q4_0, the simplest — Q4_1 adds `m`, Q4_K turbo adds
+>   super-block decode + double-buffering). Then **P2d** indexed_moe. Build with
 >   `RAYON_NUM_THREADS=8` (thermal); rebuild the cli before each sweep.
 >   **Per-slice recipe + harness/skeleton details in the P2c section below.**
 >
