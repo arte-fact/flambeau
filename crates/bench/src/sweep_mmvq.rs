@@ -1758,6 +1758,7 @@ pub enum MmqGemmDtype {
     Iq2XsWave64,
     Iq2SWave64,
     Iq3XxsWave64,
+    Iq3SWave64,
 }
 
 impl MmqGemmDtype {
@@ -1780,6 +1781,7 @@ impl MmqGemmDtype {
             MmqGemmDtype::Iq2XsWave64 => "IQ2_XS",
             MmqGemmDtype::Iq2SWave64 => "IQ2_S",
             MmqGemmDtype::Iq3XxsWave64 => "IQ3_XXS",
+            MmqGemmDtype::Iq3SWave64 => "IQ3_S",
         }
     }
     fn weight_dtype(self) -> Dtype {
@@ -1801,6 +1803,7 @@ impl MmqGemmDtype {
             MmqGemmDtype::Iq2XsWave64 => Dtype::Iq2Xs,
             MmqGemmDtype::Iq2SWave64 => Dtype::Iq2S,
             MmqGemmDtype::Iq3XxsWave64 => Dtype::Iq3Xxs,
+            MmqGemmDtype::Iq3SWave64 => Dtype::Iq3S,
         }
     }
     fn impl_id(self) -> &'static str {
@@ -1822,6 +1825,7 @@ impl MmqGemmDtype {
             MmqGemmDtype::Iq2XsWave64 => "qmatmul_iq2_xs_mmq_wave64",
             MmqGemmDtype::Iq2SWave64 => "qmatmul_iq2_s_mmq_wave64",
             MmqGemmDtype::Iq3XxsWave64 => "qmatmul_iq3_xxs_mmq_wave64",
+            MmqGemmDtype::Iq3SWave64 => "qmatmul_iq3_s_mmq_wave64",
         }
     }
     fn kernel_stem(self) -> &'static str {
@@ -1843,6 +1847,7 @@ impl MmqGemmDtype {
             MmqGemmDtype::Iq2XsWave64 => "mmq_iq2_xs_wave64",
             MmqGemmDtype::Iq2SWave64 => "mmq_iq2_s_wave64",
             MmqGemmDtype::Iq3XxsWave64 => "mmq_iq3_xxs_wave64",
+            MmqGemmDtype::Iq3SWave64 => "mmq_iq3_s_wave64",
         }
     }
     fn kernel_entry(self) -> &'static str {
@@ -1864,6 +1869,7 @@ impl MmqGemmDtype {
             MmqGemmDtype::Iq2XsWave64 => "flambeau_mmq_iq2_xs_wave64_q8_1",
             MmqGemmDtype::Iq2SWave64 => "flambeau_mmq_iq2_s_wave64_q8_1",
             MmqGemmDtype::Iq3XxsWave64 => "flambeau_mmq_iq3_xxs_wave64_q8_1",
+            MmqGemmDtype::Iq3SWave64 => "flambeau_mmq_iq3_s_wave64_q8_1",
         }
     }
     /// (MMQ_Y rows/block, TILE_N cols/block) — the grid tiling.
