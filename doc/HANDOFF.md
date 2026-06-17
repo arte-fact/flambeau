@@ -3,24 +3,30 @@
 Transient working note. Start here when the dev rig (2× MI50 gfx906 + 1× RTX 3090
 sm_86) is built and `feature/cuda-decouple` is pulled in.
 
-> **CURRENT STATUS (2026-06-17, tip `2ce63cc`): mmvq COMPLETE; ALL single-pass +
-> standard-Q8_1-4warp + F16 mmq COMPLETE; DS4 4warp_lds Q4_0 + Q4_1 COMPLETE;
-> only Q4_K turbo remains of the entire dense mmq family.** cert-check green
-> hip 82 / cuda 20 throughout.
-> - **DS4 4-warp_lds — Q4_0 (`3867eab`) + Q4_1 (`2ce63cc`) DONE.** The hardest
->   sub-family (MMQ_Y=128 × MMQ_X=64, DS4 144-B activation, dynamic LDS). **The
->   breakthrough: the hand kernels' "wave64" is a LOGICAL 64-wide tile, not a
->   hardware warp** — all cross-thread comms are LDS + `__syncthreads`, there are
->   NO `__shfl`/warp ops, so a kernel-local `MMQ_LDS_LANES=64` (decoupled from the
->   arch `WARP_SIZE`) + block `(64,4)` is correct on wave64 AND wave32. Validated:
->   HIP↔CUDA bit-identical (err 3e-4). Neutralizations: `__half2` (d,m)/(d_y,ssum)
->   → two `fb_fp16_t` (the DS4 byte layout); gfx906 prefetch → the neutral
->   `mmq_prefetch_*` seam (`6746b2f`, gfx906.cuh real / sm_80.cuh no-op); DS4
->   quantizer templated (`quantize_q8_1_mmq.cuh`, warp-agnostic). New harness
->   `Mmq4WarpLdsDtype {Q4_0,Q4_1}` / `run_mmq_4warp_lds_sweep<B>` (9-arg ABI,
->   30336 B dynamic LDS, DS4 quantize + kernel-faithful reference — bias −8·ssum
->   for Q4_0, +m·ssum for Q4_1, decoded from raw weight bytes). `--dtype
->   Q4_{0,1}_mmq_4warp_lds`. impl_ids `qmatmul_q4_{0,1}_mmq_4warp_lds`.
+> **CURRENT STATUS (2026-06-17, tip `58f52f0`): mmvq COMPLETE; the ENTIRE dense
+> mmq family COMPLETE (single-pass wave64 + tile16 + F16 + standard-Q8_1 4warp +
+> DS4 4warp_lds Q4_0/Q4_1/Q4_K-turbo) — all templated cross-backend. Only P2d
+> indexed_moe remains.** cert-check green hip 82 / cuda 20 throughout.
+> - **DS4 4-warp_lds — Q4_0 (`3867eab`) + Q4_1 (`2ce63cc`) + Q4_K turbo
+>   (`58f52f0`) DONE.** The hardest sub-family (MMQ_Y=128, DS4 144-B activation,
+>   dynamic LDS, double-buffered Y). **The breakthrough: the hand kernels'
+>   "wave64" is a LOGICAL 64-wide tile, not a hardware warp** — all cross-thread
+>   comms are LDS + `__syncthreads`, NO `__shfl`/warp ops, so a kernel-local
+>   `MMQ_LDS_LANES=64` (decoupled from the arch `WARP_SIZE`) + block `(64,4)` is
+>   correct on wave64 AND wave32. Validated: HIP↔CUDA bit-identical (err 3e-4 /
+>   1e-2). Neutralizations: `__half2` pairs → two `fb_fp16_t`; gfx906 prefetch →
+>   the neutral `mmq_prefetch_*` seam (`6746b2f`, gfx906.cuh real / sm_80.cuh
+>   no-op); DS4 quantizer templated (`quantize_q8_1_mmq.cuh`, warp-agnostic);
+>   Q4_K 6-bit scale unpack is pure int ops. Harness `Mmq4WarpLdsDtype
+>   {Q4_0,Q4_1,Q4K}` / `run_mmq_4warp_lds_sweep<B>` (9-arg ABI, DS4 quantize +
+>   kernel-faithful reference — Q4_0 −8·ssum / Q4_1 +m·ssum / Q4_K super-block
+>   affine reusing `w_dequant` for the dot + decoding dmin/m from raw bytes; a
+>   `launch()` hook carries MMQ_X 64-or-16 + LDS 30336-or-21824 B). `--dtype
+>   Q4_{0,1}_mmq_4warp_lds` / `Q4_K_mmq_turbo`. impl_ids
+>   `qmatmul_q4_{0,1}_mmq_4warp_lds` / `qmatmul_q4_k_mmq_turbo`.
+> - **Orphan:** `quantize_f16_q8_1_mmq.cu` (F16-activation DS4 quantizer) is the
+>   last un-templated dense `.cu` — no consumer (only an F16 turbo path would use
+>   it). Template it (same recipe as `quantize_q8_1_mmq.cuh`) if/when that lands.
 > - **P2a mmvq** (20 dtypes + Q8_0 t128/vdr2/r2/r4 configs) — DONE.
 > - **P2b mmvq FUSION** — **COMPLETE.** gate_up ×4 (Q8_0/Q4_0/Q4_1/Q5_K) +
 >   batched ×6 (Q8_0/Q4_0/Q4_1/Q4_K/Q6_K/Q5_K-r2) + row_tile ×3
@@ -80,29 +86,16 @@ sm_86) is built and `feature/cuda-decouple` is pulled in.
 >     `mmq_q{4,6}_k_4warp.cuh`. These had **no wave-leak at all** (already
 >     tid-based + byte reads) — trivial templates. impl_ids
 >     `qmatmul_q{4,6}_k_mmq_4warp`.
-> - **NEXT (the ONLY dense mmq left): `mmq_q4_K_turbo`** (MMQ_Y=128, MMQ_X=16,
->   DS4 activation, double-buffered Y). Same logical-lanes approach as Q4_0/Q4_1
->   (the breakthrough above applies verbatim — no `__shfl`, so `LANES=64` + block
->   `(64,4)` works on both). **The new work vs Q4_0/Q4_1:**
->   1. **`__half2`-dense `vec_dot_q4_K_q8_1_impl_mmq`** — `dm4`=(d,dmin),
->      `ds8[i]`=(d_y,ssum) per sub-block. Convert all to `fb_fp16_t` pairs exactly
->      as Q4_0 did (`x_dm[i]` → 2 fp16; pass `d,dmin` floats into the helper; read
->      `ds8` pairs). `__halves2half2(d,dmin)` → two `fb_fp16_t` writes.
->   2. **Q4_K 6-bit scale unpack** `unpack_scales_q45_K` (pure int ops — neutral
->      as-is) + the `x_sc` LDS scale layout (verbatim).
->   3. **No prefetch** in this kernel (simpler than Q4_0). `((int*)bxi->qs)[txi]`
->      reads are offset-16 aligned but use `load_int_b2` for portability.
->   4. **The hard part = the reference.** Q4_K-faithful DS4 dot: per super-block
->      (256 elem = 8 Q8_1 sub-blocks of 32), `Σ_sub [d·sc[sub]·d_y_sub·sumi_sub −
->      dmin·m[sub]·ssum_sub]` where `sc/m` are the 6-bit-unpacked Q4_K scale/min
->      (port `flambeau_q4k_scale_min` to Rust, ~10 lines), `q_raw` the 4-bit Q4_K
->      quant, `sumi_sub = Σ q_raw·q8`. Extend `Mmq4WarpLdsDtype` with `Q4K` (or a
->      sibling enum) — note Q4_K turbo's MMQ_X=16 (vs 64) so the dynamic-LDS size
->      + grid `div_ceil(_,16)` differ; add a `tile()`/`lds_bytes()` hook.
->   Then **P2d** indexed_moe. Build with `RAYON_NUM_THREADS=8` (thermal); rebuild
->   the cli before each sweep. Also the F16 DS4 quantizer `quantize_f16_q8_1_mmq`
->   is still a hand `.cu` (only matters if an F16-activation turbo path lands).
->   **Per-slice recipe + harness details in the P2c section below.**
+> - **NEXT: P2d indexed_moe** (85 hand `.cu` under `kernels-hip/src/kernels/
+>   indexed_moe_*`). The MoE expert-gather/bucket mmvq + mmq kernels. Expect the
+>   same playbook to apply: most reuse the dense decode math + the reduce family;
+>   the `indexed_moe_mmq_*_tile8` and `*_turbo` variants are the DS4/LDS-tiled
+>   ones (the logical-lanes + `fb_fp16_t`-pair + `mmq_prefetch_*` seam from the
+>   dense DS4 work transfers directly). Add a `MoeDtype`/harness path mirroring
+>   `Mmq4WarpLdsDtype`. See `PORTABILITY-ROADMAP.md` §P2d. Build with
+>   `RAYON_NUM_THREADS=8` (thermal); rebuild the cli before each sweep.
+>   **Per-slice recipe + harness details in the P2c section below (the dense
+>   playbook carries over).**
 >
 > *(detailed completion log — gate_up/batched/row_tile/mmq slices, recipes, rig
 > gotchas — follows below; the per-section text is current.)*
