@@ -3,7 +3,8 @@
 Transient working note. Start here when the dev rig (2× MI50 gfx906 + 1× RTX 3090
 sm_86) is built and `feature/cuda-decouple` is pulled in.
 
-> **CURRENT STATUS (2026-06-17, tip `a24ccf7`): mmvq COMPLETE; P2c mmq UNDERWAY.**
+> **CURRENT STATUS (2026-06-17, tip `6d50c7a`): mmvq COMPLETE; P2c single-pass
+> mmq COMPLETE; only the 4-warp LDS-tiled mmq remains.**
 > cert-check green hip 82 / cuda 20 throughout.
 > - **P2a mmvq** (20 dtypes + Q8_0 t128/vdr2/r2/r4 configs) — DONE.
 > - **P2b mmvq FUSION** — **COMPLETE.** gate_up ×4 (Q8_0/Q4_0/Q4_1/Q5_K) +
@@ -13,20 +14,34 @@ sm_86) is built and `feature/cuda-decouple` is pulled in.
 >   (`mmvq_reduce_store{,_group,_2row,_gate_up,_batched,_2row_batched,
 >   _rowtile_batched,_rowtile_gate_up_batched}`) + `GateUpDtype`/`BatchedDtype`/
 >   `GateUpBatchedDtype` harness paths in `sweep_mmvq.rs`.
-> - **P2c mmq** — UNDERWAY. Done: oracle pilot (`a014f31`, proved the 2D-grid
->   `B::launch` + wave32 reduce path); the 5 simple-dtype `mmq_<dt>_wave64`
->   (Q8_0/Q4_0/Q4_1/Q5_0/Q5_1) via the shared **`mmq_wave64_row<Q,64,8>`**
->   skeleton + `quant_traits<Q>` mmq policy (`3dab36e`); K-quants **Q6_K**
->   (`e9ad87a`) + **Q4_K** (`a24ccf7`) (own super-block bodies on the same
->   `MmqGemmDtype` harness). All certed both backends, HIP↔CUDA identical.
-> - **NEXT:** remaining wave64 K-quants **Q5_K/Q2_K/Q3_K/Q8_K + IQ\*** (mechanical
->   — port each hand `mmq_<dt>_wave64.cu`: `WARP_SIZE→MMQ_Y`, `dp4a`,
->   `load_int_b2`; own `.cuh`, add a `MmqGemmDtype` variant + cli key + bench-ref),
->   then the genuinely-hard **4-warp LDS-tiled** prefill kernels
->   (`mmq_q8_0_4warp` / `mmq_q4_K_turbo` — real LDS tiling + cp.async-vs-prefetch
->   seaming, the prefill perf lever), then **P2d** indexed_moe. **Per-slice recipe
->   + the harness/skeleton details are in the P2c section below.** Build kernels
->   with `RAYON_NUM_THREADS=8` (thermal); rebuild the cli before each sweep.
+> - **P2c single-pass tiled mmq (`mmq_<dt>_wave64`) — COMPLETE.** All 21 kernels
+>   templated cross-backend, HIP↔CUDA bit-identical, hand `.cu` retired,
+>   ops/runtime untouched, neutral impl_ids registered as bench-references:
+>   - oracle pilot (`a014f31`);
+>   - **5 simple dtypes** Q8_0/Q4_0/Q4_1/Q5_0/Q5_1 via the shared
+>     **`mmq_wave64_row<Q,64,8>`** skeleton + `quant_traits<Q>` mmq policy
+>     (`3dab36e`);
+>   - **7 K-quants** Q6_K (`e9ad87a`) Q4_K (`a24ccf7`) Q5_K (`0dcd641`) Q2_K
+>     (`503f799`) Q3_K (`3e4c968`) Q8_K (`944f1f8`) — own super-block bodies;
+>   - **9 IQ\*** IQ4_NL (`711625b`) IQ4_XS (`085c044`) IQ2_XXS (`bea4cf1`)
+>     IQ2_XS (`013e4c2`) IQ2_S (`a792781`) IQ3_XXS (`ee0fc04`) IQ3_S (`a67d95b`)
+>     IQ1_S + IQ1_M (`6d50c7a`) — grid-codebook bodies reusing the neutral
+>     `iq_grid.cuh` + shared sign/pack helpers (`flambeau_iq2xxs_apply_signs_
+>     packed`, `flambeau_pack_iq4_lut`, `flambeau_iq2s_apply_signs_byte`,
+>     `flambeau_iq1m_reassemble_d`).
+>   All ride the `MmqGemmDtype` harness path (no per-K-quant skeleton — rule 14
+>   respected; each decode differs). `--dtype <DT>_mmq_wave64`.
+> - **NEXT (the real multi-session work):** the **4-warp LDS-tiled** prefill
+>   kernels — `mmq_q8_0_4warp`, `mmq_q4_0_4warp_lds`, `mmq_q4_1_4warp_lds`,
+>   `mmq_q4_K_4warp`, `mmq_q4_K_turbo`, `mmq_q6_K_4warp` (the gold-standard
+>   prefill lever per CLAUDE.md: real LDS tiling + cp.async-vs-prefetch seaming →
+>   expect a warp-restructure per kernel, NOT one-session ports), plus the
+>   stragglers `mmq_q8_0_wave64_tile16`, the F16 mmq (`mmq_f16_q8_1`,
+>   `mmq_f16_tile`), and the DS4 MMQ activation quantizers
+>   (`quantize_q8_1_mmq`, `quantize_f16_q8_1_mmq`). Then **P2d** indexed_moe.
+>   Build kernels with `RAYON_NUM_THREADS=8` (thermal); rebuild the cli before
+>   each sweep. **Per-slice recipe + harness/skeleton details in the P2c section
+>   below.**
 >
 > *(detailed completion log — gate_up/batched/row_tile/mmq slices, recipes, rig
 > gotchas — follows below; the per-section text is current.)*
