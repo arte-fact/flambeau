@@ -1759,6 +1759,8 @@ pub enum MmqGemmDtype {
     Iq2SWave64,
     Iq3XxsWave64,
     Iq3SWave64,
+    Iq1SWave64,
+    Iq1MWave64,
 }
 
 impl MmqGemmDtype {
@@ -1782,6 +1784,8 @@ impl MmqGemmDtype {
             MmqGemmDtype::Iq2SWave64 => "IQ2_S",
             MmqGemmDtype::Iq3XxsWave64 => "IQ3_XXS",
             MmqGemmDtype::Iq3SWave64 => "IQ3_S",
+            MmqGemmDtype::Iq1SWave64 => "IQ1_S",
+            MmqGemmDtype::Iq1MWave64 => "IQ1_M",
         }
     }
     fn weight_dtype(self) -> Dtype {
@@ -1804,6 +1808,8 @@ impl MmqGemmDtype {
             MmqGemmDtype::Iq2SWave64 => Dtype::Iq2S,
             MmqGemmDtype::Iq3XxsWave64 => Dtype::Iq3Xxs,
             MmqGemmDtype::Iq3SWave64 => Dtype::Iq3S,
+            MmqGemmDtype::Iq1SWave64 => Dtype::Iq1S,
+            MmqGemmDtype::Iq1MWave64 => Dtype::Iq1M,
         }
     }
     fn impl_id(self) -> &'static str {
@@ -1826,6 +1832,8 @@ impl MmqGemmDtype {
             MmqGemmDtype::Iq2SWave64 => "qmatmul_iq2_s_mmq_wave64",
             MmqGemmDtype::Iq3XxsWave64 => "qmatmul_iq3_xxs_mmq_wave64",
             MmqGemmDtype::Iq3SWave64 => "qmatmul_iq3_s_mmq_wave64",
+            MmqGemmDtype::Iq1SWave64 => "qmatmul_iq1_s_mmq_wave64",
+            MmqGemmDtype::Iq1MWave64 => "qmatmul_iq1_m_mmq_wave64",
         }
     }
     fn kernel_stem(self) -> &'static str {
@@ -1848,6 +1856,8 @@ impl MmqGemmDtype {
             MmqGemmDtype::Iq2SWave64 => "mmq_iq2_s_wave64",
             MmqGemmDtype::Iq3XxsWave64 => "mmq_iq3_xxs_wave64",
             MmqGemmDtype::Iq3SWave64 => "mmq_iq3_s_wave64",
+            MmqGemmDtype::Iq1SWave64 => "mmq_iq1_s_wave64",
+            MmqGemmDtype::Iq1MWave64 => "mmq_iq1_m_wave64",
         }
     }
     fn kernel_entry(self) -> &'static str {
@@ -1870,6 +1880,8 @@ impl MmqGemmDtype {
             MmqGemmDtype::Iq2SWave64 => "flambeau_mmq_iq2_s_wave64_q8_1",
             MmqGemmDtype::Iq3XxsWave64 => "flambeau_mmq_iq3_xxs_wave64_q8_1",
             MmqGemmDtype::Iq3SWave64 => "flambeau_mmq_iq3_s_wave64_q8_1",
+            MmqGemmDtype::Iq1SWave64 => "flambeau_mmq_iq1_s_wave64_q8_1",
+            MmqGemmDtype::Iq1MWave64 => "flambeau_mmq_iq1_m_wave64_q8_1",
         }
     }
     /// (MMQ_Y rows/block, TILE_N cols/block) — the grid tiling.
