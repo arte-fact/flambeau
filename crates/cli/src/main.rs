@@ -1602,6 +1602,10 @@ fn moe_mmq_tile8_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::MoeMmq
         "Q5_K_down_tile8_moe_mmq" => Some(MoeMmqTile8Dtype::Q5KDown),
         "Q6_K_gate_up_tile8_moe_mmq" => Some(MoeMmqTile8Dtype::Q6KGateUp),
         "Q6_K_down_tile8_moe_mmq" => Some(MoeMmqTile8Dtype::Q6KDown),
+        "Q2_K_gate_up_tile8_moe_mmq" => Some(MoeMmqTile8Dtype::Q2KGateUp),
+        "Q2_K_down_tile8_moe_mmq" => Some(MoeMmqTile8Dtype::Q2KDown),
+        "Q3_K_gate_up_tile8_moe_mmq" => Some(MoeMmqTile8Dtype::Q3KGateUp),
+        "Q3_K_down_tile8_moe_mmq" => Some(MoeMmqTile8Dtype::Q3KDown),
         _ => None,
     }
 }
