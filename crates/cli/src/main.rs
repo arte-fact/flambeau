@@ -1028,6 +1028,19 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     );
                     return Ok(());
                 }
+                if let Some(wd) = mmq_4warp_dtype(dtype) {
+                    use flambeau_bench::sweep_mmvq::run_mmq_4warp_sweep;
+                    let root = repo_root();
+                    let cert = run_mmq_4warp_sweep::<flambeau_bench::backend::Hip>(wd, &root, arch)?;
+                    println!(
+                        "sweep qmatmul_mmq_4warp ({}): pass={} shapes={} rig={}",
+                        wd.name(),
+                        cert.pass,
+                        cert.results.len(),
+                        cert.rig
+                    );
+                    return Ok(());
+                }
                 if let Some(fk) = f16_sweep_kind(dtype) {
                     use flambeau_bench::sweep_mmvq_f16::run_f16_sweep;
                     let root = repo_root();
@@ -1470,6 +1483,14 @@ fn mmq_gemm_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::MmqGemmDtyp
     }
 }
 
+fn mmq_4warp_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::Mmq4WarpDtype> {
+    use flambeau_bench::sweep_mmvq::Mmq4WarpDtype;
+    match dtype {
+        "Q8_0_mmq_4warp" => Some(Mmq4WarpDtype::Q8_0),
+        _ => None,
+    }
+}
+
 fn f16_sweep_kind(dtype: &str) -> Option<flambeau_bench::sweep_mmvq_f16::F16SweepKind> {
     use flambeau_bench::sweep_mmvq_f16::F16SweepKind;
     match dtype {
@@ -1544,6 +1565,18 @@ fn sweep_cuda(op: &str, dtype: &str) -> Result<()> {
         println!(
             "sweep qmatmul_mmq_gemm ({}): pass={} shapes={} rig={}",
             gd.name(),
+            cert.pass,
+            cert.results.len(),
+            cert.rig
+        );
+        return Ok(());
+    }
+    if let Some(wd) = mmq_4warp_dtype(dtype) {
+        use flambeau_bench::sweep_mmvq::run_mmq_4warp_sweep;
+        let cert = run_mmq_4warp_sweep::<Cuda>(wd, &repo_root(), "sm_86")?;
+        println!(
+            "sweep qmatmul_mmq_4warp ({}): pass={} shapes={} rig={}",
+            wd.name(),
             cert.pass,
             cert.results.len(),
             cert.rig
