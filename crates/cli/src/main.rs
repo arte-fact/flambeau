@@ -1081,6 +1081,19 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     );
                     return Ok(());
                 }
+                if let Some(ld) = moe_mmq_lds_dtype(dtype) {
+                    use flambeau_bench::sweep_mmvq::run_moe_mmq_lds_sweep;
+                    let root = repo_root();
+                    let cert = run_moe_mmq_lds_sweep::<flambeau_bench::backend::Hip>(ld, &root, arch)?;
+                    println!(
+                        "sweep indexed_moe_mmq_lds_tiled ({}): pass={} shapes={} rig={}",
+                        ld.name(),
+                        cert.pass,
+                        cert.results.len(),
+                        cert.rig
+                    );
+                    return Ok(());
+                }
                 if let Some(t8) = moe_mmq_tile8_dtype(dtype) {
                     use flambeau_bench::sweep_mmvq::run_moe_mmq_tile8_sweep;
                     let root = repo_root();
@@ -1583,6 +1596,15 @@ fn moe_mmvq_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::MoeMmvqDtyp
     }
 }
 
+fn moe_mmq_lds_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::MoeMmqLdsDtype> {
+    use flambeau_bench::sweep_mmvq::MoeMmqLdsDtype;
+    match dtype {
+        "Q4_K_gate_up_lds_tiled_moe_mmq" => Some(MoeMmqLdsDtype::Q4KGateUp),
+        "Q4_K_down_lds_tiled_moe_mmq" => Some(MoeMmqLdsDtype::Q4KDown),
+        _ => None,
+    }
+}
+
 fn moe_mmq_tile8_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::MoeMmqTile8Dtype> {
     use flambeau_bench::sweep_mmvq::MoeMmqTile8Dtype;
     match dtype {
@@ -1761,6 +1783,18 @@ fn sweep_cuda(op: &str, dtype: &str) -> Result<()> {
         println!(
             "sweep indexed_moe_mmq_tile8 ({}): pass={} shapes={} rig={}",
             t8.name(),
+            cert.pass,
+            cert.results.len(),
+            cert.rig
+        );
+        return Ok(());
+    }
+    if let Some(ld) = moe_mmq_lds_dtype(dtype) {
+        use flambeau_bench::sweep_mmvq::run_moe_mmq_lds_sweep;
+        let cert = run_moe_mmq_lds_sweep::<Cuda>(ld, &repo_root(), "sm_86")?;
+        println!(
+            "sweep indexed_moe_mmq_lds_tiled ({}): pass={} shapes={} rig={}",
+            ld.name(),
             cert.pass,
             cert.results.len(),
             cert.rig
