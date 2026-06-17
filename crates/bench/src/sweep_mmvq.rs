@@ -2790,6 +2790,24 @@ pub enum MoeMmqTile8Dtype {
     Q2KDown,
     Q3KGateUp,
     Q3KDown,
+    Iq4NlGateUp,
+    Iq4NlDown,
+    Iq4XsGateUp,
+    Iq4XsDown,
+    Iq2XxsGateUp,
+    Iq2XxsDown,
+    Iq2XsGateUp,
+    Iq2XsDown,
+    Iq2SGateUp,
+    Iq2SDown,
+    Iq3XxsGateUp,
+    Iq3XxsDown,
+    Iq3SGateUp,
+    Iq3SDown,
+    Iq1SGateUp,
+    Iq1SDown,
+    Iq1MGateUp,
+    Iq1MDown,
 }
 
 impl MoeMmqTile8Dtype {
@@ -2806,6 +2824,15 @@ impl MoeMmqTile8Dtype {
             Q6KGateUp => "q6_k_gate_up", Q6KDown => "q6_k_down",
             Q2KGateUp => "q2_k_gate_up", Q2KDown => "q2_k_down",
             Q3KGateUp => "q3_k_gate_up", Q3KDown => "q3_k_down",
+            Iq4NlGateUp => "iq4_nl_gate_up", Iq4NlDown => "iq4_nl_down",
+            Iq4XsGateUp => "iq4_xs_gate_up", Iq4XsDown => "iq4_xs_down",
+            Iq2XxsGateUp => "iq2_xxs_gate_up", Iq2XxsDown => "iq2_xxs_down",
+            Iq2XsGateUp => "iq2_xs_gate_up", Iq2XsDown => "iq2_xs_down",
+            Iq2SGateUp => "iq2_s_gate_up", Iq2SDown => "iq2_s_down",
+            Iq3XxsGateUp => "iq3_xxs_gate_up", Iq3XxsDown => "iq3_xxs_down",
+            Iq3SGateUp => "iq3_s_gate_up", Iq3SDown => "iq3_s_down",
+            Iq1SGateUp => "iq1_s_gate_up", Iq1SDown => "iq1_s_down",
+            Iq1MGateUp => "iq1_m_gate_up", Iq1MDown => "iq1_m_down",
         }
     }
     fn weight_dtype(self) -> Dtype {
@@ -2821,11 +2848,24 @@ impl MoeMmqTile8Dtype {
             Q6KGateUp | Q6KDown => Dtype::Q6K,
             Q2KGateUp | Q2KDown => Dtype::Q2K,
             Q3KGateUp | Q3KDown => Dtype::Q3K,
+            Iq4NlGateUp | Iq4NlDown => Dtype::Iq4Nl,
+            Iq4XsGateUp | Iq4XsDown => Dtype::Iq4Xs,
+            Iq2XxsGateUp | Iq2XxsDown => Dtype::Iq2Xxs,
+            Iq2XsGateUp | Iq2XsDown => Dtype::Iq2Xs,
+            Iq2SGateUp | Iq2SDown => Dtype::Iq2S,
+            Iq3XxsGateUp | Iq3XxsDown => Dtype::Iq3Xxs,
+            Iq3SGateUp | Iq3SDown => Dtype::Iq3S,
+            Iq1SGateUp | Iq1SDown => Dtype::Iq1S,
+            Iq1MGateUp | Iq1MDown => Dtype::Iq1M,
         }
     }
     fn gate_up(self) -> bool {
         use MoeMmqTile8Dtype::*;
-        matches!(self, Q8_0GateUp | Q4_0GateUp | Q4_1GateUp | Q5_0GateUp | Q5_1GateUp | Q4KGateUp | Q5KGateUp | Q6KGateUp | Q2KGateUp | Q3KGateUp)
+        matches!(self,
+            Q8_0GateUp | Q4_0GateUp | Q4_1GateUp | Q5_0GateUp | Q5_1GateUp
+            | Q4KGateUp | Q5KGateUp | Q6KGateUp | Q2KGateUp | Q3KGateUp
+            | Iq4NlGateUp | Iq4XsGateUp | Iq2XxsGateUp | Iq2XsGateUp | Iq2SGateUp
+            | Iq3XxsGateUp | Iq3SGateUp | Iq1SGateUp | Iq1MGateUp)
     }
     fn impl_id(self) -> &'static str {
         use MoeMmqTile8Dtype::*;
@@ -2850,6 +2890,24 @@ impl MoeMmqTile8Dtype {
             Q2KDown => "indexed_moe_mmq_q2_k_down_tile8",
             Q3KGateUp => "indexed_moe_mmq_q3_k_gate_up_tile8",
             Q3KDown => "indexed_moe_mmq_q3_k_down_tile8",
+            Iq4NlGateUp => "indexed_moe_mmq_iq4_nl_gate_up_tile8",
+            Iq4NlDown => "indexed_moe_mmq_iq4_nl_down_tile8",
+            Iq4XsGateUp => "indexed_moe_mmq_iq4_xs_gate_up_tile8",
+            Iq4XsDown => "indexed_moe_mmq_iq4_xs_down_tile8",
+            Iq2XxsGateUp => "indexed_moe_mmq_iq2_xxs_gate_up_tile8",
+            Iq2XxsDown => "indexed_moe_mmq_iq2_xxs_down_tile8",
+            Iq2XsGateUp => "indexed_moe_mmq_iq2_xs_gate_up_tile8",
+            Iq2XsDown => "indexed_moe_mmq_iq2_xs_down_tile8",
+            Iq2SGateUp => "indexed_moe_mmq_iq2_s_gate_up_tile8",
+            Iq2SDown => "indexed_moe_mmq_iq2_s_down_tile8",
+            Iq3XxsGateUp => "indexed_moe_mmq_iq3_xxs_gate_up_tile8",
+            Iq3XxsDown => "indexed_moe_mmq_iq3_xxs_down_tile8",
+            Iq3SGateUp => "indexed_moe_mmq_iq3_s_gate_up_tile8",
+            Iq3SDown => "indexed_moe_mmq_iq3_s_down_tile8",
+            Iq1SGateUp => "indexed_moe_mmq_iq1_s_gate_up_tile8",
+            Iq1SDown => "indexed_moe_mmq_iq1_s_down_tile8",
+            Iq1MGateUp => "indexed_moe_mmq_iq1_m_gate_up_tile8",
+            Iq1MDown => "indexed_moe_mmq_iq1_m_down_tile8",
         }
     }
     fn kernel_stem(self) -> &'static str {
@@ -2875,6 +2933,24 @@ impl MoeMmqTile8Dtype {
             Q2KDown => "indexed_moe_mmq_q2_k_down_tile8_dp4a",
             Q3KGateUp => "indexed_moe_mmq_q3_k_gate_up_tile8_dp4a",
             Q3KDown => "indexed_moe_mmq_q3_k_down_tile8_dp4a",
+            Iq4NlGateUp => "indexed_moe_mmq_iq4_nl_gate_up_tile8_dp4a",
+            Iq4NlDown => "indexed_moe_mmq_iq4_nl_down_tile8_dp4a",
+            Iq4XsGateUp => "indexed_moe_mmq_iq4_xs_gate_up_tile8_dp4a",
+            Iq4XsDown => "indexed_moe_mmq_iq4_xs_down_tile8_dp4a",
+            Iq2XxsGateUp => "indexed_moe_mmq_iq2_xxs_gate_up_tile8_dp4a",
+            Iq2XxsDown => "indexed_moe_mmq_iq2_xxs_down_tile8_dp4a",
+            Iq2XsGateUp => "indexed_moe_mmq_iq2_xs_gate_up_tile8_dp4a",
+            Iq2XsDown => "indexed_moe_mmq_iq2_xs_down_tile8_dp4a",
+            Iq2SGateUp => "indexed_moe_mmq_iq2_s_gate_up_tile8_dp4a",
+            Iq2SDown => "indexed_moe_mmq_iq2_s_down_tile8_dp4a",
+            Iq3XxsGateUp => "indexed_moe_mmq_iq3_xxs_gate_up_tile8_dp4a",
+            Iq3XxsDown => "indexed_moe_mmq_iq3_xxs_down_tile8_dp4a",
+            Iq3SGateUp => "indexed_moe_mmq_iq3_s_gate_up_tile8_dp4a",
+            Iq3SDown => "indexed_moe_mmq_iq3_s_down_tile8_dp4a",
+            Iq1SGateUp => "indexed_moe_mmq_iq1_s_gate_up_tile8_dp4a",
+            Iq1SDown => "indexed_moe_mmq_iq1_s_down_tile8_dp4a",
+            Iq1MGateUp => "indexed_moe_mmq_iq1_m_gate_up_tile8_dp4a",
+            Iq1MDown => "indexed_moe_mmq_iq1_m_down_tile8_dp4a",
         }
     }
     fn kernel_entry(self) -> &'static str {
@@ -2900,6 +2976,24 @@ impl MoeMmqTile8Dtype {
             Q2KDown => "flambeau_indexed_moe_mmq_q2_k_down_tile8_dp4a_q8_1",
             Q3KGateUp => "flambeau_indexed_moe_mmq_q3_k_gate_up_tile8_dp4a_q8_1",
             Q3KDown => "flambeau_indexed_moe_mmq_q3_k_down_tile8_dp4a_q8_1",
+            Iq4NlGateUp => "flambeau_indexed_moe_mmq_iq4_nl_gate_up_tile8_dp4a_q8_1",
+            Iq4NlDown => "flambeau_indexed_moe_mmq_iq4_nl_down_tile8_dp4a_q8_1",
+            Iq4XsGateUp => "flambeau_indexed_moe_mmq_iq4_xs_gate_up_tile8_dp4a_q8_1",
+            Iq4XsDown => "flambeau_indexed_moe_mmq_iq4_xs_down_tile8_dp4a_q8_1",
+            Iq2XxsGateUp => "flambeau_indexed_moe_mmq_iq2_xxs_gate_up_tile8_dp4a_q8_1",
+            Iq2XxsDown => "flambeau_indexed_moe_mmq_iq2_xxs_down_tile8_dp4a_q8_1",
+            Iq2XsGateUp => "flambeau_indexed_moe_mmq_iq2_xs_gate_up_tile8_dp4a_q8_1",
+            Iq2XsDown => "flambeau_indexed_moe_mmq_iq2_xs_down_tile8_dp4a_q8_1",
+            Iq2SGateUp => "flambeau_indexed_moe_mmq_iq2_s_gate_up_tile8_dp4a_q8_1",
+            Iq2SDown => "flambeau_indexed_moe_mmq_iq2_s_down_tile8_dp4a_q8_1",
+            Iq3XxsGateUp => "flambeau_indexed_moe_mmq_iq3_xxs_gate_up_tile8_dp4a_q8_1",
+            Iq3XxsDown => "flambeau_indexed_moe_mmq_iq3_xxs_down_tile8_dp4a_q8_1",
+            Iq3SGateUp => "flambeau_indexed_moe_mmq_iq3_s_gate_up_tile8_dp4a_q8_1",
+            Iq3SDown => "flambeau_indexed_moe_mmq_iq3_s_down_tile8_dp4a_q8_1",
+            Iq1SGateUp => "flambeau_indexed_moe_mmq_iq1_s_gate_up_tile8_dp4a_q8_1",
+            Iq1SDown => "flambeau_indexed_moe_mmq_iq1_s_down_tile8_dp4a_q8_1",
+            Iq1MGateUp => "flambeau_indexed_moe_mmq_iq1_m_gate_up_tile8_dp4a_q8_1",
+            Iq1MDown => "flambeau_indexed_moe_mmq_iq1_m_down_tile8_dp4a_q8_1",
         }
     }
     /// Correctness envelope. The K-quant prefill kernels inherit the documented
@@ -2909,7 +3003,12 @@ impl MoeMmqTile8Dtype {
         use MoeMmqTile8Dtype::*;
         match self {
             Q4KGateUp | Q4KDown | Q5KGateUp | Q5KDown | Q6KGateUp | Q6KDown
-            | Q2KGateUp | Q2KDown | Q3KGateUp | Q3KDown => 5e-2,
+            | Q2KGateUp | Q2KDown | Q3KGateUp | Q3KDown
+            | Iq4NlGateUp | Iq4NlDown | Iq4XsGateUp | Iq4XsDown
+            | Iq2XxsGateUp | Iq2XxsDown | Iq2XsGateUp | Iq2XsDown
+            | Iq2SGateUp | Iq2SDown | Iq3XxsGateUp | Iq3XxsDown
+            | Iq3SGateUp | Iq3SDown | Iq1SGateUp | Iq1SDown
+            | Iq1MGateUp | Iq1MDown => 5e-2,
             _ => 3e-2,
         }
     }

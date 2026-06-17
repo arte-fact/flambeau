@@ -678,4 +678,76 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
         impl_id: "indexed_moe_mmq_q3_k_down_tile8",
         cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q3_k_down_tile8.json",
     },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_iq4_nl_gate_up_tile8",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_iq4_nl_gate_up_tile8.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_iq4_nl_down_tile8",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_iq4_nl_down_tile8.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_iq4_xs_gate_up_tile8",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_iq4_xs_gate_up_tile8.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_iq4_xs_down_tile8",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_iq4_xs_down_tile8.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_iq2_xxs_gate_up_tile8",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_iq2_xxs_gate_up_tile8.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_iq2_xxs_down_tile8",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_iq2_xxs_down_tile8.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_iq2_xs_gate_up_tile8",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_iq2_xs_gate_up_tile8.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_iq2_xs_down_tile8",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_iq2_xs_down_tile8.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_iq2_s_gate_up_tile8",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_iq2_s_gate_up_tile8.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_iq2_s_down_tile8",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_iq2_s_down_tile8.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_iq3_xxs_gate_up_tile8",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_iq3_xxs_gate_up_tile8.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_iq3_xxs_down_tile8",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_iq3_xxs_down_tile8.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_iq3_s_gate_up_tile8",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_iq3_s_gate_up_tile8.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_iq3_s_down_tile8",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_iq3_s_down_tile8.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_iq1_s_gate_up_tile8",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_iq1_s_gate_up_tile8.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_iq1_s_down_tile8",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_iq1_s_down_tile8.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_iq1_m_gate_up_tile8",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_iq1_m_gate_up_tile8.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_iq1_m_down_tile8",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_iq1_m_down_tile8.json",
+    },
 ];
