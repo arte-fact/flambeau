@@ -2780,6 +2780,8 @@ pub enum MoeMmqTile8Dtype {
     Q5_0Down,
     Q5_1GateUp,
     Q5_1Down,
+    Q4KGateUp,
+    Q4KDown,
 }
 
 impl MoeMmqTile8Dtype {
@@ -2791,6 +2793,7 @@ impl MoeMmqTile8Dtype {
             Q4_1GateUp => "q4_1_gate_up", Q4_1Down => "q4_1_down",
             Q5_0GateUp => "q5_0_gate_up", Q5_0Down => "q5_0_down",
             Q5_1GateUp => "q5_1_gate_up", Q5_1Down => "q5_1_down",
+            Q4KGateUp => "q4_k_gate_up", Q4KDown => "q4_k_down",
         }
     }
     fn weight_dtype(self) -> Dtype {
@@ -2801,11 +2804,12 @@ impl MoeMmqTile8Dtype {
             Q4_1GateUp | Q4_1Down => Dtype::Q4_1Dp4a,
             Q5_0GateUp | Q5_0Down => Dtype::Q5_0,
             Q5_1GateUp | Q5_1Down => Dtype::Q5_1,
+            Q4KGateUp | Q4KDown => Dtype::Q4K,
         }
     }
     fn gate_up(self) -> bool {
         use MoeMmqTile8Dtype::*;
-        matches!(self, Q8_0GateUp | Q4_0GateUp | Q4_1GateUp | Q5_0GateUp | Q5_1GateUp)
+        matches!(self, Q8_0GateUp | Q4_0GateUp | Q4_1GateUp | Q5_0GateUp | Q5_1GateUp | Q4KGateUp)
     }
     fn impl_id(self) -> &'static str {
         use MoeMmqTile8Dtype::*;
@@ -2820,6 +2824,8 @@ impl MoeMmqTile8Dtype {
             Q5_0Down => "indexed_moe_mmq_q5_0_down_tile8",
             Q5_1GateUp => "indexed_moe_mmq_q5_1_gate_up_tile8",
             Q5_1Down => "indexed_moe_mmq_q5_1_down_tile8",
+            Q4KGateUp => "indexed_moe_mmq_q4_k_gate_up_tile8",
+            Q4KDown => "indexed_moe_mmq_q4_k_down_tile8",
         }
     }
     fn kernel_stem(self) -> &'static str {
@@ -2835,6 +2841,8 @@ impl MoeMmqTile8Dtype {
             Q5_0Down => "indexed_moe_mmq_q5_0_down_tile8_dp4a",
             Q5_1GateUp => "indexed_moe_mmq_q5_1_gate_up_tile8_dp4a",
             Q5_1Down => "indexed_moe_mmq_q5_1_down_tile8_dp4a",
+            Q4KGateUp => "indexed_moe_mmq_q4_k_gate_up_tile8_dp4a",
+            Q4KDown => "indexed_moe_mmq_q4_k_down_tile8_dp4a",
         }
     }
     fn kernel_entry(self) -> &'static str {
@@ -2850,6 +2858,8 @@ impl MoeMmqTile8Dtype {
             Q5_0Down => "flambeau_indexed_moe_mmq_q5_0_down_tile8_dp4a_q8_1",
             Q5_1GateUp => "flambeau_indexed_moe_mmq_q5_1_gate_up_tile8_dp4a_q8_1",
             Q5_1Down => "flambeau_indexed_moe_mmq_q5_1_down_tile8_dp4a_q8_1",
+            Q4KGateUp => "flambeau_indexed_moe_mmq_q4_k_gate_up_tile8_dp4a_q8_1",
+            Q4KDown => "flambeau_indexed_moe_mmq_q4_k_down_tile8_dp4a_q8_1",
         }
     }
 }
