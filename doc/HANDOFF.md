@@ -3,7 +3,7 @@
 Transient working note. Start here when the dev rig (2× MI50 gfx906 + 1× RTX 3090
 sm_86) is built and `feature/cuda-decouple` is pulled in.
 
-> **CURRENT STATUS (2026-06-17, tip `2b087df`): dense mmvq + ENTIRE dense mmq
+> **CURRENT STATUS (2026-06-17, tip `8ba750e`): dense mmvq + ENTIRE dense mmq
 > family COMPLETE cross-backend. P2d indexed_moe STARTED — the plain-row MMVQ
 > family (Q8_0 pilot + Q4_0/Q4_1/Q5_0/Q5_1) is DONE cross-backend.** cert-check
 > green hip 82 / cuda 20 throughout.
@@ -33,13 +33,23 @@ sm_86) is built and `feature/cuda-decouple` is pulled in.
 >   (group reduce is shuffle-only). `--dtype Q{4,5,6,2,3}_K_r{2,4}_moe_mmvq`,
 >   neutral bench-refs `indexed_moe_mmvq_q*_k_r{2,4}`. **The entire indexed-MoE
 >   MMVQ DECODE family (plain-row + K-quant r2/r4) is now cross-backend.**
-> - **NEXT in P2d:** (1) IQ\* MoE MMVQ (iq1_s/iq1_m/iq2_s/iq2_xs/iq2_xxs/iq3_s/
->   iq3_xxs/iq4_nl/iq4_xs — plain + r2_dp4a; reuse `iq_grid.cuh` + the shared
->   sign/pack helpers from the dense IQ mmvq work); (2) the gate_up MMVQ fusion
->   variants (q4_0/q8_0/q4_k × r2/r4/sorted/dp4a configs — reuse the dense
->   `mmvq_reduce_store_gate_up` + a MoE addressing wrapper); (3) the ~40
->   `*_tile8_dp4a` + `*_turbo` MMQ prefill kernels (DS4 logical-lanes playbook
->   from the dense 4warp_lds work carries over directly).
+> - **P2d IQ\* MoE MMVQ — DONE.** All 9 IQ r2_dp4a kernels (iq4_nl `f976831`…
+>   pilot, then iq4_xs/iq2_xxs/iq2_xs/iq2_s/iq3_xxs/iq3_s/iq1_s/iq1_m — `8ba750e`).
+>   Each `indexed_moe_mmvq_iq*.cuh` `#include`s its dense `mmvq_iq*.cuh` to reuse
+>   the codebook/sign helpers (zero duplicated grid/LUT math). Cross-backend
+>   fixes: `__builtin_amdgcn_perm` → neutral `byte_perm` (via the dense LUT
+>   helpers), every int read → `load_int_b2`, half-warp DPP reduce →
+>   `mmvq_reduce_store_group<32>`. Only the `_r2_dp4a` entries are templated (the
+>   ops layer calls only those; the 9 plain scalar IQ MoE `.cu` are unused
+>   orphans — `cfg(unverified)`/delete candidates, NOT yet templated). All 9 IQ
+>   HIP↔CUDA BIT-IDENTICAL. `--dtype <IQ>_r2_moe_mmvq`. **The ENTIRE indexed-MoE
+>   MMVQ family (plain-row + K-quant r2/r4 + IQ\* r2) is now cross-backend.**
+> - **NEXT in P2d:** (1) the gate_up MMVQ fusion variants (q4_0/q8_0/q4_k ×
+>   r2/r4/sorted/dp4a configs — reuse the dense `mmvq_reduce_store_gate_up` + a
+>   MoE addressing wrapper); (2) the ~40 `*_tile8_dp4a` + `*_turbo` MMQ prefill
+>   kernels (DS4 logical-lanes playbook from the dense 4warp_lds work carries
+>   over directly). (3) Cleanup: the 9 orphan plain IQ MoE `.cu` +
+>   `quantize_f16_q8_1_mmq.cu`.
 > - **DS4 4-warp_lds — Q4_0 (`3867eab`) + Q4_1 (`2ce63cc`) + Q4_K turbo
 >   (`58f52f0`) DONE.** The hardest sub-family (MMQ_Y=128, DS4 144-B activation,
 >   dynamic LDS, double-buffered Y). **The breakthrough: the hand kernels'
