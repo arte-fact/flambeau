@@ -1055,6 +1055,19 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     );
                     return Ok(());
                 }
+                if let Some(md) = moe_mmvq_dtype(dtype) {
+                    use flambeau_bench::sweep_mmvq::run_moe_mmvq_sweep;
+                    let root = repo_root();
+                    let cert = run_moe_mmvq_sweep::<flambeau_bench::backend::Hip>(md, &root, arch)?;
+                    println!(
+                        "sweep indexed_moe_mmvq ({}): pass={} shapes={} rig={}",
+                        md.name(),
+                        cert.pass,
+                        cert.results.len(),
+                        cert.rig
+                    );
+                    return Ok(());
+                }
                 if let Some(fk) = f16_sweep_kind(dtype) {
                     use flambeau_bench::sweep_mmvq_f16::run_f16_sweep;
                     let root = repo_root();
@@ -1517,6 +1530,14 @@ fn mmq_4warp_lds_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::Mmq4Wa
     }
 }
 
+fn moe_mmvq_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::MoeMmvqDtype> {
+    use flambeau_bench::sweep_mmvq::MoeMmvqDtype;
+    match dtype {
+        "Q8_0_moe_mmvq" => Some(MoeMmvqDtype::Q8_0),
+        _ => None,
+    }
+}
+
 fn f16_sweep_kind(dtype: &str) -> Option<flambeau_bench::sweep_mmvq_f16::F16SweepKind> {
     use flambeau_bench::sweep_mmvq_f16::F16SweepKind;
     match dtype {
@@ -1603,6 +1624,18 @@ fn sweep_cuda(op: &str, dtype: &str) -> Result<()> {
         println!(
             "sweep qmatmul_mmq_4warp ({}): pass={} shapes={} rig={}",
             wd.name(),
+            cert.pass,
+            cert.results.len(),
+            cert.rig
+        );
+        return Ok(());
+    }
+    if let Some(md) = moe_mmvq_dtype(dtype) {
+        use flambeau_bench::sweep_mmvq::run_moe_mmvq_sweep;
+        let cert = run_moe_mmvq_sweep::<Cuda>(md, &repo_root(), "sm_86")?;
+        println!(
+            "sweep indexed_moe_mmvq ({}): pass={} shapes={} rig={}",
+            md.name(),
             cert.pass,
             cert.results.len(),
             cert.rig

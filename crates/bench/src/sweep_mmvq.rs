@@ -2077,6 +2077,251 @@ fn run_shape_mmq_gemm<B: BenchBackend>(
     Ok((got, reference))
 }
 
+/// Indexed-MoE MMVQ kernels (decode GEMV with per-token expert routing). Same
+/// inner product as the dense mmvq family but with the 8-arg MoE ABI
+/// `(w, y, expert_ids, dst, n_rows, n_tokens, top_k, n_blocks_per_row)` and a
+/// (n_rows, n_tokens*top_k, 1) grid — so a distinct harness from `MmqGemmDtype`.
+#[derive(Clone, Copy)]
+pub enum MoeMmvqDtype {
+    Q8_0,
+}
+
+impl MoeMmvqDtype {
+    pub fn name(self) -> &'static str {
+        match self {
+            MoeMmvqDtype::Q8_0 => "Q8_0",
+        }
+    }
+    fn weight_dtype(self) -> Dtype {
+        match self {
+            MoeMmvqDtype::Q8_0 => Dtype::Q8_0Dp4a,
+        }
+    }
+    fn impl_id(self) -> &'static str {
+        match self {
+            MoeMmvqDtype::Q8_0 => "indexed_moe_mmvq_q8_0",
+        }
+    }
+    fn kernel_stem(self) -> &'static str {
+        match self {
+            MoeMmvqDtype::Q8_0 => "indexed_moe_mmvq_q8_0",
+        }
+    }
+    fn kernel_entry(self) -> &'static str {
+        match self {
+            MoeMmvqDtype::Q8_0 => "flambeau_indexed_moe_mmvq_q8_0_dp4a_q8_1",
+        }
+    }
+    /// (threads/block, rows/block). Plain per-row kernels own one output row per
+    /// block; the r2 family (added later) owns two, shrinking grid.x by 2.
+    fn launch(self) -> (u32, u32) {
+        match self {
+            MoeMmvqDtype::Q8_0 => (256, 1),
+        }
+    }
+}
+
+pub fn run_moe_mmvq_sweep<B: BenchBackend>(
+    dtype: MoeMmvqDtype,
+    repo_root: &Path,
+    arch: &str,
+) -> Result<Cert> {
+    let dev = B::new_device(0)?;
+    let pmc = {
+        let bytes = B::image(dtype.kernel_stem())
+            .ok_or_else(|| anyhow!("{} kernel not compiled", dtype.kernel_stem()))?;
+        let module = B::load(&dev, bytes)?;
+        let kernel = B::kernel(&module, dtype.kernel_entry())?;
+        B::attributes(&kernel)?
+    };
+
+    // Qwen3.x MoE regime, scaled to 16 experts for cert runtime:
+    // (n_tokens, top_k, n_rows = expert output dim, k = hidden).
+    let n_experts = 16usize;
+    let cases = [
+        (1usize, 4usize, 256usize, 2048usize),
+        (4, 4, 256, 2048),
+        (1, 8, 2048, 768),
+    ];
+
+    let mut results = Vec::new();
+    for (n_tokens, top_k, n_rows, k) in cases {
+        let seed = 0xDEC0DE_u64
+            .wrapping_add((n_tokens as u64).wrapping_mul(53))
+            .wrapping_add((top_k as u64).wrapping_mul(17))
+            .wrapping_add((n_rows as u64).wrapping_mul(7));
+        let (got, reference) =
+            run_shape_moe_mmvq::<B>(&dev, dtype, n_experts, n_rows, k, top_k, n_tokens, seed)?;
+        let max_rel_err = max_rel_err_with_floor(&got, &reference, (k as f32).sqrt());
+        let tolerance = cert_tol(k);
+        results.push(ShapeResult {
+            m: n_tokens,
+            k,
+            n: n_rows,
+            seed,
+            max_rel_err,
+            tolerance,
+            pass: max_rel_err <= tolerance,
+        });
+    }
+
+    let pass = results.iter().all(|r| r.pass);
+    let cert = Cert {
+        schema_version: SCHEMA_VERSION,
+        impl_id: dtype.impl_id().to_string(),
+        backend: dev.backend().to_string(),
+        arch: arch.to_string(),
+        op: "indexed_moe_mmvq".to_string(),
+        dtype_weight: dtype.name().to_string(),
+        dtype_activation: "Q8_1".to_string(),
+        tolerance_formula: "|err| <= 3e-2 * max(|ref|, sqrt(k))  (indexed-MoE MMVQ)".to_string(),
+        results,
+        pass,
+        emitted_at: now_utc_iso8601(),
+        rig: rig_for(arch),
+        pmc: Some(pmc),
+    };
+    let written = cert.write_to_disk(repo_root)?;
+    tracing::info!(
+        target: "flambeau_bench::sweep_mmvq",
+        cert = %written.display(), pass = cert.pass, "indexed-moe mmvq cert written"
+    );
+    Ok(cert)
+}
+
+/// One indexed-MoE MMVQ shape. Weight `[n_experts][n_rows][k]`, per-token
+/// activation `[n_tokens][k]` Q8_1, router-selected `expert_ids[n_tokens][top_k]`,
+/// output `dst[token, slot, row]`. Returns `(got, reference)`.
+#[expect(clippy::too_many_arguments, reason = "MoE shape carries 7 independent dims")]
+fn run_shape_moe_mmvq<B: BenchBackend>(
+    dev: &B::Device,
+    dtype: MoeMmvqDtype,
+    n_experts: usize,
+    n_rows: usize,
+    k: usize,
+    top_k: usize,
+    n_tokens: usize,
+    seed: u64,
+) -> Result<(Vec<f32>, Vec<f32>)> {
+    let q_bytes =
+        B::image("quantize_q8_1").ok_or_else(|| anyhow!("quantize_q8_1 not compiled"))?;
+    let m_bytes = B::image(dtype.kernel_stem())
+        .ok_or_else(|| anyhow!("{} kernel not compiled", dtype.kernel_stem()))?;
+    let q_module = B::load(dev, q_bytes)?;
+    let m_module = B::load(dev, m_bytes)?;
+    let k_quantize = B::kernel(&q_module, "flambeau_quantize_row_q8_1")?;
+    let k_mmvq = B::kernel(&m_module, dtype.kernel_entry())?;
+
+    let wd = dtype.weight_dtype();
+    let block_elems = wd.block_elem_count();
+    let block_bytes = wd.block_size_bytes();
+    assert_eq!(k % block_elems, 0, "k {k} must be multiple of block size {block_elems}");
+    let n_blocks = k / block_elems;
+
+    // Expert weights [n_experts][n_rows][k].
+    let weights_raw =
+        tame_scales(wd, seeded_bytes(seed, n_experts * n_rows * n_blocks * block_bytes));
+    let mut w_dequant = vec![0.0f32; n_experts * n_rows * k];
+    dequantize_into(wd.ggml(), &weights_raw, &mut w_dequant)?;
+    let d_w = alloc_and_upload(dev, weights_raw.as_slice());
+
+    // Per-token activation [n_tokens][k] → token-major Q8_1 [n_tokens][n_blocks].
+    let act_f32 = seeded_f32_range(seed.wrapping_add(0xA5A5A5A5), n_tokens * k, -1.0, 1.0);
+    let d_act = alloc_and_upload(dev, act_f32.as_slice());
+    let total_y_blocks = n_tokens * k / QK8;
+    let y_bytes = total_y_blocks * std::mem::size_of::<BlockQ8_1>();
+    let d_y = dev.alloc(y_bytes)?;
+    {
+        let stream = dev.default_stream();
+        let n_elems = (n_tokens * k) as i32;
+        let d_act_ptr: u64 = d_act.as_usize() as u64;
+        let d_y_ptr: u64 = d_y.as_usize() as u64;
+        let mut args = <B::Args<'_>>::default();
+        args.push_arg(&d_act_ptr);
+        args.push_arg(&d_y_ptr);
+        args.push_arg(&n_elems);
+        B::launch(&k_quantize, stream, LaunchCfg::one_d(total_y_blocks as u32, QK8 as u32), args)?;
+        stream.synchronize()?;
+    }
+
+    // Router-selected experts (deterministic hash → [0, n_experts)).
+    let expert_ids: Vec<i32> = (0..n_tokens * top_k)
+        .map(|i| {
+            let h = (i as u64)
+                .wrapping_mul(0x9E3779B97F4A7C15)
+                .wrapping_add(seed.wrapping_mul(0x12345));
+            ((h >> 32) as u32 % n_experts as u32) as i32
+        })
+        .collect();
+    let d_ids = alloc_and_upload(dev, expert_ids.as_slice());
+
+    let d_dst = dev.alloc(n_tokens * top_k * n_rows * 4)?;
+    {
+        let stream = dev.default_stream();
+        let n_rows_i = n_rows as i32;
+        let n_tokens_i = n_tokens as i32;
+        let top_k_i = top_k as i32;
+        let nb_i = n_blocks as i32;
+        let d_w_ptr: u64 = d_w.as_usize() as u64;
+        let d_y_ptr: u64 = d_y.as_usize() as u64;
+        let d_ids_ptr: u64 = d_ids.as_usize() as u64;
+        let d_dst_ptr: u64 = d_dst.as_usize() as u64;
+        let mut args = <B::Args<'_>>::default();
+        args.push_arg(&d_w_ptr);
+        args.push_arg(&d_y_ptr);
+        args.push_arg(&d_ids_ptr);
+        args.push_arg(&d_dst_ptr);
+        args.push_arg(&n_rows_i);
+        args.push_arg(&n_tokens_i);
+        args.push_arg(&top_k_i);
+        args.push_arg(&nb_i);
+        let (threads, rows_per_block) = dtype.launch();
+        let cfg = LaunchCfg {
+            grid: ((n_rows as u32).div_ceil(rows_per_block), (n_tokens * top_k) as u32, 1),
+            block: (threads, 1, 1),
+            shared_bytes: 0,
+        };
+        B::launch(&k_mmvq, stream, cfg, args)?;
+        stream.synchronize()?;
+    }
+
+    let mut got = vec![0.0f32; n_tokens * top_k * n_rows];
+    unsafe {
+        dev.memcpy_async(
+            dev.default_stream(),
+            CopyDirection::DeviceToHost,
+            DevicePtr(got.as_mut_ptr() as usize),
+            d_dst,
+            n_tokens * top_k * n_rows * 4,
+        )?;
+    }
+    dev.default_stream().synchronize()?;
+
+    unsafe {
+        dev.dealloc(d_w, weights_raw.len())?;
+        dev.dealloc(d_act, act_f32.len() * 4)?;
+        dev.dealloc(d_y, y_bytes)?;
+        dev.dealloc(d_ids, expert_ids.len() * 4)?;
+        dev.dealloc(d_dst, n_tokens * top_k * n_rows * 4)?;
+    }
+
+    // Reference: per (token, slot, row) dot the selected expert's weight row
+    // with the Q8_1-roundtripped token activation.
+    let mut reference = vec![0.0f32; n_tokens * top_k * n_rows];
+    for t in 0..n_tokens {
+        let y_rt = quantize_q8_1_roundtrip(&act_f32[t * k..(t + 1) * k]);
+        for slot in 0..top_k {
+            let expert = expert_ids[t * top_k + slot] as usize;
+            let wbase = &w_dequant[expert * n_rows * k..(expert + 1) * n_rows * k];
+            let col_out = reference_matmul(wbase, &y_rt, n_rows, k);
+            for row in 0..n_rows {
+                reference[(t * top_k + slot) * n_rows + row] = col_out[row];
+            }
+        }
+    }
+    Ok((got, reference))
+}
+
 /// 4-warp LDS-tiled MMQ kernels. Distinct from `MmqGemmDtype` because they use
 /// the runtime's 6-arg ABI `(vx, vy, dst, n_rows, n_batches, n_blocks_per_row)`
 /// and a full MMQ_Y×MMQ_X output tile per block (not one-thread-per-row), so the

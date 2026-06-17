@@ -1606,3 +1606,27 @@ params = """
     const int n_rows,
     const int n_superblocks_per_row"""
 body = "mmvq_iq1_m_dp4a_row<fb_fp16_t>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+# ===========================================================================
+# P2d — indexed-MoE MMVQ (per-token expert routing). Same inner product as the
+# dense mmvq family (quant_traits<Q>::partial), MoE addressing in
+# indexed_moe_mmvq.cuh. Stems/entries match the runtime ops launchers
+# (crates/ops/src/hip/moe.rs) so the dispatch layer is untouched.
+# ===========================================================================
+
+[[kernel]]
+stem = "indexed_moe_mmvq_q8_0"
+includes = ["quant_traits.cuh", "indexed_moe_mmvq.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmvq_q8_0_dp4a_q8_1"
+params = """
+    const flambeau_block_q8_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_blocks_per_row"""
+body = "indexed_moe_mmvq_vdr_row<Q8_0, 256, 2>(x, y, expert_ids, dst, n_rows, n_tokens, top_k, n_blocks_per_row);"

@@ -499,4 +499,11 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
         impl_id: "quantize_q8_1_mmq_gfx906",
         cert_rel_path: "certs/hip/gfx906/quantize_q8_1_mmq_gfx906.json",
     },
+    // P2d — indexed-MoE MMVQ, neutral cross-backend certs. HIP dispatch uses
+    // the legacy _gfx906 rows; these prove the templated kernel matches on
+    // both backends (the sm_86 twin lives under certs/cuda/sm_86/).
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmvq_q8_0",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q8_0.json",
+    },
 ];
