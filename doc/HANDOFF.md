@@ -3,7 +3,7 @@
 Transient working note. Start here when the dev rig (2× MI50 gfx906 + 1× RTX 3090
 sm_86) is built and `feature/cuda-decouple` is pulled in.
 
-> **CURRENT STATUS (2026-06-17, tip `cb935c4`): dense mmvq + ENTIRE dense mmq
+> **CURRENT STATUS (2026-06-17, tip `b2a6b54`): dense mmvq + ENTIRE dense mmq
 > family COMPLETE cross-backend. P2d indexed_moe STARTED — the plain-row MMVQ
 > family (Q8_0 pilot + Q4_0/Q4_1/Q5_0/Q5_1) is DONE cross-backend.** cert-check
 > green hip 82 / cuda 20 throughout.
@@ -58,13 +58,27 @@ sm_86) is built and `feature/cuda-decouple` is pulled in.
 >   (+`_r4_sorted`). q8_0/q4_0/q4_k-plain ~1e-7/1e-6 (cross-warp FP accum order);
 >   r4_sorted BIT-IDENTICAL. The unreferenced q4_k gate_up variants
 >   (`_dp4a`/`_r2_dp4a`/`_r4_dp4a`/`_r8_dp4a`) are autotune orphans, NOT templated.
-> - **NEXT in P2d:** (1) the ~40 `indexed_moe_mmq_*_{gate_up,down}_tile8_dp4a` +
->   `*_turbo` MMQ prefill kernels — the DS4 logical-lanes playbook from the dense
->   4warp_lds work (logical `MMQ_LDS_LANES`, `fb_fp16_t` pairs, `mmq_prefetch_*`
->   seam, kernel-faithful harness) carries over directly. Cert harness today is
->   the HIP-only `sweep_moe.rs` (generic tile8); needs a `BenchBackend`-generic
->   path like the mmvq one. (2) Cleanup: the 9 orphan plain IQ MoE `.cu`, the 4
->   orphan q4_k gate_up variants, `quantize_f16_q8_1_mmq.cu`.
+> - **P2d tile8 MMQ prefill — STARTED.** Q8_0 gate_up + down (`b2a6b54`). The
+>   tile8 kernels are **register-tiled** (MMQ_Y=64 rows × TILE_N=8 sorted
+>   slot-cols, each thread computes its row's 8 outputs from registers) — NO LDS,
+>   NO cross-thread comms, so the cleanest cross-backend case (both BIT-IDENTICAL).
+>   Fixes: `WARP_SIZE` block constant → kernel-local `MMQ_Y=64`; neutral `dp4a`;
+>   weight qs → `load_int_b2`. New generic harness `MoeMmqTile8Dtype` /
+>   `run_moe_mmq_tile8_sweep<B>` / `run_shape_moe_mmq_tile8<B>` (gate_up 13-arg +
+>   down 11-arg via a `gate_up()` flag) + host `build_padded_sort` (pad-to-8
+>   expert sort). `--dtype Q8_0_{gate_up,down}_tile8_moe_mmq`.
+> - **NAMING:** the MMQ "turbo" family was renamed **`turbo` → `lds_tiled`**
+>   (`910c3e7`, coordinated across kernels/ops/dispatch/certs); the
+>   `mmq_q4_k_lds_tiled.cuh` + `indexed_moe_mmq_q4_k_{gate_up,down}_lds_tiled.cu`
+>   are the 4-warp LDS-tiled prefill kernels (block (64,4)). KV-cache turbo-quant
+>   is a separate concept, untouched.
+> - **NEXT in P2d:** (1) the remaining ~38 tile8 kernels (q4_0/q4_1/q5_0/q5_1/
+>   q4_k/q5_k/q6_k/q2_k/q3_k/iq\* × {gate_up,down}) — same register-tiled scaffold,
+>   per-dtype weight decode (Q4_0 nibble+(q-8), K-quants sub-block scales, IQ
+>   codebooks). Extend `MoeMmqTile8Dtype`. (2) The 2 Q4_K `_lds_tiled` (ex-turbo)
+>   4-warp LDS-tiled MoE kernels — DS4 logical-lanes playbook from the dense
+>   `mmq_q4_k_lds_tiled.cuh`. (3) Cleanup: 9 orphan plain IQ MoE `.cu`, 4 orphan
+>   q4_k gate_up variants, `quantize_f16_q8_1_mmq.cu`.
 > - **DS4 4-warp_lds — Q4_0 (`3867eab`) + Q4_1 (`2ce63cc`) + Q4_K turbo
 >   (`58f52f0`) DONE.** The hardest sub-family (MMQ_Y=128, DS4 144-B activation,
 >   dynamic LDS, double-buffered Y). **The breakthrough: the hand kernels'
