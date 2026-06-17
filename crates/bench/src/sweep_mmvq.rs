@@ -2784,6 +2784,8 @@ pub enum MoeMmqTile8Dtype {
     Q4KDown,
     Q5KGateUp,
     Q5KDown,
+    Q6KGateUp,
+    Q6KDown,
 }
 
 impl MoeMmqTile8Dtype {
@@ -2797,6 +2799,7 @@ impl MoeMmqTile8Dtype {
             Q5_1GateUp => "q5_1_gate_up", Q5_1Down => "q5_1_down",
             Q4KGateUp => "q4_k_gate_up", Q4KDown => "q4_k_down",
             Q5KGateUp => "q5_k_gate_up", Q5KDown => "q5_k_down",
+            Q6KGateUp => "q6_k_gate_up", Q6KDown => "q6_k_down",
         }
     }
     fn weight_dtype(self) -> Dtype {
@@ -2809,11 +2812,12 @@ impl MoeMmqTile8Dtype {
             Q5_1GateUp | Q5_1Down => Dtype::Q5_1,
             Q4KGateUp | Q4KDown => Dtype::Q4K,
             Q5KGateUp | Q5KDown => Dtype::Q5K,
+            Q6KGateUp | Q6KDown => Dtype::Q6K,
         }
     }
     fn gate_up(self) -> bool {
         use MoeMmqTile8Dtype::*;
-        matches!(self, Q8_0GateUp | Q4_0GateUp | Q4_1GateUp | Q5_0GateUp | Q5_1GateUp | Q4KGateUp | Q5KGateUp)
+        matches!(self, Q8_0GateUp | Q4_0GateUp | Q4_1GateUp | Q5_0GateUp | Q5_1GateUp | Q4KGateUp | Q5KGateUp | Q6KGateUp)
     }
     fn impl_id(self) -> &'static str {
         use MoeMmqTile8Dtype::*;
@@ -2832,6 +2836,8 @@ impl MoeMmqTile8Dtype {
             Q4KDown => "indexed_moe_mmq_q4_k_down_tile8",
             Q5KGateUp => "indexed_moe_mmq_q5_k_gate_up_tile8",
             Q5KDown => "indexed_moe_mmq_q5_k_down_tile8",
+            Q6KGateUp => "indexed_moe_mmq_q6_k_gate_up_tile8",
+            Q6KDown => "indexed_moe_mmq_q6_k_down_tile8",
         }
     }
     fn kernel_stem(self) -> &'static str {
@@ -2851,6 +2857,8 @@ impl MoeMmqTile8Dtype {
             Q4KDown => "indexed_moe_mmq_q4_k_down_tile8_dp4a",
             Q5KGateUp => "indexed_moe_mmq_q5_k_gate_up_tile8_dp4a",
             Q5KDown => "indexed_moe_mmq_q5_k_down_tile8_dp4a",
+            Q6KGateUp => "indexed_moe_mmq_q6_k_gate_up_tile8_dp4a",
+            Q6KDown => "indexed_moe_mmq_q6_k_down_tile8_dp4a",
         }
     }
     fn kernel_entry(self) -> &'static str {
@@ -2870,6 +2878,8 @@ impl MoeMmqTile8Dtype {
             Q4KDown => "flambeau_indexed_moe_mmq_q4_k_down_tile8_dp4a_q8_1",
             Q5KGateUp => "flambeau_indexed_moe_mmq_q5_k_gate_up_tile8_dp4a_q8_1",
             Q5KDown => "flambeau_indexed_moe_mmq_q5_k_down_tile8_dp4a_q8_1",
+            Q6KGateUp => "flambeau_indexed_moe_mmq_q6_k_gate_up_tile8_dp4a_q8_1",
+            Q6KDown => "flambeau_indexed_moe_mmq_q6_k_down_tile8_dp4a_q8_1",
         }
     }
     /// Correctness envelope. The K-quant prefill kernels inherit the documented
@@ -2878,7 +2888,7 @@ impl MoeMmqTile8Dtype {
     fn tolerance(self) -> f32 {
         use MoeMmqTile8Dtype::*;
         match self {
-            Q4KGateUp | Q4KDown | Q5KGateUp | Q5KDown => 5e-2,
+            Q4KGateUp | Q4KDown | Q5KGateUp | Q5KDown | Q6KGateUp | Q6KDown => 5e-2,
             _ => 3e-2,
         }
     }
