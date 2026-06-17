@@ -114,8 +114,11 @@ sm_86) is built and `feature/cuda-decouple` is pulled in.
 >    (any weight block size — `run_shape_mmq_gemm` uses `weight_dtype` block size +
 >    k/32 activation). The wave-leak is just `tile_m=blockIdx.x*WARP_SIZE` →
 >    `MMQ_Y`; loads → `load_int_b2` (block_q6_K 210 B → odd super-blocks non-mul-4).
->    **Remaining wave64:** Q4_K/Q5_K/Q2_K/Q3_K/Q8_K (own bodies, port from the hand
->    `mmq_<dt>_wave64.cu` the same way) + **IQ\***. Then the genuinely-hard
+>    **Q4_K also done** (`mmq_q4_k_wave64.cuh`, `d·Σd − dmin·Σm` super-block,
+>    `flambeau_q4k_scale_min`; cert both backends err 1.1e-2). **Remaining wave64:**
+>    Q5_K/Q2_K/Q3_K/Q8_K (own bodies, port from the hand `mmq_<dt>_wave64.cu` the
+>    same mechanical way — WARP_SIZE→MMQ_Y, dp4a, load_int_b2) + **IQ\***. Then the
+>    genuinely-hard
 >    **4-warp LDS-tiled** kernels (`mmq_q8_0_4warp` / `mmq_q4_K_turbo`, real LDS
 >    tiling + cp.async-vs-prefetch seaming — the prefill perf lever).
 > 1. **Genericize `sweep_mmq.rs` over `BenchBackend`** (`run_sweep<B>`/
