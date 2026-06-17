@@ -101,11 +101,22 @@ sm_86) is built and `feature/cuda-decouple` is pulled in.
 >     (worst max_rel_err 0.015, inside the 5e-2 IQ envelope). `MoeMmqTile8Dtype`
 >     now 38 variants. **The ENTIRE tile8 MMQ prefill family (simple + K-quant +
 >     IQ\*) is now cross-backend.**
-> - **NEXT in P2d:** (1) The 2 Q4_K `_lds_tiled` (ex-turbo) 4-warp LDS-tiled MoE
->   kernels (`indexed_moe_mmq_q4_k_{gate_up,down}_lds_tiled.cu`) — DS4
->   logical-lanes playbook from the dense `mmq_q4_k_lds_tiled.cuh`. (2) Cleanup:
->   9 orphan plain (scalar) IQ MoE `.cu`, 4 orphan q4_k gate_up mmvq variants,
->   `quantize_f16_q8_1_mmq.cu`.
+>   - **Q4_K `_lds_tiled` MoE DONE** (`9ca14d6`): the 2 4-warp LDS-tiled MoE
+>     kernels (gate_up + down) as `indexed_moe_mmq_q4_k_lds_tiled.cuh`, reusing
+>     the dense header's neutral helpers; `WARP_SIZE` → logical `MMQ_LDS_LANES`
+>     (LDS + __syncthreads only, no __shfl). MoE addressing (expert offset, DS4
+>     per-column gather by token/pair, dual gate/up tiles), templated
+>     `<MMQ_X=8, MMQ_Y=128, NWARPS=4, OutT>`. These were UNCERTIFIED hand kernels
+>     — closed the rule-2 gap with a NEW MoE-DS4 sweep (`MoeMmqLdsDtype` /
+>     `run_moe_mmq_lds_sweep` / `run_shape_moe_mmq_lds`: per-expert Q4_K weights,
+>     DS4 144-B activation, padded sort, per-expert-gather Q4_K-over-DS4 affine
+>     reference). Both BIT-IDENTICAL (max_rel_err ≤0.015). **The ENTIRE P2d
+>     indexed-MoE MMQ surface (MMVQ + tile8 simple/K-quant/IQ\* + Q4_K
+>     lds_tiled) is now cross-backend.**
+> - **NEXT in P2d — cleanup only:** 9 orphan plain (scalar) IQ MoE `.cu` (ops
+>   only calls `_r2_dp4a` — `cfg(unverified)`/delete candidates), 4 orphan q4_k
+>   gate_up mmvq variants (`_dp4a`/`_r2_dp4a`/`_r4_dp4a`/`_r8_dp4a`),
+>   `quantize_f16_q8_1_mmq.cu`. After that P2d is structurally complete.
 > - **DS4 4-warp_lds — Q4_0 (`3867eab`) + Q4_1 (`2ce63cc`) + Q4_K turbo
 >   (`58f52f0`) DONE.** The hardest sub-family (MMQ_Y=128, DS4 144-B activation,
 >   dynamic LDS, double-buffered Y). **The breakthrough: the hand kernels'
