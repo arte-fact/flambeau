@@ -91,7 +91,7 @@ pub mod sweep_attention_q8_kv_splitk;
 #[cfg(feature = "hip")]
 pub mod sweep_attention_splitk;
 
-#[cfg(feature = "hip")]
+#[cfg(any(feature = "hip", feature = "cuda"))]
 pub mod sweep_mmvq_f16;
 
 #[cfg(feature = "hip")]

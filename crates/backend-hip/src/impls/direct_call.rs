@@ -55,6 +55,20 @@ pub const DIRECT_CALL_KERNELS_GFX906: &[DirectCallKernel] = &[
         impl_id: "mmq_f16_tile_gfx906",
         cert_rel_path: "certs/hip/gfx906/mmq_f16_tile_gfx906.json",
     },
+    // Templated cross-backend F16 certs (neutral impl_ids; same kernels as the
+    // _gfx906 dispatch rows above, registered as bench-references).
+    DirectCallKernel {
+        impl_id: "qmatmul_f16_mmvq",
+        cert_rel_path: "certs/hip/gfx906/qmatmul_f16_mmvq.json",
+    },
+    DirectCallKernel {
+        impl_id: "qmatmul_f16_mmq",
+        cert_rel_path: "certs/hip/gfx906/qmatmul_f16_mmq.json",
+    },
+    DirectCallKernel {
+        impl_id: "qmatmul_f16_mmq_tile",
+        cert_rel_path: "certs/hip/gfx906/qmatmul_f16_mmq_tile.json",
+    },
     // Indexed-MoE MMVQ for Q8_0 / Q4_0 / Q6_K
     // expert weights. Routing is by GGUF tensor dtype, not shape.
     DirectCallKernel {

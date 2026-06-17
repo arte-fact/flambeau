@@ -1,33 +1,23 @@
-//! F16 weight × Q8_1 activation MMVQ correctness sweep.
-//! Unsloth's UD-Q8_K_XL GGUFs reserve F16 for i-matrix-flagged layers. Sweep
-//! validates `flambeau_mmvq_f16_q8_1` against an F32 reference that
-//! dequantises the Q8_1 activation back to F32, multiplies in F32 with the
-//! F16 weight upcast, and sums. Shapes cover 27B-UD-Q8_K_XL:
+//! F16 weight × Q8_1 activation MMVQ / MMQ correctness sweep (backend-generic).
+//! Unsloth's UD-Q8_K_XL GGUFs reserve F16 for i-matrix-flagged layers. The sweep
+//! validates the templated `mmvq_f16` / `mmq_f16` / `mmq_f16_tile` kernels against
+//! an F32 reference that dequantises the Q8_1 activation back to F32, multiplies
+//! in F32 with the F16 weight upcast, and sums. Shapes cover 27B-UD-Q8_K_XL:
 //! * GDN attn_gate: n=6144, k=5120
 //! * GDN ssm_out: n=5120, k=6144
 //! * synthetic narrow shape for block-count coverage.
-
-#![cfg(feature = "hip")]
-#![expect(
-    clippy::undocumented_unsafe_blocks,
-    reason = "sweep harness — every unsafe block is a kernel launch or a memcpy_async \
-              over buffers allocated locally in the same function and freed before \
-              return; invariant is uniform across all sites."
-)]
+//! Generic over `BenchBackend` so it emits HIP (gfx906) + CUDA (sm_86) certs.
 
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
-use flambeau_backend_hip::{
-    device_count, FuncAttributes, HipDevice, HipKernel, HipModule, KernelArgs, LaunchCfg,
-};
-use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
-use flambeau_kernels_hip as kernels;
+use anyhow::{anyhow, Result};
+use flambeau_core::{CopyDirection, Device, DevicePtr, LaunchCfg, Stream};
 use flambeau_quant::{BlockQ8_1, QK8_1};
 use half::f16;
 
+use crate::backend::{BenchBackend, LaunchArgs};
 use crate::cert::{now_utc_iso8601, Cert, PmcSnapshot, ShapeResult, SCHEMA_VERSION};
-use crate::harness::{alloc_and_upload, max_rel_err_with_floor, rig, seeded_f32_range};
+use crate::harness::{alloc_and_upload, max_rel_err_with_floor, rig_for, seeded_f32_range};
 
 const SHAPES: &[(usize, usize)] = &[
     (256, 256),     // smoke
@@ -36,360 +26,161 @@ const SHAPES: &[(usize, usize)] = &[
     (248320, 5120), // Qwen3.6-27B LM head / embeddings (F16 in UD)
 ];
 
-/// tile-M variant sweep: exercises `flambeau_mmq_f16_tile_q8_1`
-/// at `n_tokens > 1` (covers MMQ_X=8 tile-fit + under-fill partial tiles)
-/// and compares each row to the single-row F32 reference.
-pub fn run_mmq_tile_sweep(repo_root: &Path) -> Result<Cert> {
-    if device_count().context("hipGetDeviceCount")? < 1 {
-        bail!("no HIP devices");
-    }
-    let dev = HipDevice::new(0)?;
-    dev.bind()?;
-    let kb = kernels::hsaco("mmq_f16_tile").unwrap();
-    let module = HipModule::load(dev.id(), kb)?;
-    let kernel: HipKernel<'_> = module.kernel("flambeau_mmq_f16_tile_q8_1")?;
-    let attrs: FuncAttributes = kernel.attributes()?;
+const TOL: f32 = 3e-2;
+const TOL_FORMULA: &str = "|err| <= 3e-2 * max(|ref|, sqrt(k) * q8_step)";
 
-    // (n_rows, k, n_tokens) — include an under-fill (n_tokens=5) case to
-    // exercise the slot-token -1 early-exit path.
-    let cases = [
-        (256usize, 256usize, 8usize), // smoke + MMQ_X fit
-        (256, 256, 5),                // under-fill TILE_N=8
-        (6144, 5120, 16),             // 27B-UD-Q8_K_XL attn_gate
-        (5120, 6144, 8),              // 27B-UD-Q8_K_XL ssm_out
-    ];
-    let mut results = Vec::new();
-    for (n, k, n_tokens) in cases {
-        let seed = 0x29A0u64 ^ (n as u64 * 7919) ^ (k as u64 * 101) ^ (n_tokens as u64 * 37);
-        let (got, reference) = run_mmq_tile_shape(&dev, &kernel, n, k, n_tokens, seed)?;
-        let max_rel = max_rel_err_with_floor(&got, &reference, (k as f32).sqrt() * 0.01);
-        let tol = 3e-2;
-        results.push(ShapeResult {
-            m: n_tokens,
-            k,
-            n,
-            seed,
-            max_rel_err: max_rel,
-            tolerance: tol,
-            pass: max_rel <= tol,
-        });
-    }
-    let pass = results.iter().all(|r| r.pass);
-    let rig = rig();
-    let cert = Cert {
-        schema_version: SCHEMA_VERSION,
-        impl_id: "mmq_f16_tile_gfx906".to_string(),
-        backend: "hip".to_string(),
-        arch: "gfx906".to_string(),
-        op: "qmatmul".to_string(),
-        dtype_weight: "F16".to_string(),
-        dtype_activation: "Q8_1".to_string(),
-        tolerance_formula: "|err| <= 3e-2 * max(|ref|, sqrt(k) * q8_step)".to_string(),
-        results,
-        pass,
-        emitted_at: now_utc_iso8601(),
-        rig,
-        pmc: Some(PmcSnapshot {
-            vgpr_count: Some(attrs.num_regs),
-            sgpr_count: None,
-            waves_per_simd: Some(attrs.gfx906_waves_per_simd()),
-            mem_busy_pct: None,
-            valu_busy_pct: None,
-        }),
-    };
-    cert.write_to_disk(repo_root)?;
-    Ok(cert)
+/// Which F16-weight kernel a sweep targets.
+#[derive(Clone, Copy)]
+pub enum F16SweepKind {
+    Mmvq,
+    Mmq,
+    MmqTile,
 }
 
-fn run_mmq_tile_shape(
-    dev: &HipDevice,
-    kernel: &HipKernel<'_>,
-    n: usize,
-    k: usize,
-    n_tokens: usize,
-    seed: u64,
-) -> Result<(Vec<f32>, Vec<f32>)> {
-    let w_f32 = seeded_f32_range(seed, n * k, -0.5, 0.5);
-    let x_f32 = seeded_f32_range(seed.wrapping_add(0xA1), n_tokens * k, -0.5, 0.5);
-    let w_f16: Vec<f16> = w_f32.iter().map(|&v| f16::from_f32(v)).collect();
-    let mut x_q: Vec<BlockQ8_1> = Vec::with_capacity(n_tokens * (k / QK8_1));
-    for row in 0..n_tokens {
-        x_q.extend(quantize_row_q8_1(&x_f32[row * k..(row + 1) * k]));
-    }
-
-    let d_w = alloc_and_upload(dev, &w_f16);
-    let d_x = alloc_and_upload(dev, &x_q);
-    let d_out = dev.alloc(n_tokens * n * 4)?;
-
-    {
-        let stream = dev.default_stream();
-        let n_rows_i = n as i32;
-        let n_tokens_i = n_tokens as i32;
-        let n_blocks_i = (k / 32) as i32;
-        let w_ptr: u64 = d_w.as_usize() as u64;
-        let y_ptr: u64 = d_x.as_usize() as u64;
-        let o_ptr: u64 = d_out.as_usize() as u64;
-        let mut args = KernelArgs::new();
-        args.push(&w_ptr);
-        args.push(&y_ptr);
-        args.push(&o_ptr);
-        args.push(&n_rows_i);
-        args.push(&n_tokens_i);
-        args.push(&n_blocks_i);
-        let cfg = LaunchCfg {
-            grid: ((n as u32).div_ceil(64), (n_tokens as u32).div_ceil(8), 1),
-            block: (64, 1, 1),
-            shared_bytes: 0,
-        };
-        unsafe { kernel.launch(stream, cfg, args)? };
-        stream.synchronize()?;
-    }
-
-    let mut got = vec![0.0f32; n_tokens * n];
-    unsafe {
-        dev.memcpy_async(
-            dev.default_stream(),
-            CopyDirection::DeviceToHost,
-            DevicePtr(got.as_mut_ptr() as usize),
-            d_out,
-            n_tokens * n * 4,
-        )?;
-    }
-    dev.default_stream().synchronize()?;
-    unsafe {
-        dev.dealloc(d_w, w_f16.len() * 2)?;
-        dev.dealloc(d_x, x_q.len() * std::mem::size_of::<BlockQ8_1>())?;
-        dev.dealloc(d_out, n_tokens * n * 4)?;
-    }
-
-    let mut reference = vec![0.0f32; n_tokens * n];
-    let w_back: Vec<f32> = w_f16.iter().map(|v| v.to_f32()).collect();
-    for tok in 0..n_tokens {
-        let blocks = &x_q[tok * (k / QK8_1)..(tok + 1) * (k / QK8_1)];
-        let x_dequant: Vec<f32> = blocks
-            .iter()
-            .flat_map(|b| {
-                let d = b.d.to_f32();
-                (0..QK8_1).map(move |i| d * b.qs[i] as f32)
-            })
-            .collect();
-        for row in 0..n {
-            let mut acc = 0.0f64;
-            for j in 0..k {
-                acc += (w_back[row * k + j] * x_dequant[j]) as f64;
-            }
-            reference[tok * n + row] = acc as f32;
+impl F16SweepKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            F16SweepKind::Mmvq => "mmvq",
+            F16SweepKind::Mmq => "mmq",
+            F16SweepKind::MmqTile => "mmq_tile",
         }
     }
-    Ok((got, reference))
 }
 
-/// multi-row variant sweep: exercises `flambeau_mmq_f16_q8_1` at
-/// `n_tokens > 1` and compares each row to the single-row F32 reference.
-pub fn run_mmq_sweep(repo_root: &Path) -> Result<Cert> {
-    if device_count().context("hipGetDeviceCount")? < 1 {
-        bail!("no HIP devices");
+/// Backend-generic entry point for the three F16-weight kernel sweeps.
+/// # Errors
+/// Propagates device / launch / cert-write failures.
+pub fn run_f16_sweep<B: BenchBackend>(
+    kind: F16SweepKind,
+    repo_root: &Path,
+    arch: &str,
+) -> Result<Cert> {
+    match kind {
+        F16SweepKind::Mmvq => run_f16_mmvq_sweep::<B>(repo_root, arch),
+        F16SweepKind::Mmq => run_f16_mmq_sweep::<B>(repo_root, arch),
+        F16SweepKind::MmqTile => run_f16_mmq_tile_sweep::<B>(repo_root, arch),
     }
-    let dev = HipDevice::new(0)?;
-    dev.bind()?;
-    let kb = kernels::hsaco("mmq_f16_q8_1").unwrap();
-    let module = HipModule::load(dev.id(), kb)?;
-    let kernel: HipKernel<'_> = module.kernel("flambeau_mmq_f16_q8_1")?;
-    let attrs: FuncAttributes = kernel.attributes()?;
-
-    // (n_rows, k, n_tokens)
-    let cases = [
-        (256usize, 256usize, 1usize), // collapse to mmvq case
-        (256, 256, 8),                // small smoke
-        (6144, 5120, 16),             // 27B-UD-Q8_K_XL attn_gate, prefill-like
-        (5120, 6144, 8),              // 27B-UD-Q8_K_XL ssm_out
-    ];
-    let mut results = Vec::new();
-    for (n, k, n_tokens) in cases {
-        let seed = 0x25A0u64 ^ (n as u64 * 7919) ^ (k as u64 * 101) ^ (n_tokens as u64 * 37);
-        let (got, reference) = run_mmq_shape(&dev, &kernel, n, k, n_tokens, seed)?;
-        let max_rel = max_rel_err_with_floor(&got, &reference, (k as f32).sqrt() * 0.01);
-        let tol = 3e-2;
-        results.push(ShapeResult {
-            m: n_tokens,
-            k,
-            n,
-            seed,
-            max_rel_err: max_rel,
-            tolerance: tol,
-            pass: max_rel <= tol,
-        });
-    }
-    let pass = results.iter().all(|r| r.pass);
-    let rig = rig();
-    let cert = Cert {
-        schema_version: SCHEMA_VERSION,
-        impl_id: "mmq_f16_q8_1_gfx906".to_string(),
-        backend: "hip".to_string(),
-        arch: "gfx906".to_string(),
-        op: "qmatmul".to_string(),
-        dtype_weight: "F16".to_string(),
-        dtype_activation: "Q8_1".to_string(),
-        tolerance_formula: "|err| <= 3e-2 * max(|ref|, sqrt(k) * q8_step)".to_string(),
-        results,
-        pass,
-        emitted_at: now_utc_iso8601(),
-        rig,
-        pmc: Some(PmcSnapshot {
-            vgpr_count: Some(attrs.num_regs),
-            sgpr_count: None,
-            waves_per_simd: Some(attrs.gfx906_waves_per_simd()),
-            mem_busy_pct: None,
-            valu_busy_pct: None,
-        }),
-    };
-    cert.write_to_disk(repo_root)?;
-    Ok(cert)
 }
 
-fn run_mmq_shape(
-    dev: &HipDevice,
-    kernel: &HipKernel<'_>,
-    n: usize,
-    k: usize,
-    n_tokens: usize,
-    seed: u64,
-) -> Result<(Vec<f32>, Vec<f32>)> {
-    let w_f32 = seeded_f32_range(seed, n * k, -0.5, 0.5);
-    let x_f32 = seeded_f32_range(seed.wrapping_add(0xA1), n_tokens * k, -0.5, 0.5);
-    let w_f16: Vec<f16> = w_f32.iter().map(|&v| f16::from_f32(v)).collect();
-    // Quantise each activation row independently.
-    let mut x_q: Vec<BlockQ8_1> = Vec::with_capacity(n_tokens * (k / QK8_1));
-    for row in 0..n_tokens {
-        x_q.extend(quantize_row_q8_1(&x_f32[row * k..(row + 1) * k]));
-    }
-
-    let d_w = alloc_and_upload(dev, &w_f16);
-    let d_x = alloc_and_upload(dev, &x_q);
-    let d_out = dev.alloc(n_tokens * n * 4)?;
-
-    {
-        let stream = dev.default_stream();
-        let n_rows_i = n as i32;
-        let n_tokens_i = n_tokens as i32;
-        let n_blocks_i = (k / 32) as i32;
-        let w_ptr: u64 = d_w.as_usize() as u64;
-        let y_ptr: u64 = d_x.as_usize() as u64;
-        let o_ptr: u64 = d_out.as_usize() as u64;
-        let mut args = KernelArgs::new();
-        args.push(&w_ptr);
-        args.push(&y_ptr);
-        args.push(&o_ptr);
-        args.push(&n_rows_i);
-        args.push(&n_tokens_i);
-        args.push(&n_blocks_i);
-        let cfg = LaunchCfg {
-            grid: (n as u32, n_tokens as u32, 1),
-            block: (256, 1, 1),
-            shared_bytes: 0,
-        };
-        unsafe { kernel.launch(stream, cfg, args)? };
-        stream.synchronize()?;
-    }
-
-    let mut got = vec![0.0f32; n_tokens * n];
-    unsafe {
-        dev.memcpy_async(
-            dev.default_stream(),
-            CopyDirection::DeviceToHost,
-            DevicePtr(got.as_mut_ptr() as usize),
-            d_out,
-            n_tokens * n * 4,
-        )?;
-    }
-    dev.default_stream().synchronize()?;
-    unsafe {
-        dev.dealloc(d_w, w_f16.len() * 2)?;
-        dev.dealloc(d_x, x_q.len() * std::mem::size_of::<BlockQ8_1>())?;
-        dev.dealloc(d_out, n_tokens * n * 4)?;
-    }
-
-    // Reference: F16 weight × Q8_1-dequant activation in F32, per row.
-    let mut reference = vec![0.0f32; n_tokens * n];
-    let w_back: Vec<f32> = w_f16.iter().map(|v| v.to_f32()).collect();
-    for tok in 0..n_tokens {
-        let blocks = &x_q[tok * (k / QK8_1)..(tok + 1) * (k / QK8_1)];
-        let x_dequant: Vec<f32> = blocks
-            .iter()
-            .flat_map(|b| {
-                let d = b.d.to_f32();
-                (0..QK8_1).map(move |i| d * b.qs[i] as f32)
-            })
-            .collect();
-        for row in 0..n {
-            let mut acc = 0.0f64;
-            for j in 0..k {
-                acc += (w_back[row * k + j] * x_dequant[j]) as f64;
-            }
-            reference[tok * n + row] = acc as f32;
-        }
-    }
-    Ok((got, reference))
+fn pmc_from<B: BenchBackend>(kernel: &B::Kernel<'_>) -> Result<PmcSnapshot> {
+    Ok(B::attributes(kernel)?)
 }
 
-pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
-    if device_count().context("hipGetDeviceCount")? < 1 {
-        bail!("no HIP devices");
-    }
-    let dev = HipDevice::new(0)?;
-    dev.bind()?;
-    let kb = kernels::hsaco("mmvq_f16_q8_1").unwrap();
-    let module = HipModule::load(dev.id(), kb)?;
-    let kernel: HipKernel<'_> = module.kernel("flambeau_mmvq_f16_q8_1")?;
-    let attrs: FuncAttributes = kernel.attributes()?;
+/// Single-row MMVQ sweep — `flambeau_mmvq_f16_q8_1` at one activation row.
+pub fn run_f16_mmvq_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) -> Result<Cert> {
+    let dev = B::new_device(0)?;
+    let bytes = B::image("mmvq_f16_q8_1").ok_or_else(|| anyhow!("mmvq_f16_q8_1 not compiled"))?;
+    let module = B::load(&dev, bytes)?;
+    let kernel = B::kernel(&module, "flambeau_mmvq_f16_q8_1")?;
+    let pmc = pmc_from::<B>(&kernel)?;
 
     let mut results = Vec::new();
     for &(n, k) in SHAPES {
         let seed = 0xF16FACE ^ (n as u64 * 7919) ^ (k as u64 * 101);
-        let (got, reference) = run_shape(&dev, &kernel, n, k, seed)?;
+        let (got, reference) = run_mmvq_shape::<B>(&dev, &kernel, n, k, seed)?;
         let max_rel = max_rel_err_with_floor(&got, &reference, (k as f32).sqrt() * 0.01);
-        // F16 × Q8_1 dequant → F32: error floor = Q8 step (1/127) × k-sum
-        // noise + F16 rounding on weight side. 3e-2 is comfortably above the
-        // measured noise at k=5120/6144 and far below a usable signal bar.
-        let tol = 3e-2;
         results.push(ShapeResult {
             m: 1,
             k,
             n,
             seed,
             max_rel_err: max_rel,
-            tolerance: tol,
-            pass: max_rel <= tol,
+            tolerance: TOL,
+            pass: max_rel <= TOL,
         });
-        tracing::info!(
-            target: "flambeau_bench::sweep_mmvq_f16",
-            n, k, max_rel, tol,
-            "mmvq f16 × q8_1 shape"
-        );
     }
+    finish::<B>(&dev, "qmatmul_f16_mmvq", "qmatmul_mmvq", arch, results, pmc, repo_root)
+}
 
+/// Multi-row MMQ sweep — `flambeau_mmq_f16_q8_1` (grid.y = n_tokens, launch-overhead amortisation).
+pub fn run_f16_mmq_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) -> Result<Cert> {
+    let dev = B::new_device(0)?;
+    let bytes = B::image("mmq_f16_q8_1").ok_or_else(|| anyhow!("mmq_f16_q8_1 not compiled"))?;
+    let module = B::load(&dev, bytes)?;
+    let kernel = B::kernel(&module, "flambeau_mmq_f16_q8_1")?;
+    let pmc = pmc_from::<B>(&kernel)?;
+
+    let cases = [
+        (256usize, 256usize, 1usize),
+        (256, 256, 8),
+        (6144, 5120, 16),
+        (5120, 6144, 8),
+    ];
+    let mut results = Vec::new();
+    for (n, k, n_tokens) in cases {
+        let seed = 0x25A0u64 ^ (n as u64 * 7919) ^ (k as u64 * 101) ^ (n_tokens as u64 * 37);
+        let (got, reference) = run_mmq_shape::<B>(&dev, &kernel, n, k, n_tokens, seed, false)?;
+        let max_rel = max_rel_err_with_floor(&got, &reference, (k as f32).sqrt() * 0.01);
+        results.push(ShapeResult {
+            m: n_tokens,
+            k,
+            n,
+            seed,
+            max_rel_err: max_rel,
+            tolerance: TOL,
+            pass: max_rel <= TOL,
+        });
+    }
+    finish::<B>(&dev, "qmatmul_f16_mmq", "qmatmul", arch, results, pmc, repo_root)
+}
+
+/// Tile-M MMQ sweep — `flambeau_mmq_f16_tile_q8_1` (MMQ_Y=64 × TILE_N=8, weight HBM amortisation).
+pub fn run_f16_mmq_tile_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) -> Result<Cert> {
+    let dev = B::new_device(0)?;
+    let bytes = B::image("mmq_f16_tile").ok_or_else(|| anyhow!("mmq_f16_tile not compiled"))?;
+    let module = B::load(&dev, bytes)?;
+    let kernel = B::kernel(&module, "flambeau_mmq_f16_tile_q8_1")?;
+    let pmc = pmc_from::<B>(&kernel)?;
+
+    let cases = [
+        (256usize, 256usize, 8usize),
+        (256, 256, 5), // under-fill TILE_N=8 → slot-token -1 early-exit
+        (6144, 5120, 16),
+        (5120, 6144, 8),
+    ];
+    let mut results = Vec::new();
+    for (n, k, n_tokens) in cases {
+        let seed = 0x29A0u64 ^ (n as u64 * 7919) ^ (k as u64 * 101) ^ (n_tokens as u64 * 37);
+        let (got, reference) = run_mmq_shape::<B>(&dev, &kernel, n, k, n_tokens, seed, true)?;
+        let max_rel = max_rel_err_with_floor(&got, &reference, (k as f32).sqrt() * 0.01);
+        results.push(ShapeResult {
+            m: n_tokens,
+            k,
+            n,
+            seed,
+            max_rel_err: max_rel,
+            tolerance: TOL,
+            pass: max_rel <= TOL,
+        });
+    }
+    finish::<B>(&dev, "qmatmul_f16_mmq_tile", "qmatmul", arch, results, pmc, repo_root)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish<B: BenchBackend>(
+    dev: &B::Device,
+    impl_id: &str,
+    op: &str,
+    arch: &str,
+    results: Vec<ShapeResult>,
+    pmc: PmcSnapshot,
+    repo_root: &Path,
+) -> Result<Cert> {
     let pass = results.iter().all(|r| r.pass);
-    let rig = rig();
     let cert = Cert {
         schema_version: SCHEMA_VERSION,
-        impl_id: "mmvq_f16_q8_1_gfx906".to_string(),
-        backend: "hip".to_string(),
-        arch: "gfx906".to_string(),
-        op: "qmatmul_mmvq".to_string(),
+        impl_id: impl_id.to_string(),
+        backend: dev.backend().to_string(),
+        arch: arch.to_string(),
+        op: op.to_string(),
         dtype_weight: "F16".to_string(),
         dtype_activation: "Q8_1".to_string(),
-        tolerance_formula: "|err| <= 3e-2 * max(|ref|, sqrt(k) * q8_step)".to_string(),
+        tolerance_formula: TOL_FORMULA.to_string(),
         results,
         pass,
         emitted_at: now_utc_iso8601(),
-        rig,
-        pmc: Some(PmcSnapshot {
-            vgpr_count: Some(attrs.num_regs),
-            sgpr_count: None,
-            waves_per_simd: Some(attrs.gfx906_waves_per_simd()),
-            mem_busy_pct: None,
-            valu_busy_pct: None,
-        }),
+        rig: rig_for(arch),
+        pmc: Some(pmc),
     };
     cert.write_to_disk(repo_root)?;
     Ok(cert)
@@ -420,9 +211,10 @@ fn quantize_row_q8_1(xs: &[f32]) -> Vec<BlockQ8_1> {
     out
 }
 
-fn run_shape(
-    dev: &HipDevice,
-    kernel: &HipKernel<'_>,
+#[allow(clippy::undocumented_unsafe_blocks)]
+fn run_mmvq_shape<B: BenchBackend>(
+    dev: &B::Device,
+    kernel: &B::Kernel<'_>,
     n: usize,
     k: usize,
     seed: u64,
@@ -443,14 +235,13 @@ fn run_shape(
         let w_ptr: u64 = d_w.as_usize() as u64;
         let y_ptr: u64 = d_x.as_usize() as u64;
         let o_ptr: u64 = d_out.as_usize() as u64;
-        let mut args = KernelArgs::new();
-        args.push(&w_ptr);
-        args.push(&y_ptr);
-        args.push(&o_ptr);
-        args.push(&n_rows_i);
-        args.push(&n_blocks_i);
-        let cfg = LaunchCfg::one_d(n as u32, 256);
-        unsafe { kernel.launch(stream, cfg, args)? };
+        let mut args = <B::Args<'_>>::default();
+        args.push_arg(&w_ptr);
+        args.push_arg(&y_ptr);
+        args.push_arg(&o_ptr);
+        args.push_arg(&n_rows_i);
+        args.push_arg(&n_blocks_i);
+        B::launch(kernel, stream, LaunchCfg::one_d(n as u32, 256), args)?;
         stream.synchronize()?;
     }
 
@@ -471,22 +262,105 @@ fn run_shape(
         dev.dealloc(d_out, n * 4)?;
     }
 
-    // Reference: F16 weight × Q8_1-dequant activation in F32.
-    let mut reference = vec![0.0f32; n];
-    let w_back: Vec<f32> = w_f16.iter().map(|v| v.to_f32()).collect();
-    let x_dequant: Vec<f32> = x_q
-        .iter()
-        .flat_map(|b| {
-            let d = b.d.to_f32();
-            (0..QK8_1).map(move |i| d * b.qs[i] as f32)
-        })
-        .collect();
-    for row in 0..n {
-        let mut acc = 0.0f64;
-        for j in 0..k {
-            acc += (w_back[row * k + j] * x_dequant[j]) as f64;
-        }
-        reference[row] = acc as f32;
-    }
+    let reference = f16_q8_1_reference(&w_f16, &x_q, n, k, 1);
     Ok((got, reference))
+}
+
+#[allow(clippy::undocumented_unsafe_blocks)]
+fn run_mmq_shape<B: BenchBackend>(
+    dev: &B::Device,
+    kernel: &B::Kernel<'_>,
+    n: usize,
+    k: usize,
+    n_tokens: usize,
+    seed: u64,
+    tile: bool,
+) -> Result<(Vec<f32>, Vec<f32>)> {
+    let w_f32 = seeded_f32_range(seed, n * k, -0.5, 0.5);
+    let x_f32 = seeded_f32_range(seed.wrapping_add(0xA1), n_tokens * k, -0.5, 0.5);
+    let w_f16: Vec<f16> = w_f32.iter().map(|&v| f16::from_f32(v)).collect();
+    let mut x_q: Vec<BlockQ8_1> = Vec::with_capacity(n_tokens * (k / QK8_1));
+    for row in 0..n_tokens {
+        x_q.extend(quantize_row_q8_1(&x_f32[row * k..(row + 1) * k]));
+    }
+
+    let d_w = alloc_and_upload(dev, &w_f16);
+    let d_x = alloc_and_upload(dev, &x_q);
+    let d_out = dev.alloc(n_tokens * n * 4)?;
+
+    {
+        let stream = dev.default_stream();
+        let n_rows_i = n as i32;
+        let n_tokens_i = n_tokens as i32;
+        let n_blocks_i = (k / 32) as i32;
+        let w_ptr: u64 = d_w.as_usize() as u64;
+        let y_ptr: u64 = d_x.as_usize() as u64;
+        let o_ptr: u64 = d_out.as_usize() as u64;
+        let mut args = <B::Args<'_>>::default();
+        args.push_arg(&w_ptr);
+        args.push_arg(&y_ptr);
+        args.push_arg(&o_ptr);
+        args.push_arg(&n_rows_i);
+        args.push_arg(&n_tokens_i);
+        args.push_arg(&n_blocks_i);
+        let cfg = if tile {
+            LaunchCfg {
+                grid: ((n as u32).div_ceil(64), (n_tokens as u32).div_ceil(8), 1),
+                block: (64, 1, 1),
+                shared_bytes: 0,
+            }
+        } else {
+            LaunchCfg {
+                grid: (n as u32, n_tokens as u32, 1),
+                block: (256, 1, 1),
+                shared_bytes: 0,
+            }
+        };
+        B::launch(kernel, stream, cfg, args)?;
+        stream.synchronize()?;
+    }
+
+    let mut got = vec![0.0f32; n_tokens * n];
+    unsafe {
+        dev.memcpy_async(
+            dev.default_stream(),
+            CopyDirection::DeviceToHost,
+            DevicePtr(got.as_mut_ptr() as usize),
+            d_out,
+            n_tokens * n * 4,
+        )?;
+    }
+    dev.default_stream().synchronize()?;
+    unsafe {
+        dev.dealloc(d_w, w_f16.len() * 2)?;
+        dev.dealloc(d_x, x_q.len() * std::mem::size_of::<BlockQ8_1>())?;
+        dev.dealloc(d_out, n_tokens * n * 4)?;
+    }
+
+    let reference = f16_q8_1_reference(&w_f16, &x_q, n, k, n_tokens);
+    Ok((got, reference))
+}
+
+/// Reference: F16 weight × Q8_1-dequant activation in F32, `[n_tokens][n]` row-major.
+fn f16_q8_1_reference(w_f16: &[f16], x_q: &[BlockQ8_1], n: usize, k: usize, n_tokens: usize) -> Vec<f32> {
+    let mut reference = vec![0.0f32; n_tokens * n];
+    let w_back: Vec<f32> = w_f16.iter().map(|v| v.to_f32()).collect();
+    for tok in 0..n_tokens {
+        let blocks = &x_q[tok * (k / QK8_1)..(tok + 1) * (k / QK8_1)];
+        let x_dequant: Vec<f32> = blocks
+            .iter()
+            .flat_map(|b| {
+                let d = b.d.to_f32();
+                (0..QK8_1).map(move |i| d * b.qs[i] as f32)
+            })
+            .collect();
+        for row in 0..n {
+            let mut acc = 0.0f64;
+            for j in 0..k {
+                acc += (w_back[row * k + j] * x_dequant[j]) as f64;
+            }
+            reference[tok * n + row] = acc as f32;
+        }
+    }
+    reference
 }

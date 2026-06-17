@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "impl_id": "qmatmul_f16_mmq_tile",
+  "backend": "cuda",
+  "arch": "sm_86",
+  "op": "qmatmul",
+  "dtype_weight": "F16",
+  "dtype_activation": "Q8_1",
+  "tolerance_formula": "|err| <= 3e-2 * max(|ref|, sqrt(k) * q8_step)",
+  "results": [
+    {
+      "m": 8,
+      "k": 256,
+      "n": 256,
+      "seed": 2007688,
+      "max_rel_err": 0.0000012572855,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 5,
+      "k": 256,
+      "n": 256,
+      "seed": 2007833,
+      "max_rel_err": 0.0000011816155,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 16,
+      "k": 5120,
+      "n": 6144,
+      "seed": 48343024,
+      "max_rel_err": 0.0000073304022,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 8,
+      "k": 6144,
+      "n": 5120,
+      "seed": 40107144,
+      "max_rel_err": 0.0000099615245,
+      "tolerance": 0.03,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-06-17T09:17:38Z",
+  "rig": "threadreaper-sm_86",
+  "pmc": {
+    "vgpr_count": 56,
+    "sgpr_count": null,
+    "waves_per_simd": null,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

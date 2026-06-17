@@ -781,12 +781,6 @@ const SIMPLE_SWEEPS: &[(&str, SweepFn)] = &[
         "attention_decode_q8_kv_splitk",
         flambeau_bench::sweep_attention_q8_kv_splitk::run_sweep,
     ),
-    ("mmvq_f16", flambeau_bench::sweep_mmvq_f16::run_sweep),
-    ("mmq_f16", flambeau_bench::sweep_mmvq_f16::run_mmq_sweep),
-    (
-        "mmq_f16_tile",
-        flambeau_bench::sweep_mmvq_f16::run_mmq_tile_sweep,
-    ),
     (
         "mmvq_q4_0",
         flambeau_bench::sweep_q4_0_q5_0::run_mmvq_q4_0_sweep,
@@ -1028,6 +1022,19 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     println!(
                         "sweep qmatmul_mmq_gemm ({}): pass={} shapes={} rig={}",
                         gd.name(),
+                        cert.pass,
+                        cert.results.len(),
+                        cert.rig
+                    );
+                    return Ok(());
+                }
+                if let Some(fk) = f16_sweep_kind(dtype) {
+                    use flambeau_bench::sweep_mmvq_f16::run_f16_sweep;
+                    let root = repo_root();
+                    let cert = run_f16_sweep::<flambeau_bench::backend::Hip>(fk, &root, arch)?;
+                    println!(
+                        "sweep qmatmul_f16 ({}): pass={} shapes={} rig={}",
+                        fk.name(),
                         cert.pass,
                         cert.results.len(),
                         cert.rig
@@ -1463,6 +1470,16 @@ fn mmq_gemm_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::MmqGemmDtyp
     }
 }
 
+fn f16_sweep_kind(dtype: &str) -> Option<flambeau_bench::sweep_mmvq_f16::F16SweepKind> {
+    use flambeau_bench::sweep_mmvq_f16::F16SweepKind;
+    match dtype {
+        "F16_mmvq" => Some(F16SweepKind::Mmvq),
+        "F16_mmq" => Some(F16SweepKind::Mmq),
+        "F16_mmq_tile" => Some(F16SweepKind::MmqTile),
+        _ => None,
+    }
+}
+
 #[cfg(feature = "cuda_sweep")]
 fn sweep_cuda(op: &str, dtype: &str) -> Result<()> {
     use flambeau_bench::backend::Cuda;
@@ -1527,6 +1544,18 @@ fn sweep_cuda(op: &str, dtype: &str) -> Result<()> {
         println!(
             "sweep qmatmul_mmq_gemm ({}): pass={} shapes={} rig={}",
             gd.name(),
+            cert.pass,
+            cert.results.len(),
+            cert.rig
+        );
+        return Ok(());
+    }
+    if let Some(fk) = f16_sweep_kind(dtype) {
+        use flambeau_bench::sweep_mmvq_f16::run_f16_sweep;
+        let cert = run_f16_sweep::<Cuda>(fk, &repo_root(), "sm_86")?;
+        println!(
+            "sweep qmatmul_f16 ({}): pass={} shapes={} rig={}",
+            fk.name(),
             cert.pass,
             cert.results.len(),
             cert.rig
