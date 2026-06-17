@@ -1,35 +1,9 @@
-// indexed_moe_mmq_q4_k_gate_up_turbo — indexed-MoE port of the
-// turbo-style 4-warp LDS-tiled Q4_K MMQ.
-// Two changes vs the dense `mmq_q4_K_turbo` kernel:
-// 1. Weight pointer is expert-indexed.
-// All MMQ_X slots in a block share the same expert (padded-sort
-// invariant). Resolve `expert = expert_ids[sorted_pair_idx_padded[tile_n]]`
-// once per block, then address
-// gate_w[expert * n_rows * n_sb_per_row + row * n_sb_per_row + kb0]
-// as usual.
-// 2. Y activation is per-pair gathered, not contiguous along col axis.
-// Dense turbo loads `tile_y[l] = by0[l]` with by0 pointing at the mmq_x
-// col slice after the baked `tile_n * sz_mmq_int` offset. For indexed
-// MoE the "cols" are pair-indices from sorted_pair_idx_padded, NOT
-// contiguous in memory. Each tile_y[l] load now computes
-// pair = slot_pair[l / MMQ_TILE_Y_K_LDS]
-// tile_y[l] = y_int[big_block * n_pairs * sz + pair * sz + (l % MMQ_TILE_Y_K_LDS)]
-// The 2-wave indirect gather adds some overhead vs the dense contiguous
-// load, but the LDS tile reuse across 128 rows × 8 dp4a columns per
-// vec_dot dwarfs it.
-// Dual outputs (gate + up): both weight matrices share the same activation.
-// Per-block LDS holds gate's tile_x AND up's tile_x side-by-side (2× LDS
-// budget for x), loaded in sequence per K-iter. Each vec_dot pass runs twice
-// (once with gate tile, once with up tile) against the same tile_y.
-// Padding slots (): tail slots in each expert range repeat the last
-// real pair_idx → redundant compute + duplicate writeback, no branch.
-// Launch:
-// grid = (⌈n_rows / MMQ_Y⌉, ⌈padded_total / MMQ_X⌉, 1)
-// block = (64, 4, 1) = 256 threads = 4 warps × 64
-// shared = tile_y (MMQ_X×MMQ_TILE_Y_K_LDS)
-// + 2 × (TXS_QS + TXS_DM + TXS_SC) for gate_x + up_x
-// Activation format: `block_q8_1_mmq` (DS4). Must be pre-quantised via
-// `quantize_q8_1_mmq` on an F32 activation (F16 input: cast then quantise).
+// indexed_moe_mmq_q4_k_down_lds_tiled — sibling of gate_up_lds_tiled.
+// Down-projection has a single weight matrix and uses the SwiGLU'd per-pair
+// activation (each pair has its own activation vector), so both the
+// activation index AND the output index use slot_pair directly.
+// Structurally identical to gate_up_lds_tiled with half the weight LDS and one
+// set of accumulators.
 
 #include "block_quant.cuh"
 #include <hip/hip_runtime.h>
@@ -48,21 +22,18 @@
 #define QK_K             256
 #define QK8_1_FLAMBEAU   32
 #define QI8_1            8
-#define MMQ_TILE_Y_K_LDS (MMQ_TILE_NE_K + MMQ_TILE_NE_K / QI8_1)   // 36
+#define MMQ_TILE_Y_K_LDS (MMQ_TILE_NE_K + MMQ_TILE_NE_K / QI8_1)
 
-// MMQ_X=8 matches padded-sort alignment. Turbo dense uses 16 but the
-// indexed-MoE path's per-expert padding is pad-to-8 — using 16 would read
-// uninitialised sorted_pair_idx_padded slots for the 9th-16th entries in a
-// block straddling an expert boundary, producing OOB Y loads (HIP 700).
+// MMQ_X=8 matches padded-sort alignment (see gate_up_lds_tiled note).
 #define MMQ_X 8
 #define MMQ_Y 128
 #define NWARPS 4
-#define BLOCK_THREADS (WARP_SIZE * NWARPS)   // 256
+#define BLOCK_THREADS (WARP_SIZE * NWARPS)
 
-#define TXS_QS (MMQ_Y * MMQ_TILE_NE_K + MMQ_Y)           // 4224 ints
-#define TXS_DM (MMQ_Y * MMQ_TILE_NE_K / QI4_K)            // 128 half2 slots
-#define TXS_SC (MMQ_Y * MMQ_TILE_NE_K / 8 + MMQ_Y / 8)    // 528 ints
-#define TILE_X_TOTAL (TXS_QS + TXS_DM + TXS_SC)           // 4880 ints per weight tile
+#define TXS_QS (MMQ_Y * MMQ_TILE_NE_K + MMQ_Y)
+#define TXS_DM (MMQ_Y * MMQ_TILE_NE_K / QI4_K)
+#define TXS_SC (MMQ_Y * MMQ_TILE_NE_K / 8 + MMQ_Y / 8)
+#define TILE_X_TOTAL (TXS_QS + TXS_DM + TXS_SC)
 
 static __device__ __forceinline__ int dp4a(int a, int b, int c) {
     return __builtin_amdgcn_sdot4(a, b, c, false);
@@ -95,9 +66,6 @@ static __device__ __forceinline__ float vec_dot_q4_K_q8_1_impl_mmq(
     return dm4f.x * sumf_d - dm4f.y * sumf_m;
 }
 
-// Helper: cooperative load of one Q4_K super-block for MMQ_Y rows into an
-// LDS tile (x_qs, x_dm, x_sc) following turbo's load_tiles_q4_K DP4A branch.
-// `w` must already be offset to `+ expert * n_rows * n_sb_per_row`.
 static __device__ __forceinline__ void load_x_q4_K_super_block(
     const flambeau_block_q4_K * __restrict__ w,
     const int kb0,
@@ -108,12 +76,10 @@ static __device__ __forceinline__ void load_x_q4_K_super_block(
     __half2 * __restrict__ x_dm,
     int * __restrict__ x_sc
 ) {
-    // qs load: 32 threads/row × 2 rows/warp × 4 warps → 256 threads cover 8 rows/iter × 16 iters = 128 rows
     {
-        constexpr int threads_per_row = MMQ_ITER_K / (4 * QR4_K);    // 32
-        constexpr int nrows           = WARP_SIZE / threads_per_row;  // 2
+        constexpr int threads_per_row = MMQ_ITER_K / (4 * QR4_K);
+        constexpr int nrows           = WARP_SIZE / threads_per_row;
         const int txi = threadIdx.x % threads_per_row;
-
         #pragma unroll
         for (int i0 = 0; i0 < MMQ_Y; i0 += nrows * NWARPS) {
             const int i = i0 + threadIdx.y * nrows + threadIdx.x / threads_per_row;
@@ -127,8 +93,6 @@ static __device__ __forceinline__ void load_x_q4_K_super_block(
             }
         }
     }
-
-    // dm load: one half2 per row; 256 threads redundantly write 128 slots
     {
         #pragma unroll
         for (int i0 = 0; i0 < MMQ_Y; i0 += NWARPS * WARP_SIZE) {
@@ -141,10 +105,8 @@ static __device__ __forceinline__ void load_x_q4_K_super_block(
             }
         }
     }
-
-    // scales pass: 4 ksc positions per row × 128 rows = 512 writes
     {
-        constexpr int rows_per_warp_sc = WARP_SIZE / 4;    // 16
+        constexpr int rows_per_warp_sc = WARP_SIZE / 4;
         #pragma unroll
         for (int i0 = 0; i0 < MMQ_Y; i0 += NWARPS * rows_per_warp_sc) {
             const int i_raw = i0 + threadIdx.y * rows_per_warp_sc + threadIdx.x / (MMQ_TILE_NE_K / 8);
@@ -163,8 +125,6 @@ static __device__ __forceinline__ void load_x_q4_K_super_block(
     }
 }
 
-// Helper: one DP4A vec_dot pass against (x_qs, x_dm, x_sc, tile_y) at k00.
-// Accumulates into `sum[]`. Same indexing as dense turbo.
 static __device__ __forceinline__ void vec_dot_pass(
     const int * __restrict__ x_qs,
     const __half2 * __restrict__ x_dm,
@@ -178,11 +138,9 @@ static __device__ __forceinline__ void vec_dot_pass(
 
     for (int k01 = 0; k01 < MMQ_TILE_NE_K; k01 += QR4_K * VDR_Q4_K_Q8_1_MMQ) {
         const int k0 = k00 + k01;
-
         #pragma unroll
         for (int j0 = 0; j0 < MMQ_X; j0 += NWARPS) {
             const int j = j0 + threadIdx.y;
-
             #pragma unroll
             for (int i0 = 0; i0 < MMQ_Y; i0 += WARP_SIZE) {
                 const int i = i0 + threadIdx.x;
@@ -190,7 +148,6 @@ static __device__ __forceinline__ void vec_dot_pass(
                     const uint8_t* sc = (const uint8_t*) &x_sc[
                         i * (MMQ_TILE_NE_K / 8) + i / 8 + k0 / 32
                     ] + 2 * (k01 / 16);
-
                     sum[j0 / NWARPS * ((MMQ_Y + WARP_SIZE - 1) / WARP_SIZE) + i0 / WARP_SIZE]
                       += vec_dot_q4_K_q8_1_impl_mmq(
                         &x_qs[i * (MMQ_TILE_NE_K + 1) + k0 / 2],
@@ -205,136 +162,95 @@ static __device__ __forceinline__ void vec_dot_pass(
 }
 
 extern "C" __global__ __launch_bounds__(BLOCK_THREADS, 1)
-void flambeau_indexed_moe_mmq_q4_k_gate_up_turbo_q8_1(
-    const flambeau_block_q4_K * __restrict__ gate_w,
-    const flambeau_block_q4_K * __restrict__ up_w,
+void flambeau_indexed_moe_mmq_q4_k_down_lds_tiled_q8_1(
+    const flambeau_block_q4_K * __restrict__ down_w,
     const flambeau_block_q8_1_mmq * __restrict__ y_mmq,
     const int * __restrict__ expert_ids,
     const int * __restrict__ sorted_pair_idx_padded,
     const int * __restrict__ padded_offsets,
-    float * __restrict__ gate_out,
-    float * __restrict__ up_out,
-    const int n_rows,          // inter (intermediate size)
-    const int n_tokens,        // hidden activation row count (Y layout is per-token, not per-pair)
-    const int top_k,           // pair = token * top_k + slot
-    const int n_sb_per_row,    // n_sb per row (= hidden / QK_K) for gate_w / up_w (both same)
+    float * __restrict__ dst,
+    const int n_rows,          // hidden
+    const int n_pairs,
+    const int n_sb_per_row,    // = inter / QK_K for down_w
     const int n_experts
 ) {
     extern __shared__ int lds[];
-    // LDS layout:
-    // tile_y : MMQ_X * MMQ_TILE_Y_K_LDS ints (576)
-    // tile_x_gate : TILE_X_TOTAL ints (4880)
-    // tile_x_up : TILE_X_TOTAL ints (4880)
-    // Total 10336 ints = 41344 B
     int * tile_y    = lds;
-    int * tile_x_gate = tile_y + MMQ_X * MMQ_TILE_Y_K_LDS;
-    int * tile_x_up   = tile_x_gate + TILE_X_TOTAL;
+    int * tile_x    = tile_y + MMQ_X * MMQ_TILE_Y_K_LDS;
 
-    int   * xg_qs = tile_x_gate;
-    __half2 * xg_dm = (__half2 *) (xg_qs + TXS_QS);
-    int   * xg_sc = (int *) (xg_dm + TXS_DM);
-
-    int   * xu_qs = tile_x_up;
-    __half2 * xu_dm = (__half2 *) (xu_qs + TXS_QS);
-    int   * xu_sc = (int *) (xu_dm + TXS_DM);
+    int   * x_qs = tile_x;
+    __half2 * x_dm = (__half2 *) (x_qs + TXS_QS);
+    int   * x_sc = (int *) (x_dm + TXS_DM);
 
     const int tile_m = blockIdx.x * MMQ_Y;
     const int tile_n = blockIdx.y * MMQ_X;
 
-    // Early-exit blocks past the padded total.
     __shared__ int padded_total_shared;
     if (threadIdx.x == 0 && threadIdx.y == 0) padded_total_shared = padded_offsets[n_experts];
     __syncthreads();
     if (tile_n >= padded_total_shared) return;
 
-    // Per-block expert lookup (invariant: all MMQ_X slots same expert).
     const int first_pair = sorted_pair_idx_padded[tile_n];
     const int expert     = expert_ids[first_pair];
 
-    // Cache per-slot pair_idx (for output write) and token (for Y gather).
     __shared__ int slot_pair[MMQ_X];
-    __shared__ int slot_token[MMQ_X];
     if (threadIdx.y == 0 && threadIdx.x < MMQ_X) {
-        const int pair = sorted_pair_idx_padded[tile_n + threadIdx.x];
-        slot_pair[threadIdx.x]  = pair;
-        slot_token[threadIdx.x] = pair / top_k;  // token index (Y layout is per-token for gate/up)
+        slot_pair[threadIdx.x] = sorted_pair_idx_padded[tile_n + threadIdx.x];
     }
     __syncthreads();
 
-    const flambeau_block_q4_K * gate_w_expert = gate_w + (size_t) expert * n_rows * n_sb_per_row;
-    const flambeau_block_q4_K * up_w_expert   = up_w   + (size_t) expert * n_rows * n_sb_per_row;
+    const flambeau_block_q4_K * down_w_expert = down_w + (size_t) expert * n_rows * n_sb_per_row;
 
-    // DS4 activation: 128 elements per MMQ block. For a Q4_K super-block (256
-    // elements) that's 2 MMQ blocks per kb0 iter.
-    constexpr int sz_mmq_int = (int) (sizeof(flambeau_block_q8_1_mmq) / sizeof(int));  // 36
+    constexpr int sz_mmq_int = (int) (sizeof(flambeau_block_q8_1_mmq) / sizeof(int));
     const int * y_int = (const int *) y_mmq;
 
-    // Accumulators: 2 × n_sum (one set for gate, one for up).
-    constexpr int n_sum = (MMQ_X / NWARPS) * ((MMQ_Y + WARP_SIZE - 1) / WARP_SIZE);  // 8
-    float sum_gate[n_sum];
-    float sum_up  [n_sum];
+    constexpr int n_sum = (MMQ_X / NWARPS) * ((MMQ_Y + WARP_SIZE - 1) / WARP_SIZE);
+    float sum[n_sum];
     #pragma unroll
-    for (int s = 0; s < n_sum; ++s) { sum_gate[s] = 0.0f; sum_up[s] = 0.0f; }
+    for (int s = 0; s < n_sum; ++s) sum[s] = 0.0f;
 
     for (int kb0 = 0; kb0 < n_sb_per_row; ++kb0) {
-        // Load gate X + up X for this super-block.
-        load_x_q4_K_super_block(gate_w_expert, kb0, tile_m, n_rows, n_sb_per_row, xg_qs, xg_dm, xg_sc);
-        load_x_q4_K_super_block(up_w_expert,   kb0, tile_m, n_rows, n_sb_per_row, xu_qs, xu_dm, xu_sc);
+        load_x_q4_K_super_block(down_w_expert, kb0, tile_m, n_rows, n_sb_per_row, x_qs, x_dm, x_sc);
 
-        // Y LDS load pass 1 (big_block = kb0 * 2, first half of super-block).
-        // Indirect gather by TOKEN (gate+up activations are shared across the
-        // top_k slots of a token — per-token, not per-pair).
         {
-            const int big_block = kb0 * (QK_K / (4 * QK8_1_FLAMBEAU));  // = kb0 * 2
+            const int big_block = kb0 * (QK_K / (4 * QK8_1_FLAMBEAU));
             #pragma unroll
             for (int l0 = 0; l0 < MMQ_X * MMQ_TILE_Y_K_LDS; l0 += NWARPS * WARP_SIZE) {
                 const int l = l0 + threadIdx.y * WARP_SIZE + threadIdx.x;
                 if (l < MMQ_X * MMQ_TILE_Y_K_LDS) {
                     const int c_in_tile = l / MMQ_TILE_Y_K_LDS;
                     const int intra     = l % MMQ_TILE_Y_K_LDS;
-                    const int token     = slot_token[c_in_tile];
-                    // Layout: y_int[(big_block * n_tokens + token) * sz + intra]
-                    tile_y[l] = y_int[((size_t) big_block * n_tokens + token) * sz_mmq_int + intra];
+                    const int pair      = slot_pair[c_in_tile];
+                    tile_y[l] = y_int[((size_t) big_block * n_pairs + pair) * sz_mmq_int + intra];
                 }
             }
         }
-
+        __syncthreads();
+        vec_dot_pass(x_qs, x_dm, x_sc, tile_y, sum, 0);
         __syncthreads();
 
-        vec_dot_pass(xg_qs, xg_dm, xg_sc, tile_y, sum_gate, /*k00=*/ 0);
-        vec_dot_pass(xu_qs, xu_dm, xu_sc, tile_y, sum_up,   /*k00=*/ 0);
-
-        __syncthreads();
-
-        // Y LDS load pass 2 (big_block = kb0 * 2 + 1).
         {
-            const int big_block = kb0 * (QK_K / (4 * QK8_1_FLAMBEAU)) + 1;  // = kb0 * 2 + 1
+            const int big_block = kb0 * (QK_K / (4 * QK8_1_FLAMBEAU)) + 1;
             #pragma unroll
             for (int l0 = 0; l0 < MMQ_X * MMQ_TILE_Y_K_LDS; l0 += NWARPS * WARP_SIZE) {
                 const int l = l0 + threadIdx.y * WARP_SIZE + threadIdx.x;
                 if (l < MMQ_X * MMQ_TILE_Y_K_LDS) {
                     const int c_in_tile = l / MMQ_TILE_Y_K_LDS;
                     const int intra     = l % MMQ_TILE_Y_K_LDS;
-                    const int token     = slot_token[c_in_tile];
-                    tile_y[l] = y_int[((size_t) big_block * n_tokens + token) * sz_mmq_int + intra];
+                    const int pair      = slot_pair[c_in_tile];
+                    tile_y[l] = y_int[((size_t) big_block * n_pairs + pair) * sz_mmq_int + intra];
                 }
             }
         }
-
         __syncthreads();
-
-        vec_dot_pass(xg_qs, xg_dm, xg_sc, tile_y, sum_gate, /*k00=*/ MMQ_TILE_NE_K);
-        vec_dot_pass(xu_qs, xu_dm, xu_sc, tile_y, sum_up,   /*k00=*/ MMQ_TILE_NE_K);
-
+        vec_dot_pass(x_qs, x_dm, x_sc, tile_y, sum, MMQ_TILE_NE_K);
         __syncthreads();
     }
 
-    // Writeback — dual outputs (gate + up).
     #pragma unroll
     for (int j0 = 0; j0 < MMQ_X; j0 += NWARPS) {
         const int j_local = j0 + threadIdx.y;
         const int pair    = slot_pair[j_local];
-
         #pragma unroll
         for (int i0 = 0; i0 < MMQ_Y; i0 += WARP_SIZE) {
             const int i = i0 + threadIdx.x;
@@ -343,8 +259,7 @@ void flambeau_indexed_moe_mmq_q4_k_gate_up_turbo_q8_1(
                 if (row < n_rows) {
                     const size_t out_idx = (size_t) pair * n_rows + row;
                     const int s = j0 / NWARPS * ((MMQ_Y + WARP_SIZE - 1) / WARP_SIZE) + i0 / WARP_SIZE;
-                    gate_out[out_idx] = sum_gate[s];
-                    up_out  [out_idx] = sum_up  [s];
+                    dst[out_idx] = sum[s];
                 }
             }
         }

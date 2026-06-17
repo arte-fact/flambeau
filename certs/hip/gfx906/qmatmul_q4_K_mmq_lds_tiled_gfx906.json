@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "impl_id": "qmatmul_q4_K_mmq_turbo_gfx906",
+  "impl_id": "qmatmul_q4_K_mmq_lds_tiled_gfx906",
   "backend": "hip",
   "arch": "gfx906",
   "op": "qmatmul_mmq",

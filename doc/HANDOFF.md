@@ -80,8 +80,8 @@ sm_86) is built and `feature/cuda-decouple` is pulled in.
 >   kernel-faithful reference — Q4_0 −8·ssum / Q4_1 +m·ssum / Q4_K super-block
 >   affine reusing `w_dequant` for the dot + decoding dmin/m from raw bytes; a
 >   `launch()` hook carries MMQ_X 64-or-16 + LDS 30336-or-21824 B). `--dtype
->   Q4_{0,1}_mmq_4warp_lds` / `Q4_K_mmq_turbo`. impl_ids
->   `qmatmul_q4_{0,1}_mmq_4warp_lds` / `qmatmul_q4_k_mmq_turbo`.
+>   Q4_{0,1}_mmq_4warp_lds` / `Q4_K_mmq_lds_tiled`. impl_ids
+>   `qmatmul_q4_{0,1}_mmq_4warp_lds` / `qmatmul_q4_k_mmq_lds_tiled`.
 > - **Orphan:** `quantize_f16_q8_1_mmq.cu` (F16-activation DS4 quantizer) is the
 >   last un-templated dense `.cu` — no consumer (only an F16 turbo path would use
 >   it). Template it (same recipe as `quantize_q8_1_mmq.cuh`) if/when that lands.
@@ -263,7 +263,7 @@ sm_86) is built and `feature/cuda-decouple` is pulled in.
 >    Q5_K/Q2_K/Q3_K/Q8_K (own bodies, port from the hand `mmq_<dt>_wave64.cu` the
 >    same mechanical way — WARP_SIZE→MMQ_Y, dp4a, load_int_b2) + **IQ\***. Then the
 >    genuinely-hard
->    **4-warp LDS-tiled** kernels (`mmq_q8_0_4warp` / `mmq_q4_K_turbo`, real LDS
+>    **4-warp LDS-tiled** kernels (`mmq_q8_0_4warp` / `mmq_q4_K_lds_tiled`, real LDS
 >    tiling + cp.async-vs-prefetch seaming — the prefill perf lever).
 > 1. **Genericize `sweep_mmq.rs` over `BenchBackend`** (`run_sweep<B>`/
 >    `run_shape<B>`/`capture_static_pmc<B>` — currently HIP-bound via `HipDevice`/
@@ -272,7 +272,7 @@ sm_86) is built and `feature/cuda-decouple` is pulled in.
 >    test = HIP certs unchanged). The additive oracle path proved the harness
 >    primitives; this folds mmq proper onto them.
 > 2. **Template the real kernels** — `mmq_<dt>_wave64` (single-pass tiled) then
->    the 4-warp LDS-tiled (`mmq_q8_0_4warp` / `mmq_q4_K_turbo`, the gold-standard
+>    the 4-warp LDS-tiled (`mmq_q8_0_4warp` / `mmq_q4_K_lds_tiled`, the gold-standard
 >    prefill lever per CLAUDE.md). These are **heavily wave64-LDS** → expect a
 >    warp-restructure per kernel (the roadmap's "two tiling skeletons"; cp.async
 >    on CUDA vs prefetch on HIP, seamed). NOT one-session ports.

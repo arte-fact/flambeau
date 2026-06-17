@@ -3021,21 +3021,21 @@ impl Mmq4WarpLdsDtype {
         match self {
             Mmq4WarpLdsDtype::Q4_0 => "mmq_q4_0_4warp_lds",
             Mmq4WarpLdsDtype::Q4_1 => "mmq_q4_1_4warp_lds",
-            Mmq4WarpLdsDtype::Q4K => "mmq_q4_K_turbo",
+            Mmq4WarpLdsDtype::Q4K => "mmq_q4_K_lds_tiled",
         }
     }
     fn kernel_entry(self) -> &'static str {
         match self {
             Mmq4WarpLdsDtype::Q4_0 => "flambeau_mmq_q4_0_4warp_lds_q8_1",
             Mmq4WarpLdsDtype::Q4_1 => "flambeau_mmq_q4_1_4warp_lds_q8_1",
-            Mmq4WarpLdsDtype::Q4K => "flambeau_mmq_q4_K_turbo_q8_1",
+            Mmq4WarpLdsDtype::Q4K => "flambeau_mmq_q4_K_lds_tiled_q8_1",
         }
     }
     fn impl_id(self) -> &'static str {
         match self {
             Mmq4WarpLdsDtype::Q4_0 => "qmatmul_q4_0_mmq_4warp_lds",
             Mmq4WarpLdsDtype::Q4_1 => "qmatmul_q4_1_mmq_4warp_lds",
-            Mmq4WarpLdsDtype::Q4K => "qmatmul_q4_k_mmq_turbo",
+            Mmq4WarpLdsDtype::Q4K => "qmatmul_q4_k_mmq_lds_tiled",
         }
     }
     /// (MMQ_X cols/block, dynamic-LDS bytes). MMQ_Y is 128 for all.

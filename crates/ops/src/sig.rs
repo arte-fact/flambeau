@@ -695,13 +695,13 @@ pub struct PenaltyKnobs {
 }
 
 // ---------------------------------------------------------------------------
-// MoE Q4_K turbo aggregates — used by `indexed_moe_mmq_q4_k_*_turbo` and the
-// bucket-sorted `indexed_moe_mmq_q4_k` paths.
+// MoE Q4_K LDS-tiled aggregates — used by `indexed_moe_mmq_q4_k_*_lds_tiled`
+// and the bucket-sorted `indexed_moe_mmq_q4_k` paths.
 // ---------------------------------------------------------------------------
 
-/// Buffers for [`Ops::indexed_moe_mmq_q4_k_gate_up_turbo`].
+/// Buffers for [`Ops::indexed_moe_mmq_q4_k_gate_up_lds_tiled`].
 #[derive(Copy, Clone, Debug)]
-pub struct MoeMmqQ4KGateUpTurboBuffers {
+pub struct MoeMmqQ4KGateUpLdsTiledBuffers {
     pub gate_w: DevicePtr,
     pub up_w: DevicePtr,
     pub y_mmq: DevicePtr,
@@ -712,9 +712,9 @@ pub struct MoeMmqQ4KGateUpTurboBuffers {
     pub up_out: DevicePtr,
 }
 
-/// Buffers for [`Ops::indexed_moe_mmq_q4_k_down_turbo`].
+/// Buffers for [`Ops::indexed_moe_mmq_q4_k_down_lds_tiled`].
 #[derive(Copy, Clone, Debug)]
-pub struct MoeMmqQ4KDownTurboBuffers {
+pub struct MoeMmqQ4KDownLdsTiledBuffers {
     pub down_w: DevicePtr,
     pub y_mmq: DevicePtr,
     pub expert_ids: DevicePtr,

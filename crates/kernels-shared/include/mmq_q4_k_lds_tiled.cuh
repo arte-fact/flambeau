@@ -1,8 +1,7 @@
 #pragma once
-// Templated Q4_K 4-warp LDS-tiled MMQ (turbo prefill kernel), DS4 144-B
+// Templated Q4_K 4-warp LDS-tiled MMQ (the prefill kernel), DS4 144-B
 // activation. MMQ_Y=128 weight rows × MMQ_X=16 activation cols, double-buffered
-// Y per half-super-block. Port of llamacpp-turbo's load_tiles_q4_K /
-// vec_dot_q4_K_q8_1_impl_mmq. Same logical-lanes structure as the Q4_0/Q4_1
+// Y per half-super-block. Same logical-lanes structure as the Q4_0/Q4_1
 // 4warp_lds (the "wave64" is a logical 64-wide tile — LDS + __syncthreads only,
 // NO __shfl — so block (LANES, NWARPS)=(64,4) is correct on wave64 AND wave32).
 // Backend-neutral: `dp4a` from the shared headers; the half2 (d,dmin)/(d_y,Σx)
@@ -15,7 +14,7 @@
 #define MMQ_LDS_LANES 64
 #endif
 
-// Turbo's unpack_scales_q45_K — 8 packed 6-bit (scale, min) → int32 lane.
+// unpack_scales_q45_K — 8 packed 6-bit (scale, min) → int32 lane.
 static __device__ __forceinline__ int flambeau_unpack_scales_q45_K(const int* scales, int ksc) {
     return ((scales[(ksc % 2) + (ksc != 0)] >> (4 * (ksc & (ksc / 2)))) & 0x0F0F0F0F)
          | ((scales[ksc / 2]               >> (2 * (ksc % 2)))          & 0x30303030);
@@ -49,7 +48,7 @@ static __device__ __forceinline__ float flambeau_vec_dot_q4_k_mmq(
 }
 
 template<int MMQ_X, int MMQ_Y, int NWARPS, class OutT = float>
-static __device__ __forceinline__ void mmq_q4_k_turbo_row(
+static __device__ __forceinline__ void mmq_q4_k_lds_tiled_row(
     const void* __restrict__ vx,
     const void* __restrict__ vy,
     OutT* __restrict__ dst,
@@ -116,7 +115,7 @@ static __device__ __forceinline__ void mmq_q4_k_turbo_row(
                     x_dm[i * 2 + 1] = bxi->dmin;
                 }
             }
-            // Scales pass: 8 int32/row (turbo layout).
+            // Scales pass: 8 int32/row (LDS-tiled layout).
             constexpr int rows_per_warp_sc = LANES / 4;   // 16
             #pragma unroll
             for (int i0 = 0; i0 < MMQ_Y; i0 += NWARPS * rows_per_warp_sc) {

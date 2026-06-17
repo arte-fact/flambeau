@@ -1607,7 +1607,7 @@ fn mmq_lds_x64_params(stem: &str) -> Result<(u32, u32)> {
         // Q4_K turbo: MMQ_Y=128, MMQ_X=16, block_elems=256 (QK_K). LDS:
         // tile_y(MMQ_X*36=576) + x_qs(4224) + x_dm(128 half2=128 ints) +
         // x_sc(528) = 5456 ints = 21824 B; round up to 22528 B.
-        "mmq_q4_K_turbo" => (256, 22528),
+        "mmq_q4_K_lds_tiled" => (256, 22528),
         other => bail!("mmq_lds_x64_params: no entry for stem {other}"),
     })
 }
@@ -2274,13 +2274,13 @@ impl Recipe {
             // MMQ_X=16, NWARPS=4 → 256 threads per (64, 4, 1) block. Promoted
             // to default at m≥128 (Q4_K wave64 owns m=32..127 below). Dynamic
             // LDS = 22528 B; weight block = QK_K = 256 elems.
-            "qmatmul_q4_K_mmq_turbo_gfx906" => Self {
+            "qmatmul_q4_K_mmq_lds_tiled_gfx906" => Self {
                 kind: RecipeKind::MmqLdsX64,
-                stem: "mmq_q4_K_turbo",
-                entry: "flambeau_mmq_q4_K_turbo_q8_1",
+                stem: "mmq_q4_K_lds_tiled",
+                entry: "flambeau_mmq_q4_K_lds_tiled_q8_1",
                 threads: 0, // unused for MmqLdsX64
                 rows_per_block: 0,
-                // MMQ_Y=128, MMQ_X=16 (must match mmq_q4_K_turbo.cu).
+                // MMQ_Y=128, MMQ_X=16 (must match mmq_q4_K_lds_tiled.cu).
                 mmq_tile: (128, 16),
             },
             "qmatmul_q4_K_mmq_wave64_gfx906" => Self {

@@ -922,15 +922,15 @@ pub trait Ops {
         shape: MoeShape,
     ) -> Result<()>;
 
-    fn indexed_moe_mmq_q4_k_gate_up_turbo(
+    fn indexed_moe_mmq_q4_k_gate_up_lds_tiled(
         &self,
-        bufs: crate::MoeMmqQ4KGateUpTurboBuffers,
+        bufs: crate::MoeMmqQ4KGateUpLdsTiledBuffers,
         shape: MoeShape,
     ) -> Result<()>;
 
-    fn indexed_moe_mmq_q4_k_down_turbo(
+    fn indexed_moe_mmq_q4_k_down_lds_tiled(
         &self,
-        bufs: crate::MoeMmqQ4KDownTurboBuffers,
+        bufs: crate::MoeMmqQ4KDownLdsTiledBuffers,
         shape: MoeShape,
     ) -> Result<()>;
 

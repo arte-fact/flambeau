@@ -1207,7 +1207,7 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     "Q5_1" | "Q5_1_wave64" => (vec![MmqDtype::Q5_1Wave64], SweepSpec::v1_4_prefill),
                     "Q4_K" | "Q4_K_4warp" => (vec![MmqDtype::Q4K4Warp], SweepSpec::v1_4_prefill),
                     "Q4_K_wave64" => (vec![MmqDtype::Q4KWave64], SweepSpec::v1_4_prefill),
-                    "Q4_K_turbo" => (vec![MmqDtype::Q4KTurbo], SweepSpec::v1_4_prefill),
+                    "Q4_K_lds_tiled" => (vec![MmqDtype::Q4KLdsTiled], SweepSpec::v1_4_prefill),
                     "Q5_K" | "Q5_K_wave64" => (vec![MmqDtype::Q5KWave64], SweepSpec::v1_4_prefill),
                     "Q6_K" | "Q6_K_4warp" => (vec![MmqDtype::Q6K4Warp], SweepSpec::v1_4_prefill),
                     "Q6_K_wave64" => (vec![MmqDtype::Q6KWave64], SweepSpec::v1_4_prefill),
@@ -1274,7 +1274,7 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                             | MmqDtype::Q4_04Warp
                             | MmqDtype::Q5_0Wave64
                             | MmqDtype::Q5_1Wave64
-                            | MmqDtype::Q4KTurbo
+                            | MmqDtype::Q4KLdsTiled
                             | MmqDtype::Q4K4Warp
                             | MmqDtype::Q4KWave64
                             | MmqDtype::Q5KWave64
@@ -1538,7 +1538,7 @@ fn mmq_4warp_lds_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::Mmq4Wa
     match dtype {
         "Q4_0_mmq_4warp_lds" => Some(Mmq4WarpLdsDtype::Q4_0),
         "Q4_1_mmq_4warp_lds" => Some(Mmq4WarpLdsDtype::Q4_1),
-        "Q4_K_mmq_turbo" => Some(Mmq4WarpLdsDtype::Q4K),
+        "Q4_K_mmq_lds_tiled" => Some(Mmq4WarpLdsDtype::Q4K),
         _ => None,
     }
 }

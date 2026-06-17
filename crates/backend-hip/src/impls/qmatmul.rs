@@ -346,13 +346,13 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         // MMQ_X=16, double-buffered Y LDS per super-block. Owns m >= 128; the
         // wave64 row below covers m = 32..127. Static dispatch is first-match
         // — keep this entry ABOVE the wave64 row (lesson).
-        impl_id: "qmatmul_q4_K_mmq_turbo_gfx906",
+        impl_id: "qmatmul_q4_K_mmq_lds_tiled_gfx906",
         backend: "hip",
         arch: "gfx906",
         dtype_weight: QDtype::Q4_K,
         dtype_activation: QDtype::Q8_1,
         m_range: (128, usize::MAX),
-        cert_rel_path: "certs/hip/gfx906/qmatmul_q4_K_mmq_turbo_gfx906.json",
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q4_K_mmq_lds_tiled_gfx906.json",
     },
     KernelDescriptor {
         op_name: "QMatMul",

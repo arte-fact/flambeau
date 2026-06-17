@@ -1672,20 +1672,20 @@ impl<'a> Ops for HipOps<'a> {
         )
     }
 
-    fn indexed_moe_mmq_q4_k_gate_up_turbo(
+    fn indexed_moe_mmq_q4_k_gate_up_lds_tiled(
         &self,
-        bufs: crate::MoeMmqQ4KGateUpTurboBuffers,
+        bufs: crate::MoeMmqQ4KGateUpLdsTiledBuffers,
         shape: MoeShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmq_q4_k_gate_up_turbo(self.ctx(), bufs, shape)
+        super::moe::indexed_moe_mmq_q4_k_gate_up_lds_tiled(self.ctx(), bufs, shape)
     }
 
-    fn indexed_moe_mmq_q4_k_down_turbo(
+    fn indexed_moe_mmq_q4_k_down_lds_tiled(
         &self,
-        bufs: crate::MoeMmqQ4KDownTurboBuffers,
+        bufs: crate::MoeMmqQ4KDownLdsTiledBuffers,
         shape: MoeShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmq_q4_k_down_turbo(self.ctx(), bufs, shape)
+        super::moe::indexed_moe_mmq_q4_k_down_lds_tiled(self.ctx(), bufs, shape)
     }
 
     fn indexed_moe_mmq_q5_k_down_tile8(
