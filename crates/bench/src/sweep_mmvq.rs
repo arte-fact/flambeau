@@ -2088,6 +2088,8 @@ pub enum MoeMmvqDtype {
     Q4_1,
     Q5_0,
     Q5_1,
+    Q4KR2,
+    Q4KR4,
 }
 
 impl MoeMmvqDtype {
@@ -2098,6 +2100,7 @@ impl MoeMmvqDtype {
             MoeMmvqDtype::Q4_1 => "Q4_1",
             MoeMmvqDtype::Q5_0 => "Q5_0",
             MoeMmvqDtype::Q5_1 => "Q5_1",
+            MoeMmvqDtype::Q4KR2 | MoeMmvqDtype::Q4KR4 => "Q4_K",
         }
     }
     fn weight_dtype(self) -> Dtype {
@@ -2107,6 +2110,7 @@ impl MoeMmvqDtype {
             MoeMmvqDtype::Q4_1 => Dtype::Q4_1Dp4a,
             MoeMmvqDtype::Q5_0 => Dtype::Q5_0,
             MoeMmvqDtype::Q5_1 => Dtype::Q5_1,
+            MoeMmvqDtype::Q4KR2 | MoeMmvqDtype::Q4KR4 => Dtype::Q4K,
         }
     }
     fn impl_id(self) -> &'static str {
@@ -2116,6 +2120,8 @@ impl MoeMmvqDtype {
             MoeMmvqDtype::Q4_1 => "indexed_moe_mmvq_q4_1",
             MoeMmvqDtype::Q5_0 => "indexed_moe_mmvq_q5_0",
             MoeMmvqDtype::Q5_1 => "indexed_moe_mmvq_q5_1",
+            MoeMmvqDtype::Q4KR2 => "indexed_moe_mmvq_q4_k_r2",
+            MoeMmvqDtype::Q4KR4 => "indexed_moe_mmvq_q4_k_r4",
         }
     }
     fn kernel_stem(self) -> &'static str {
@@ -2125,6 +2131,8 @@ impl MoeMmvqDtype {
             MoeMmvqDtype::Q4_1 => "indexed_moe_mmvq_q4_1",
             MoeMmvqDtype::Q5_0 => "indexed_moe_mmvq_q5_0",
             MoeMmvqDtype::Q5_1 => "indexed_moe_mmvq_q5_1",
+            MoeMmvqDtype::Q4KR2 => "indexed_moe_mmvq_q4_k_r2_dp4a",
+            MoeMmvqDtype::Q4KR4 => "indexed_moe_mmvq_q4_k_r4_dp4a",
         }
     }
     fn kernel_entry(self) -> &'static str {
@@ -2134,10 +2142,13 @@ impl MoeMmvqDtype {
             MoeMmvqDtype::Q4_1 => "flambeau_indexed_moe_mmvq_q4_1_q8_1",
             MoeMmvqDtype::Q5_0 => "flambeau_indexed_moe_mmvq_q5_0_q8_1",
             MoeMmvqDtype::Q5_1 => "flambeau_indexed_moe_mmvq_q5_1_q8_1",
+            MoeMmvqDtype::Q4KR2 => "flambeau_indexed_moe_mmvq_q4_k_r2_dp4a_q8_1",
+            MoeMmvqDtype::Q4KR4 => "flambeau_indexed_moe_mmvq_q4_k_r4_dp4a_q8_1",
         }
     }
     /// (threads/block, rows/block). Plain per-row kernels own one output row per
-    /// block; the r2 family (added later) owns two, shrinking grid.x by 2.
+    /// block (256t); the r2/r4 K-quant kernels are one wave64 (64t) computing
+    /// 2 / 4 output rows, shrinking grid.x by that factor.
     fn launch(self) -> (u32, u32) {
         match self {
             MoeMmvqDtype::Q8_0
@@ -2145,6 +2156,8 @@ impl MoeMmvqDtype {
             | MoeMmvqDtype::Q4_1
             | MoeMmvqDtype::Q5_0
             | MoeMmvqDtype::Q5_1 => (256, 1),
+            MoeMmvqDtype::Q4KR2 => (64, 2),
+            MoeMmvqDtype::Q4KR4 => (64, 4),
         }
     }
 }

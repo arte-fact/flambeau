@@ -1538,6 +1538,8 @@ fn moe_mmvq_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::MoeMmvqDtyp
         "Q4_1_moe_mmvq" => Some(MoeMmvqDtype::Q4_1),
         "Q5_0_moe_mmvq" => Some(MoeMmvqDtype::Q5_0),
         "Q5_1_moe_mmvq" => Some(MoeMmvqDtype::Q5_1),
+        "Q4_K_r2_moe_mmvq" => Some(MoeMmvqDtype::Q4KR2),
+        "Q4_K_r4_moe_mmvq" => Some(MoeMmvqDtype::Q4KR4),
         _ => None,
     }
 }
