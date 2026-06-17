@@ -3,10 +3,31 @@
 Transient working note. Start here when the dev rig (2× MI50 gfx906 + 1× RTX 3090
 sm_86) is built and `feature/cuda-decouple` is pulled in.
 
-> **CURRENT STATUS (2026-06-17, tip `58f52f0`): mmvq COMPLETE; the ENTIRE dense
-> mmq family COMPLETE (single-pass wave64 + tile16 + F16 + standard-Q8_1 4warp +
-> DS4 4warp_lds Q4_0/Q4_1/Q4_K-turbo) — all templated cross-backend. Only P2d
-> indexed_moe remains.** cert-check green hip 82 / cuda 20 throughout.
+> **CURRENT STATUS (2026-06-17, tip `8d91b12`): dense mmvq + ENTIRE dense mmq
+> family COMPLETE cross-backend. P2d indexed_moe STARTED — the plain-row MMVQ
+> family (Q8_0 pilot + Q4_0/Q4_1/Q5_0/Q5_1) is DONE cross-backend.** cert-check
+> green hip 82 / cuda 20 throughout.
+> - **P2d plain-row indexed-MoE MMVQ — DONE.** Foundational
+>   `indexed_moe_mmvq.cuh` skeleton (`indexed_moe_mmvq_row` /
+>   `indexed_moe_mmvq_vdr_row` / `indexed_moe_mmvq_nrow_row`), the MoE sibling of
+>   `mmvq.cuh`: identical inner product (`quant_traits<Q>::partial`/`partial_vdr`
+>   + the warp-agnostic `mmvq_reduce_store` family), only the addressing differs
+>   (weight row by `expert_ids[token,slot]`, per-token activation `y[token,:]`,
+>   output `dst[token,slot,row]`; grid (n_rows, n_tokens*top_k, 1)). Q8_0
+>   (`f976831`, 256t VDR=2) + Q4_0/Q4_1/Q5_0/Q5_1 (`8d91b12`, plain
+>   `indexed_moe_mmvq_row<Q,256>` re-instantiation, zero new C++). Stems/entries
+>   kept identical to the ops launchers (`crates/ops/src/hip/moe.rs`) →
+>   ops/runtime untouched; hand `.cu` retired; neutral bench-reference impl_ids
+>   `indexed_moe_mmvq_<dt>`. Harness `MoeMmvqDtype` / `run_moe_mmvq_sweep<B>` /
+>   `run_shape_moe_mmvq<B>` in `sweep_mmvq.rs` (8-arg ABI, expert-routed
+>   reference); `--dtype <dt>_moe_mmvq`. HIP↔CUDA errs match ~1e-7 (reduce
+>   lane-order, same as dense mmvq).
+> - **NEXT in P2d:** the K-quant r2_dp4a MoE MMVQ (Q4_K r2/r4, Q5_K, Q6_K, Q2_K,
+>   Q3_K) — own super-block bodies (not `quant_traits::partial`), the multi-row
+>   64-thread pattern (`indexed_moe_mmvq_nrow_row` is the reduce shape; bodies
+>   mirror the dense `mmvq_q{4,5,6,2,3}_k.cuh`). Then the gate_up MMVQ fusion
+>   variants, then the 40 `*_tile8_dp4a` + `*_turbo` MMQ kernels (DS4 logical-
+>   lanes playbook from the dense 4warp_lds work carries over).
 > - **DS4 4-warp_lds — Q4_0 (`3867eab`) + Q4_1 (`2ce63cc`) + Q4_K turbo
 >   (`58f52f0`) DONE.** The hardest sub-family (MMQ_Y=128, DS4 144-B activation,
 >   dynamic LDS, double-buffered Y). **The breakthrough: the hand kernels'
