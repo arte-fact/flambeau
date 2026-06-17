@@ -2300,16 +2300,65 @@ fn run_shape_mmq_4warp<B: BenchBackend>(
     Ok((got, reference))
 }
 
-/// Q4_0 DS4 4-warp_lds MMQ. Consumes the 144-B `block_q8_1_mmq` activation
+/// DS4 4-warp_lds MMQ kernels. Consume the 144-B `block_q8_1_mmq` activation
 /// (produced by the DS4 quantizer), MMQ_Y=128 × MMQ_X=64 tile, dynamic LDS,
 /// 9-arg ABI with explicit Y/X strides.
-pub fn run_mmq_4warp_lds_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) -> Result<Cert> {
+#[derive(Clone, Copy)]
+pub enum Mmq4WarpLdsDtype {
+    Q4_0,
+    Q4_1,
+}
+
+impl Mmq4WarpLdsDtype {
+    pub fn name(self) -> &'static str {
+        match self {
+            Mmq4WarpLdsDtype::Q4_0 => "Q4_0",
+            Mmq4WarpLdsDtype::Q4_1 => "Q4_1",
+        }
+    }
+    fn weight_dtype(self) -> Dtype {
+        match self {
+            Mmq4WarpLdsDtype::Q4_0 => Dtype::Q4_0,
+            Mmq4WarpLdsDtype::Q4_1 => Dtype::Q4_1Dp4a,
+        }
+    }
+    fn block_bytes(self) -> usize {
+        match self {
+            Mmq4WarpLdsDtype::Q4_0 => 18,
+            Mmq4WarpLdsDtype::Q4_1 => 20,
+        }
+    }
+    fn kernel_stem(self) -> &'static str {
+        match self {
+            Mmq4WarpLdsDtype::Q4_0 => "mmq_q4_0_4warp_lds",
+            Mmq4WarpLdsDtype::Q4_1 => "mmq_q4_1_4warp_lds",
+        }
+    }
+    fn kernel_entry(self) -> &'static str {
+        match self {
+            Mmq4WarpLdsDtype::Q4_0 => "flambeau_mmq_q4_0_4warp_lds_q8_1",
+            Mmq4WarpLdsDtype::Q4_1 => "flambeau_mmq_q4_1_4warp_lds_q8_1",
+        }
+    }
+    fn impl_id(self) -> &'static str {
+        match self {
+            Mmq4WarpLdsDtype::Q4_0 => "qmatmul_q4_0_mmq_4warp_lds",
+            Mmq4WarpLdsDtype::Q4_1 => "qmatmul_q4_1_mmq_4warp_lds",
+        }
+    }
+}
+
+pub fn run_mmq_4warp_lds_sweep<B: BenchBackend>(
+    dtype: Mmq4WarpLdsDtype,
+    repo_root: &Path,
+    arch: &str,
+) -> Result<Cert> {
     let dev = B::new_device(0)?;
     let pmc = {
-        let bytes = B::image("mmq_q4_0_4warp_lds")
-            .ok_or_else(|| anyhow!("mmq_q4_0_4warp_lds not compiled"))?;
+        let bytes = B::image(dtype.kernel_stem())
+            .ok_or_else(|| anyhow!("{} not compiled", dtype.kernel_stem()))?;
         let module = B::load(&dev, bytes)?;
-        let kernel = B::kernel(&module, "flambeau_mmq_q4_0_4warp_lds_q8_1")?;
+        let kernel = B::kernel(&module, dtype.kernel_entry())?;
         B::attributes(&kernel)?
     };
 
@@ -2328,7 +2377,7 @@ pub fn run_mmq_4warp_lds_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) ->
                     .wrapping_add((n_rows as u64).wrapping_mul(0x1234567))
                     .wrapping_add((n_cols as u64).wrapping_mul(0x85EBCA6B))
                     .wrapping_add((k as u64).wrapping_mul(0x9E3779B97F4A7C15));
-                let (got, reference) = run_shape_mmq_4warp_lds::<B>(&dev, n_rows, n_cols, k, s)?;
+                let (got, reference) = run_shape_mmq_4warp_lds::<B>(&dev, dtype, n_rows, n_cols, k, s)?;
                 let max_rel_err = max_rel_err_with_floor(&got, &reference, (k as f32).sqrt());
                 let tolerance = cert_tol(k);
                 results.push(ShapeResult {
@@ -2347,11 +2396,11 @@ pub fn run_mmq_4warp_lds_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) ->
     let pass = results.iter().all(|r| r.pass);
     let cert = Cert {
         schema_version: SCHEMA_VERSION,
-        impl_id: "qmatmul_q4_0_mmq_4warp_lds".to_string(),
+        impl_id: dtype.impl_id().to_string(),
         backend: dev.backend().to_string(),
         arch: arch.to_string(),
         op: "qmatmul_mmq".to_string(),
-        dtype_weight: "Q4_0".to_string(),
+        dtype_weight: dtype.name().to_string(),
         dtype_activation: "Q8_1_MMQ".to_string(),
         tolerance_formula: "|err| <= 3e-2 * max(|ref|, sqrt(k))".to_string(),
         results,
@@ -2367,6 +2416,7 @@ pub fn run_mmq_4warp_lds_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) ->
 #[allow(clippy::undocumented_unsafe_blocks)]
 fn run_shape_mmq_4warp_lds<B: BenchBackend>(
     dev: &B::Device,
+    dtype: Mmq4WarpLdsDtype,
     n_rows: usize,
     n_cols: usize,
     k: usize,
@@ -2375,16 +2425,17 @@ fn run_shape_mmq_4warp_lds<B: BenchBackend>(
     assert_eq!(k % 256, 0, "k {k} must be a multiple of ITER_K (256)");
     let q_bytes = B::image("quantize_q8_1_mmq")
         .ok_or_else(|| anyhow!("quantize_q8_1_mmq not compiled"))?;
-    let m_bytes = B::image("mmq_q4_0_4warp_lds")
-        .ok_or_else(|| anyhow!("mmq_q4_0_4warp_lds not compiled"))?;
+    let m_bytes = B::image(dtype.kernel_stem())
+        .ok_or_else(|| anyhow!("{} not compiled", dtype.kernel_stem()))?;
     let q_module = B::load(dev, q_bytes)?;
     let m_module = B::load(dev, m_bytes)?;
     let k_quantize = B::kernel(&q_module, "flambeau_quantize_q8_1_mmq")?;
-    let k_mmq = B::kernel(&m_module, "flambeau_mmq_q4_0_4warp_lds_q8_1")?;
+    let k_mmq = B::kernel(&m_module, dtype.kernel_entry())?;
 
-    let wd = Dtype::Q4_0;
+    let wd = dtype.weight_dtype();
     let block_elems = wd.block_elem_count();
     let block_bytes = wd.block_size_bytes();
+    let bb_stride = dtype.block_bytes();
     let n_blocks = k / block_elems;
     let weights_raw = tame_scales(wd, seeded_bytes(seed, n_rows * n_blocks * block_bytes));
     let mut w_dequant = vec![0.0f32; n_rows * k];
@@ -2470,14 +2521,15 @@ fn run_shape_mmq_4warp_lds<B: BenchBackend>(
         dev.dealloc(d_dst, n_cols * n_rows * 4)?;
     }
 
-    // Reference: kernel-faithful. Per 32-elem block the kernel computes
-    // d_x·(d_y·sumi − 8·ssum) where d_x = Q4_0 block scale, d_y = amax/127 over
-    // the activation sub-block, q8 = round(x/d_y), sumi = Σ q_raw·q8 (raw nibble
-    // 0..15, NOT q−8), and ssum = Σx (raw activation sum). Weight d_x + nibbles
-    // decoded from the raw Q4_0 bytes (18 B/block: fp16 d, 16 B qs; GGML element
-    // order — low nibble = e<16, high nibble = e+16). The bias −8 is carried by
-    // −8·ssum, matching the DS4 dot identity.
+    // Reference: kernel-faithful. Per 32-elem block, sumi = Σ q_raw·q8 (raw
+    // nibble 0..15, NOT q−8), d_y = amax/127 over the activation sub-block,
+    // q8 = round(x/d_y), ssum = Σx (raw activation sum). Q4_0 block (bb_stride 18:
+    // fp16 d, qs) → d_x·(d_y·sumi − 8·ssum); Q4_1 block (20: fp16 d, fp16 m, qs)
+    // → d_x·d_y·sumi + m_x·ssum. Weight d_x/m_x + nibbles decoded from the raw
+    // bytes (GGML element order — low nibble e<16, high nibble e+16).
     let _ = &w_dequant;
+    let is_q4_1 = matches!(dtype, Mmq4WarpLdsDtype::Q4_1);
+    let qs_off = if is_q4_1 { 4 } else { 2 };
     let mut reference = vec![0.0f32; n_cols * n_rows];
     for c in 0..n_cols {
         let col = &act_f32[c * k..(c + 1) * k];
@@ -2488,11 +2540,16 @@ fn run_shape_mmq_4warp_lds<B: BenchBackend>(
                 let amax = xs.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
                 let d_y = amax / 127.0;
                 let ssum: f32 = xs.iter().sum();
-                let bb = (row * n_blocks + blk) * 18;
+                let bb = (row * n_blocks + blk) * bb_stride;
                 let d_x = f16::from_le_bytes([weights_raw[bb], weights_raw[bb + 1]]).to_f32();
+                let m_x = if is_q4_1 {
+                    f16::from_le_bytes([weights_raw[bb + 2], weights_raw[bb + 3]]).to_f32()
+                } else {
+                    0.0
+                };
                 let mut sumi = 0i64;
                 for e in 0..32usize {
-                    let byte = weights_raw[bb + 2 + (e & 15)] as i32;
+                    let byte = weights_raw[bb + qs_off + (e & 15)] as i32;
                     let q_raw = if e < 16 { byte & 0x0F } else { byte >> 4 };
                     let q8 = if d_y != 0.0 {
                         (xs[e] / d_y).round().clamp(-127.0, 127.0) as i64
@@ -2501,7 +2558,11 @@ fn run_shape_mmq_4warp_lds<B: BenchBackend>(
                     };
                     sumi += q_raw as i64 * q8;
                 }
-                acc += d_x as f64 * (d_y as f64 * sumi as f64 - 8.0 * ssum as f64);
+                acc += if is_q4_1 {
+                    d_x as f64 * d_y as f64 * sumi as f64 + m_x as f64 * ssum as f64
+                } else {
+                    d_x as f64 * (d_y as f64 * sumi as f64 - 8.0 * ssum as f64)
+                };
             }
             reference[c * n_rows + row] = acc as f32;
         }

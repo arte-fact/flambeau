@@ -1041,13 +1041,14 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     );
                     return Ok(());
                 }
-                if dtype == "Q4_0_mmq_4warp_lds" {
+                if let Some(ld) = mmq_4warp_lds_dtype(dtype) {
                     use flambeau_bench::sweep_mmvq::run_mmq_4warp_lds_sweep;
                     let root = repo_root();
                     let cert =
-                        run_mmq_4warp_lds_sweep::<flambeau_bench::backend::Hip>(&root, arch)?;
+                        run_mmq_4warp_lds_sweep::<flambeau_bench::backend::Hip>(ld, &root, arch)?;
                     println!(
-                        "sweep qmatmul_mmq_4warp_lds (Q4_0): pass={} shapes={} rig={}",
+                        "sweep qmatmul_mmq_4warp_lds ({}): pass={} shapes={} rig={}",
+                        ld.name(),
                         cert.pass,
                         cert.results.len(),
                         cert.rig
@@ -1506,6 +1507,15 @@ fn mmq_4warp_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::Mmq4WarpDt
     }
 }
 
+fn mmq_4warp_lds_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::Mmq4WarpLdsDtype> {
+    use flambeau_bench::sweep_mmvq::Mmq4WarpLdsDtype;
+    match dtype {
+        "Q4_0_mmq_4warp_lds" => Some(Mmq4WarpLdsDtype::Q4_0),
+        "Q4_1_mmq_4warp_lds" => Some(Mmq4WarpLdsDtype::Q4_1),
+        _ => None,
+    }
+}
+
 fn f16_sweep_kind(dtype: &str) -> Option<flambeau_bench::sweep_mmvq_f16::F16SweepKind> {
     use flambeau_bench::sweep_mmvq_f16::F16SweepKind;
     match dtype {
@@ -1598,11 +1608,12 @@ fn sweep_cuda(op: &str, dtype: &str) -> Result<()> {
         );
         return Ok(());
     }
-    if dtype == "Q4_0_mmq_4warp_lds" {
+    if let Some(ld) = mmq_4warp_lds_dtype(dtype) {
         use flambeau_bench::sweep_mmvq::run_mmq_4warp_lds_sweep;
-        let cert = run_mmq_4warp_lds_sweep::<Cuda>(&repo_root(), "sm_86")?;
+        let cert = run_mmq_4warp_lds_sweep::<Cuda>(ld, &repo_root(), "sm_86")?;
         println!(
-            "sweep qmatmul_mmq_4warp_lds (Q4_0): pass={} shapes={} rig={}",
+            "sweep qmatmul_mmq_4warp_lds ({}): pass={} shapes={} rig={}",
+            ld.name(),
             cert.pass,
             cert.results.len(),
             cert.rig
