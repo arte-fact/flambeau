@@ -113,10 +113,19 @@ sm_86) is built and `feature/cuda-decouple` is pulled in.
 >     reference). Both BIT-IDENTICAL (max_rel_err ≤0.015). **The ENTIRE P2d
 >     indexed-MoE MMQ surface (MMVQ + tile8 simple/K-quant/IQ\* + Q4_K
 >     lds_tiled) is now cross-backend.**
-> - **NEXT in P2d — cleanup only:** 9 orphan plain (scalar) IQ MoE `.cu` (ops
->   only calls `_r2_dp4a` — `cfg(unverified)`/delete candidates), 4 orphan q4_k
->   gate_up mmvq variants (`_dp4a`/`_r2_dp4a`/`_r4_dp4a`/`_r8_dp4a`),
->   `quantize_f16_q8_1_mmq.cu`. After that P2d is structurally complete.
+>   - **P2d cleanup DONE** (`58d73b0`): removed 12 dead hand kernels + 1 stale
+>     test + their `KERNEL_STEMS` entries — 9 scalar `indexed_moe_mmvq_iq*.cu`
+>     (superseded by templated `_r2_dp4a`), the `iq4_xs` parity test, and 3
+>     built-but-undispatched q4_k gate_up variants (`dp4a`/`r2_dp4a`/`r8_dp4a`).
+>     **The handoff's earlier cleanup list was WRONG** — audit found `r4_dp4a`
+>     (ops `moe.rs:2884`) and `quantize_f16_q8_1_mmq.cu` (ops `norm.rs:368`) are
+>     LIVE, not orphans; left untouched. `KERNEL_STEMS` now 254, every entry
+>     backed by a `.cu`/instantiations stem.
+> - **P2d STRUCTURALLY COMPLETE.** The entire indexed-MoE MMQ surface (MMVQ
+>   plain/K-quant/IQ\* + tile8 simple/K-quant/IQ\* + Q4_K lds_tiled) is
+>   cross-backend (HIP gfx906 ↔ CUDA sm_86, bit-identical), hand `.cu` retired,
+>   dead orphans removed. Remaining P2-series work (if any) is dispatch-table /
+>   perf, not templating.
 > - **DS4 4-warp_lds — Q4_0 (`3867eab`) + Q4_1 (`2ce63cc`) + Q4_K turbo
 >   (`58f52f0`) DONE.** The hardest sub-family (MMQ_Y=128, DS4 144-B activation,
 >   dynamic LDS, double-buffered Y). **The breakthrough: the hand kernels'
