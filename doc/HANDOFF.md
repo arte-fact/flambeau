@@ -3,7 +3,7 @@
 Transient working note. Start here when the dev rig (2× MI50 gfx906 + 1× RTX 3090
 sm_86) is built and `feature/cuda-decouple` is pulled in.
 
-> **CURRENT STATUS (2026-06-17, tip `3428838`): dense mmvq + ENTIRE dense mmq
+> **CURRENT STATUS (2026-06-17, tip `873f05f`): dense mmvq + ENTIRE dense mmq
 > family COMPLETE cross-backend. P2d indexed_moe STARTED — the plain-row MMVQ
 > family (Q8_0 pilot + Q4_0/Q4_1/Q5_0/Q5_1) is DONE cross-backend.** cert-check
 > green hip 82 / cuda 20 throughout.
@@ -78,14 +78,20 @@ sm_86) is built and `feature/cuda-decouple` is pulled in.
 >     Q8_0/Q4_0/Q4_1/Q5_0/Q5_1 × {gate_up,down} (10 kernels) with ZERO per-dtype
 >     C++. Q8_0 refactored onto it (per-dtype headers deleted). 19/20 BIT-IDENTICAL.
 >     `MoeMmqTile8Dtype` (10 variants) / `run_moe_mmq_tile8_sweep<B>`.
-> - **NEXT in P2d:** (1) the K-quant tile8 kernels (q4_k/q5_k/q6_k/q2_k/q3_k ×
->   {gate_up,down} = 10) — these DON'T ride `quant_traits` mmq policy (super-block
->   sub-block scales decoded into registers), so per-dtype bodies like the mmvq
->   K-quants; extend `MoeMmqTile8Dtype`. (2) IQ\* tile8 (×{gate_up,down} = 18 —
->   codebook decode into registers). (3) The 2 Q4_K `_lds_tiled` (ex-turbo) 4-warp
->   LDS-tiled MoE kernels — DS4 logical-lanes playbook from the dense
->   `mmq_q4_k_lds_tiled.cuh`. (4) Cleanup: 9 orphan plain IQ MoE `.cu`, 4 orphan
->   q4_k gate_up variants, `quantize_f16_q8_1_mmq.cu`.
+>   - **K-quant tile8 STARTED:** Q4_K (`3dc039b`) + Q5_K (`873f05f`), each a
+>     per-dtype body (super-block affine decoded into registers — NOT the
+>     `quant_traits` mmq policy): `indexed_moe_mmq_q{4,5}_k_tile8.cuh`, gate_up +
+>     down, `flambeau_q4k_scale_min` + `load_int_b2`. Q5_K adds the qh 5th bit +
+>     a per-super-block `sumf_d/sumf_m` fold. All BIT-IDENTICAL. **Tile8 cert
+>     tolerance is now dtype-aware** (`MoeMmqTile8Dtype::tolerance()`): K-quants
+>     5e-2 (documented Q8_1-activation noise on cancellation-heavy prefill rows —
+>     Q5_K down hit 0.0315), simple block quants 3e-2.
+> - **NEXT in P2d:** (1) Q6_K/Q2_K/Q3_K tile8 (×{gate_up,down} = 6) — per-dtype
+>   bodies; add them to `tolerance()`'s 5e-2 K-quant arm. (2) IQ\* tile8
+>   (×{gate_up,down} = 18 — codebook decode into registers). (3) The 2 Q4_K
+>   `_lds_tiled` (ex-turbo) 4-warp LDS-tiled MoE kernels — DS4 logical-lanes
+>   playbook from the dense `mmq_q4_k_lds_tiled.cuh`. (4) Cleanup: 9 orphan plain
+>   IQ MoE `.cu`, 4 orphan q4_k gate_up variants, `quantize_f16_q8_1_mmq.cu`.
 > - **DS4 4-warp_lds — Q4_0 (`3867eab`) + Q4_1 (`2ce63cc`) + Q4_K turbo
 >   (`58f52f0`) DONE.** The hardest sub-family (MMQ_Y=128, DS4 144-B activation,
 >   dynamic LDS, double-buffered Y). **The breakthrough: the hand kernels'
