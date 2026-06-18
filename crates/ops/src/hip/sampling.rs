@@ -8,15 +8,8 @@
 //! is `K * 8` bytes versus `V * 4` bytes for the full logit slab —
 //! ~37× less PCIe traffic at V=151424, K=256).
 
-#![expect(
-    clippy::undocumented_unsafe_blocks,
-    reason = "op wrapper — every unsafe block is a `kernel.launch` over caller-validated \
-              `DevicePtr`s; the kernel stem + entry are resolved through the validated \
-              registry and the ABI matches the kernel's extern-C signature."
-)]
-
 use anyhow::{bail, Result};
-use flambeau_backend_hip::{KernelArgs, LaunchCfg};
+use flambeau_core::{LaunchArgs, LaunchCfg};
 
 
 /// Caller-visible upper bound on `K`. Must match `SAMPLER_K_OUT_MAX` in
@@ -36,14 +29,14 @@ pub const SAMPLER_K_OUT_MAX: usize = 2048;
 /// # Errors
 /// - `n_pairs == 0` (penalty path should short-circuit on host).
 /// - kernel-launch dispatch failure.
-pub fn apply_penalties_f32(
-    ctx: crate::OpCtx<'_>,
+pub fn apply_penalties_f32<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     bufs: crate::PenaltyBuffers,
     n_pairs: usize,
     vocab: usize,
     knobs: crate::PenaltyKnobs,
 ) -> Result<()> {
-    let crate::OpCtx { reg, stream } = ctx;
     let crate::PenaltyBuffers { logits, token_counts } = bufs;
     let crate::PenaltyKnobs {
         repetition: repetition_penalty,
@@ -54,24 +47,24 @@ pub fn apply_penalties_f32(
         bail!("sampler::apply_penalties_f32: n_pairs must be >= 1 — caller should short-circuit");
     }
     let module = reg.expect_module("sampler_apply_penalties_f32")?;
-    let kernel = module.kernel("flambeau_sampler_apply_penalties_f32")?;
+    let kernel = B::kernel(module, "flambeau_sampler_apply_penalties_f32")?;
 
     let n_pairs_i = n_pairs as i32;
     let vocab_i = vocab as i32;
     let l_ptr: u64 = logits.as_usize() as u64;
     let c_ptr: u64 = token_counts.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&l_ptr);
-    args.push(&c_ptr);
-    args.push(&n_pairs_i);
-    args.push(&vocab_i);
-    args.push(&repetition_penalty);
-    args.push(&presence_penalty);
-    args.push(&frequency_penalty);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&l_ptr);
+    args.push_arg(&c_ptr);
+    args.push_arg(&n_pairs_i);
+    args.push_arg(&vocab_i);
+    args.push_arg(&repetition_penalty);
+    args.push_arg(&presence_penalty);
+    args.push_arg(&frequency_penalty);
     let block: u32 = 256;
     let grid: u32 = (n_pairs as u32).div_ceil(block);
     let cfg = LaunchCfg::one_d(grid, block);
-    unsafe { kernel.launch(stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 
@@ -92,12 +85,12 @@ pub fn apply_penalties_f32(
 /// # Errors
 /// - `k <= 0` or `k > SAMPLER_K_OUT_MAX`.
 /// - kernel-launch dispatch failure.
-pub fn topk_softmax_f32(
-    ctx: crate::OpCtx<'_>,
+pub fn topk_softmax_f32<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     bufs: crate::SamplerTopkSoftmaxBuffers,
     knobs: crate::SamplerTopkSoftmaxKnobs,
 ) -> Result<()> {
-    let crate::OpCtx { reg, stream } = ctx;
     let crate::SamplerTopkSoftmaxBuffers { logits, out_ids, out_probs } = bufs;
     let crate::SamplerTopkSoftmaxKnobs { vocab, k, inv_temp } = knobs;
     if k == 0 {
@@ -111,21 +104,21 @@ pub fn topk_softmax_f32(
         );
     }
     let module = reg.expect_module("sampler_topk_softmax_f32")?;
-    let kernel = module.kernel("flambeau_sampler_topk_softmax_f32")?;
+    let kernel = B::kernel(module, "flambeau_sampler_topk_softmax_f32")?;
 
     let vocab_i = vocab as i32;
     let k_i = k as i32;
     let l_ptr: u64 = logits.as_usize() as u64;
     let i_ptr: u64 = out_ids.as_usize() as u64;
     let p_ptr: u64 = out_probs.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&l_ptr);
-    args.push(&i_ptr);
-    args.push(&p_ptr);
-    args.push(&vocab_i);
-    args.push(&k_i);
-    args.push(&inv_temp);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&l_ptr);
+    args.push_arg(&i_ptr);
+    args.push_arg(&p_ptr);
+    args.push_arg(&vocab_i);
+    args.push_arg(&k_i);
+    args.push_arg(&inv_temp);
     let cfg = LaunchCfg::one_d(1, 256);
-    unsafe { kernel.launch(stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }

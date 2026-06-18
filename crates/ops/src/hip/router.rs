@@ -3,27 +3,18 @@
 //! in every Qwen3.x GGUF we target, so we don't pay for a quantised path
 //! here. Output goes to `moe::topk_f32`.
 
-#![expect(
-    clippy::undocumented_unsafe_blocks,
-    reason = "op wrapper — every unsafe block is a kernel.launch or memcpy_async over \
-              DevicePtrs validated by the caller; the kernel stem + entry are resolved \
-              through the validated registry and the ABI matches the kernels extern-C \
-              signature."
-)]
-
 use anyhow::Result;
-use flambeau_backend_hip::{HipStream, KernelArgs, LaunchCfg};
+use flambeau_core::{LaunchArgs, LaunchCfg};
 use flambeau_core::DevicePtr;
 
-use super::OpsRegistry;
 
 /// Dense GEMV: `y[n] = Σ_k w[n, k] * (float) x[k]`. Weight is F32
 /// `[n_rows, k]` (outermost-first, contiguous innermost k); activation is
 /// F16 `[k]`; output is F32 `[n_rows]`.
 /// Launch: one block per output row, 256 threads (4 wave64).
-pub fn dense_gemv_f32_f16(
-    reg: &OpsRegistry,
-    stream: &HipStream,
+pub fn dense_gemv_f32_f16<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     w: DevicePtr,
     x: DevicePtr,
     y: DevicePtr,
@@ -31,20 +22,20 @@ pub fn dense_gemv_f32_f16(
     k: usize,
 ) -> Result<()> {
     let module = reg.expect_module("dense_gemv_f32_f16")?;
-    let kernel = module.kernel("flambeau_dense_gemv_f32_f16")?;
+    let kernel = B::kernel(module, "flambeau_dense_gemv_f32_f16")?;
     let n_rows_i = n_rows as i32;
     let k_i = k as i32;
     let w_ptr: u64 = w.as_usize() as u64;
     let x_ptr: u64 = x.as_usize() as u64;
     let y_ptr: u64 = y.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&w_ptr);
-    args.push(&x_ptr);
-    args.push(&y_ptr);
-    args.push(&n_rows_i);
-    args.push(&k_i);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&w_ptr);
+    args.push_arg(&x_ptr);
+    args.push_arg(&y_ptr);
+    args.push_arg(&n_rows_i);
+    args.push_arg(&k_i);
     let cfg = LaunchCfg::one_d(n_rows as u32, 256);
-    unsafe { kernel.launch(stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 
@@ -53,9 +44,9 @@ pub fn dense_gemv_f32_f16(
 /// router on models where the F32→F16 router-weight conversion is
 /// applied at load time (see `sharded.rs::up_router_f16` / equivalent).
 /// Same launch shape and reduction semantics as the F32 variant.
-pub fn dense_gemv_f16_f16(
-    reg: &OpsRegistry,
-    stream: &HipStream,
+pub fn dense_gemv_f16_f16<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     w: DevicePtr,
     x: DevicePtr,
     y: DevicePtr,
@@ -63,53 +54,53 @@ pub fn dense_gemv_f16_f16(
     k: usize,
 ) -> Result<()> {
     let module = reg.expect_module("dense_gemv_f16_f16")?;
-    let kernel = module.kernel("flambeau_dense_gemv_f16_f16")?;
+    let kernel = B::kernel(module, "flambeau_dense_gemv_f16_f16")?;
     let n_rows_i = n_rows as i32;
     let k_i = k as i32;
     let w_ptr: u64 = w.as_usize() as u64;
     let x_ptr: u64 = x.as_usize() as u64;
     let y_ptr: u64 = y.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&w_ptr);
-    args.push(&x_ptr);
-    args.push(&y_ptr);
-    args.push(&n_rows_i);
-    args.push(&k_i);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&w_ptr);
+    args.push_arg(&x_ptr);
+    args.push_arg(&y_ptr);
+    args.push_arg(&n_rows_i);
+    args.push_arg(&k_i);
     let cfg = LaunchCfg::one_d(n_rows as u32, 256);
-    unsafe { kernel.launch(stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 
 /// F16-weight variant of [`dense_gemv_f32_f16_batched`].
-pub fn dense_gemv_f16_f16_batched(
-    ctx: crate::OpCtx<'_>,
+pub fn dense_gemv_f16_f16_batched<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     bufs: crate::DenseGemvBatchedBuffers,
     shape: crate::DenseGemvBatchedShape,
 ) -> Result<()> {
-    let crate::OpCtx { reg, stream } = ctx;
     let crate::DenseGemvBatchedBuffers { w, x, y } = bufs;
     let crate::DenseGemvBatchedShape { n_rows, k, n_tokens } = shape;
     let module = reg.expect_module("dense_gemv_f16_f16_batched")?;
-    let kernel = module.kernel("flambeau_dense_gemv_f16_f16_batched")?;
+    let kernel = B::kernel(module, "flambeau_dense_gemv_f16_f16_batched")?;
     let n_rows_i = n_rows as i32;
     let k_i = k as i32;
     let n_tokens_i = n_tokens as i32;
     let w_ptr: u64 = w.as_usize() as u64;
     let x_ptr: u64 = x.as_usize() as u64;
     let y_ptr: u64 = y.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&w_ptr);
-    args.push(&x_ptr);
-    args.push(&y_ptr);
-    args.push(&n_rows_i);
-    args.push(&k_i);
-    args.push(&n_tokens_i);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&w_ptr);
+    args.push_arg(&x_ptr);
+    args.push_arg(&y_ptr);
+    args.push_arg(&n_rows_i);
+    args.push_arg(&k_i);
+    args.push_arg(&n_tokens_i);
     let cfg = LaunchCfg {
         grid: (n_rows as u32, n_tokens as u32, 1),
         block: (256, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 
@@ -120,34 +111,34 @@ pub fn dense_gemv_f16_f16_batched(
 /// Collapses a caller-side `for t in 0..n_tokens { gemv_single }` loop
 /// into a single kernel launch — saves ~L µs launch overhead per call at
 /// the cost of a 2D grid.
-pub fn dense_gemv_f32_f16_batched(
-    ctx: crate::OpCtx<'_>,
+pub fn dense_gemv_f32_f16_batched<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     bufs: crate::DenseGemvBatchedBuffers,
     shape: crate::DenseGemvBatchedShape,
 ) -> Result<()> {
-    let crate::OpCtx { reg, stream } = ctx;
     let crate::DenseGemvBatchedBuffers { w, x, y } = bufs;
     let crate::DenseGemvBatchedShape { n_rows, k, n_tokens } = shape;
     let module = reg.expect_module("dense_gemv_f32_f16_batched")?;
-    let kernel = module.kernel("flambeau_dense_gemv_f32_f16_batched")?;
+    let kernel = B::kernel(module, "flambeau_dense_gemv_f32_f16_batched")?;
     let n_rows_i = n_rows as i32;
     let k_i = k as i32;
     let n_tokens_i = n_tokens as i32;
     let w_ptr: u64 = w.as_usize() as u64;
     let x_ptr: u64 = x.as_usize() as u64;
     let y_ptr: u64 = y.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&w_ptr);
-    args.push(&x_ptr);
-    args.push(&y_ptr);
-    args.push(&n_rows_i);
-    args.push(&k_i);
-    args.push(&n_tokens_i);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&w_ptr);
+    args.push_arg(&x_ptr);
+    args.push_arg(&y_ptr);
+    args.push_arg(&n_rows_i);
+    args.push_arg(&k_i);
+    args.push_arg(&n_tokens_i);
     let cfg = LaunchCfg {
         grid: (n_rows as u32, n_tokens as u32, 1),
         block: (256, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }

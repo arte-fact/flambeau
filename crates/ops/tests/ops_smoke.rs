@@ -19,7 +19,7 @@ use anyhow::Result;
 use flambeau_backend_hip::{device_count, HipDevice};
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_ops::{
-    mlp, norm, pe, softmax, OpCtx, OpsRegistry, SoftmaxMaskedBuffers, SoftmaxMaskedKnobs,
+    mlp, norm, pe, softmax, OpsRegistry, SoftmaxMaskedBuffers, SoftmaxMaskedKnobs,
 };
 use half::f16;
 
@@ -168,10 +168,8 @@ fn rope_f16_runs() -> Result<()> {
     let d_x = upload(&dev, &x);
     let d_p = upload(&dev, &positions);
     pe::rope_f16(
-        flambeau_ops::OpCtx {
-            reg: &reg,
-            stream: dev.default_stream(),
-        },
+        &reg,
+        dev.default_stream(),
         flambeau_ops::RopeBuffers {
             x: d_x,
             positions: d_p,
@@ -210,7 +208,8 @@ fn softmax_masked_runs_with_zero_mask() -> Result<()> {
     let d_m = upload(&dev, &mask);
     let d_o = dev.alloc(m * k * 2)?;
     softmax::softmax_masked_f16(
-        OpCtx { reg: &reg, stream: dev.default_stream() },
+        &reg,
+        dev.default_stream(),
         SoftmaxMaskedBuffers { scores: d_s, mask: d_m, out: d_o },
         SoftmaxMaskedKnobs { m, k, scale: 1.0 },
     )?;
