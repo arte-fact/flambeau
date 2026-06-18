@@ -94,6 +94,8 @@ pub fn run_pointwise_sweep<B: BenchBackend>(
         "gdn_state_step_f32" => run_gdn_state_step_sweep::<B>(repo_root, arch),
         "gdn_state_step_alphabeta_f32" => run_gdn_alphabeta_sweep::<B>(repo_root, arch, false),
         "gdn_state_step_alphabeta_f32_batched_slots" => run_gdn_alphabeta_sweep::<B>(repo_root, arch, true),
+        "kv_append_f16_paged_slots" => run_kv_append_paged_slots_sweep::<B>(repo_root, arch),
+        "kv_append_f16_paged_prefill" => run_kv_append_paged_prefill_sweep::<B>(repo_root, arch),
         _ => return None,
     };
     Some(cert)
@@ -994,6 +996,148 @@ pub fn run_rope_f16_sweep<B: BenchBackend>(repo_root: &Path, arch: &str, neox: b
     }
     finish_cert(&dev, repo_root, arch, impl_id, impl_id, "F16", "F16",
         "|err| <= 5e-3 * max(|ref|, 1e-2) vs F64 angle oracle", results, pmc)
+}
+
+/// `kv_append_f16_paged_slots` — per-slot K+V row append into a paged page pool
+/// via block-table indirection. Bit-exact written rows.
+pub fn run_kv_append_paged_slots_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) -> Result<Cert> {
+    let dev = B::new_device(0)?;
+    let image = B::image("kv_append_f16_paged_slots").ok_or_else(|| anyhow!("kv_append_f16_paged_slots not compiled"))?;
+    let module = B::load(&dev, image)?;
+    let kernel = B::kernel(&module, "flambeau_kv_append_f16_paged_slots")?;
+    let pmc = B::attributes(&kernel)?;
+
+    let page_size = 16i32;
+    let cases = [(2usize, 1024usize), (4, 2048), (8, 512)];
+    let mut results = Vec::new();
+    for (n_slots, kv_width) in cases {
+        let seed = 0xC0FFEE ^ ((n_slots as u64) * 13 + (kv_width as u64) * 7);
+        let k_src = f16_input(seed, n_slots * kv_width);
+        let v_src = f16_input(seed ^ 0xAA, n_slots * kv_width);
+        let max_pages_per_slot = 2usize;
+        let n_pages = n_slots * max_pages_per_slot;
+        // slot s → page (s+1) (some non-trivial mapping), write_pos within page 0.
+        let write_pos: Vec<i32> = (0..n_slots).map(|s| (s % page_size as usize) as i32).collect();
+        let mut block_tables = vec![0u32; n_slots * max_pages_per_slot];
+        for s in 0..n_slots {
+            block_tables[s * max_pages_per_slot] = ((s + 1) % n_pages) as u32;
+        }
+        let pool_elems = n_pages * page_size as usize * kv_width;
+
+        let d_ks = alloc_and_upload(&dev, &k_src);
+        let d_vs = alloc_and_upload(&dev, &v_src);
+        let d_kp = dev.alloc(pool_elems * 2)?;
+        let d_vp = dev.alloc(pool_elems * 2)?;
+        let d_bt = alloc_and_upload(&dev, &block_tables);
+        let d_wp = alloc_and_upload(&dev, &write_pos);
+        {
+            let stream = dev.default_stream();
+            let ns = n_slots as i32;
+            let kw = kv_width as i32;
+            let mpp = max_pages_per_slot as i32;
+            let ks: u64 = d_ks.as_usize() as u64; let vs: u64 = d_vs.as_usize() as u64;
+            let kp: u64 = d_kp.as_usize() as u64; let vp: u64 = d_vp.as_usize() as u64;
+            let bt: u64 = d_bt.as_usize() as u64; let wp: u64 = d_wp.as_usize() as u64;
+            let mut args = <B::Args<'_>>::default();
+            args.push_arg(&ks); args.push_arg(&vs); args.push_arg(&kp); args.push_arg(&vp);
+            args.push_arg(&bt); args.push_arg(&wp);
+            args.push_arg(&ns); args.push_arg(&kw); args.push_arg(&page_size); args.push_arg(&mpp);
+            B::launch(&kernel, stream, LaunchCfg { grid: (n_slots as u32, 1, 1), block: (128, 1, 1), shared_bytes: 0 }, args)?;
+            stream.synchronize()?;
+        }
+        let mut got_k = vec![f16::from_f32(0.0); pool_elems];
+        let mut got_v = vec![f16::from_f32(0.0); pool_elems];
+        unsafe {
+            dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost, DevicePtr(got_k.as_mut_ptr() as usize), d_kp, pool_elems * 2)?;
+            dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost, DevicePtr(got_v.as_mut_ptr() as usize), d_vp, pool_elems * 2)?;
+        }
+        dev.default_stream().synchronize()?;
+        unsafe {
+            dev.dealloc(d_ks, n_slots * kv_width * 2)?; dev.dealloc(d_vs, n_slots * kv_width * 2)?;
+            dev.dealloc(d_kp, pool_elems * 2)?; dev.dealloc(d_vp, pool_elems * 2)?;
+            dev.dealloc(d_bt, n_slots * max_pages_per_slot * 4)?; dev.dealloc(d_wp, n_slots * 4)?;
+        }
+        let mut bad = 0u32;
+        for s in 0..n_slots {
+            let page = block_tables[s * max_pages_per_slot] as usize;
+            let off = (page * page_size as usize + write_pos[s] as usize) * kv_width;
+            for i in 0..kv_width {
+                if got_k[off + i].to_bits() != k_src[s * kv_width + i].to_bits() { bad += 1; }
+                if got_v[off + i].to_bits() != v_src[s * kv_width + i].to_bits() { bad += 1; }
+            }
+        }
+        results.push(ShapeResult { m: n_slots, k: kv_width, n: 1, seed, max_rel_err: bad as f32, tolerance: 0.0, pass: bad == 0 });
+    }
+    finish_cert(&dev, repo_root, arch, "kv_append_f16_paged_slots", "kv_append_f16_paged_slots",
+        "F16", "F16", "exact (paged gather/scatter copy)", results, pmc)
+}
+
+/// `kv_append_f16_paged_prefill` — write L prefill K+V rows of one slot into its
+/// paged cache, walking the slot's block-table row. Bit-exact.
+pub fn run_kv_append_paged_prefill_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) -> Result<Cert> {
+    let dev = B::new_device(0)?;
+    let image = B::image("kv_append_f16_paged_prefill").ok_or_else(|| anyhow!("kv_append_f16_paged_prefill not compiled"))?;
+    let module = B::load(&dev, image)?;
+    let kernel = B::kernel(&module, "flambeau_kv_append_f16_paged_prefill")?;
+    let pmc = B::attributes(&kernel)?;
+
+    let page_size = 16i32;
+    let cases = [(20usize, 1024usize, 0usize), (40, 512, 8)];
+    let mut results = Vec::new();
+    for (n_tokens, kv_width, start_pos) in cases {
+        let seed = 0xC0FFEE ^ ((n_tokens as u64) * 13 + (kv_width as u64) * 7);
+        let k_src = f16_input(seed, n_tokens * kv_width);
+        let v_src = f16_input(seed ^ 0xAA, n_tokens * kv_width);
+        let max_pages = (start_pos + n_tokens).div_ceil(page_size as usize) + 1;
+        let block_table: Vec<u32> = (0..max_pages).map(|p| (p * 3 + 1) as u32).collect();
+        let n_pages = block_table.iter().map(|&p| p as usize).max().unwrap() + 1;
+        let pool_elems = n_pages * page_size as usize * kv_width;
+
+        let d_ks = alloc_and_upload(&dev, &k_src);
+        let d_vs = alloc_and_upload(&dev, &v_src);
+        let d_kp = dev.alloc(pool_elems * 2)?;
+        let d_vp = dev.alloc(pool_elems * 2)?;
+        let d_bt = alloc_and_upload(&dev, &block_table);
+        {
+            let stream = dev.default_stream();
+            let nt = n_tokens as i32;
+            let kw = kv_width as i32;
+            let sp = start_pos as i32;
+            let ks: u64 = d_ks.as_usize() as u64; let vs: u64 = d_vs.as_usize() as u64;
+            let kp: u64 = d_kp.as_usize() as u64; let vp: u64 = d_vp.as_usize() as u64;
+            let bt: u64 = d_bt.as_usize() as u64;
+            let mut args = <B::Args<'_>>::default();
+            args.push_arg(&ks); args.push_arg(&vs); args.push_arg(&kp); args.push_arg(&vp);
+            args.push_arg(&bt); args.push_arg(&nt); args.push_arg(&kw); args.push_arg(&sp); args.push_arg(&page_size);
+            B::launch(&kernel, stream, LaunchCfg { grid: (n_tokens as u32, 1, 1), block: (128, 1, 1), shared_bytes: 0 }, args)?;
+            stream.synchronize()?;
+        }
+        let mut got_k = vec![f16::from_f32(0.0); pool_elems];
+        let mut got_v = vec![f16::from_f32(0.0); pool_elems];
+        unsafe {
+            dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost, DevicePtr(got_k.as_mut_ptr() as usize), d_kp, pool_elems * 2)?;
+            dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost, DevicePtr(got_v.as_mut_ptr() as usize), d_vp, pool_elems * 2)?;
+        }
+        dev.default_stream().synchronize()?;
+        unsafe {
+            dev.dealloc(d_ks, n_tokens * kv_width * 2)?; dev.dealloc(d_vs, n_tokens * kv_width * 2)?;
+            dev.dealloc(d_kp, pool_elems * 2)?; dev.dealloc(d_vp, pool_elems * 2)?;
+            dev.dealloc(d_bt, max_pages * 4)?;
+        }
+        let mut bad = 0u32;
+        for t in 0..n_tokens {
+            let target = start_pos + t;
+            let page = block_table[target / page_size as usize] as usize;
+            let off = (page * page_size as usize + (target % page_size as usize)) * kv_width;
+            for i in 0..kv_width {
+                if got_k[off + i].to_bits() != k_src[t * kv_width + i].to_bits() { bad += 1; }
+                if got_v[off + i].to_bits() != v_src[t * kv_width + i].to_bits() { bad += 1; }
+            }
+        }
+        results.push(ShapeResult { m: n_tokens, k: kv_width, n: start_pos, seed, max_rel_err: bad as f32, tolerance: 0.0, pass: bad == 0 });
+    }
+    finish_cert(&dev, repo_root, arch, "kv_append_f16_paged_prefill", "kv_append_f16_paged_prefill",
+        "F16", "F16", "exact (paged scatter copy)", results, pmc)
 }
 
 /// `gdn_state_step_alphabeta_f32[_batched_slots]` — GDN recurrent step with
