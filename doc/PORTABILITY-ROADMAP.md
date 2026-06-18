@@ -6,7 +6,7 @@ and `doc/KERNEL-TEMPLATING.md` (which remain the detailed sub-plans for their
 mechanics); `doc/AUTOTUNE.md` details the harness. This file is the at-a-glance
 phase ledger; `doc/HANDOFF.md` is the detailed chronological log.
 
-## Status ledger (as of 2026-06-18, tip `c082e39`)
+## Status ledger (as of 2026-06-18, tip `41ffad7`)
 
 | Phase | Scope | Status | Closed at |
 | --- | --- | --- | --- |
@@ -17,16 +17,22 @@ phase ledger; `doc/HANDOFF.md` is the detailed chronological log.
 | P2c | `mmq` (wave64 single-pass + DS4 4-warp LDS-tiled), 21 kernels | ✅ | `58f52f0` / `df58e84` |
 | P2d | `indexed_moe` (mmvq + tile8 + Q4_K lds_tiled) + dead-orphan cleanup | ✅ | `c082e39` / `58d73b0` |
 | **P2** | **Stream M rollout — 196 hand `.cu` → templates, both dispatch tables cross-backend** | **✅** | **`c082e39`** |
-| P3 | Stream F port — ~70 fixed kernels → CUDA (attention, norms, rope, softmax, sampler, gdn, moe sort/combine, kv_append, …) | ⬜ not started | — |
+| P3 | Stream F port — ~70 fixed kernels → CUDA (attention, norms, rope, softmax, sampler, gdn, moe sort/combine, kv_append, …) | 🔄 in progress — spine + Wave 1a (11 leaves) done; 1b underway (rmsnorm_f16/f32, l2_norm_f32; `block_reduce_sum` primitive landed) | — |
 | P4 | CUDA multi-GPU runtime — NCCL `Collectives` + CUDA Graphs `GraphExec` (multi-GPU only) | ⬜ | — |
 | P5 | End-to-end CUDA decode parity — qwen35moe-v2 Q4_K via `ForwardEngine<CudaBackend>`, logit-cosine ≥ 0.9999 (gated on P3) | ⬜ | — |
 | P6 | Arch breadth (sm_80/89, gfx1031 wave32, gfx908/90a/942) + autotune-as-CI | ⬜ | — |
 
 **Critical path now runs through P3.** Stream M (the entire matmul-templating
-axis) is cross-backend and bit-identical HIP gfx906 ↔ CUDA sm_86. CUDA currently
-carries only the matmul templates + quantizers (`kernels-cuda/src/kernels/` = 3
-`.cu`); **none of the Stream F fixed kernels are on CUDA yet**, so P3 is the sole
-remaining gate before the P5 integration milestone (first end-to-end CUDA decode).
+axis) is cross-backend and bit-identical HIP gfx906 ↔ CUDA sm_86. **P3 is
+underway:** the Stream F harness spine (`bench/src/sweep_pointwise_cb.rs`,
+BenchBackend-generic, one driver both rigs) + Wave 1a (all 11 Tier-A pointwise
+leaves: add/cast/scale/silu/softcap/swiglu/sigmoid/split_q_gate/swiglu→q8_1) are
+cross-backend. Wave 1b (block-reduce norms) is underway — the `block_reduce_sum`
+seam (`kernels-shared/include/block_reduce.cuh`) closes the wave64 reduce leak,
+and `rmsnorm_f16` / `rmsnorm_f32` / `l2_norm_f32` are neutralized to shared
+`.cuh` + manifest cells. CUDA `kernels-cuda/src/kernels/` now carries the Stream
+F leaves; remaining: rest of 1b (rmsnorm residual/q8_1 variants, rope, quantize)
++ 1c attention. P3 remains the sole gate before the P5 integration milestone.
 
 ## Thesis: three axes of portability of one artifact
 

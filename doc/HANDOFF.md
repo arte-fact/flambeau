@@ -3,10 +3,59 @@
 Transient working note. Start here when the dev rig (2× MI50 gfx906 + 1× RTX 3090
 sm_86) is built and `feature/cuda-decouple` is pulled in.
 
-> **CURRENT STATUS (2026-06-17, tip `873f05f`): dense mmvq + ENTIRE dense mmq
-> family COMPLETE cross-backend. P2d indexed_moe STARTED — the plain-row MMVQ
-> family (Q8_0 pilot + Q4_0/Q4_1/Q5_0/Q5_1) is DONE cross-backend.** cert-check
-> green hip 82 / cuda 20 throughout.
+> **CURRENT STATUS (2026-06-18, tip `41ffad7`): P2 (Stream M) COMPLETE. P3
+> (Stream F) UNDERWAY — spine + Wave 1a + 1b pilot done.** cert-check green hip
+> 82 / cuda 20 throughout. See `doc/P3-STREAM-F-PORT.md` for the wave tracker.
+> - **P3 harness spine DONE.** `crates/bench/src/sweep_pointwise_cb.rs` —
+>   BenchBackend-generic pointwise sweeps, one driver certs HIP gfx906 AND CUDA
+>   sm_86. A `run_pointwise_sweep<B>(op, …)` dispatcher both cli arms (HIP `match
+>   op` + `sweep_cuda`) call → a ported kernel is wired in one place. add_f16
+>   pilot certed both rigs (the earlier `cuInit 999` was the missing
+>   `/dev/nvidia-uvm`, recovered). Spine commit `846bd94` left
+>   `every_cert_on_disk_is_registered` red (neutral add_f16 cert unregistered) —
+>   FIXED (`cf7f9c5`): neutral Stream F certs register in
+>   `BENCH_REFERENCE_KERNELS_GFX906`.
+> - **P3 Wave 1a (Tier-A leaves) DONE — all 11 cross-backend** (`e986b5c` +
+>   `5905998`): add_f16, cast_f16_f32, cast_f32_f16, scale_f32, scale_f16,
+>   silu_f32, apply_softcap_f32, swiglu_f16, sigmoid_mul_f16, swiglu_f32_to_q8_1,
+>   split_q_gate_f16. **Approach = MIRROR** (trivial / identical body): keep the
+>   HIP hand `.cu` + its frozen `_gfx906` dispatch cert, add a CUDA `.cu` mirror
+>   in `kernels-cuda/src/kernels/` (auto-globbed by build.rs), emit a NEUTRAL
+>   cert on both rigs registered as a bench-ref. Shared drivers:
+>   `run_unary_sweep<B,IE,OE>` (1 input + optional f32 scalar),
+>   `run_binary_f16_sweep<B>` (2 F16 in). swiglu→q8_1 uses width-32 `__shfl_xor`
+>   (quantizer seam); split_q_gate is a 3D-grid copy. Casts/scales/split
+>   bit-exact; silu/softcap 1e-5 vs F64 (fast __expf/tanhf hold); swiglu/sigmoid
+>   5e-3 F16 envelope; swiglu→q8_1 dequant-vs-oracle 5e-3.
+> - **P3 Wave 1b (Tier-B block-reduce) UNDERWAY** (`6cff4c7` + `41ffad7`):
+>   rmsnorm_f16, rmsnorm_f32, l2_norm_f32 cross-backend. **Approach =
+>   NEUTRALIZE** (these carry the wave64 reduce leak: `tid>>6`,
+>   `__shfl_xor(...,64)`, `WARPS=THREADS/64`). New
+>   `kernels-shared/include/block_reduce.cuh`:
+>   `block_reduce_sum<THREADS>(val, lds_scratch)` reduces block-wide + broadcasts
+>   via the `WARP_SIZE` seam + neutral `warp_reduce_sum` — correct on wave64
+>   (NWARPS=4) AND wave32 (NWARPS=8). Each body moved to a shared `.cuh`
+>   (`rmsnorm.cuh` / `rmsnorm_f16.cuh` / `l2_norm.cuh`) + `instantiations.toml`
+>   cell (generated wrapper injects the arch header), hand `.cu` RETIRED. Neutral
+>   certs registered as bench-refs; frozen `_gfx906` dispatch rows untouched.
+>   `registry_loads_all_kernel_stems` + `rmsnorm_f16_runs` confirm the generated
+>   wrappers load via the real runtime registry. Gotcha: `uintptr_t` is undefined
+>   in the generated CUDA wrapper → use `size_t` for the float4 alignment check.
+> - **NEXT P3:** rest of Wave 1b — rmsnorm_f32_to_f16 (3 entries: _to_f16,
+>   _to_f16_add_residual, _f16_to_f16_add_residual), rmsnorm_f16_add_residual
+>   (2 outputs), rmsnorm_q8_1_fused, rope_f16, rope_neox_partial_f16,
+>   rmsnorm_rope_neox_partial_f16, quantize_f16_q8_1/_q8_0/_q8_1_mmq. All reuse
+>   `block_reduce_sum`; residual/q8_1 variants add an epilogue (rule 14: keep
+>   separate bodies). Then **Wave 1c attention** (hard tier: online softmax +
+>   cp.async↔prefetch seam). Build cli `--features "hip_sweep cuda_sweep"` +
+>   `RAYON_NUM_THREADS=8`; `flambeau sweep --arch {gfx906,sm_86} --op <k>`.
+>
+> ---
+>
+> *(P2 status — historical, below)*
+>
+> **(2026-06-17, tip `873f05f`): dense mmvq + ENTIRE dense mmq family COMPLETE
+> cross-backend. P2d indexed_moe STARTED.**
 > - **P2d plain-row indexed-MoE MMVQ — DONE.** Foundational
 >   `indexed_moe_mmvq.cuh` skeleton (`indexed_moe_mmvq_row` /
 >   `indexed_moe_mmvq_vdr_row` / `indexed_moe_mmvq_nrow_row`), the MoE sibling of
