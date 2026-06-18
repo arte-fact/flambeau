@@ -134,16 +134,38 @@ driver 610.43.02). A full `flambeau-kernels-cuda` build compiles **203 / 254**
   `indexed_moe_mmq_q4_k`, `mmvq_q8_0{,_gate_up_dp4a,_llamacpp_style}` — exactly
   what **qwen35moe-v2 Q4_K** decode dispatches.
 
-So P5.3 is **port ~35 static MMVQ/indexed-MoE `.cu` files hip→cuda** (adapt any
-gfx906 cross-lane / dp4a intrinsics to the sm_80 primitives in
-`kernels-cuda/src/arch_primitives/sm_80.cuh`; the shared `.cuh` bodies are already
-backend-neutral) — **not** "fill dispatch rows". Once the decode subset compiles,
-`Registry<CudaKernels>::new` succeeds and the runtime op smoke
-(`rmsnorm_f16` / `attention_decode_f16` vs the F64 oracle through the runtime
-path) is reachable. Then fill `dispatch/cuda/sm_86.toml` for those ops with green
-`certs/cuda/sm_86/<impl>.json` (rule 2) and proceed to P5.4. attention's CUDA
-graph-slot rebind stays deferred (P4.4 `CudaGraphExec` slot-map) — not needed for
-decode parity.
+**The runtime-blocking subset is now pinned to exactly the kernels the decode
+path dispatches** (traced through `dispatch/cuda/sm_86.toml` + `moe_experts.rs`):
+
+- ✅ **Keystone — `Registry::new` is load-present** (`19d9e9d7`). It loads the
+  stems this backend's catalogue contains and skips the rest (drift moves to a
+  loud launch-time `expect_module` error). `Registry<CudaKernels>::new` now
+  constructs on the RTX 3090 — `cuda_registry_smoke` (skips 52, dense decode
+  spine `mmvq_q4_k_r2_dp4a` / `attention_decode_f16` / `rmsnorm_f16` / `swiglu`
+  loaded). HIP compiles all 254 → skips nothing → bit-identical.
+- **Dense path: already satisfied.** Q4_K attention/router/lm_head dispatch
+  `qmatmul_q4_k_mmvq_dp4a` → `mmvq_q4_k_r2_dp4a` (present). Attention / norm /
+  rope / swiglu / topk / moe_combine / sampler all present.
+- **MoE expert path: needs exactly 2 kernels ported.** qwen35moe-v2 Q4_K
+  experts dispatch:
+  - gate+up → `indexed_moe_mmvq_q4_k_gate_up_r4_dp4a`
+  - down    → `indexed_moe_mmvq_q4_k_r2`
+
+  Both are static `kernels-hip/src/kernels/*.cu` with **inline gfx906/wave64
+  bodies** (no shared `.cuh` yet; include `gfx906.cuh`). The rule-5-correct port
+  is the path `mmvq_q4_k_r2_dp4a` already took: extract the body into a
+  backend-neutral `kernels-shared/include/<stem>.cuh` over the arch header
+  (DPP/wave64 reduce + `dp4a` → the sm_80 `warp_reduce_sum` + `__dp4a`), add a
+  manifest entry so both backends generate it, then a green
+  `certs/cuda/sm_86/<impl>.json` (rule 2). The other ~33 missing non-IQ stems
+  (legacy single-row oracles, non-dispatched variants) are **not** on the decode
+  path; the 18 IQ stems are out of scope (prune from `KERNEL_STEMS`).
+
+So the remaining P5.3 decode work is **2 K-quant indexed-MoE kernels** + their
+certs, then fill the MoE dispatch rows. After that `Registry<CudaKernels>::new`
+fully satisfies the qwen35moe-v2 Q4_K decode dispatch and **P5.4** (the
+logit-cosine gate) is runnable. attention's CUDA graph-slot rebind stays deferred
+(P4.4 `CudaGraphExec` slot-map) — not needed for decode parity.
 - **P5.4 — The parity gate.** `flambeau infer --backend cuda --model
   qwen35moe-v2-Q4_K`: single token first (logit-cosine vs llama.cpp CUDA), then
   64 tokens ≥ 0.9999. File the diff; no perf claim.
