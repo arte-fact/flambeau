@@ -3255,3 +3255,57 @@ params = """
     const float eps,
     const int ring_depth"""
 body = "kv_append_v_unit_norm_f16_body<512>(k_src, v_src, k_cache, v_cache, n_kv_heads, write_pos, eps, ring_depth);"
+
+# Fused per-head RMSNorm + partial NeoX RoPE (gemma4 Q/K norm; HEAD_DIM entries).
+
+[[kernel]]
+stem = "rmsnorm_rope_neox_partial_f16"
+includes = ["block_quant.cuh", "block_reduce.cuh", "rmsnorm_rope.cuh"]
+[[kernel.entry]]
+name = "flambeau_rmsnorm_rope_neox_partial_f16_d64"
+launch_bounds = "64, 16"
+params = """
+    fb_fp16_t* __restrict__ x,
+    const fb_fp16_t* __restrict__ norm_w,
+    const int* __restrict__ positions,
+    const int n_heads,
+    const int rotated_dims,
+    const float theta_base,
+    const float eps"""
+body = "rmsnorm_rope_neox_partial_f16_body<64>(x, norm_w, positions, n_heads, rotated_dims, theta_base, eps);"
+[[kernel.entry]]
+name = "flambeau_rmsnorm_rope_neox_partial_f16_d128"
+launch_bounds = "128, 8"
+params = """
+    fb_fp16_t* __restrict__ x,
+    const fb_fp16_t* __restrict__ norm_w,
+    const int* __restrict__ positions,
+    const int n_heads,
+    const int rotated_dims,
+    const float theta_base,
+    const float eps"""
+body = "rmsnorm_rope_neox_partial_f16_body<128>(x, norm_w, positions, n_heads, rotated_dims, theta_base, eps);"
+[[kernel.entry]]
+name = "flambeau_rmsnorm_rope_neox_partial_f16_d256"
+launch_bounds = "256, 4"
+params = """
+    fb_fp16_t* __restrict__ x,
+    const fb_fp16_t* __restrict__ norm_w,
+    const int* __restrict__ positions,
+    const int n_heads,
+    const int rotated_dims,
+    const float theta_base,
+    const float eps"""
+body = "rmsnorm_rope_neox_partial_f16_body<256>(x, norm_w, positions, n_heads, rotated_dims, theta_base, eps);"
+[[kernel.entry]]
+name = "flambeau_rmsnorm_rope_neox_partial_f16_d512"
+launch_bounds = "512, 2"
+params = """
+    fb_fp16_t* __restrict__ x,
+    const fb_fp16_t* __restrict__ norm_w,
+    const int* __restrict__ positions,
+    const int n_heads,
+    const int rotated_dims,
+    const float theta_base,
+    const float eps"""
+body = "rmsnorm_rope_neox_partial_f16_body<512>(x, norm_w, positions, n_heads, rotated_dims, theta_base, eps);"

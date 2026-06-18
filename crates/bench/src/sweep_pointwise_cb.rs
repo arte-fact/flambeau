@@ -85,6 +85,7 @@ pub fn run_pointwise_sweep<B: BenchBackend>(
         "dense_gemv_f16_f16_batched" => run_dense_gemv_sweep::<B>(repo_root, arch, "dense_gemv_f16_f16_batched", "flambeau_dense_gemv_f16_f16_batched", true, 4),
         "v_unit_norm_per_head_f16" => run_v_unit_norm_sweep::<B>(repo_root, arch),
         "kv_append_v_unit_norm_f16" => run_kv_append_v_unit_norm_sweep::<B>(repo_root, arch),
+        "rmsnorm_rope_neox_partial_f16" => run_rmsnorm_rope_sweep::<B>(repo_root, arch),
         _ => return None,
     };
     Some(cert)
@@ -985,6 +986,103 @@ pub fn run_rope_f16_sweep<B: BenchBackend>(repo_root: &Path, arch: &str, neox: b
     }
     finish_cert(&dev, repo_root, arch, impl_id, impl_id, "F16", "F16",
         "|err| <= 5e-3 * max(|ref|, 1e-2) vs F64 angle oracle", results, pmc)
+}
+
+/// `rmsnorm_rope_neox_partial_f16` — fused per-head RMSNorm + partial NeoX RoPE,
+/// F16 in place. HEAD_DIM-templated entries (each with __launch_bounds__).
+pub fn run_rmsnorm_rope_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) -> Result<Cert> {
+    let dev = B::new_device(0)?;
+    let image = B::image("rmsnorm_rope_neox_partial_f16").ok_or_else(|| anyhow!("rmsnorm_rope_neox_partial_f16 not compiled"))?;
+    let module = B::load(&dev, image)?;
+    let pmc = B::attributes(&B::kernel(&module, "flambeau_rmsnorm_rope_neox_partial_f16_d128")?)?;
+
+    let theta = 10000.0f32;
+    let eps = 1e-6f32;
+    // (n_tokens, n_heads, head_dim, rotated_dims, entry)
+    let cases = [
+        (1usize, 4usize, 128usize, 64usize, "flambeau_rmsnorm_rope_neox_partial_f16_d128"),
+        (8, 2, 256, 128, "flambeau_rmsnorm_rope_neox_partial_f16_d256"),
+        (2, 4, 64, 32, "flambeau_rmsnorm_rope_neox_partial_f16_d64"),
+    ];
+    let mut results = Vec::new();
+    for (n_tokens, n_heads, head_dim, rotated, entry) in cases {
+        let kernel = B::kernel(&module, entry)?;
+        let seed = 0xC0FFEE ^ ((n_tokens as u64) * 1049 + (head_dim as u64) * 11);
+        let total = n_tokens * n_heads * head_dim;
+        let x = f16_input(seed, total);
+        let norm_w = f16_input(seed ^ 0xEE, head_dim);
+        let positions: Vec<i32> = (0..n_tokens).map(|t| (t as i32) * 5 + 1).collect();
+
+        let mut reference: Vec<f32> = x.iter().map(|v| v.to_f32()).collect();
+        for t in 0..n_tokens {
+            for h in 0..n_heads {
+                let base = (t * n_heads + h) * head_dim;
+                let sum_sq: f64 = (0..head_dim).map(|i| (x[base + i].to_f32() as f64).powi(2)).sum();
+                let inv = 1.0 / (sum_sq / head_dim as f64 + eps as f64).sqrt();
+                let normed: Vec<f64> = (0..head_dim)
+                    .map(|i| x[base + i].to_f32() as f64 * norm_w[i].to_f32() as f64 * inv)
+                    .collect();
+                let half = rotated / 2;
+                for i in 0..head_dim {
+                    reference[base + i] = if i < half {
+                        let exponent = 2.0 * i as f64 / rotated as f64;
+                        let inv_freq = 1.0 / (theta as f64).powf(exponent);
+                        let angle = positions[t] as f64 * inv_freq;
+                        let (s, c) = angle.sin_cos();
+                        f16::from_f32((normed[i] * c - normed[i + half] * s) as f32).to_f32()
+                    } else if i < rotated {
+                        let lo = i - half;
+                        let exponent = 2.0 * lo as f64 / rotated as f64;
+                        let inv_freq = 1.0 / (theta as f64).powf(exponent);
+                        let angle = positions[t] as f64 * inv_freq;
+                        let (s, c) = angle.sin_cos();
+                        f16::from_f32((normed[lo] * s + normed[i] * c) as f32).to_f32()
+                    } else {
+                        f16::from_f32(normed[i] as f32).to_f32()
+                    };
+                }
+            }
+        }
+
+        let d_x = alloc_and_upload(&dev, &x);
+        let d_w = alloc_and_upload(&dev, &norm_w);
+        let d_pos = alloc_and_upload(&dev, &positions);
+        {
+            let stream = dev.default_stream();
+            let nh = n_heads as i32;
+            let rd = rotated as i32;
+            let x_ptr: u64 = d_x.as_usize() as u64;
+            let w_ptr: u64 = d_w.as_usize() as u64;
+            let p_ptr: u64 = d_pos.as_usize() as u64;
+            let mut args = <B::Args<'_>>::default();
+            args.push_arg(&x_ptr);
+            args.push_arg(&w_ptr);
+            args.push_arg(&p_ptr);
+            args.push_arg(&nh);
+            args.push_arg(&rd);
+            args.push_arg(&theta);
+            args.push_arg(&eps);
+            let cfg = LaunchCfg { grid: (n_tokens as u32, n_heads as u32, 1), block: (head_dim as u32, 1, 1), shared_bytes: 0 };
+            B::launch(&kernel, stream, cfg, args)?;
+            stream.synchronize()?;
+        }
+        let mut got_f16 = vec![f16::from_f32(0.0); total];
+        unsafe {
+            dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost,
+                DevicePtr(got_f16.as_mut_ptr() as usize), d_x, total * 2)?;
+        }
+        dev.default_stream().synchronize()?;
+        unsafe {
+            dev.dealloc(d_x, total * 2)?;
+            dev.dealloc(d_w, head_dim * 2)?;
+            dev.dealloc(d_pos, n_tokens * 4)?;
+        }
+        let got: Vec<f32> = got_f16.iter().map(|v| v.to_f32()).collect();
+        let err = max_rel_err_with_floor(&got, &reference, (head_dim as f32).sqrt() * 0.01);
+        results.push(ShapeResult { m: n_tokens, k: n_heads, n: head_dim, seed, max_rel_err: err, tolerance: 1e-2, pass: err <= 1e-2 });
+    }
+    finish_cert(&dev, repo_root, arch, "rmsnorm_rope_neox_partial_f16", "rmsnorm_rope_neox_partial_f16",
+        "F16", "F16", "|err| <= 1e-2 * max(|ref|, sqrt(head_dim)) vs F64 oracle", results, pmc)
 }
 
 /// `v_unit_norm_per_head_f16` — per-head V RMSNorm (unit weights) in place.

@@ -955,4 +955,8 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
         impl_id: "kv_append_v_unit_norm_f16",
         cert_rel_path: "certs/hip/gfx906/kv_append_v_unit_norm_f16.json",
     },
+    DirectCallKernel {
+        impl_id: "rmsnorm_rope_neox_partial_f16",
+        cert_rel_path: "certs/hip/gfx906/rmsnorm_rope_neox_partial_f16.json",
+    },
 ];
