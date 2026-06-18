@@ -66,26 +66,29 @@ kernel authoring, just composition.
 
 ## Phasing (B6 sliced)
 
-- **P4.0 — Prereqs.** Install + pin NCCL; decide the rig path (2nd NVIDIA GPU vs
-  1-GPU partial validation). Add `nccl`/`nccl_sys` (or hand FFI) behind an `nccl`
-  cargo feature on `backend-cuda`.
-- **P4.1 — `CudaBackend` + `CudaCluster` (no collectives).** Complete the
-  `Backend` bundle for CUDA (Device/Stream/Event already exist from P1-P3; add the
-  CUDA `Registry`/`Ops` op-launch layer — shared with P5). `CudaCluster`: device
-  list + peer-access matrix (`cudaDeviceCanAccessPeer`). Gate: `ranks()` /
-  `device(r)` smoke on 1 GPU.
-- **P4.2 — NCCL `DeviceAllReduce`.** `ncclCommInitAll` in `CudaCluster::new`;
-  `all_reduce_sum` → `ncclAllReduce(ncclSum, F32/F16)` on the rank's stream. Gate:
-  2-GPU (or 2-rank-1-GPU) AllReduce vs the `RefMesh` CPU oracle.
-- **P4.3 — `FusedAllReduce` (NCCL + epilogue).** Implement the 4 fused ops as
+- ✅ **P4.0 — Prereqs.** `nccl` cargo feature on `backend-cuda`; hand FFI to
+  libnccl 2.28 (`nccl_sys.rs`); build.rs symlinks `libnccl.so` in OUT_DIR +
+  rpaths the wheel lib dir (env `NCCL_LIB_DIR` override). `84a433b`.
+- ✅ **P4.1 — `CudaCluster`.** Device list + `cuDeviceCanAccessPeer` matrix,
+  implementing the `Cluster` seam (`ranks`/`device`/`peer_access_full`). `84a433b`.
+  *(The full `CudaBackend` bundle — `Registry`/`Ops` op-launch layer — is still
+  open; it is shared with P5 and gates P4.3 below.)*
+- ✅ **P4.2 — NCCL `DeviceAllReduce`.** `ncclCommInitAll` per rank; `all_reduce_sum`
+  → in-place `ncclAllReduce(Sum, F32/F16)`. **Validated on 1 GPU**: 1-rank
+  identity + 2-ranks-on-1-GPU real reduction (1+2=3) green. `84a433b`. Real
+  2-distinct-GPU PCIe-P2P cert deferred to a 2nd NVIDIA card.
+- ⏸️ **P4.3 — `FusedAllReduce` (NCCL + epilogue).** The 4 fused ops as
   `ncclAllReduce` + the P3 add/rmsnorm kernels; `supports_*` mirror the HIP rank
-  gates (TP=2 residual, TP∈{2,4} sum/post-attn). Gate: fused-AR cert vs oracle.
-- **P4.4 — `CudaGraphExec`.** `cuGraph*` capture/instantiate/launch + the
-  shadow-param slot map (`ScalarSlot`/`MemcpySlot`) mirroring `HipGraphExec`. Lift
-  `GraphExec` to a trait if not already. Gate: graph-capture smoke (single GPU —
-  this one does NOT need 2 GPUs).
-- **P4.5 — multi-GPU forward smoke.** `ForwardEngine<CudaBackend>` pp2/tp2 on
-  2 NVIDIA GPUs (gated on hardware). Byte/logit parity vs single-GPU CUDA decode.
+  gates (TP=2 residual, TP∈{2,4} sum/post-attn). **Blocked on the CUDA `Ops`
+  op-launch layer** (to dispatch the epilogue kernels) — that layer is the P5
+  prerequisite; build it once, shared.
+- ✅ **P4.4 (core) — `CudaGraphExec`.** `cuStreamBeginCapture`→`cuStreamEndCapture`
+  →`cuGraphInstantiateWithFlags`→`cuGraphLaunch` + Drop. **Validated on 1 GPU**:
+  capture a DtoD memcpy, replay tracks an on-device source mutation. `3cd97f2`.
+  The shadow-param slot map (per-replay kernel/memcpy rebind for progressive
+  dispatch) is deferred — overlaps the P5 `CudaOps` layer.
+- ⏸️ **P4.5 — multi-GPU forward smoke.** `ForwardEngine<CudaBackend>` pp2/tp2 on
+  2 NVIDIA GPUs. Gated on hardware (2nd sm_75+ card) + the `CudaBackend` bundle.
 
 ## Notes / decisions to lock
 
