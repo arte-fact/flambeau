@@ -3018,3 +3018,20 @@ params = """
     const int n_tokens,
     const int hidden"""
 body = "shared_expert_scale_f32_row<256>(shared_out, x, gate_w, n_tokens, hidden);"
+
+# Router top-k — per-token argmax×k + softmax (WARP_SIZE-seamed argmax reduce).
+
+[[kernel]]
+stem = "topk_f32"
+includes = ["backend_compat.cuh", "topk.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_topk_softmax_f32"
+params = """
+    const float* __restrict__ logits,
+    int* __restrict__ out_indices,
+    float* __restrict__ out_weights,
+    const int n_tokens,
+    const int n_experts,
+    const int k"""
+body = "topk_softmax_f32_row(logits, out_indices, out_weights, n_tokens, n_experts, k);"

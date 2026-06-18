@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "impl_id": "topk_f32",
+  "backend": "cuda",
+  "arch": "sm_86",
+  "op": "topk_f32",
+  "dtype_weight": "F32",
+  "dtype_activation": "F32",
+  "tolerance_formula": "indices exact + weights |err| <= 1e-4 vs CPU oracle",
+  "results": [
+    {
+      "m": 1,
+      "k": 128,
+      "n": 8,
+      "seed": 12640543,
+      "max_rel_err": 1.4901161e-8,
+      "tolerance": 0.0001,
+      "pass": true
+    },
+    {
+      "m": 8,
+      "k": 256,
+      "n": 8,
+      "seed": 12626382,
+      "max_rel_err": 1.4901161e-8,
+      "tolerance": 0.0001,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 512,
+      "n": 10,
+      "seed": 12620137,
+      "max_rel_err": 1.4901161e-8,
+      "tolerance": 0.0001,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-06-18T11:39:09Z",
+  "rig": "threadreaper-sm_86",
+  "pmc": {
+    "vgpr_count": 23,
+    "sgpr_count": null,
+    "waves_per_simd": null,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

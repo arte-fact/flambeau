@@ -66,6 +66,7 @@ pub fn run_pointwise_sweep<B: BenchBackend>(
         "moe_combine_two_residuals_f16" => run_moe_combine_sweep::<B>(repo_root, arch, 2),
         "apply_per_expert_scale_f32" => run_apply_per_expert_scale_sweep::<B>(repo_root, arch),
         "shared_expert_scale_f32" => run_shared_expert_scale_sweep::<B>(repo_root, arch),
+        "topk_f32" => run_topk_f32_sweep::<B>(repo_root, arch),
         _ => return None,
     };
     Some(cert)
@@ -966,6 +967,85 @@ pub fn run_rope_f16_sweep<B: BenchBackend>(repo_root: &Path, arch: &str, neox: b
     }
     finish_cert(&dev, repo_root, arch, impl_id, impl_id, "F16", "F16",
         "|err| <= 5e-3 * max(|ref|, 1e-2) vs F64 angle oracle", results, pmc)
+}
+
+/// `topk_f32` — per-token router top-k + softmax. One block per token,
+/// blockDim = n_experts; the per-round block argmax rides the WARP_SIZE seam.
+/// Indices must match the CPU oracle exactly (lower-index tiebreak); weights to
+/// 1e-4 (fast `__expf`).
+pub fn run_topk_f32_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) -> Result<Cert> {
+    let dev = B::new_device(0)?;
+    let image = B::image("topk_f32").ok_or_else(|| anyhow!("topk_f32 not compiled"))?;
+    let module = B::load(&dev, image)?;
+    let kernel = B::kernel(&module, "flambeau_topk_softmax_f32")?;
+    let pmc = B::attributes(&kernel)?;
+
+    let shapes = [(1usize, 128usize, 8usize), (8, 256, 8), (1, 512, 10)];
+    let mut results = Vec::new();
+    for (n_tokens, n_experts, k) in shapes {
+        let seed = 0xC0FFEE ^ ((n_tokens as u64) * 1049 + (n_experts as u64) * 53 + (k as u64) * 11);
+        let logits = seeded_f32_range(seed, n_tokens * n_experts, -4.0, 4.0);
+        // CPU oracle: top-k by (value desc, index asc), softmax of k raw values.
+        let mut ref_idx = vec![0i32; n_tokens * k];
+        let mut ref_w = vec![0.0f32; n_tokens * k];
+        for t in 0..n_tokens {
+            let mut order: Vec<usize> = (0..n_experts).collect();
+            order.sort_by(|&a, &b| {
+                let (va, vb) = (logits[t * n_experts + a], logits[t * n_experts + b]);
+                vb.partial_cmp(&va).unwrap().then(a.cmp(&b))
+            });
+            let top: Vec<usize> = order[..k].to_vec();
+            let m = logits[t * n_experts + top[0]];
+            let sum: f64 = top.iter().map(|&e| ((logits[t * n_experts + e] - m) as f64).exp()).sum();
+            for (r, &e) in top.iter().enumerate() {
+                ref_idx[t * k + r] = e as i32;
+                ref_w[t * k + r] = (((logits[t * n_experts + e] - m) as f64).exp() / sum) as f32;
+            }
+        }
+
+        let d_logits = alloc_and_upload(&dev, &logits);
+        let d_idx = dev.alloc(n_tokens * k * 4)?;
+        let d_w = dev.alloc(n_tokens * k * 4)?;
+        {
+            let stream = dev.default_stream();
+            let nt = n_tokens as i32;
+            let ne = n_experts as i32;
+            let kk = k as i32;
+            let l_ptr: u64 = d_logits.as_usize() as u64;
+            let idx_ptr: u64 = d_idx.as_usize() as u64;
+            let w_ptr: u64 = d_w.as_usize() as u64;
+            let mut args = <B::Args<'_>>::default();
+            args.push_arg(&l_ptr);
+            args.push_arg(&idx_ptr);
+            args.push_arg(&w_ptr);
+            args.push_arg(&nt);
+            args.push_arg(&ne);
+            args.push_arg(&kk);
+            let cfg = LaunchCfg { grid: (n_tokens as u32, 1, 1), block: (n_experts as u32, 1, 1), shared_bytes: 0 };
+            B::launch(&kernel, stream, cfg, args)?;
+            stream.synchronize()?;
+        }
+        let mut got_idx = vec![0i32; n_tokens * k];
+        let mut got_w = vec![0.0f32; n_tokens * k];
+        unsafe {
+            dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost,
+                DevicePtr(got_idx.as_mut_ptr() as usize), d_idx, n_tokens * k * 4)?;
+            dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost,
+                DevicePtr(got_w.as_mut_ptr() as usize), d_w, n_tokens * k * 4)?;
+        }
+        dev.default_stream().synchronize()?;
+        unsafe {
+            dev.dealloc(d_logits, n_tokens * n_experts * 4)?;
+            dev.dealloc(d_idx, n_tokens * k * 4)?;
+            dev.dealloc(d_w, n_tokens * k * 4)?;
+        }
+        let idx_mismatch = got_idx.iter().zip(&ref_idx).filter(|(g, r)| g != r).count() as f32;
+        let w_err = max_rel_err_with_floor(&got_w, &ref_w, 1.0);
+        let err = idx_mismatch.max(w_err);
+        results.push(ShapeResult { m: n_tokens, k: n_experts, n: k, seed, max_rel_err: err, tolerance: 1e-4, pass: err <= 1e-4 });
+    }
+    finish_cert(&dev, repo_root, arch, "topk_f32", "topk_f32", "F32", "F32",
+        "indices exact + weights |err| <= 1e-4 vs CPU oracle", results, pmc)
 }
 
 /// `moe_combine_*_f16` — expert fan-in `Σ_k w_k·e_k` (+ 0/1/2 F16 residuals).

@@ -878,4 +878,8 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
         impl_id: "shared_expert_scale_f32",
         cert_rel_path: "certs/hip/gfx906/shared_expert_scale_f32.json",
     },
+    DirectCallKernel {
+        impl_id: "topk_f32",
+        cert_rel_path: "certs/hip/gfx906/topk_f32.json",
+    },
 ];

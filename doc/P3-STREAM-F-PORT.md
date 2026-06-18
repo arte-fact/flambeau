@@ -135,7 +135,8 @@ rope + activation quantizers are all cross-backend.
 - [ ] kv_append_f16_batched_slots
 
 **1d — MoE decode glue + sampler:**
-- [ ] topk_f32
+- [x] topk_f32  *(NEUTRALIZE — per-token block argmax×k + softmax over the
+      WARP_SIZE seam; indices exact + weights 1e-4 both rigs)*
 - [ ] moe_sort_by_expert  *(Tier C — segmented sort)*
 - [x] moe_combine_no_residual_f16  *(MIRROR — pointwise fan-in)*
 - [x] moe_combine_f16  *(MIRROR — fan-in + residual)*
@@ -145,10 +146,11 @@ rope + activation quantizers are all cross-backend.
 - [ ] sampler_topk_softmax_f32
 - [ ] sampler_apply_penalties_f32
 
-The MoE-combine fan-in kernels + the per-expert/shared-expert scales are
-cross-backend. Remaining 1d: topk_f32 + moe_sort_by_expert (segmented sort —
+The MoE-combine fan-in kernels + the per-expert/shared-expert scales + router
+top-k are cross-backend. Remaining 1d: moe_sort_by_expert (segmented sort —
 Tier C, CUDA may want `cub`) + the two sampler kernels (reductions over the
-vocab).
+vocab). The `block_reduce_sum` (sum) + the topk argmax pattern (value+index
+butterfly over `WARP_SIZE`) cover most of what the samplers need.
 
 → **Gate: P5 single-GPU qwen35moe-v2 Q4_K decode parity** (logit-cosine ≥ 0.9999
 vs llama.cpp CUDA). Minimal parity can run decode-only (1-token prompt); real
