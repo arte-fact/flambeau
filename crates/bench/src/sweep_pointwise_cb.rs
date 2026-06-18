@@ -44,6 +44,12 @@ pub fn run_pointwise_sweep<B: BenchBackend>(
         "rmsnorm_f32" => run_rmsnorm_f32_sweep::<B>(repo_root, arch),
         "rmsnorm_f16" => run_rmsnorm_f16_sweep::<B>(repo_root, arch),
         "l2_norm_f32" => run_l2_norm_f32_sweep::<B>(repo_root, arch),
+        "quantize_f16_q8_1" => run_quantize_f16_q8_sweep::<B>(
+            repo_root, arch, "quantize_f16_q8_1", "flambeau_quantize_row_f16_q8_1", "Q8_1", 36, 4,
+        ),
+        "quantize_f16_q8_0" => run_quantize_f16_q8_sweep::<B>(
+            repo_root, arch, "quantize_f16_q8_0", "flambeau_quantize_row_f16_q8_0", "Q8_0", 34, 2,
+        ),
         _ => return None,
     };
     Some(cert)
@@ -494,6 +500,96 @@ pub fn run_sigmoid_mul_f16_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) 
         &[256, 4096, 8192], 0x53,
         |g, x| (1.0 / (1.0 + (-g).exp())) * x,
     )
+}
+
+/// `quantize_f16_q8_{0,1}` — F16 activation → Q8 blocks (32 threads/block,
+/// width-32 `__shfl_xor` amax/sum). `block_bytes` = 34 (Q8_0) or 36 (Q8_1);
+/// `qs_off` = 2 or 4. Scored by dequantizing (`d * qs`) and comparing to the
+/// F16 input upcast — cross-backend the integer `rintf`/shuffle path is exact,
+/// so this is the Q8 step error.
+fn run_quantize_f16_q8_sweep<B: BenchBackend>(
+    repo_root: &Path,
+    arch: &str,
+    impl_id: &'static str,
+    entry: &'static str,
+    dst_dtype: &str,
+    block_bytes: usize,
+    qs_off: usize,
+) -> Result<Cert> {
+    let dev = B::new_device(0)?;
+    let image = B::image(impl_id).ok_or_else(|| anyhow!("{impl_id} not compiled"))?;
+    let module = B::load(&dev, image)?;
+    let kernel = B::kernel(&module, entry)?;
+    let pmc = B::attributes(&kernel)?;
+
+    let shapes = [32usize, 256, 4096];
+    let mut results = Vec::new();
+    for n in shapes {
+        let seed = 0xC0FFEE ^ ((n as u64).wrapping_mul(173).wrapping_add(qs_off as u64));
+        let x = f16_input(seed, n);
+        let xi: Vec<f32> = x.iter().map(|v| v.to_f32()).collect();
+
+        let d_x = alloc_and_upload(&dev, &x);
+        let n_blocks = n / 32;
+        let out_bytes = n_blocks * block_bytes;
+        let d_y = dev.alloc(out_bytes)?;
+        {
+            let stream = dev.default_stream();
+            let n_i = n as i32;
+            let x_ptr: u64 = d_x.as_usize() as u64;
+            let y_ptr: u64 = d_y.as_usize() as u64;
+            let mut args = <B::Args<'_>>::default();
+            args.push_arg(&x_ptr);
+            args.push_arg(&y_ptr);
+            args.push_arg(&n_i);
+            B::launch(&kernel, stream, LaunchCfg::one_d(n_blocks as u32, 32), args)?;
+            stream.synchronize()?;
+        }
+        let mut got = vec![0u8; out_bytes];
+        unsafe {
+            dev.memcpy_async(
+                dev.default_stream(),
+                CopyDirection::DeviceToHost,
+                DevicePtr(got.as_mut_ptr() as usize),
+                d_y,
+                out_bytes,
+            )?;
+        }
+        dev.default_stream().synchronize()?;
+        unsafe {
+            dev.dealloc(d_x, n * 2)?;
+            dev.dealloc(d_y, out_bytes)?;
+        }
+
+        let mut dequant = vec![0.0f32; n];
+        for (blk_idx, block) in got.chunks(block_bytes).enumerate() {
+            let d = f16::from_bits(u16::from_le_bytes([block[0], block[1]])).to_f32();
+            for lane in 0..32 {
+                dequant[blk_idx * 32 + lane] = d * (block[qs_off + lane] as i8) as f32;
+            }
+        }
+        let err = max_rel_err_with_floor(&dequant, &xi, 1.0);
+        results.push(ShapeResult { m: n, k: 1, n: 1, seed, max_rel_err: err, tolerance: 5e-3, pass: err <= 5e-3 });
+    }
+
+    let pass = results.iter().all(|r| r.pass);
+    let cert = Cert {
+        schema_version: SCHEMA_VERSION,
+        impl_id: impl_id.to_string(),
+        backend: dev.backend().to_string(),
+        arch: arch.to_string(),
+        op: impl_id.to_string(),
+        dtype_weight: "F16".to_string(),
+        dtype_activation: dst_dtype.to_string(),
+        tolerance_formula: "|dequant - input| <= 5e-3 * max(|input|, 1) (Q8 step)".to_string(),
+        results,
+        pass,
+        emitted_at: now_utc_iso8601(),
+        rig: rig_for(arch),
+        pmc: Some(pmc),
+    };
+    cert.write_to_disk(repo_root)?;
+    Ok(cert)
 }
 
 /// `swiglu_f32_to_q8_1` — fused `silu(a)*b` (F32) → Q8_1 blocks (36 B: d, s,

@@ -716,10 +716,6 @@ const SIMPLE_SWEEPS: &[(&str, SweepFn)] = &[
         flambeau_bench::sweep_f32_pointwise::run_gdn_alpha_beta_sweep,
     ),
     (
-        "quantize_f16_q8_1",
-        flambeau_bench::sweep_f32_pointwise::run_quantize_f16_q8_1_sweep,
-    ),
-    (
         "dense_gemv_f32_f16",
         flambeau_bench::sweep_f32_pointwise::run_dense_gemv_sweep,
     ),

@@ -116,9 +116,9 @@ on top.
 - [ ] rope_f16
 - [ ] rope_neox_partial_f16
 - [ ] rmsnorm_rope_neox_partial_f16
-- [ ] quantize_f16_q8_1
-- [ ] quantize_f16_q8_1_mmq
-- [ ] quantize_f16_q8_0
+- [x] quantize_f16_q8_1  *(MIRROR — backend-neutral 32-thread quantizer; dequant 5e-3)*
+- [ ] quantize_f16_q8_1_mmq  *(orphan — no current consumer; defer)*
+- [x] quantize_f16_q8_0  *(MIRROR — Q8 KV-cache quantizer; dequant 5e-3)*
 
 **1c — Tier-C attention decode + KV append** (the hard tier):
 - [ ] attention_decode_f16

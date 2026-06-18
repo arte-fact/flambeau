@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "impl_id": "quantize_f16_q8_1",
+  "backend": "hip",
+  "arch": "gfx906",
+  "op": "quantize_f16_q8_1",
+  "dtype_weight": "F16",
+  "dtype_activation": "Q8_1",
+  "tolerance_formula": "|dequant - input| <= 5e-3 * max(|input|, 1) (Q8 step)",
+  "results": [
+    {
+      "m": 32,
+      "k": 1,
+      "n": 1,
+      "seed": 12642890,
+      "max_rel_err": 0.001953125,
+      "tolerance": 0.005,
+      "pass": true
+    },
+    {
+      "m": 256,
+      "k": 1,
+      "n": 1,
+      "seed": 12604138,
+      "max_rel_err": 0.0019359589,
+      "tolerance": 0.005,
+      "pass": true
+    },
+    {
+      "m": 4096,
+      "k": 1,
+      "n": 1,
+      "seed": 13250538,
+      "max_rel_err": 0.0021018982,
+      "tolerance": 0.005,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-06-18T11:12:55Z",
+  "rig": "threadreaper-gfx906",
+  "pmc": {
+    "vgpr_count": 13,
+    "sgpr_count": null,
+    "waves_per_simd": 10,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}
