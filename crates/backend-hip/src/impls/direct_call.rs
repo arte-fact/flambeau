@@ -906,4 +906,8 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
         impl_id: "attention_decode_f16_splitk",
         cert_rel_path: "certs/hip/gfx906/attention_decode_f16_splitk.json",
     },
+    DirectCallKernel {
+        impl_id: "moe_sort_by_expert",
+        cert_rel_path: "certs/hip/gfx906/moe_sort_by_expert.json",
+    },
 ];

@@ -148,7 +148,8 @@ test (batched == serial, bit-for-bit) is the guard.
 **1d — MoE decode glue + sampler:**
 - [x] topk_f32  *(NEUTRALIZE — per-token block argmax×k + softmax over the
       WARP_SIZE seam; indices exact + weights 1e-4 both rigs)*
-- [ ] moe_sort_by_expert  *(Tier C — segmented sort)*
+- [x] moe_sort_by_expert  *(MIRROR — histogram + LDS scan + deterministic
+      scatter; no warp ops, so wave-agnostic; counts/offsets/sorted bit-exact)*
 - [x] moe_combine_no_residual_f16  *(MIRROR — pointwise fan-in)*
 - [x] moe_combine_f16  *(MIRROR — fan-in + residual)*
 - [x] moe_combine_two_residuals_f16  *(MIRROR — fan-in + 2 residuals)*
@@ -169,12 +170,15 @@ Tier C, CUDA may want `cub`) + the two sampler kernels (reductions over the
 vocab). The `block_reduce_sum` (sum) + the topk argmax pattern (value+index
 butterfly over `WARP_SIZE`) cover most of what the samplers need.
 
-**Wave 1 status: 31/33 (only moe_sort_by_expert + the two earlier deferrals
-remain).** The entire decode spine — norms, rope, activation-quant, MoE glue,
+**Wave 1 DECODE SPINE COMPLETE (32/32 — only the two early deferrals sit outside
+it).** Every Wave-1 kernel — norms, rope, activation-quant, MoE glue + sort,
 router top-k, samplers, masked softmax, KV append, and BOTH decode-attention
-kernels (single-pass + split-K) — is cross-backend, and the attention kernels
-are bit-identical to the hand kernels (all 14 attention parity tests green).
-Remaining: **moe_sort_by_expert** (Tier-C segmented sort; CUDA may want `cub`).
+kernels (single-pass + split-K) — is cross-backend; the attention kernels are
+bit-identical to the hand kernels (all 14 attention parity tests green). The two
+deferrals (`rmsnorm_rope_neox_partial_f16` launch-bounds, `quantize_f16_q8_1_mmq`
+orphan) are non-blocking for the P5 decode-parity gate. **P3 is unblocked for the
+P5 qwen35moe-v2 Q4_K single-GPU decode integration** (Waves 2-4 are prefill / Q8
+KV / paged-serving / GDN — not on the minimal decode-parity path).
 
 → **Gate: P5 single-GPU qwen35moe-v2 Q4_K decode parity** (logit-cosine ≥ 0.9999
 vs llama.cpp CUDA). Minimal parity can run decode-only (1-token prompt); real

@@ -73,6 +73,7 @@ pub fn run_pointwise_sweep<B: BenchBackend>(
         "kv_append_f16_batched_slots" => run_kv_append_f16_batched_slots_sweep::<B>(repo_root, arch),
         "attention_decode_f16" => run_attention_decode_f16_sweep::<B>(repo_root, arch),
         "attention_decode_f16_splitk" => run_attention_decode_splitk_sweep::<B>(repo_root, arch),
+        "moe_sort_by_expert" => run_moe_sort_by_expert_sweep::<B>(repo_root, arch),
         _ => return None,
     };
     Some(cert)
@@ -973,6 +974,117 @@ pub fn run_rope_f16_sweep<B: BenchBackend>(repo_root: &Path, arch: &str, neox: b
     }
     finish_cert(&dev, repo_root, arch, impl_id, impl_id, "F16", "F16",
         "|err| <= 5e-3 * max(|ref|, 1e-2) vs F64 angle oracle", results, pmc)
+}
+
+/// `moe_sort_by_expert` — group (token,slot) pairs by expert via histogram +
+/// prefix-sum + deterministic scatter. Wave-agnostic (atomics + LDS scan, no
+/// warp ops) → MIRROR. The deterministic pipeline (zero→count→scan→scatter_det)
+/// is bit-reproducible, so counts/offsets/sorted_pair_idx match the CPU oracle
+/// exactly on both rigs.
+pub fn run_moe_sort_by_expert_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) -> Result<Cert> {
+    let dev = B::new_device(0)?;
+    let image = B::image("moe_sort_by_expert").ok_or_else(|| anyhow!("moe_sort_by_expert not compiled"))?;
+    let module = B::load(&dev, image)?;
+    let zero_k = B::kernel(&module, "flambeau_moe_sort_zero_counts")?;
+    let count_k = B::kernel(&module, "flambeau_moe_sort_count")?;
+    let scan_k = B::kernel(&module, "flambeau_moe_sort_scan_offsets")?;
+    let scatter_k = B::kernel(&module, "flambeau_moe_sort_scatter_det")?;
+    let pmc = B::attributes(&count_k)?;
+
+    let shapes = [(8usize, 8usize, 64usize), (64, 8, 128), (128, 8, 256)];
+    let mut results = Vec::new();
+    for (n_tokens, top_k, n_experts) in shapes {
+        let seed = 0xC0FFEE ^ ((n_tokens as u64) * 1049 + (n_experts as u64) * 11);
+        let total = n_tokens * top_k;
+        let expert_ids: Vec<i32> = (0..total)
+            .map(|i| (i.wrapping_mul(2654435761) ^ (seed as usize)) as i32 % n_experts as i32)
+            .map(|e| e.rem_euclid(n_experts as i32))
+            .collect();
+        // CPU oracle: counts, exclusive offsets, stable scatter by input order.
+        let mut counts_ref = vec![0i32; n_experts];
+        for &e in &expert_ids {
+            counts_ref[e as usize] += 1;
+        }
+        let mut offsets_ref = vec![0i32; n_experts + 1];
+        for e in 0..n_experts {
+            offsets_ref[e + 1] = offsets_ref[e] + counts_ref[e];
+        }
+        let mut cursor = offsets_ref[..n_experts].to_vec();
+        let mut sorted_ref = vec![0i32; total];
+        for (i, &e) in expert_ids.iter().enumerate() {
+            let pos = cursor[e as usize];
+            cursor[e as usize] += 1;
+            sorted_ref[pos as usize] = i as i32;
+        }
+
+        let d_ids = alloc_and_upload(&dev, &expert_ids);
+        let d_counts = dev.alloc(n_experts * 4)?;
+        let d_offsets = dev.alloc((n_experts + 1) * 4)?;
+        let d_cursors = dev.alloc(n_experts * 4)?;
+        let d_sorted = dev.alloc(total * 4)?;
+        {
+            let stream = dev.default_stream();
+            let ne = n_experts as i32;
+            let tot = total as i32;
+            let ids: u64 = d_ids.as_usize() as u64;
+            let cnt: u64 = d_counts.as_usize() as u64;
+            let off: u64 = d_offsets.as_usize() as u64;
+            let cur: u64 = d_cursors.as_usize() as u64;
+            let srt: u64 = d_sorted.as_usize() as u64;
+
+            let mut a0 = <B::Args<'_>>::default();
+            a0.push_arg(&cnt);
+            a0.push_arg(&ne);
+            B::launch(&zero_k, stream, LaunchCfg { grid: (1, 1, 1), block: (512, 1, 1), shared_bytes: 0 }, a0)?;
+
+            let mut a1 = <B::Args<'_>>::default();
+            a1.push_arg(&ids);
+            a1.push_arg(&cnt);
+            a1.push_arg(&tot);
+            B::launch(&count_k, stream, LaunchCfg::one_d((total as u32).div_ceil(256), 256), a1)?;
+
+            let mut a2 = <B::Args<'_>>::default();
+            a2.push_arg(&cnt);
+            a2.push_arg(&off);
+            a2.push_arg(&cur);
+            a2.push_arg(&ne);
+            B::launch(&scan_k, stream, LaunchCfg { grid: (1, 1, 1), block: (512, 1, 1), shared_bytes: 0 }, a2)?;
+
+            let mut a3 = <B::Args<'_>>::default();
+            a3.push_arg(&ids);
+            a3.push_arg(&cur);
+            a3.push_arg(&srt);
+            a3.push_arg(&tot);
+            B::launch(&scatter_k, stream, LaunchCfg { grid: (1, 1, 1), block: (1, 1, 1), shared_bytes: 0 }, a3)?;
+            stream.synchronize()?;
+        }
+        let mut got_counts = vec![0i32; n_experts];
+        let mut got_offsets = vec![0i32; n_experts + 1];
+        let mut got_sorted = vec![0i32; total];
+        unsafe {
+            dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost,
+                DevicePtr(got_counts.as_mut_ptr() as usize), d_counts, n_experts * 4)?;
+            dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost,
+                DevicePtr(got_offsets.as_mut_ptr() as usize), d_offsets, (n_experts + 1) * 4)?;
+            dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost,
+                DevicePtr(got_sorted.as_mut_ptr() as usize), d_sorted, total * 4)?;
+        }
+        dev.default_stream().synchronize()?;
+        unsafe {
+            dev.dealloc(d_ids, total * 4)?;
+            dev.dealloc(d_counts, n_experts * 4)?;
+            dev.dealloc(d_offsets, (n_experts + 1) * 4)?;
+            dev.dealloc(d_cursors, n_experts * 4)?;
+            dev.dealloc(d_sorted, total * 4)?;
+        }
+        let mismatches = (got_counts != counts_ref) as u32
+            + (got_offsets != offsets_ref) as u32
+            + (got_sorted != sorted_ref) as u32;
+        let err = mismatches as f32;
+        results.push(ShapeResult { m: n_tokens, k: n_experts, n: total, seed, max_rel_err: err, tolerance: 0.0, pass: err == 0.0 });
+    }
+    finish_cert(&dev, repo_root, arch, "moe_sort_by_expert", "moe_sort_by_expert", "I32", "I32",
+        "exact (counts + exclusive offsets + deterministic scatter vs CPU oracle)", results, pmc)
 }
 
 /// `attention_decode_f16_splitk` — flash-decoding split-K decode attention.

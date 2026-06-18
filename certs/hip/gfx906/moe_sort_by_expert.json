@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "impl_id": "moe_sort_by_expert",
+  "backend": "hip",
+  "arch": "gfx906",
+  "op": "moe_sort_by_expert",
+  "dtype_weight": "I32",
+  "dtype_activation": "I32",
+  "tolerance_formula": "exact (counts + exclusive offsets + deterministic scatter vs CPU oracle)",
+  "results": [
+    {
+      "m": 8,
+      "k": 64,
+      "n": 64,
+      "seed": 12639334,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 64,
+      "k": 128,
+      "n": 512,
+      "seed": 12710958,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 128,
+      "k": 256,
+      "n": 1024,
+      "seed": 12773486,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-06-18T12:43:21Z",
+  "rig": "threadreaper-gfx906",
+  "pmc": {
+    "vgpr_count": 3,
+    "sgpr_count": null,
+    "waves_per_simd": 10,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}
