@@ -68,7 +68,12 @@ behaviour-preserving.
   Guardrail green: `ops_smoke` 5/5, `parity_snapshot_dense`/`gdn` +
   `snapshot_restore` bit-identical on gfx906; `add_f16` sweep certs both
   backends.
-- 🔄 **P5.1 — Genericize the launch bodies, domain by domain.** Bodies move to
+- ✅ **P5.1 — COMPLETE. All 13 op-launch domains are generic over `KernelBackend`.**
+  The op layer (`crates/ops/src/hip/*`) names no concrete `HipModule`/`KernelArgs`;
+  HIP forward + the full ops suite (incl. the 14-test attention parity) stay
+  bit-identical. Two seams were built along the way: `dispatch_qmatmul`
+  (per-backend table) and `LaunchArgs::push_slot` (graph-capture slot tagging,
+  default = plain push for backends without a graph slot-map). Bodies move to
   `<B: KernelBackend>(reg: &Registry<B>, stream, …)` with `B::kernel`/`B::Args`/
   `B::launch`; `ops_impl` callers pass `self.reg, self.stream`. Done via a
   scripted mechanical pass (`/tmp/migrate_ops.py`) + per-file import fixes, each
@@ -87,13 +92,22 @@ behaviour-preserving.
     `QMATMUL_SM86` (`backend-cuda::impls`, generated from `dispatch/cuda/sm_86.toml`,
     20 MMVQ+dp4a rows). `qmatmul.rs` migrated (`B::dispatch_qmatmul` + the 7
     `*_launch` helpers genericized). Parity bit-identical.
-  - **12 of 13 op domains now generic over `KernelBackend`.** Only `attention.rs`
-    remains, blocked on the **slot seam**: it uses 6 `KernelArgs::push_slot`
-    graph-slot bindings (`ScalarSlot`) and the generic `LaunchArgs` has no slot
-    surface — extend `LaunchArgs` with `push_slot` (the same progressive-dispatch
-    slot support P4.4's graph slot-map needs), then migrate.
+  - ✅ **Batch 5 — slot seam + `attention`** (`ebf424b`): `LaunchArgs::push_slot`
+    (default ignores the slot; HIP records the tag for `HipGraphExec`). `attention.rs`
+    migrated; `push_scalar_maybe_slot` genericized over `<A: LaunchArgs>`. Full
+    attention parity (14 tests) + graph_slot + forward snapshots bit-identical.
   - **P5.3 head start:** the CUDA `QMATMUL_SM86` table + `dispatch_qmatmul` path
     already exist; P5.3 is then the remaining decode-path dispatch rows.
+
+### Next: P5.2 — `CudaBackend` + `CudaOps`
+
+With the launch + dispatch + slot seams all generic, `CudaOps` is now the generic
+`Ops` impl over `CudaBackend`: build `CudaBackend: Backend` (Device/Stream/Event/
+Cluster done; add the CUDA `Registry = Registry<CudaKernels>` + `Ops` op object)
+and the `impl Ops for CudaOps` reuses the *same* migrated bodies. Then P5.3 (fill
+the rest of `dispatch/cuda/sm_86.toml` + Rust mirrors for the decode path) and
+P5.4 (the logit-cosine gate). attention's CUDA graph-slot rebind stays deferred
+(P4.4 `CudaGraphExec` slot-map) — not needed for decode parity.
 - **P5.2 — `CudaBackend` + CUDA `Registry`/`CudaOps`.** Implement `Backend` for
   `CudaBackend` (Device/Stream/Event/Cluster already done); `Registry<CudaBackend>`
   loads `flambeau_kernels_cuda::cubin(stem)`; `CudaOps` is the generic `Ops` over
