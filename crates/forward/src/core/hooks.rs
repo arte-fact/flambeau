@@ -132,4 +132,6 @@ pub trait TopologyHooks<B: Backend = HipBackend> {
 
 pub struct NoopHooks;
 
-impl TopologyHooks for NoopHooks {}
+// No-op on every backend (solo / single-device runs): the trait methods all have
+// default bodies, so the empty impl is backend-generic.
+impl<B: Backend> TopologyHooks<B> for NoopHooks {}

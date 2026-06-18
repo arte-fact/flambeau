@@ -9,12 +9,14 @@ description = "Typed, individually-testable model ops. Each op is a free functio
 [features]
 default = []
 hip = ["dep:flambeau-backend-hip", "flambeau-ops/hip"]
+cuda = ["dep:flambeau-backend-cuda", "flambeau-ops/cuda"]
 
 [dependencies]
 flambeau-core = { path = "../core" }
 flambeau-ops = { path = "../ops" }
 flambeau-quant = { path = "../quant" }
 flambeau-backend-hip = { path = "../backend-hip", optional = true }
+flambeau-backend-cuda = { path = "../backend-cuda", optional = true }
 anyhow.workspace = true
 half.workspace = true
 bytemuck.workspace = true

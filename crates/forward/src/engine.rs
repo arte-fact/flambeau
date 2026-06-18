@@ -689,6 +689,21 @@ impl<'a> ForwardEngine<'a, HipBackend, NoopHooks, SoloStage> {
     }
 }
 
+impl<'a, B: Backend> ForwardEngine<'a, B, NoopHooks, SoloStage> {
+    /// Single-device engine over any backend bundle. The HIP `new` above is the
+    /// inference-friendly alias (`B` is inferred from the concrete arg types);
+    /// this one is called with an explicit `B` (`ForwardEngine::<CudaBackend>::
+    /// new_solo(…)`) where associated-type inference can't pick `B` on its own.
+    pub fn new_solo(
+        device: &'a B::Device,
+        stream: &'a B::Stream,
+        reg: &'a B::Registry,
+        pool: &'a mut ScratchPool,
+    ) -> Self {
+        Self::build(device, stream, reg, pool, NoopHooks, SoloStage, 0)
+    }
+}
+
 impl<'a> ForwardEngine<'a, HipBackend, TpHooks, SoloStage> {
     pub fn new(
         device: &'a HipDevice,

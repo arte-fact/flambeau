@@ -9,6 +9,10 @@ description = "Topology executor for model forward passes. A model writes ONE fo
 [features]
 default = []
 hip = ["dep:flambeau-backend-hip", "dep:flambeau-backend", "flambeau-backend/hip", "flambeau-model-ops/hip", "flambeau-ops/hip"]
+# CUDA arrives alongside HIP (engine.rs names `HipBackend` for the default type
+# param + aliases), so build with `--features hip,cuda` on a dual rig. Adds the
+# CudaBackend bundle + the CUDA op/registry path for `ForwardEngine<CudaBackend>`.
+cuda = ["dep:flambeau-backend-cuda", "dep:flambeau-backend", "flambeau-backend/cuda", "flambeau-model-ops/cuda", "flambeau-ops/cuda"]
 
 [dependencies]
 flambeau-core = { path = "../core" }
@@ -17,6 +21,7 @@ flambeau-model-ops = { path = "../model-ops" }
 flambeau-ops = { path = "../ops" }
 flambeau-runtime = { path = "../runtime" }
 flambeau-backend-hip = { path = "../backend-hip", optional = true }
+flambeau-backend-cuda = { path = "../backend-cuda", optional = true }
 flambeau-backend = { path = "../backend", optional = true }
 anyhow.workspace = true
 bytemuck.workspace = true

@@ -1620,6 +1620,9 @@ impl Recipe {
         let impl_id = match impl_id {
             "qmatmul_q8_0_mmvq_single_row_gfx906" => "qmatmul_q8_0_mmvq_t128_vdr2",
             "qmatmul_q8_0_mmvq_dp4a_vdr2" => "qmatmul_q8_0_mmvq_t128_vdr2",
+            // CUDA sm_86 dispatch emits the un-suffixed cert impl_id; the recipe
+            // (stem + entry) is arch-neutral, so map it to the shared key.
+            "qmatmul_q8_0_mmvq_dp4a" => "qmatmul_q8_0_mmvq_dp4a_gfx906",
             other => other,
         };
         Ok(match impl_id {
