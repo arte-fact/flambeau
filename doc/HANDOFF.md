@@ -3,9 +3,28 @@
 Transient working note. Start here when the dev rig (2× MI50 gfx906 + 1× RTX 3090
 sm_86) is built and `feature/cuda-decouple` is pulled in.
 
-> **CURRENT STATUS (2026-06-18, tip `41ffad7`): P2 (Stream M) COMPLETE. P3
-> (Stream F) UNDERWAY — spine + Wave 1a + 1b pilot done.** cert-check green hip
-> 82 / cuda 20 throughout. See `doc/P3-STREAM-F-PORT.md` for the wave tracker.
+> **CURRENT STATUS (2026-06-18, tip `c2f87bf`): P2 (Stream M) COMPLETE. P3
+> (Stream F) UNDERWAY — spine + Wave 1a (11/11) + Wave 1b (11/13) done; next =
+> Wave 1c attention.** cert-check green hip 82 / cuda 20 throughout. See
+> `doc/P3-STREAM-F-PORT.md` for the wave tracker.
+> - **P3 Wave 1b (Tier-B) — 11/13 DONE** (`6cff4c7`…`c2f87bf`): the
+>   `block_reduce_sum` seam + the full norm family (rmsnorm_f16/f32/f32_to_f16
+>   ×3/f16_add_residual/q8_1_fused, l2_norm_f32), the F16→Q8 activation
+>   quantizers (q8_0/q8_1, MIRROR), and rope_f16/rope_neox_partial_f16 (MIRROR,
+>   pure index math). NEUTRALIZE for the wave64-reduce kernels (shared `.cuh` +
+>   manifest, hand `.cu` retired); MIRROR for the already-neutral ones. Two
+>   deferred: **rmsnorm_rope_neox_partial_f16** (4 HEAD_DIM entries carry
+>   per-entry `__launch_bounds__` the manifest codegen can't emit + perf-critical
+>   on gfx906 — needs manifest launch-bounds support or a careful MIRROR) and
+>   **quantize_f16_q8_1_mmq** (orphan, no consumer). Helpers added to the spine:
+>   `finish_cert` (shared cert tail), `run_rmsnorm_add_residual_sweep` (both delta
+>   dtypes), `run_rope_f16_sweep` (interleaved + neox), `run_quantize_f16_q8_sweep`.
+> - **NEXT = Wave 1c attention** (the hard tier): attention_decode_f16 (+splitk),
+>   softmax_masked_f16, kv_append_f16_batched_slots, then 1d MoE-decode glue +
+>   sampler. Attention needs online-softmax + LDS tiles + the cp.async↔prefetch
+>   seam (some HIP-only sweeps need BenchBackend-genericizing first). See
+>   `doc/P3-STREAM-F-PORT.md` Wave 1c.
+> - *(spine + Wave 1a + 1b-pilot detail below.)*
 > - **P3 harness spine DONE.** `crates/bench/src/sweep_pointwise_cb.rs` —
 >   BenchBackend-generic pointwise sweeps, one driver certs HIP gfx906 AND CUDA
 >   sm_86. A `run_pointwise_sweep<B>(op, …)` dispatcher both cli arms (HIP `match
