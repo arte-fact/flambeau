@@ -113,12 +113,20 @@ in the hand kernels was the rule-5 leak; this seams it. `rmsnorm_f32` /
 manifest cells, hand `.cu` retired (generated wrappers inject the arch header).
 The remaining 1b norms reuse this primitive; rope/quantize add index/quant math
 on top.
-- [ ] rope_f16
-- [ ] rope_neox_partial_f16
-- [ ] rmsnorm_rope_neox_partial_f16
+- [x] rope_f16  *(MIRROR — interleaved-pair index math; 5e-3)*
+- [x] rope_neox_partial_f16  *(MIRROR — split-pair partial; 5e-3)*
+- [ ] rmsnorm_rope_neox_partial_f16  *(DEFER — 4 HEAD_DIM entries carry per-entry
+      `__launch_bounds__` (perf-critical on gfx906) the manifest codegen can't
+      emit, and phase-1 has the wave64 reduce leak. Needs manifest
+      `__launch_bounds__` support, or a MIRROR preserving the launch bounds on
+      the gfx906 side + a wave32-correct reduce on CUDA.)*
 - [x] quantize_f16_q8_1  *(MIRROR — backend-neutral 32-thread quantizer; dequant 5e-3)*
 - [ ] quantize_f16_q8_1_mmq  *(orphan — no current consumer; defer)*
 - [x] quantize_f16_q8_0  *(MIRROR — Q8 KV-cache quantizer; dequant 5e-3)*
+
+**1b status: 11/13 done.** Remaining: rmsnorm_rope_neox_partial_f16 (launch-bounds
+caveat above) + quantize_f16_q8_1_mmq (orphan). The block-reduce norm family +
+rope + activation quantizers are all cross-backend.
 
 **1c — Tier-C attention decode + KV append** (the hard tier):
 - [ ] attention_decode_f16

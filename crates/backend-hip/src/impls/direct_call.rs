@@ -850,4 +850,12 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
         impl_id: "rmsnorm_q8_1_fused",
         cert_rel_path: "certs/hip/gfx906/rmsnorm_q8_1_fused.json",
     },
+    DirectCallKernel {
+        impl_id: "rope_f16",
+        cert_rel_path: "certs/hip/gfx906/rope_f16.json",
+    },
+    DirectCallKernel {
+        impl_id: "rope_neox_partial_f16",
+        cert_rel_path: "certs/hip/gfx906/rope_neox_partial_f16.json",
+    },
 ];

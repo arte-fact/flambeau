@@ -59,6 +59,8 @@ pub fn run_pointwise_sweep<B: BenchBackend>(
         }
         "rmsnorm_f16_add_residual" => run_rmsnorm_f16_add_residual_sweep::<B>(repo_root, arch),
         "rmsnorm_q8_1_fused" => run_rmsnorm_q8_1_fused_sweep::<B>(repo_root, arch),
+        "rope_f16" => run_rope_f16_sweep::<B>(repo_root, arch, false),
+        "rope_neox_partial_f16" => run_rope_f16_sweep::<B>(repo_root, arch, true),
         _ => return None,
     };
     Some(cert)
@@ -864,6 +866,101 @@ pub fn run_rmsnorm_q8_1_fused_sweep<B: BenchBackend>(repo_root: &Path, arch: &st
     }
     finish_cert(&dev, repo_root, arch, "rmsnorm_q8_1_fused", "rmsnorm_q8_1_fused", "F16", "Q8_1",
         "|dequant - rmsnorm oracle| <= 2e-2 * max(|ref|, 1)", results, pmc)
+}
+
+/// `rope_f16` / `rope_neox_partial_f16` — rotary embedding, F16 in-place. Pure
+/// index math (no reduce); `neox` selects the split-pair partial layout vs the
+/// interleaved-pair full-head layout. F64 angle oracle, 5e-3 F16 envelope.
+pub fn run_rope_f16_sweep<B: BenchBackend>(repo_root: &Path, arch: &str, neox: bool) -> Result<Cert> {
+    let (stem, entry, impl_id) = if neox {
+        ("rope_neox_partial_f16", "flambeau_rope_neox_partial_f16", "rope_neox_partial_f16")
+    } else {
+        ("rope_f16", "flambeau_rope_f16", "rope_f16")
+    };
+    let dev = B::new_device(0)?;
+    let image = B::image(stem).ok_or_else(|| anyhow!("{stem} not compiled"))?;
+    let module = B::load(&dev, image)?;
+    let kernel = B::kernel(&module, entry)?;
+    let pmc = B::attributes(&kernel)?;
+
+    let theta_base = 10000.0f32;
+    // (n_tokens, n_heads, head_dim, rotated_dims). Interleaved rotates the whole
+    // head_dim; neox rotates only rotated_dims with split pairs.
+    let shapes: [(usize, usize, usize, usize); 3] = if neox {
+        [(1, 16, 256, 64), (4, 8, 256, 64), (1, 2, 128, 64)]
+    } else {
+        [(1, 16, 128, 128), (4, 8, 128, 128), (1, 2, 64, 64)]
+    };
+    let mut results = Vec::new();
+    for (n_tokens, n_heads, head_dim, rotated) in shapes {
+        let seed = 0xC0FFEE ^ ((n_tokens as u64) * 1049 + (n_heads as u64) * 53 + (head_dim as u64) * 11);
+        let total = n_tokens * n_heads * head_dim;
+        let x = f16_input(seed, total);
+        let positions: Vec<i32> = (0..n_tokens).map(|t| (t as i32) * 7 + 1).collect();
+
+        // Host oracle (F64 angles), applied to the f16-upcast input.
+        let mut reference: Vec<f32> = x.iter().map(|v| v.to_f32()).collect();
+        for t in 0..n_tokens {
+            for h in 0..n_heads {
+                let base = (t * n_heads + h) * head_dim;
+                let half = rotated / 2;
+                for p in 0..half {
+                    let exponent = 2.0 * p as f64 / rotated as f64;
+                    let inv_freq = 1.0 / (theta_base as f64).powf(exponent);
+                    let angle = positions[t] as f64 * inv_freq;
+                    let (s, c) = angle.sin_cos();
+                    let (lo, hi) = if neox { (base + p, base + p + half) } else { (base + 2 * p, base + 2 * p + 1) };
+                    let x0 = x[lo].to_f32() as f64;
+                    let x1 = x[hi].to_f32() as f64;
+                    reference[lo] = f16::from_f32((x0 * c - x1 * s) as f32).to_f32();
+                    reference[hi] = f16::from_f32((x0 * s + x1 * c) as f32).to_f32();
+                }
+            }
+        }
+
+        let d_x = alloc_and_upload(&dev, &x);
+        let d_pos = alloc_and_upload(&dev, &positions);
+        {
+            let stream = dev.default_stream();
+            let nh = n_heads as i32;
+            let hd = head_dim as i32;
+            let rd = rotated as i32;
+            let x_ptr: u64 = d_x.as_usize() as u64;
+            let pos_ptr: u64 = d_pos.as_usize() as u64;
+            let block_x = if neox { (rotated / 2) as u32 } else { (head_dim / 2) as u32 };
+            let mut args = <B::Args<'_>>::default();
+            args.push_arg(&x_ptr);
+            args.push_arg(&pos_ptr);
+            args.push_arg(&theta_base);
+            args.push_arg(&nh);
+            args.push_arg(&hd);
+            if neox {
+                args.push_arg(&rd);
+            }
+            let cfg = LaunchCfg {
+                grid: (n_tokens as u32, n_heads as u32, 1),
+                block: (block_x, 1, 1),
+                shared_bytes: 0,
+            };
+            B::launch(&kernel, stream, cfg, args)?;
+            stream.synchronize()?;
+        }
+        let mut got_f16 = vec![f16::from_f32(0.0); total];
+        unsafe {
+            dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost,
+                DevicePtr(got_f16.as_mut_ptr() as usize), d_x, total * 2)?;
+        }
+        dev.default_stream().synchronize()?;
+        unsafe {
+            dev.dealloc(d_x, total * 2)?;
+            dev.dealloc(d_pos, n_tokens * 4)?;
+        }
+        let got: Vec<f32> = got_f16.iter().map(|v| v.to_f32()).collect();
+        let err = max_rel_err_with_floor(&got, &reference, 1e-2);
+        results.push(ShapeResult { m: n_tokens, k: n_heads, n: head_dim, seed, max_rel_err: err, tolerance: 5e-3, pass: err <= 5e-3 });
+    }
+    finish_cert(&dev, repo_root, arch, impl_id, impl_id, "F16", "F16",
+        "|err| <= 5e-3 * max(|ref|, 1e-2) vs F64 angle oracle", results, pmc)
 }
 
 /// `quantize_f16_q8_{0,1}` — F16 activation → Q8 blocks (32 threads/block,
