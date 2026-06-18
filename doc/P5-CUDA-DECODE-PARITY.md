@@ -81,18 +81,19 @@ behaviour-preserving.
     mechanically (named-kernel launches + `with_capacity` handled).
   - Guardrail green throughout: `ops_smoke` 5/5, `synth_dense/gdn/gemma_mixed/moe`
     + `parity_snapshot_dense/gdn/attn_gated` + `snapshot_restore` bit-identical.
-  - **All mechanically-migratable bodies are now done (11 of 13 domains).** The 2
-    remaining are blocked on real seam extensions (they fold into P5.2/P5.3):
-    - **`attention.rs` — blocked on the slot seam.** Uses 6 `KernelArgs::push_slot`
-      graph-slot bindings (`ScalarSlot`); the generic `LaunchArgs` has no slot
-      surface. Needs `LaunchArgs` extended with `push_slot` — the same
-      progressive-dispatch slot support P4.4's graph slot-map needs.
-    - **`qmatmul.rs` — blocked on the dispatch seam.** Calls `dispatch_qmatmul`
-      → the HIP-gfx906 `QMATMUL_GFX906` table (`backend-hip::impls`); the variant
-      choice is *arch-specific by design*, so it must become a per-backend
-      dispatch method, and the CUDA dispatch-table Rust mirror
-      (`QMATMUL_SM86`, from `dispatch/cuda/sm_86.toml`) must be built. That is
-      P5.2/P5.3 work, not a mechanical body migration.
+  - ✅ **Batch 4 — dispatch seam + `qmatmul`** (`8364d06`): `dispatch_qmatmul`
+    is now a `KernelBackend` method over `core::first_match` (lifted from
+    backend-hip); `HipKernels` → `QMATMUL_GFX906`, `CudaKernels` → new
+    `QMATMUL_SM86` (`backend-cuda::impls`, generated from `dispatch/cuda/sm_86.toml`,
+    20 MMVQ+dp4a rows). `qmatmul.rs` migrated (`B::dispatch_qmatmul` + the 7
+    `*_launch` helpers genericized). Parity bit-identical.
+  - **12 of 13 op domains now generic over `KernelBackend`.** Only `attention.rs`
+    remains, blocked on the **slot seam**: it uses 6 `KernelArgs::push_slot`
+    graph-slot bindings (`ScalarSlot`) and the generic `LaunchArgs` has no slot
+    surface — extend `LaunchArgs` with `push_slot` (the same progressive-dispatch
+    slot support P4.4's graph slot-map needs), then migrate.
+  - **P5.3 head start:** the CUDA `QMATMUL_SM86` table + `dispatch_qmatmul` path
+    already exist; P5.3 is then the remaining decode-path dispatch rows.
 - **P5.2 — `CudaBackend` + CUDA `Registry`/`CudaOps`.** Implement `Backend` for
   `CudaBackend` (Device/Stream/Event/Cluster already done); `Registry<CudaBackend>`
   loads `flambeau_kernels_cuda::cubin(stem)`; `CudaOps` is the generic `Ops` over
