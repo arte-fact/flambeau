@@ -23,6 +23,10 @@ impl KernelBackend for CudaKernels {
     type Kernel<'m> = CudaKernel<'m>;
     type Args<'a> = KernelArgs<'a>;
 
+    fn bind(dev: &CudaDevice) -> DeviceResult<()> {
+        dev.bind()
+    }
+
     fn image(stem: &str) -> Option<&'static [u8]> {
         flambeau_kernels_cuda::cubin(stem)
     }

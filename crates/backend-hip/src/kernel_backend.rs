@@ -21,6 +21,10 @@ impl KernelBackend for HipKernels {
     type Kernel<'m> = HipKernel<'m>;
     type Args<'a> = KernelArgs<'a>;
 
+    fn bind(dev: &HipDevice) -> DeviceResult<()> {
+        dev.bind()
+    }
+
     fn image(stem: &str) -> Option<&'static [u8]> {
         flambeau_kernels_hip::hsaco(stem)
     }

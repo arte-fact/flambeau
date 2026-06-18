@@ -25,6 +25,12 @@
 #[cfg(feature = "hip")]
 pub mod hip;
 
+// Backend-generic kernel-module registry over the `core::KernelBackend` seam.
+// Always compiled so a CUDA `Ops` impl shares it; `hip::OpsRegistry` is the
+// `Registry<HipKernels>` alias.
+pub mod registry;
+pub use registry::{Registry, RegistryError, KERNEL_STEMS};
+
 // `sig` is the backend-portable op-signature surface (POD buffers / shapes /
 // knobs over `DevicePtr` + `core::ScalarSlot`). Always compiled so the `Ops`
 // trait and a future `CudaOps` impl share it. The one HIP-specific member —

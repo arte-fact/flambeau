@@ -22,6 +22,13 @@ pub trait KernelBackend: 'static {
     type Kernel<'m>;
     type Args<'a>: LaunchArgs<'a>;
 
+    /// Bind `dev` as the calling thread's current device, so subsequent module
+    /// loads / launches land on it (matters when several registries are built
+    /// back-to-back on a multi-GPU cluster).
+    /// # Errors
+    /// Propagates the backend context-bind failure.
+    fn bind(dev: &Self::Device) -> DeviceResult<()>;
+
     /// Compiled kernel image (`.hsaco` / `.cubin`) for catalogue `stem`, if the
     /// kernel was compiled into this build.
     fn image(stem: &str) -> Option<&'static [u8]>;
