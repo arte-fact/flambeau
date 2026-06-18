@@ -175,17 +175,44 @@ present), so only the fused gate+up — hard-coded to
   kernels-hip rebuilds clean, synth/ops_smoke green). Registry smoke: skipped
   52→51, the stem loads. **The full qwen35moe-v2 Q4_K decode dispatch set now
   builds + loads on sm_86.**
-- ⬜ **Cert blocked on a harness gap.** The kernel reuses CUDA-certified pieces
-  (high correctness confidence), but `flambeau sweep --arch sm_86` currently
-  errors for any `--op` other than `qmatmul` ("other ops are gfx906-only") — the
-  CUDA sweep harness only wires the mmvq path. **Next concrete step: extend the
-  CUDA sweep to cover `indexed_moe_mmvq_gate_up`** (and the rest of the decode
-  spine) so rule 2 certs land, then **P5.4** (`flambeau infer --backend cuda` →
-  logit-cosine ≥ 0.9999). attention's CUDA graph-slot rebind stays deferred
-  (P4.4 `CudaGraphExec` slot-map) — not needed for decode parity.
-- **P5.4 — The parity gate.** `flambeau infer --backend cuda --model
-  qwen35moe-v2-Q4_K`: single token first (logit-cosine vs llama.cpp CUDA), then
-  64 tokens ≥ 0.9999. File the diff; no perf claim.
+- ✅ **Kernel certified both backends.** Extended the gate+up MoE sweep with the
+  non-sorted r4 variant (`MoeGateUpDtype::Q4KR4` → `Q4_K_gate_up_r4_moe_mmvq`);
+  the runner already handled the non-sorted arg layout. Certs green:
+  `certs/cuda/sm_86/indexed_moe_mmvq_q4_k_gate_up_r4.json` (max_rel_err ~3.8e-3 vs
+  3e-2 tol) + the gfx906 cert (closing a pre-existing HIP gap — the dispatched r4
+  kernel had no cert of its own). Rule 2 satisfied.
+
+### P5.4 — end-to-end CUDA decode (core proof ✅)
+
+`flambeau infer` was removed (#221); inference is `serve` (HIP-concrete server)
+or a direct `ForwardEngine<B>` harness. The whole stack below the server is
+already backend-generic — `model-ops` takes `&impl Ops`, the GGUF loader takes
+`&impl Device`, `ForwardEngine::build` is generic — so the engine runs on
+`CudaBackend` with only construction + crate features to wire.
+
+- ✅ **First end-to-end CUDA decode** (`3d7374d4`). A synthetic dense block
+  (embed → q8_0 MMVQ attention + rope + attention_decode → q8_0 SwiGLU FFN →
+  q8_0 lm_head), single token, run through `ForwardEngine<CudaBackend>` on the
+  RTX 3090, reproduces the gfx906 snapshot logits to ~1e-6 (argmax exact, head16
+  within 5e-3). The HIP reference is the oracle → the whole CUDA forward path is
+  validated, not just per-op. `parity_snapshot_dense_cuda` (build `--features
+  hip,cuda`). Wiring: `ForwardEngine::new_solo` (generic ctor), `NoopHooks:
+  TopologyHooks<B>` genericized, `forward`/`model-ops` `cuda` features, the
+  `qmatmul_q8_0_mmvq_dp4a` recipe alias, generic test `DeviceAllocs<D>`. HIP
+  forward parity unaffected.
+- **Remaining to the full doc gate (real qwen35moe-v2 / gemma-4 Q4_K model,
+  logit-cosine vs llama.cpp over 64 tokens):**
+  1. Finish the per-dtype qmatmul recipe aliases (Q4_K, Q4_0, …) so a real model
+     dispatches end-to-end (the Q8_0 alias is the template).
+  2. A MoE-composite CUDA proof (mirror `synth_moe` — router → indexed_moe →
+     combine — and a Q4_K-expert variant to exercise the certified gate+up
+     kernel through the engine).
+  3. A real-GGUF harness: `gemma-4-12B Q4_K` (6.7 GB, dense, fits 24 GB) or
+     `gemma-4-26B-A4B Q4_K` (14.2 GB, MoE) via the generic loader, logits vs
+     `ForwardEngine<HipBackend>` then llama.cpp. (No Q4_K qwen-MoE GGUF on disk;
+     the 122B is too large for the RTX 3090 — substitute a fitting Q4_K model.)
+  attention's CUDA graph-slot rebind stays deferred (P4.4 `CudaGraphExec`
+  slot-map) — not needed for decode parity.
 
 ## Validation posture
 
