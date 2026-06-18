@@ -8,7 +8,7 @@ use flambeau_core::op::QDtype;
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_forward::ctx::QuantWeight;
 use flambeau_model_ops::{Tensor, F16};
-use flambeau_quant::quantize_k::quantize_row_q8_0;
+use flambeau_quant::quantize_k::{quantize_row_q4_k, quantize_row_q8_0};
 use half::f16;
 
 // Default `D = HipDevice` keeps the existing HIP synth tests' bare `DeviceAllocs`
@@ -65,6 +65,21 @@ impl<D: Device> DeviceAllocs<D> {
         QuantWeight {
             ptr,
             dtype: QDtype::Q8_0,
+            n_elems: rows * cols,
+        }
+    }
+
+    pub fn upload_q4_k(&mut self, host_f32: &[f32], rows: usize, cols: usize) -> QuantWeight {
+        assert_eq!(host_f32.len(), rows * cols);
+        assert!(cols % 256 == 0, "Q4_K needs cols % 256 == 0 (one super-block)");
+        let mut bytes: Vec<u8> = Vec::new();
+        for r in 0..rows {
+            quantize_row_q4_k(&host_f32[r * cols..(r + 1) * cols], &mut bytes);
+        }
+        let (ptr, _) = self.upload(&bytes);
+        QuantWeight {
+            ptr,
+            dtype: QDtype::Q4_K,
             n_elems: rows * cols,
         }
     }
