@@ -209,30 +209,34 @@ already backend-generic — `model-ops` takes `&impl Ops`, the GGUF loader takes
   with Q4_K experts through `ForwardEngine` on both backends: CUDA matches HIP
   **exactly** (max_abs=0.0, logit-cosine=1.0000000 — K-quant dp4a is
   integer-exact). Drives the kernel certified this cycle end-to-end.
-- 🔴 **Real model — gemma-4-12B Q4_K: cross-check FAILED, found a CUDA bug**
-  (`f0287d7c` loaded + ran it; the HIP↔CUDA cross-check then exposed the defect).
-  The 6.7 GB Q4_K GGUF loads and a 7-token prefill runs through
-  `ForwardEngine<CudaBackend>` producing finite, healthy-*looking* logits — but
-  they are **wrong and non-deterministic**: logit-cosine vs the gfx906 reference
-  is **0.68** at full depth (not ≥0.9999), the CUDA argmax changes run-to-run, and
-  even after layer 0 the cosine wobbles (0.989 / 0.980 across runs). Single-token
-  output is degenerate. **Diagnosis: the CUDA gemma *prefill* path reads
-  uninitialized device memory** — a kernel on `alloc` (not `alloc_zeros`) that
-  doesn't write every output lane (CLAUDE.md rule 8), so leftover garbage feeds
-  downstream. The synthetic tests passed because they exercise single-token
-  *decode* with SwiGLU/no-softcap/no-SWA — never prefill or gemma's
-  GELU/softcap/SWA/side-channel ops. Reproducer:
-  `gemma4-v2/tests/real_gguf_cuda_parity.rs` (`#[ignore]`d, un-ignore on fix).
+- ✅ **Real model — gemma-4-12B Q4_K runs correctly on CUDA** (`f0287d7c` loaded
+  it; the HIP↔CUDA cross-check found a bug, fixed in `c05ca260`). The 6.7 GB Q4_K
+  GGUF loads and a 7-token prefill runs through `ForwardEngine<CudaBackend>` →
+  **logit-cosine 0.9969 vs the gfx906 reference, argmax matches exactly,
+  deterministic across runs**, initcheck clean. Per-layer cosine is ~1e-6 from 1.0
+  (layer 0 = 0.9999975); the residual ~0.997 over 48 layers is legitimate
+  wave64↔wave32 F16 reduction drift, not a defect. Test:
+  `gemma4-v2/tests/real_gguf_cuda_parity.rs` (cross-check, threshold 0.995).
 
-**Status: P5.4 NOT complete.** Synthetic decode parity is solid (dense ~1e-6, MoE
-Q4_K bit-identical) and the per-dtype dispatch resolves — but the first real model
-exposed a CUDA prefill correctness bug. **Next: localize the uninitialized-memory
-read in the CUDA prefill/layer-0 path** (prime suspects: prefill attention
-writing only valid positions and leaving padding unwritten, the per-layer
-side-channel table, or a GELU/norm scratch), fix it (zero-init or full-lane
-write), then the cross-check goes green and the literal logit-cosine-vs-llama.cpp
-gate (+ multi-token loop) follows. attention's CUDA graph-slot rebind stays
-deferred (P4.4) — not needed here.
+  **The bug the cross-check caught** (and why it mattered): the synthetic decode
+  tests all passed, but the first real model — a *prefill* through gemma's op set
+  — was wrong + non-deterministic (cosine 0.68, argmax drift). `compute-sanitizer
+  --tool initcheck` pinned it to `attention_prefill_flash_tile_d256_br8_f16`
+  reading uninitialized `__global__` memory: the host launch **hard-coded
+  `block.x = 64`** (wave64) while the kernel indexes by `threadIdx.x < WARP_SIZE`
+  (32 on sm_8x), so lanes 32–63 ran out-of-range and raced the cooperative K/V
+  load. Fixed by adding `KernelBackend::WARP_SIZE` (64/32) and launching the
+  flash-tile at `block:(B::WARP_SIZE, br)`. The single-token decode synthetic
+  tests never hit the prefill kernel, which is why this hid until a real model.
+
+**Status: P5.4 core complete — the CUDA decode path runs real models correctly**
+(deterministic, argmax-correct, ~0.997 cross-backend cosine reflecting only F16
+wave-width drift). Remaining for the *literal* doc gate: logit-cosine vs llama.cpp
+on the same backend + a multi-token decode loop (the cross-backend wave64↔wave32
+drift means HIP↔CUDA won't hit 0.9999, but same-backend-vs-llama.cpp can).
+Known latent twin: `launch/recurrent.rs` (GDN/qwen3-next) has the same
+`WARP_SIZE=64` hard-code — fix when a qwen3-next CUDA path is tested. attention's
+CUDA graph-slot rebind stays deferred (P4.4) — not needed here.
 
 ## Validation posture
 
