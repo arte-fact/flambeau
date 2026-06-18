@@ -132,7 +132,8 @@ rope + activation quantizers are all cross-backend.
 - [x] attention_decode_f16  *(NEUTRALIZE — online softmax; Q·K dot via `__shfl_xor`
       butterfly over WARP_SIZE; BIT-IDENTICAL to the hand kernel — all 14 attention
       parity tests green)*
-- [ ] attention_decode_f16_splitk
+- [x] attention_decode_f16_splitk  *(NEUTRALIZE — chunk tile-4 `__shfl_xor` reduce
+      + per-lane combine; 2 entries; bit-identical, parity green)*
 - [x] softmax_masked_f16  *(NEUTRALIZE — `block_reduce_softmax`; NaN-safe; 5e-3)*
 - [x] kv_append_f16_batched_slots  *(MIRROR — per-slot gather/scatter copy; bit-exact)*
 
@@ -167,6 +168,13 @@ top-k are cross-backend. Remaining 1d: moe_sort_by_expert (segmented sort —
 Tier C, CUDA may want `cub`) + the two sampler kernels (reductions over the
 vocab). The `block_reduce_sum` (sum) + the topk argmax pattern (value+index
 butterfly over `WARP_SIZE`) cover most of what the samplers need.
+
+**Wave 1 status: 31/33 (only moe_sort_by_expert + the two earlier deferrals
+remain).** The entire decode spine — norms, rope, activation-quant, MoE glue,
+router top-k, samplers, masked softmax, KV append, and BOTH decode-attention
+kernels (single-pass + split-K) — is cross-backend, and the attention kernels
+are bit-identical to the hand kernels (all 14 attention parity tests green).
+Remaining: **moe_sort_by_expert** (Tier-C segmented sort; CUDA may want `cub`).
 
 → **Gate: P5 single-GPU qwen35moe-v2 Q4_K decode parity** (logit-cosine ≥ 0.9999
 vs llama.cpp CUDA). Minimal parity can run decode-only (1-token prompt); real
