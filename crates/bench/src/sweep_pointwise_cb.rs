@@ -71,6 +71,7 @@ pub fn run_pointwise_sweep<B: BenchBackend>(
         "softmax_masked_f16" => run_softmax_masked_f16_sweep::<B>(repo_root, arch),
         "sampler_topk_softmax_f32" => run_sampler_topk_softmax_sweep::<B>(repo_root, arch),
         "kv_append_f16_batched_slots" => run_kv_append_f16_batched_slots_sweep::<B>(repo_root, arch),
+        "attention_decode_f16" => run_attention_decode_f16_sweep::<B>(repo_root, arch),
         _ => return None,
     };
     Some(cert)
@@ -971,6 +972,101 @@ pub fn run_rope_f16_sweep<B: BenchBackend>(repo_root: &Path, arch: &str, neox: b
     }
     finish_cert(&dev, repo_root, arch, impl_id, impl_id, "F16", "F16",
         "|err| <= 5e-3 * max(|ref|, 1e-2) vs F64 angle oracle", results, pmc)
+}
+
+/// `attention_decode_f16` — GQA decode attention (1 Q token, full-context K/V),
+/// flash-attn-v2 online softmax. The Q·K dot is a block sum over the WARP_SIZE
+/// seam; the rest is per-thread. Full causal (window_size=0), F64 oracle, 5e-3.
+pub fn run_attention_decode_f16_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) -> Result<Cert> {
+    let dev = B::new_device(0)?;
+    let image = B::image("attention_decode_f16").ok_or_else(|| anyhow!("attention_decode_f16 not compiled"))?;
+    let module = B::load(&dev, image)?;
+    let kernel = B::kernel(&module, "flambeau_attention_decode_f16")?;
+    let pmc = B::attributes(&kernel)?;
+
+    // (n_heads_q, n_heads_kv, head_dim, n_tokens)
+    let shapes = [(4usize, 4usize, 128usize, 32usize), (16, 2, 256, 64), (8, 8, 64, 16)];
+    let mut results = Vec::new();
+    for (n_heads_q, n_heads_kv, head_dim, n_tokens) in shapes {
+        let seed = 0xC0FFEE ^ ((n_heads_q as u64) * 1049 + (head_dim as u64) * 53 + (n_tokens as u64) * 11);
+        let scale = 1.0f32 / (head_dim as f32).sqrt();
+        let q = f16_input(seed, n_heads_q * head_dim);
+        let k = f16_input(seed ^ 0xAA, n_tokens * n_heads_kv * head_dim);
+        let v = f16_input(seed ^ 0xBB, n_tokens * n_heads_kv * head_dim);
+        let group = n_heads_q / n_heads_kv;
+
+        let mut reference = vec![0.0f32; n_heads_q * head_dim];
+        for qh in 0..n_heads_q {
+            let kvh = qh / group;
+            let scores: Vec<f64> = (0..n_tokens)
+                .map(|t| {
+                    let dot: f64 = (0..head_dim)
+                        .map(|d| q[qh * head_dim + d].to_f32() as f64
+                            * k[(t * n_heads_kv + kvh) * head_dim + d].to_f32() as f64)
+                        .sum();
+                    dot * scale as f64
+                })
+                .collect();
+            let m = scores.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let denom: f64 = scores.iter().map(|&s| (s - m).exp()).sum();
+            for d in 0..head_dim {
+                let acc: f64 = (0..n_tokens)
+                    .map(|t| (scores[t] - m).exp() * v[(t * n_heads_kv + kvh) * head_dim + d].to_f32() as f64)
+                    .sum();
+                reference[qh * head_dim + d] = (acc / denom) as f32;
+            }
+        }
+
+        let d_q = alloc_and_upload(&dev, &q);
+        let d_k = alloc_and_upload(&dev, &k);
+        let d_v = alloc_and_upload(&dev, &v);
+        let d_out = dev.alloc(n_heads_q * head_dim * 2)?;
+        {
+            let stream = dev.default_stream();
+            let nhq = n_heads_q as i32;
+            let nhkv = n_heads_kv as i32;
+            let hd = head_dim as i32;
+            let nt = n_tokens as i32;
+            let ws = 0i32;
+            let rd = 0i32;
+            let q_ptr: u64 = d_q.as_usize() as u64;
+            let k_ptr: u64 = d_k.as_usize() as u64;
+            let v_ptr: u64 = d_v.as_usize() as u64;
+            let o_ptr: u64 = d_out.as_usize() as u64;
+            let mut args = <B::Args<'_>>::default();
+            args.push_arg(&q_ptr);
+            args.push_arg(&k_ptr);
+            args.push_arg(&v_ptr);
+            args.push_arg(&o_ptr);
+            args.push_arg(&nhq);
+            args.push_arg(&nhkv);
+            args.push_arg(&hd);
+            args.push_arg(&nt);
+            args.push_arg(&scale);
+            args.push_arg(&ws);
+            args.push_arg(&rd);
+            let cfg = LaunchCfg { grid: (n_heads_q as u32, 1, 1), block: (head_dim as u32, 1, 1), shared_bytes: 0 };
+            B::launch(&kernel, stream, cfg, args)?;
+            stream.synchronize()?;
+        }
+        let mut got_f16 = vec![f16::from_f32(0.0); n_heads_q * head_dim];
+        unsafe {
+            dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost,
+                DevicePtr(got_f16.as_mut_ptr() as usize), d_out, n_heads_q * head_dim * 2)?;
+        }
+        dev.default_stream().synchronize()?;
+        unsafe {
+            dev.dealloc(d_q, n_heads_q * head_dim * 2)?;
+            dev.dealloc(d_k, n_tokens * n_heads_kv * head_dim * 2)?;
+            dev.dealloc(d_v, n_tokens * n_heads_kv * head_dim * 2)?;
+            dev.dealloc(d_out, n_heads_q * head_dim * 2)?;
+        }
+        let got: Vec<f32> = got_f16.iter().map(|v| v.to_f32()).collect();
+        let err = max_rel_err_with_floor(&got, &reference, 1.0);
+        results.push(ShapeResult { m: n_heads_q, k: head_dim, n: n_tokens, seed, max_rel_err: err, tolerance: 5e-3, pass: err <= 5e-3 });
+    }
+    finish_cert(&dev, repo_root, arch, "attention_decode_f16", "attention_decode_f16", "F16", "F16",
+        "|err| <= 5e-3 * max(|ref|, 1) vs F64 attention oracle", results, pmc)
 }
 
 /// `kv_append_f16_batched_slots` — append one K+V token row into each of N

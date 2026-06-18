@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "impl_id": "attention_decode_f16",
+  "backend": "hip",
+  "arch": "gfx906",
+  "op": "attention_decode_f16",
+  "dtype_weight": "F16",
+  "dtype_activation": "F16",
+  "tolerance_formula": "|err| <= 5e-3 * max(|ref|, 1) vs F64 attention oracle",
+  "results": [
+    {
+      "m": 4,
+      "k": 128,
+      "n": 32,
+      "seed": 12637098,
+      "max_rel_err": 0.00005710125,
+      "tolerance": 0.005,
+      "pass": true
+    },
+    {
+      "m": 16,
+      "k": 256,
+      "n": 64,
+      "seed": 12617406,
+      "max_rel_err": 0.000030480325,
+      "tolerance": 0.005,
+      "pass": true
+    },
+    {
+      "m": 8,
+      "k": 64,
+      "n": 16,
+      "seed": 12636502,
+      "max_rel_err": 0.000060647726,
+      "tolerance": 0.005,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-06-18T12:33:19Z",
+  "rig": "threadreaper-gfx906",
+  "pmc": {
+    "vgpr_count": 25,
+    "sgpr_count": null,
+    "waves_per_simd": 10,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

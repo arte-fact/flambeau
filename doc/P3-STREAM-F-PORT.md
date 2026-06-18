@@ -129,10 +129,20 @@ caveat above) + quantize_f16_q8_1_mmq (orphan). The block-reduce norm family +
 rope + activation quantizers are all cross-backend.
 
 **1c — Tier-C attention decode + KV append** (the hard tier):
-- [ ] attention_decode_f16
+- [x] attention_decode_f16  *(NEUTRALIZE — online softmax; Q·K dot via `__shfl_xor`
+      butterfly over WARP_SIZE; BIT-IDENTICAL to the hand kernel — all 14 attention
+      parity tests green)*
 - [ ] attention_decode_f16_splitk
 - [x] softmax_masked_f16  *(NEUTRALIZE — `block_reduce_softmax`; NaN-safe; 5e-3)*
 - [x] kv_append_f16_batched_slots  *(MIRROR — per-slot gather/scatter copy; bit-exact)*
+
+**1c lesson — bit-identity vs the hand kernel:** use the SAME reduce the hand
+kernel used. attention_decode used a plain `__shfl_xor` butterfly, NOT gfx906's
+DPP `warp_reduce_sum` (different intermediate rounding) — the neutral body must
+inline `__shfl_xor` over the `WARP_SIZE` width to stay bit-identical on wave64
+while staying correct on wave32. Also match the exact FP form: `1/sum` then
+`*norm` (two roundings), not `x/sum` (one). The `attention_decode_f16_batched_parity`
+test (batched == serial, bit-for-bit) is the guard.
 
 **1d — MoE decode glue + sampler:**
 - [x] topk_f32  *(NEUTRALIZE — per-token block argmax×k + softmax over the

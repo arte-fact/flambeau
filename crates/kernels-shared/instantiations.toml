@@ -3067,3 +3067,26 @@ params = """
     const int K,
     const float inv_temp"""
 body = "sampler_topk_softmax_f32_body(logits, out_ids, out_probs, V, K, inv_temp);"
+
+# GQA decode attention — online softmax; the Q·K dot is a block sum over the
+# WARP_SIZE seam (warp_reduce_sum + runtime cross-warp LDS).
+
+[[kernel]]
+stem = "attention_decode_f16"
+includes = ["block_quant.cuh", "attention_decode.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_attention_decode_f16"
+params = """
+    const fb_fp16_t* __restrict__ q,
+    const fb_fp16_t* __restrict__ k_cache,
+    const fb_fp16_t* __restrict__ v_cache,
+    fb_fp16_t* __restrict__ out,
+    const int n_heads_q,
+    const int n_heads_kv,
+    const int head_dim,
+    const int n_tokens,
+    const float scale,
+    const int window_size,
+    const int ring_depth"""
+body = "attention_decode_f16_body(q, k_cache, v_cache, out, n_heads_q, n_heads_kv, head_dim, n_tokens, scale, window_size, ring_depth);"
