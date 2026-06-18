@@ -99,25 +99,51 @@ behaviour-preserving.
   - **P5.3 head start:** the CUDA `QMATMUL_SM86` table + `dispatch_qmatmul` path
     already exist; P5.3 is then the remaining decode-path dispatch rows.
 
-### Next: P5.2 — `CudaBackend` + `CudaOps`
+- ✅ **P5.2 — COMPLETE (structural).** `CudaBackend: Backend` exists; `CudaOps`
+  / `HipOps` are now both the *one* generic `OpsImpl<'a, B: KernelBackend>`
+  (type aliases over `OpsImpl<CudaKernels>` / `OpsImpl<HipKernels>`) — the
+  13 op-launch domains moved out of the HIP-gated module into the always-compiled
+  `crates/ops/src/launch/`, so a new kernel or arch never re-copies the
+  145-method forwarding layer (rule 14). `CudaOpsRegistry = Registry<CudaKernels>`.
+  `ForwardEngine<CudaBackend>` is the existing generic engine — no forward / model
+  / server changes. Commit `78765d30`. Guardrail green on gfx906: full ops suite
+  (incl. the 14-test attention parity) + forward `parity_snapshot_*` /
+  `snapshot_restore` / `synth_*` all bit-identical; ops / backend / bench / cli
+  build clean on both `hip` and `cuda`.
+  - **Runtime smoke still gated on catalogue completeness** (see P5.3): `Registry::new`
+    *eagerly* loads every `KERNEL_STEMS` entry and fails fast on the first stem
+    with no compiled `.cubin`, so a CUDA registry cannot be constructed until the
+    decode-path stems all compile (or `KERNEL_STEMS` is trimmed / made lazy).
 
-With the launch + dispatch + slot seams all generic, `CudaOps` is now the generic
-`Ops` impl over `CudaBackend`: build `CudaBackend: Backend` (Device/Stream/Event/
-Cluster done; add the CUDA `Registry = Registry<CudaKernels>` + `Ops` op object)
-and the `impl Ops for CudaOps` reuses the *same* migrated bodies. Then P5.3 (fill
-the rest of `dispatch/cuda/sm_86.toml` + Rust mirrors for the decode path) and
-P5.4 (the logit-cosine gate). attention's CUDA graph-slot rebind stays deferred
-(P4.4 `CudaGraphExec` slot-map) — not needed for decode parity.
-- **P5.2 — `CudaBackend` + CUDA `Registry`/`CudaOps`.** Implement `Backend` for
-  `CudaBackend` (Device/Stream/Event/Cluster already done); `Registry<CudaBackend>`
-  loads `flambeau_kernels_cuda::cubin(stem)`; `CudaOps` is the generic `Ops` over
-  `CudaBackend`. Gate: a CUDA op smoke (e.g. `rmsnorm_f16` / `attention_decode_f16`
-  vs the F64 oracle) through the runtime path, not just the sweep.
-- **P5.3 — Fill `dispatch/cuda/sm_86.toml` for the decode path.** The
-  qwen35moe-v2 Q4_K decode ops (Q4_K mmvq/mmq, attention_decode_f16, rmsnorm,
-  rope, swiglu, moe sort/combine/topk, sampler). Each row needs a green
-  `certs/cuda/sm_86/<impl>.json` (rule 2). `flambeau autotune --backend cuda`
-  seeds the mmvq rows; the rest from the P3 certs.
+### Next: P5.3 — close the CUDA `.cubin` catalogue gap (measured)
+
+The CUDA toolchain + RTX 3090 are reachable (`/usr/local/cuda-13.3/bin/nvcc`,
+driver 610.43.02). A full `flambeau-kernels-cuda` build compiles **203 / 254**
+`KERNEL_STEMS`. The **53** unbuilt stems split:
+- **18 IQ-quant** (`mmvq_iq*`, `indexed_moe_mmvq_iq*`, `mmq_iq*`) — **out of
+  CLAUDE.md quant scope** (no IQ quants). HIP-inherited cruft in `KERNEL_STEMS`;
+  the cleanup is to **prune them from `KERNEL_STEMS`** (helps HIP too — it stops
+  loading dead modules), not to port them.
+- **35 non-IQ** — static `.cu` kernels present in `kernels-hip/src/kernels/` but
+  never ported to `kernels-cuda/src/kernels/`. These are **not** manifest-driven
+  (the `instantiations.toml` variants, e.g. `mmvq_q4_k_batched`, already build on
+  both); they are the hand-written base kernels. The decode-critical subset is the
+  **K-quant + Q8_0 MMVQ family** — `mmvq_q4_k`, `mmvq_q4_k_r2`, `mmvq_q5_k`,
+  `mmvq_q6_k`, `mmvq_q2_k`, `mmvq_q3_k` (+ `_r2`/`_r4`/`_dp4a` variants),
+  `indexed_moe_mmvq_q4_k{,_r2,_gate_up_r4_dp4a,_r4_sorted_dp4a}`,
+  `indexed_moe_mmq_q4_k`, `mmvq_q8_0{,_gate_up_dp4a,_llamacpp_style}` — exactly
+  what **qwen35moe-v2 Q4_K** decode dispatches.
+
+So P5.3 is **port ~35 static MMVQ/indexed-MoE `.cu` files hip→cuda** (adapt any
+gfx906 cross-lane / dp4a intrinsics to the sm_80 primitives in
+`kernels-cuda/src/arch_primitives/sm_80.cuh`; the shared `.cuh` bodies are already
+backend-neutral) — **not** "fill dispatch rows". Once the decode subset compiles,
+`Registry<CudaKernels>::new` succeeds and the runtime op smoke
+(`rmsnorm_f16` / `attention_decode_f16` vs the F64 oracle through the runtime
+path) is reachable. Then fill `dispatch/cuda/sm_86.toml` for those ops with green
+`certs/cuda/sm_86/<impl>.json` (rule 2) and proceed to P5.4. attention's CUDA
+graph-slot rebind stays deferred (P4.4 `CudaGraphExec` slot-map) — not needed for
+decode parity.
 - **P5.4 — The parity gate.** `flambeau infer --backend cuda --model
   qwen35moe-v2-Q4_K`: single token first (logit-cosine vs llama.cpp CUDA), then
   64 tokens ≥ 0.9999. File the diff; no perf claim.
