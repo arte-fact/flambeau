@@ -74,6 +74,11 @@ pub fn run_pointwise_sweep<B: BenchBackend>(
         "attention_decode_f16" => run_attention_decode_f16_sweep::<B>(repo_root, arch),
         "attention_decode_f16_splitk" => run_attention_decode_splitk_sweep::<B>(repo_root, arch),
         "moe_sort_by_expert" => run_moe_sort_by_expert_sweep::<B>(repo_root, arch),
+        "swiglu_f32" => run_binary_act_sweep::<B>(repo_root, arch, "swiglu_f32", "flambeau_swiglu_f32", false, true),
+        "swiglu_f32_to_f16" => run_binary_act_sweep::<B>(repo_root, arch, "swiglu_f32_to_f16", "flambeau_swiglu_f32_to_f16", true, true),
+        "gelu_mul_f32" => run_binary_act_sweep::<B>(repo_root, arch, "gelu_mul_f32", "flambeau_gelu_mul_f32", false, false),
+        "gelu_f32_to_f16" => run_binary_act_sweep::<B>(repo_root, arch, "gelu_f32_to_f16", "flambeau_gelu_f32_to_f16", true, false),
+        "moe_combine_no_residual_f32" => run_moe_combine_no_residual_f32_sweep::<B>(repo_root, arch),
         _ => return None,
     };
     Some(cert)
@@ -974,6 +979,162 @@ pub fn run_rope_f16_sweep<B: BenchBackend>(repo_root: &Path, arch: &str, neox: b
     }
     finish_cert(&dev, repo_root, arch, impl_id, impl_id, "F16", "F16",
         "|err| <= 5e-3 * max(|ref|, 1e-2) vs F64 angle oracle", results, pmc)
+}
+
+/// Shared driver for the F32-input gated activations `act(a)*b` (silu/gelu),
+/// output F32 or saturated F16. `silu` selects silu vs tanh-approx gelu;
+/// `out_f16` selects the output dtype. F64 oracle.
+pub fn run_binary_act_sweep<B: BenchBackend>(
+    repo_root: &Path,
+    arch: &str,
+    stem: &'static str,
+    entry: &'static str,
+    out_f16: bool,
+    silu: bool,
+) -> Result<Cert> {
+    let dev = B::new_device(0)?;
+    let image = B::image(stem).ok_or_else(|| anyhow!("{stem} not compiled"))?;
+    let module = B::load(&dev, image)?;
+    let kernel = B::kernel(&module, entry)?;
+    let pmc = B::attributes(&kernel)?;
+
+    let act = |x: f64| -> f64 {
+        if silu {
+            x / (1.0 + (-x).exp())
+        } else {
+            const C: f64 = 0.797_884_560_802_865_4;
+            const A: f64 = 0.044715;
+            0.5 * x * (1.0 + (C * x * (1.0 + A * x * x)).tanh())
+        }
+    };
+    let out_sz = if out_f16 { 2 } else { 4 };
+    let shapes = [256usize, 1024, 4096];
+    let mut results = Vec::new();
+    for n in shapes {
+        let seed = 0xC0FFEE ^ ((n as u64).wrapping_mul(191).wrapping_add(if out_f16 { 1 } else { 0 }));
+        let a = seeded_f32_range(seed, n, -2.0, 2.0);
+        let b = seeded_f32_range(seed ^ 0xBE, n, -1.0, 1.0);
+        let reference: Vec<f32> = a
+            .iter()
+            .zip(&b)
+            .map(|(&av, &bv)| {
+                let v = (act(av as f64) * bv as f64) as f32;
+                if out_f16 { f16::from_f32(v.clamp(-65504.0, 65504.0)).to_f32() } else { v }
+            })
+            .collect();
+
+        let d_a = alloc_and_upload(&dev, &a);
+        let d_b = alloc_and_upload(&dev, &b);
+        let d_y = dev.alloc(n * out_sz)?;
+        {
+            let stream = dev.default_stream();
+            let n_i = n as i32;
+            let a_ptr: u64 = d_a.as_usize() as u64;
+            let b_ptr: u64 = d_b.as_usize() as u64;
+            let y_ptr: u64 = d_y.as_usize() as u64;
+            let mut args = <B::Args<'_>>::default();
+            args.push_arg(&a_ptr);
+            args.push_arg(&b_ptr);
+            args.push_arg(&y_ptr);
+            args.push_arg(&n_i);
+            B::launch(&kernel, stream, LaunchCfg::one_d((n as u32).div_ceil(256), 256), args)?;
+            stream.synchronize()?;
+        }
+        let got: Vec<f32> = if out_f16 {
+            let mut g = vec![f16::from_f32(0.0); n];
+            unsafe {
+                dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost,
+                    DevicePtr(g.as_mut_ptr() as usize), d_y, n * 2)?;
+            }
+            dev.default_stream().synchronize()?;
+            g.iter().map(|v| v.to_f32()).collect()
+        } else {
+            let mut g = vec![0.0f32; n];
+            unsafe {
+                dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost,
+                    DevicePtr(g.as_mut_ptr() as usize), d_y, n * 4)?;
+            }
+            dev.default_stream().synchronize()?;
+            g
+        };
+        unsafe {
+            dev.dealloc(d_a, n * 4)?;
+            dev.dealloc(d_b, n * 4)?;
+            dev.dealloc(d_y, n * out_sz)?;
+        }
+        let (floor, tol) = if out_f16 { (1e-2, 5e-3) } else { (1.0, 1e-4) };
+        let err = max_rel_err_with_floor(&got, &reference, floor);
+        results.push(ShapeResult { m: n, k: 1, n: 1, seed, max_rel_err: err, tolerance: tol, pass: err <= tol });
+    }
+    let (dw, da) = if out_f16 { ("F32", "F16") } else { ("F32", "F32") };
+    finish_cert(&dev, repo_root, arch, stem, stem, dw, da,
+        "|err| <= tol * max(|ref|, floor) vs F64 oracle", results, pmc)
+}
+
+/// `moe_combine_no_residual_f32` — F32 expert fan-in (TP-sharded). Pointwise.
+pub fn run_moe_combine_no_residual_f32_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) -> Result<Cert> {
+    let dev = B::new_device(0)?;
+    let image = B::image("moe_combine_no_residual_f32").ok_or_else(|| anyhow!("moe_combine_no_residual_f32 not compiled"))?;
+    let module = B::load(&dev, image)?;
+    let kernel = B::kernel(&module, "flambeau_moe_combine_no_residual_f32")?;
+    let pmc = B::attributes(&kernel)?;
+
+    let shapes = [(1usize, 8usize, 2048usize), (8, 8, 2048), (4, 4, 1024)];
+    let mut results = Vec::new();
+    for (n_tokens, top_k, hidden) in shapes {
+        let seed = 0xC0FFEE ^ ((n_tokens as u64) * 1049 + (top_k as u64) * 53 + (hidden as u64) * 11);
+        let total = n_tokens * hidden;
+        let expert_outs = seeded_f32_range(seed, n_tokens * top_k * hidden, -0.5, 0.5);
+        let weights = seeded_f32_range(seed ^ 0x11, n_tokens * top_k, -0.5, 0.5);
+        let mut reference = vec![0.0f32; total];
+        for token in 0..n_tokens {
+            for d in 0..hidden {
+                let mut acc = 0.0f64;
+                for k in 0..top_k {
+                    acc += weights[token * top_k + k] as f64
+                        * expert_outs[(token * top_k + k) * hidden + d] as f64;
+                }
+                reference[token * hidden + d] = acc as f32;
+            }
+        }
+
+        let d_eo = alloc_and_upload(&dev, &expert_outs);
+        let d_w = alloc_and_upload(&dev, &weights);
+        let d_out = dev.alloc(total * 4)?;
+        {
+            let stream = dev.default_stream();
+            let nt = n_tokens as i32;
+            let tk = top_k as i32;
+            let h = hidden as i32;
+            let eo: u64 = d_eo.as_usize() as u64;
+            let w: u64 = d_w.as_usize() as u64;
+            let o: u64 = d_out.as_usize() as u64;
+            let mut args = <B::Args<'_>>::default();
+            args.push_arg(&eo);
+            args.push_arg(&w);
+            args.push_arg(&o);
+            args.push_arg(&nt);
+            args.push_arg(&tk);
+            args.push_arg(&h);
+            B::launch(&kernel, stream, LaunchCfg::one_d((total as u32).div_ceil(256), 256), args)?;
+            stream.synchronize()?;
+        }
+        let mut got = vec![0.0f32; total];
+        unsafe {
+            dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost,
+                DevicePtr(got.as_mut_ptr() as usize), d_out, total * 4)?;
+        }
+        dev.default_stream().synchronize()?;
+        unsafe {
+            dev.dealloc(d_eo, n_tokens * top_k * hidden * 4)?;
+            dev.dealloc(d_w, n_tokens * top_k * 4)?;
+            dev.dealloc(d_out, total * 4)?;
+        }
+        let err = max_rel_err_with_floor(&got, &reference, 1.0);
+        results.push(ShapeResult { m: n_tokens, k: top_k, n: hidden, seed, max_rel_err: err, tolerance: 1e-4, pass: err <= 1e-4 });
+    }
+    finish_cert(&dev, repo_root, arch, "moe_combine_no_residual_f32", "moe_combine_no_residual_f32",
+        "F32", "F32", "|err| <= 1e-4 * max(|ref|, 1) vs F64 oracle", results, pmc)
 }
 
 /// `moe_sort_by_expert` — group (token,slot) pairs by expert via histogram +

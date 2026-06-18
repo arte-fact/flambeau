@@ -910,4 +910,25 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
         impl_id: "moe_sort_by_expert",
         cert_rel_path: "certs/hip/gfx906/moe_sort_by_expert.json",
     },
+    // P3 Wave 2 — pointwise activations + F32 MoE combine.
+    DirectCallKernel {
+        impl_id: "swiglu_f32",
+        cert_rel_path: "certs/hip/gfx906/swiglu_f32.json",
+    },
+    DirectCallKernel {
+        impl_id: "swiglu_f32_to_f16",
+        cert_rel_path: "certs/hip/gfx906/swiglu_f32_to_f16.json",
+    },
+    DirectCallKernel {
+        impl_id: "gelu_mul_f32",
+        cert_rel_path: "certs/hip/gfx906/gelu_mul_f32.json",
+    },
+    DirectCallKernel {
+        impl_id: "gelu_f32_to_f16",
+        cert_rel_path: "certs/hip/gfx906/gelu_f32_to_f16.json",
+    },
+    DirectCallKernel {
+        impl_id: "moe_combine_no_residual_f32",
+        cert_rel_path: "certs/hip/gfx906/moe_combine_no_residual_f32.json",
+    },
 ];

@@ -708,10 +708,6 @@ const SIMPLE_SWEEPS: &[(&str, SweepFn)] = &[
         flambeau_bench::sweep_gdn_step_alphabeta::run_sweep,
     ),
     (
-        "swiglu_f32",
-        flambeau_bench::sweep_f32_pointwise::run_swiglu_sweep,
-    ),
-    (
         "gdn_alpha_beta",
         flambeau_bench::sweep_f32_pointwise::run_gdn_alpha_beta_sweep,
     ),
