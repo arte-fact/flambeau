@@ -1,9 +1,32 @@
 # Portability roadmap — one program for source, backend, and arch portability
 
-**Status:** Draft v0. Unifies three previously-separate efforts into one program
-and one sequencing. Supersedes the *phasing* of `doc/CUDA-PORT-PLAN.md` and
-`doc/KERNEL-TEMPLATING.md` (which remain the detailed sub-plans for their
-mechanics); a future `doc/AUTOTUNE.md` details the harness. Plan-only.
+**Status:** Live tracker. Unifies three previously-separate efforts into one
+program and one sequencing. Supersedes the *phasing* of `doc/CUDA-PORT-PLAN.md`
+and `doc/KERNEL-TEMPLATING.md` (which remain the detailed sub-plans for their
+mechanics); `doc/AUTOTUNE.md` details the harness. This file is the at-a-glance
+phase ledger; `doc/HANDOFF.md` is the detailed chronological log.
+
+## Status ledger (as of 2026-06-18, tip `c082e39`)
+
+| Phase | Scope | Status | Closed at |
+| --- | --- | --- | --- |
+| P0 | Foundations — decouple, CUDA driver core (B0/B1), arch primitives (B2), rule-5 neutrality | ✅ | (pre-program) |
+| P1 | Spine — `quant_traits` + `mmvq` Q8_0 pilot + bench genericized + autotune rank-emit, both backends | ✅ | `5e3ed3f` / `5bb9812` |
+| P2a | `mmvq` all 20 dtypes + ROWS/DP4A/THREADS configs | ✅ | `699f0c3` / `250bd39` |
+| P2b | `mmvq` fusion (gate_up / batched / row_tile) | ✅ | `f72c0ab` |
+| P2c | `mmq` (wave64 single-pass + DS4 4-warp LDS-tiled), 21 kernels | ✅ | `58f52f0` / `df58e84` |
+| P2d | `indexed_moe` (mmvq + tile8 + Q4_K lds_tiled) + dead-orphan cleanup | ✅ | `c082e39` / `58d73b0` |
+| **P2** | **Stream M rollout — 196 hand `.cu` → templates, both dispatch tables cross-backend** | **✅** | **`c082e39`** |
+| P3 | Stream F port — ~70 fixed kernels → CUDA (attention, norms, rope, softmax, sampler, gdn, moe sort/combine, kv_append, …) | ⬜ not started | — |
+| P4 | CUDA multi-GPU runtime — NCCL `Collectives` + CUDA Graphs `GraphExec` (multi-GPU only) | ⬜ | — |
+| P5 | End-to-end CUDA decode parity — qwen35moe-v2 Q4_K via `ForwardEngine<CudaBackend>`, logit-cosine ≥ 0.9999 (gated on P3) | ⬜ | — |
+| P6 | Arch breadth (sm_80/89, gfx1031 wave32, gfx908/90a/942) + autotune-as-CI | ⬜ | — |
+
+**Critical path now runs through P3.** Stream M (the entire matmul-templating
+axis) is cross-backend and bit-identical HIP gfx906 ↔ CUDA sm_86. CUDA currently
+carries only the matmul templates + quantizers (`kernels-cuda/src/kernels/` = 3
+`.cu`); **none of the Stream F fixed kernels are on CUDA yet**, so P3 is the sole
+remaining gate before the P5 integration milestone (first end-to-end CUDA decode).
 
 ## Thesis: three axes of portability of one artifact
 
@@ -100,35 +123,35 @@ the strongest oracle:
 Each phase: green sweep both rigs, gfx906 regression-clean, dispatch tables +
 certs committed.
 
-- **P1 — The spine (pilot: `quantize_q8_1` + `mmvq` Q8_0).** Build *all* reusable
+- ✅ **P1 — The spine (pilot: `quantize_q8_1` + `mmvq` Q8_0).** Build *all* reusable
   machinery on the smallest real slice: port `quantize_q8_1` (Stream F, needed
   now); stand up `quant_traits` + the `mmvq` skeleton + `Plain` epilogue + the
   manifest/codegen for both backends; genericize `bench` + build the autotune
   rank-and-emit. Run the full vertical slice on `mmvq` Q8_0 (10 variants).
   **Gate: one family-dtype proven end-to-end across template + both backends +
   autotune.** This de-risks the entire program before scaling.
-- **P2 — Stream M rollout.** Repeat the slice per family:
-  - **P2a** `mmvq` all dtypes + `ROWS`/`DP4A`/`THREADS` configs.
-  - **P2b** `mmvq` fusion (`gate_up`/`batched`/`row_tile` loaders+epilogues).
-  - **P2c** `mmq` (two tiling skeletons sharing `quant_traits` + Q8_1 quantize).
-  - **P2d** `indexed_moe_mmvq` + `indexed_moe_mmq` (expert gather/bucket `Loader`,
+- ✅ **P2 — Stream M rollout.** Repeat the slice per family:
+  - ✅ **P2a** `mmvq` all dtypes + `ROWS`/`DP4A`/`THREADS` configs.
+  - ✅ **P2b** `mmvq` fusion (`gate_up`/`batched`/`row_tile` loaders+epilogues).
+  - ✅ **P2c** `mmq` (two tiling skeletons sharing `quant_traits` + Q8_1 quantize).
+  - ✅ **P2d** `indexed_moe_mmvq` + `indexed_moe_mmq` (expert gather/bucket `Loader`,
     sorted-scatter `Epilogue`).
   - Outcome: 196 hand `.cu` → ~5 templates + ~21 traits + manifests; both dispatch
     tables autotuned.
-- **P3 — Stream F port (parallel to P2).** Port the ~70 fixed kernels to CUDA —
+- ⬜ **P3 — Stream F port (parallel to P2).** Port the ~70 fixed kernels to CUDA —
   attention (decode/prefill/splitk; cp.async on CUDA vs prefetch on HIP, seamed),
   norms/rope/softmax, elementwise, moe_combine/sort, gdn, sampler, kv_append,
   dense_gemv, topk, l2_norm. Cert each on both rigs; one dispatch row each.
-- **P4 — CUDA multi-GPU runtime (parallel; needs 2× CUDA).** `backend-cuda`
+- ⬜ **P4 — CUDA multi-GPU runtime (parallel; needs 2× CUDA).** `backend-cuda`
   `Cluster` + NCCL implementing the `Collectives` seam; CUDA Graphs implementing
   `GraphExec`. (CUDA-PORT-PLAN B6.) Independent of the kernel streams once B1 is
   proven; gates only multi-GPU.
-- **P5 — End-to-end model parity (CUDA, single-GPU).** (B7.) Smallest full model
+- ⬜ **P5 — End-to-end model parity (CUDA, single-GPU).** (B7.) Smallest full model
   (qwen35moe-v2 Q4_K) through `ForwardEngine<CudaBackend>` on the 3090;
   logit-cosine ≥ 0.9999 vs llama.cpp CUDA over 64 tokens. Requires the Q4_K MoE +
   dense paths from P2, the attention/norm/sampler kernels from P3, and the
   single-GPU runtime. The integration milestone.
-- **P6 — Arch breadth + autotune-as-CI.** (B8 + autotune generalization.)
+- ⬜ **P6 — Arch breadth + autotune-as-CI.** (B8 + autotune generalization.)
   Recompile the templates under sm_80/sm_89 and the HIP breadth (gfx1031 wave32,
   gfx908/90a/942); run autotune per arch to emit each table — **adding an arch is
   now "run autotune," not hand-tuning.** Wire autotune into CI as the dispatch-table
