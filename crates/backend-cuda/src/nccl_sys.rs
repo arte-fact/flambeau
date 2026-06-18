@@ -2,7 +2,7 @@
 //! CUDA `Cluster` needs — unique-id / comm init / all-reduce / destroy + error
 //! text + the group API. Mirrors the `sys.rs` style (opaque handles, i32
 //! results formatted via `ncclGetErrorString`). Linked only under the `nccl`
-//! cargo feature; NCCL 2.28.x ABI.
+//! cargo feature; built against libnccl 2.28.
 
 use std::os::raw::{c_char, c_int, c_void};
 

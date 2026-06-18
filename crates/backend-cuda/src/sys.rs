@@ -19,6 +19,12 @@ pub type CUstream = *mut c_void;
 pub type CUevent = *mut c_void;
 pub type CUmodule = *mut c_void;
 pub type CUfunction = *mut c_void;
+pub type CUgraph = *mut c_void;
+pub type CUgraphExec = *mut c_void;
+
+// `CUstreamCaptureMode`. GLOBAL is the default whole-process capture mode.
+pub const CU_STREAM_CAPTURE_MODE_GLOBAL: c_int = 0;
+pub const CU_STREAM_CAPTURE_MODE_THREAD_LOCAL: c_int = 1;
 /// `CUdevice` is an `int` ordinal.
 pub type CUdevice = c_int;
 /// `CUdeviceptr` is `unsigned long long` on the 64-bit driver ABI (`_v2`).
@@ -134,6 +140,19 @@ extern "C" {
         extra: *mut *mut c_void,
     ) -> c_int;
     pub fn cuFuncGetAttribute(value: *mut c_int, attrib: c_int, func: CUfunction) -> c_int;
+
+    // --- graph capture / replay ---
+    /// Begin recording work issued to `stream` into a graph.
+    #[link_name = "cuStreamBeginCapture_v2"]
+    pub fn cuStreamBeginCapture(stream: CUstream, mode: c_int) -> c_int;
+    /// End capture; `*graph` receives the recorded graph.
+    pub fn cuStreamEndCapture(stream: CUstream, graph: *mut CUgraph) -> c_int;
+    pub fn cuGraphInstantiateWithFlags(exec: *mut CUgraphExec, graph: CUgraph, flags: u64) -> c_int;
+    pub fn cuGraphLaunch(exec: CUgraphExec, stream: CUstream) -> c_int;
+    #[link_name = "cuGraphDestroy"]
+    pub fn cuGraphDestroy(graph: CUgraph) -> c_int;
+    #[link_name = "cuGraphExecDestroy"]
+    pub fn cuGraphExecDestroy(exec: CUgraphExec) -> c_int;
 }
 
 /// Format a `CUresult` for error messages. The driver returns the strings
