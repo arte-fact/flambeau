@@ -101,6 +101,8 @@ pub fn run_pointwise_sweep<B: BenchBackend>(
         "attention_decode_f16_paged" => run_attention_paged_sweep::<B>(repo_root, arch, false),
         "attention_prefill_f16_paged" => run_attention_paged_sweep::<B>(repo_root, arch, true),
         "attention_prefill_flash_tile_f16" => run_attention_flash_tile_sweep::<B>(repo_root, arch),
+        "attention_decode_q8_kv" => run_attention_q8_kv_sweep::<B>(repo_root, arch, false),
+        "attention_prefill_q8_kv" => run_attention_q8_kv_sweep::<B>(repo_root, arch, true),
         _ => return None,
     };
     Some(cert)
@@ -1001,6 +1003,131 @@ pub fn run_rope_f16_sweep<B: BenchBackend>(repo_root: &Path, arch: &str, neox: b
     }
     finish_cert(&dev, repo_root, arch, impl_id, impl_id, "F16", "F16",
         "|err| <= 5e-3 * max(|ref|, 1e-2) vs F64 angle oracle", results, pmc)
+}
+
+// Quantize an F32 vector (len multiple of 32) to packed block_q8_0 bytes
+// (per 32-block: d fp16 LE, then 32 i8 quants) = 34 bytes/block.
+fn quantize_q8_0_blocks(data: &[f32]) -> Vec<u8> {
+    let n_blocks = data.len() / 32;
+    let mut out = vec![0u8; n_blocks * 34];
+    for b in 0..n_blocks {
+        let blk = &data[b * 32..b * 32 + 32];
+        let amax = blk.iter().fold(0.0f32, |m, &x| m.max(x.abs()));
+        let d = amax / 127.0;
+        let id = if d != 0.0 { 1.0 / d } else { 0.0 };
+        out[b * 34..b * 34 + 2].copy_from_slice(&f16::from_f32(d).to_bits().to_le_bytes());
+        for i in 0..32 {
+            let qi = (blk[i] * id).round_ties_even().clamp(-127.0, 127.0) as i8;
+            out[b * 34 + 2 + i] = qi as u8;
+        }
+    }
+    out
+}
+
+/// `attention_{decode,prefill}_q8_kv` — attention over a Q8_0 KV cache. Compared
+/// to the full-precision F64 attention oracle within the Q8 quality envelope
+/// (3e-2). block_tree_sum is pure LDS so HIP and CUDA are bit-identical.
+pub fn run_attention_q8_kv_sweep<B: BenchBackend>(repo_root: &Path, arch: &str, prefill: bool) -> Result<Cert> {
+    let (stem, entry) = if prefill {
+        ("attention_prefill_q8_kv", "flambeau_attention_prefill_q8_kv")
+    } else {
+        ("attention_decode_q8_kv", "flambeau_attention_decode_q8_kv")
+    };
+    let dev = B::new_device(0)?;
+    let image = B::image(stem).ok_or_else(|| anyhow!("{stem} not compiled"))?;
+    let module = B::load(&dev, image)?;
+    let kernel = B::kernel(&module, entry)?;
+    let pmc = B::attributes(&kernel)?;
+
+    // (n_a, n_heads_q, n_heads_kv, head_dim, n_k)
+    let shapes = [(if prefill { 4 } else { 1 }, 8usize, 2usize, 128usize, 16usize), (if prefill { 6 } else { 1 }, 16, 4, 64, 24)];
+    let mut results = Vec::new();
+    for (n_a, n_heads_q, n_heads_kv, head_dim, n_k) in shapes {
+        let seed = 0xC0FFEE ^ ((n_a as u64) * 1049 + (head_dim as u64) * 11 + if prefill { 1 } else { 0 });
+        let scale = 1.0f32 / (head_dim as f32).sqrt();
+        let group = n_heads_q / n_heads_kv;
+        let q = f16_input(seed, n_a * n_heads_q * head_dim);
+        let k_f32 = seeded_f32_range(seed ^ 0xAA, n_k * n_heads_kv * head_dim, -0.5, 0.5);
+        let v_f32 = seeded_f32_range(seed ^ 0xBB, n_k * n_heads_kv * head_dim, -0.5, 0.5);
+        // Quantize each (token, kv_head) row's head_dim elements to Q8_0.
+        let row = head_dim;
+        let rows = n_k * n_heads_kv;
+        let mut k_bytes = Vec::with_capacity(rows * (head_dim / 32) * 34);
+        let mut v_bytes = Vec::with_capacity(rows * (head_dim / 32) * 34);
+        // Dequantized K/V (what the kernel reads) for the reference.
+        let mut k_deq = vec![0.0f32; n_k * n_heads_kv * head_dim];
+        let mut v_deq = vec![0.0f32; n_k * n_heads_kv * head_dim];
+        for r in 0..rows {
+            let kb = quantize_q8_0_blocks(&k_f32[r * row..(r + 1) * row]);
+            let vb = quantize_q8_0_blocks(&v_f32[r * row..(r + 1) * row]);
+            // Dequant back.
+            for blk in 0..head_dim / 32 {
+                let kd = f16::from_bits(u16::from_le_bytes([kb[blk * 34], kb[blk * 34 + 1]])).to_f32();
+                let vd = f16::from_bits(u16::from_le_bytes([vb[blk * 34], vb[blk * 34 + 1]])).to_f32();
+                for i in 0..32 {
+                    k_deq[r * row + blk * 32 + i] = kd * (kb[blk * 34 + 2 + i] as i8) as f32;
+                    v_deq[r * row + blk * 32 + i] = vd * (vb[blk * 34 + 2 + i] as i8) as f32;
+                }
+            }
+            k_bytes.extend_from_slice(&kb);
+            v_bytes.extend_from_slice(&vb);
+        }
+        // Reference: F64 attention on the dequantized K/V (Q stays f16; the
+        // kernel re-quantizes Q to Q8, an extra ~0.8% covered by the 3e-2 tol).
+        let mut reference = vec![0.0f32; n_a * n_heads_q * head_dim];
+        for a in 0..n_a {
+            for h in 0..n_heads_q {
+                let kvh = h / group;
+                let limit = if prefill { (a + 1).min(n_k) } else { n_k };
+                let qr: Vec<f32> = (0..head_dim).map(|d| q[(a * n_heads_q + h) * head_dim + d].to_f32()).collect();
+                let ctx: Vec<(Vec<f32>, Vec<f32>)> = (0..limit).map(|t| {
+                    let base = (t * n_heads_kv + kvh) * head_dim;
+                    (k_deq[base..base + head_dim].to_vec(), v_deq[base..base + head_dim].to_vec())
+                }).collect();
+                let o = attn_oracle_row(&qr, &ctx, scale as f64, head_dim);
+                for d in 0..head_dim { reference[(a * n_heads_q + h) * head_dim + d] = f16::from_f32(o[d]).to_f32(); }
+            }
+        }
+
+        let d_q = alloc_and_upload(&dev, &q);
+        let d_k = alloc_and_upload(&dev, &k_bytes);
+        let d_v = alloc_and_upload(&dev, &v_bytes);
+        let d_o = dev.alloc(n_a * n_heads_q * head_dim * 2)?;
+        {
+            let stream = dev.default_stream();
+            let (nhq, nhkv, hd) = (n_heads_q as i32, n_heads_kv as i32, head_dim as i32);
+            let qp: u64 = d_q.as_usize() as u64; let kp: u64 = d_k.as_usize() as u64;
+            let vp: u64 = d_v.as_usize() as u64; let op: u64 = d_o.as_usize() as u64;
+            let mut a = <B::Args<'_>>::default();
+            let block = (head_dim / 4) as u32;
+            if prefill {
+                let (nqi, nki, qoff, ws, rd) = (n_a as i32, n_k as i32, 0i32, 0i32, 0i32);
+                a.push_arg(&qp); a.push_arg(&kp); a.push_arg(&vp); a.push_arg(&op);
+                a.push_arg(&nqi); a.push_arg(&nhq); a.push_arg(&nhkv); a.push_arg(&hd);
+                a.push_arg(&nki); a.push_arg(&qoff); a.push_arg(&scale); a.push_arg(&ws); a.push_arg(&rd);
+                B::launch(&kernel, stream, LaunchCfg { grid: (n_a as u32, n_heads_q as u32, 1), block: (block, 1, 1), shared_bytes: 0 }, a)?;
+            } else {
+                let (nt, ws, rd) = (n_k as i32, 0i32, 0i32);
+                a.push_arg(&qp); a.push_arg(&kp); a.push_arg(&vp); a.push_arg(&op);
+                a.push_arg(&nhq); a.push_arg(&nhkv); a.push_arg(&hd); a.push_arg(&nt); a.push_arg(&scale); a.push_arg(&ws); a.push_arg(&rd);
+                B::launch(&kernel, stream, LaunchCfg { grid: (n_heads_q as u32, 1, 1), block: (block, 1, 1), shared_bytes: 0 }, a)?;
+            }
+            stream.synchronize()?;
+        }
+        let mut got_f16 = vec![f16::from_f32(0.0); n_a * n_heads_q * head_dim];
+        unsafe { dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost, DevicePtr(got_f16.as_mut_ptr() as usize), d_o, n_a * n_heads_q * head_dim * 2)?; }
+        dev.default_stream().synchronize()?;
+        unsafe {
+            dev.dealloc(d_q, n_a * n_heads_q * head_dim * 2)?;
+            dev.dealloc(d_k, k_bytes.len())?; dev.dealloc(d_v, v_bytes.len())?;
+            dev.dealloc(d_o, n_a * n_heads_q * head_dim * 2)?;
+        }
+        let got: Vec<f32> = got_f16.iter().map(|v| v.to_f32()).collect();
+        let err = max_rel_err_with_floor(&got, &reference, 1.0);
+        results.push(ShapeResult { m: n_a, k: head_dim, n: n_k, seed, max_rel_err: err, tolerance: 3e-2, pass: err <= 3e-2 });
+    }
+    finish_cert(&dev, repo_root, arch, stem, stem, "F16", "Q8_0",
+        "|err| <= 3e-2 * max(|ref|, 1) vs F64 dequant oracle (Q8 envelope)", results, pmc)
 }
 
 /// `attention_prefill_flash_tile_f16` — LDS-tiled flash-attn-v2 prefill. Block =

@@ -31,6 +31,25 @@ static __device__ __forceinline__ float block_reduce_sum(float val, float* scrat
     return total;
 }
 
+// LDS tree sum over the whole block, broadcast to all threads. Wave-agnostic
+// (no warp ops) — works for any power-of-two blockDim, including sub-warp
+// blocks (e.g. head_dim/4 = 16). `red` is caller LDS of at least blockDim.x
+// floats. blockDim.x must be a power of two.
+static __device__ __forceinline__ float block_tree_sum(float val, float* red) {
+    const int tid = threadIdx.x;
+    red[tid] = val;
+    __syncthreads();
+    for (int s = blockDim.x >> 1; s > 0; s >>= 1) {
+        if (tid < s) {
+            red[tid] += red[tid + s];
+        }
+        __syncthreads();
+    }
+    const float total = red[0];
+    __syncthreads();
+    return total;
+}
+
 // Runtime-blockDim sibling of block_reduce_sum (for kernels whose block size is
 // chosen at launch, e.g. block = head_dim). `scratch` must hold at least
 // `blockDim.x / WARP_SIZE` floats; blockDim.x must be a multiple of WARP_SIZE.

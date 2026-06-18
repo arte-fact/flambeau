@@ -3505,3 +3505,34 @@ params = """
     const int n_k_tokens, const int q_offset, const float scale,
     const int window_size, const int ring_depth"""
 body = "flash_attn_prefill_v2_impl<512, 4, 8>(q, k_cache, v_cache, out, n_q_tokens, n_heads_q, n_heads_kv, n_k_tokens, q_offset, scale, window_size, ring_depth);"
+
+# Q8_0 KV-cache attention (decode + prefill) — dp4a score, block_tree_sum reduce
+# (wave-agnostic over the sub-warp head_dim/4 block).
+
+[[kernel]]
+stem = "attention_decode_q8_kv"
+includes = ["block_quant.cuh", "quant_traits.cuh", "block_reduce.cuh", "attention_q8_kv.cuh"]
+[[kernel.entry]]
+name = "flambeau_attention_decode_q8_kv"
+params = """
+    const fb_fp16_t* __restrict__ q,
+    const flambeau_block_q8_0* __restrict__ k_cache,
+    const flambeau_block_q8_0* __restrict__ v_cache,
+    fb_fp16_t* __restrict__ out,
+    const int n_heads_q, const int n_heads_kv, const int head_dim, const int n_tokens,
+    const float scale, const int window_size, const int ring_depth"""
+body = "attention_decode_q8_kv_body(q, k_cache, v_cache, out, n_heads_q, n_heads_kv, head_dim, n_tokens, scale, window_size, ring_depth);"
+
+[[kernel]]
+stem = "attention_prefill_q8_kv"
+includes = ["block_quant.cuh", "quant_traits.cuh", "block_reduce.cuh", "attention_q8_kv.cuh"]
+[[kernel.entry]]
+name = "flambeau_attention_prefill_q8_kv"
+params = """
+    const fb_fp16_t* __restrict__ q,
+    const flambeau_block_q8_0* __restrict__ k_cache,
+    const flambeau_block_q8_0* __restrict__ v_cache,
+    fb_fp16_t* __restrict__ out,
+    const int n_q_tokens, const int n_heads_q, const int n_heads_kv, const int head_dim,
+    const int n_k_tokens, const int q_offset, const float scale, const int window_size, const int ring_depth"""
+body = "attention_prefill_q8_kv_body(q, k_cache, v_cache, out, n_q_tokens, n_heads_q, n_heads_kv, head_dim, n_k_tokens, q_offset, scale, window_size, ring_depth);"
