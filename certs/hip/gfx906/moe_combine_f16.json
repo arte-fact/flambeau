@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "impl_id": "moe_combine_f16",
+  "backend": "hip",
+  "arch": "gfx906",
+  "op": "moe_combine_f16",
+  "dtype_weight": "F16",
+  "dtype_activation": "F16",
+  "tolerance_formula": "|err| <= 5e-3 * max(|ref|, 1e-2) vs F64 oracle",
+  "results": [
+    {
+      "m": 1,
+      "k": 8,
+      "n": 2048,
+      "seed": 12624431,
+      "max_rel_err": 0.00072411296,
+      "tolerance": 0.005,
+      "pass": true
+    },
+    {
+      "m": 8,
+      "k": 8,
+      "n": 2048,
+      "seed": 12617118,
+      "max_rel_err": 0.00079239305,
+      "tolerance": 0.005,
+      "pass": true
+    },
+    {
+      "m": 4,
+      "k": 4,
+      "n": 1024,
+      "seed": 12632790,
+      "max_rel_err": 0.0007806401,
+      "tolerance": 0.005,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-06-18T11:33:53Z",
+  "rig": "threadreaper-gfx906",
+  "pmc": {
+    "vgpr_count": 24,
+    "sgpr_count": null,
+    "waves_per_simd": 10,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

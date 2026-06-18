@@ -3002,3 +3002,19 @@ params = """
     const int k,
     const float eps"""
 body = "rmsnorm_q8_1_fused_row<256>(x, weight, y, n_rows, k, eps);"
+
+# MoE-decode glue — shared-expert gate (block-reduce dot + sigmoid scale).
+
+[[kernel]]
+stem = "shared_expert_scale_f32"
+includes = ["block_reduce.cuh", "shared_expert_scale.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_shared_expert_scale_f32"
+params = """
+    float* __restrict__ shared_out,
+    const float* __restrict__ x,
+    const float* __restrict__ gate_w,
+    const int n_tokens,
+    const int hidden"""
+body = "shared_expert_scale_f32_row<256>(shared_out, x, gate_w, n_tokens, hidden);"

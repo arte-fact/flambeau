@@ -858,4 +858,24 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
         impl_id: "rope_neox_partial_f16",
         cert_rel_path: "certs/hip/gfx906/rope_neox_partial_f16.json",
     },
+    DirectCallKernel {
+        impl_id: "moe_combine_no_residual_f16",
+        cert_rel_path: "certs/hip/gfx906/moe_combine_no_residual_f16.json",
+    },
+    DirectCallKernel {
+        impl_id: "moe_combine_f16",
+        cert_rel_path: "certs/hip/gfx906/moe_combine_f16.json",
+    },
+    DirectCallKernel {
+        impl_id: "moe_combine_two_residuals_f16",
+        cert_rel_path: "certs/hip/gfx906/moe_combine_two_residuals_f16.json",
+    },
+    DirectCallKernel {
+        impl_id: "apply_per_expert_scale_f32",
+        cert_rel_path: "certs/hip/gfx906/apply_per_expert_scale_f32.json",
+    },
+    DirectCallKernel {
+        impl_id: "shared_expert_scale_f32",
+        cert_rel_path: "certs/hip/gfx906/shared_expert_scale_f32.json",
+    },
 ];

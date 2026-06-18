@@ -61,6 +61,11 @@ pub fn run_pointwise_sweep<B: BenchBackend>(
         "rmsnorm_q8_1_fused" => run_rmsnorm_q8_1_fused_sweep::<B>(repo_root, arch),
         "rope_f16" => run_rope_f16_sweep::<B>(repo_root, arch, false),
         "rope_neox_partial_f16" => run_rope_f16_sweep::<B>(repo_root, arch, true),
+        "moe_combine_no_residual_f16" => run_moe_combine_sweep::<B>(repo_root, arch, 0),
+        "moe_combine_f16" => run_moe_combine_sweep::<B>(repo_root, arch, 1),
+        "moe_combine_two_residuals_f16" => run_moe_combine_sweep::<B>(repo_root, arch, 2),
+        "apply_per_expert_scale_f32" => run_apply_per_expert_scale_sweep::<B>(repo_root, arch),
+        "shared_expert_scale_f32" => run_shared_expert_scale_sweep::<B>(repo_root, arch),
         _ => return None,
     };
     Some(cert)
@@ -961,6 +966,221 @@ pub fn run_rope_f16_sweep<B: BenchBackend>(repo_root: &Path, arch: &str, neox: b
     }
     finish_cert(&dev, repo_root, arch, impl_id, impl_id, "F16", "F16",
         "|err| <= 5e-3 * max(|ref|, 1e-2) vs F64 angle oracle", results, pmc)
+}
+
+/// `moe_combine_*_f16` — expert fan-in `Σ_k w_k·e_k` (+ 0/1/2 F16 residuals).
+/// Pure pointwise per (token, d). `n_residuals` selects the variant.
+pub fn run_moe_combine_sweep<B: BenchBackend>(repo_root: &Path, arch: &str, n_residuals: usize) -> Result<Cert> {
+    let (stem, entry, impl_id) = match n_residuals {
+        0 => ("moe_combine_no_residual_f16", "flambeau_moe_combine_no_residual_f16", "moe_combine_no_residual_f16"),
+        1 => ("moe_combine_f16", "flambeau_moe_combine_f16", "moe_combine_f16"),
+        _ => ("moe_combine_two_residuals_f16", "flambeau_moe_combine_two_residuals_f16", "moe_combine_two_residuals_f16"),
+    };
+    let dev = B::new_device(0)?;
+    let image = B::image(stem).ok_or_else(|| anyhow!("{stem} not compiled"))?;
+    let module = B::load(&dev, image)?;
+    let kernel = B::kernel(&module, entry)?;
+    let pmc = B::attributes(&kernel)?;
+
+    let shapes = [(1usize, 8usize, 2048usize), (8, 8, 2048), (4, 4, 1024)];
+    let mut results = Vec::new();
+    for (n_tokens, top_k, hidden) in shapes {
+        let seed = 0xC0FFEE ^ ((n_tokens as u64) * 1049 + (top_k as u64) * 53 + (hidden as u64) * 11);
+        let total = n_tokens * hidden;
+        let expert_outs = f16_input(seed, n_tokens * top_k * hidden);
+        let weights = seeded_f32_range(seed ^ 0x11, n_tokens * top_k, -0.5, 0.5);
+        let r1 = f16_input(seed ^ 0x22, total);
+        let r2 = f16_input(seed ^ 0x33, total);
+
+        let mut reference = vec![0.0f32; total];
+        for token in 0..n_tokens {
+            for d in 0..hidden {
+                let idx = token * hidden + d;
+                let mut acc = match n_residuals {
+                    1 => r1[idx].to_f32() as f64,
+                    2 => r1[idx].to_f32() as f64 + r2[idx].to_f32() as f64,
+                    _ => 0.0,
+                };
+                for k in 0..top_k {
+                    let w = weights[token * top_k + k] as f64;
+                    let e = expert_outs[(token * top_k + k) * hidden + d].to_f32() as f64;
+                    acc += w * e;
+                }
+                reference[idx] = f16::from_f32(acc as f32).to_f32();
+            }
+        }
+
+        let d_eo = alloc_and_upload(&dev, &expert_outs);
+        let d_w = alloc_and_upload(&dev, &weights);
+        let d_r1 = alloc_and_upload(&dev, &r1);
+        let d_r2 = alloc_and_upload(&dev, &r2);
+        let d_out = dev.alloc(total * 2)?;
+        {
+            let stream = dev.default_stream();
+            let nt = n_tokens as i32;
+            let tk = top_k as i32;
+            let h = hidden as i32;
+            let eo_ptr: u64 = d_eo.as_usize() as u64;
+            let w_ptr: u64 = d_w.as_usize() as u64;
+            let r1_ptr: u64 = d_r1.as_usize() as u64;
+            let r2_ptr: u64 = d_r2.as_usize() as u64;
+            let out_ptr: u64 = d_out.as_usize() as u64;
+            let mut args = <B::Args<'_>>::default();
+            args.push_arg(&eo_ptr);
+            args.push_arg(&w_ptr);
+            if n_residuals >= 1 {
+                args.push_arg(&r1_ptr);
+            }
+            if n_residuals >= 2 {
+                args.push_arg(&r2_ptr);
+            }
+            args.push_arg(&out_ptr);
+            args.push_arg(&nt);
+            args.push_arg(&tk);
+            args.push_arg(&h);
+            B::launch(&kernel, stream, LaunchCfg::one_d((total as u32).div_ceil(256), 256), args)?;
+            stream.synchronize()?;
+        }
+        let mut got_f16 = vec![f16::from_f32(0.0); total];
+        unsafe {
+            dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost,
+                DevicePtr(got_f16.as_mut_ptr() as usize), d_out, total * 2)?;
+        }
+        dev.default_stream().synchronize()?;
+        unsafe {
+            dev.dealloc(d_eo, n_tokens * top_k * hidden * 2)?;
+            dev.dealloc(d_w, n_tokens * top_k * 4)?;
+            dev.dealloc(d_r1, total * 2)?;
+            dev.dealloc(d_r2, total * 2)?;
+            dev.dealloc(d_out, total * 2)?;
+        }
+        let got: Vec<f32> = got_f16.iter().map(|v| v.to_f32()).collect();
+        let err = max_rel_err_with_floor(&got, &reference, 1e-2);
+        results.push(ShapeResult { m: n_tokens, k: top_k, n: hidden, seed, max_rel_err: err, tolerance: 5e-3, pass: err <= 5e-3 });
+    }
+    finish_cert(&dev, repo_root, arch, impl_id, impl_id, "F16", "F16",
+        "|err| <= 5e-3 * max(|ref|, 1e-2) vs F64 oracle", results, pmc)
+}
+
+/// `apply_per_expert_scale_f32` — fold expert scalars into routing weights in
+/// place. One thread per (token, k); exact f32 multiply (bit-exact both rigs).
+pub fn run_apply_per_expert_scale_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) -> Result<Cert> {
+    let dev = B::new_device(0)?;
+    let image = B::image("apply_per_expert_scale_f32").ok_or_else(|| anyhow!("apply_per_expert_scale_f32 not compiled"))?;
+    let module = B::load(&dev, image)?;
+    let kernel = B::kernel(&module, "flambeau_apply_per_expert_scale_f32")?;
+    let pmc = B::attributes(&kernel)?;
+
+    let shapes = [(1usize, 8usize, 128usize), (8, 8, 128), (4, 4, 32)];
+    let mut results = Vec::new();
+    for (n_tokens, top_k, n_experts) in shapes {
+        let seed = 0xC0FFEE ^ ((n_tokens as u64) * 1049 + (top_k as u64) * 53 + (n_experts as u64) * 11);
+        let weights = seeded_f32_range(seed, n_tokens * top_k, -0.5, 0.5);
+        let scales = seeded_f32_range(seed ^ 0x44, n_experts, 0.1, 2.0);
+        // expert_ids: pseudo-random valid ids.
+        let expert_ids: Vec<i32> = (0..n_tokens * top_k)
+            .map(|i| ((i.wrapping_mul(2654435761)) % n_experts) as i32)
+            .collect();
+        let reference: Vec<f32> = (0..n_tokens * top_k)
+            .map(|i| weights[i] * scales[expert_ids[i] as usize])
+            .collect();
+
+        let d_w = alloc_and_upload(&dev, &weights);
+        let d_ids = alloc_and_upload(&dev, &expert_ids);
+        let d_scales = alloc_and_upload(&dev, &scales);
+        {
+            let stream = dev.default_stream();
+            let tk = top_k as i32;
+            let w_ptr: u64 = d_w.as_usize() as u64;
+            let ids_ptr: u64 = d_ids.as_usize() as u64;
+            let sc_ptr: u64 = d_scales.as_usize() as u64;
+            let mut args = <B::Args<'_>>::default();
+            args.push_arg(&w_ptr);
+            args.push_arg(&ids_ptr);
+            args.push_arg(&sc_ptr);
+            args.push_arg(&tk);
+            let cfg = LaunchCfg { grid: (n_tokens as u32, 1, 1), block: (top_k as u32, 1, 1), shared_bytes: 0 };
+            B::launch(&kernel, stream, cfg, args)?;
+            stream.synchronize()?;
+        }
+        let mut got = vec![0.0f32; n_tokens * top_k];
+        unsafe {
+            dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost,
+                DevicePtr(got.as_mut_ptr() as usize), d_w, n_tokens * top_k * 4)?;
+        }
+        dev.default_stream().synchronize()?;
+        unsafe {
+            dev.dealloc(d_w, n_tokens * top_k * 4)?;
+            dev.dealloc(d_ids, n_tokens * top_k * 4)?;
+            dev.dealloc(d_scales, n_experts * 4)?;
+        }
+        let (err, tol, pass) = bits_mismatch_f32(&got, &reference);
+        results.push(ShapeResult { m: n_tokens, k: top_k, n: n_experts, seed, max_rel_err: err, tolerance: tol, pass });
+    }
+    finish_cert(&dev, repo_root, arch, "apply_per_expert_scale_f32", "apply_per_expert_scale_f32",
+        "F32", "F32", "exact (per-element f32 multiply)", results, pmc)
+}
+
+/// `shared_expert_scale_f32` — per-token gate `sigmoid(dot(x, gate_w))`, scale
+/// `shared_out` in place. Block-reduce dot rides `block_reduce_sum`.
+pub fn run_shared_expert_scale_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) -> Result<Cert> {
+    let dev = B::new_device(0)?;
+    let image = B::image("shared_expert_scale_f32").ok_or_else(|| anyhow!("shared_expert_scale_f32 not compiled"))?;
+    let module = B::load(&dev, image)?;
+    let kernel = B::kernel(&module, "flambeau_shared_expert_scale_f32")?;
+    let pmc = B::attributes(&kernel)?;
+
+    let shapes = [(1usize, 2048usize), (8, 2048), (1, 5120)];
+    let mut results = Vec::new();
+    for (n_tokens, hidden) in shapes {
+        let seed = 0xC0FFEE ^ ((n_tokens as u64) * 1049 + (hidden as u64) * 11);
+        let x = seeded_f32_range(seed, n_tokens * hidden, -0.25, 0.25);
+        let gate_w = seeded_f32_range(seed ^ 0x55, hidden, -0.25, 0.25);
+        let shared = seeded_f32_range(seed ^ 0x66, n_tokens * hidden, -0.5, 0.5);
+        let mut reference = vec![0.0f32; n_tokens * hidden];
+        for t in 0..n_tokens {
+            let dot: f64 = (0..hidden).map(|i| gate_w[i] as f64 * x[t * hidden + i] as f64).sum();
+            let g = 1.0 / (1.0 + (-dot).exp());
+            for i in 0..hidden {
+                reference[t * hidden + i] = (shared[t * hidden + i] as f64 * g) as f32;
+            }
+        }
+
+        let d_out = alloc_and_upload(&dev, &shared);
+        let d_x = alloc_and_upload(&dev, &x);
+        let d_gw = alloc_and_upload(&dev, &gate_w);
+        {
+            let stream = dev.default_stream();
+            let nt = n_tokens as i32;
+            let h = hidden as i32;
+            let out_ptr: u64 = d_out.as_usize() as u64;
+            let x_ptr: u64 = d_x.as_usize() as u64;
+            let gw_ptr: u64 = d_gw.as_usize() as u64;
+            let mut args = <B::Args<'_>>::default();
+            args.push_arg(&out_ptr);
+            args.push_arg(&x_ptr);
+            args.push_arg(&gw_ptr);
+            args.push_arg(&nt);
+            args.push_arg(&h);
+            B::launch(&kernel, stream, LaunchCfg::one_d(n_tokens as u32, 256), args)?;
+            stream.synchronize()?;
+        }
+        let mut got = vec![0.0f32; n_tokens * hidden];
+        unsafe {
+            dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost,
+                DevicePtr(got.as_mut_ptr() as usize), d_out, n_tokens * hidden * 4)?;
+        }
+        dev.default_stream().synchronize()?;
+        unsafe {
+            dev.dealloc(d_out, n_tokens * hidden * 4)?;
+            dev.dealloc(d_x, n_tokens * hidden * 4)?;
+            dev.dealloc(d_gw, hidden * 4)?;
+        }
+        let err = max_rel_err_with_floor(&got, &reference, 1.0);
+        results.push(ShapeResult { m: n_tokens, k: hidden, n: 1, seed, max_rel_err: err, tolerance: 1e-4, pass: err <= 1e-4 });
+    }
+    finish_cert(&dev, repo_root, arch, "shared_expert_scale_f32", "shared_expert_scale_f32",
+        "F32", "F32", "|err| <= 1e-4 * max(|ref|, 1) vs F64 oracle (fast __expf)", results, pmc)
 }
 
 /// `quantize_f16_q8_{0,1}` — F16 activation → Q8 blocks (32 threads/block,
