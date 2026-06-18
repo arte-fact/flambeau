@@ -707,22 +707,9 @@ const SIMPLE_SWEEPS: &[(&str, SweepFn)] = &[
         "gdn_state_step_alphabeta",
         flambeau_bench::sweep_gdn_step_alphabeta::run_sweep,
     ),
-    ("cast_f32_f16", flambeau_bench::sweep_cast::run_sweep),
-    (
-        "cast_f16_f32",
-        flambeau_bench::sweep_f32_pointwise::run_cast_f16_f32_sweep,
-    ),
-    (
-        "silu_f32",
-        flambeau_bench::sweep_f32_pointwise::run_silu_sweep,
-    ),
     (
         "swiglu_f32",
         flambeau_bench::sweep_f32_pointwise::run_swiglu_sweep,
-    ),
-    (
-        "scale_f32",
-        flambeau_bench::sweep_f32_pointwise::run_scale_sweep,
     ),
     (
         "rmsnorm_f32",
@@ -1347,18 +1334,20 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                 );
                 Ok(())
             }
-            "add_f16" => {
-                use flambeau_bench::sweep_pointwise_cb::run_add_f16_sweep;
-                let cert = run_add_f16_sweep::<flambeau_bench::backend::Hip>(&repo_root(), arch)?;
-                println!(
-                    "sweep add_f16: pass={} shapes={} rig={}",
-                    cert.pass,
-                    cert.results.len(),
-                    cert.rig
-                );
-                Ok(())
-            }
             other => {
+                if let Some(res) = flambeau_bench::sweep_pointwise_cb::run_pointwise_sweep::<
+                    flambeau_bench::backend::Hip,
+                >(other, &repo_root(), arch)
+                {
+                    let cert = res?;
+                    println!(
+                        "sweep {other}: pass={} shapes={} rig={}",
+                        cert.pass,
+                        cert.results.len(),
+                        cert.rig
+                    );
+                    return Ok(());
+                }
                 if let Some(run) = find_simple_sweep(other) {
                     let _ = dtype;
                     let cert = run(&repo_root())?;
@@ -1683,11 +1672,12 @@ fn sweep_cuda(op: &str, dtype: &str) -> Result<()> {
     use flambeau_bench::backend::Cuda;
     use flambeau_bench::sweep_mmvq::{run_sweep, Dtype, SweepSpec};
 
-    if op == "add_f16" {
-        use flambeau_bench::sweep_pointwise_cb::run_add_f16_sweep;
-        let cert = run_add_f16_sweep::<Cuda>(&repo_root(), "sm_86")?;
+    if let Some(res) =
+        flambeau_bench::sweep_pointwise_cb::run_pointwise_sweep::<Cuda>(op, &repo_root(), "sm_86")
+    {
+        let cert = res?;
         println!(
-            "sweep add_f16: pass={} shapes={} rig={}",
+            "sweep {op}: pass={} shapes={} rig={}",
             cert.pass,
             cert.results.len(),
             cert.rig

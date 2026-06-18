@@ -758,4 +758,37 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
         impl_id: "indexed_moe_mmq_q4_k_down_lds_tiled",
         cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q4_k_down_lds_tiled.json",
     },
+    // P3 Stream F — cross-backend (neutral impl_id) certs for the fixed
+    // pointwise kernels. Same gfx906 kernels as the `_gfx906` dispatch rows
+    // above; these are the cross-backend bit-match baselines against the
+    // sm_86 twins under certs/cuda/sm_86/. Sweep harness:
+    // crates/bench/src/sweep_pointwise_cb.rs.
+    DirectCallKernel {
+        impl_id: "add_f16",
+        cert_rel_path: "certs/hip/gfx906/add_f16.json",
+    },
+    DirectCallKernel {
+        impl_id: "cast_f16_f32",
+        cert_rel_path: "certs/hip/gfx906/cast_f16_f32.json",
+    },
+    DirectCallKernel {
+        impl_id: "cast_f32_f16",
+        cert_rel_path: "certs/hip/gfx906/cast_f32_f16.json",
+    },
+    DirectCallKernel {
+        impl_id: "scale_f32",
+        cert_rel_path: "certs/hip/gfx906/scale_f32.json",
+    },
+    DirectCallKernel {
+        impl_id: "scale_f16",
+        cert_rel_path: "certs/hip/gfx906/scale_f16.json",
+    },
+    DirectCallKernel {
+        impl_id: "silu_f32",
+        cert_rel_path: "certs/hip/gfx906/silu_f32.json",
+    },
+    DirectCallKernel {
+        impl_id: "apply_softcap_f32",
+        cert_rel_path: "certs/hip/gfx906/apply_softcap_f32.json",
+    },
 ];
