@@ -3,16 +3,41 @@
 Transient working note. Start here when the dev rig (2× MI50 gfx906 + 1× RTX 3090
 sm_86) is built and `feature/cuda-decouple` is pulled in.
 
-> **CURRENT STATUS (2026-06-18, tip `ec0aa8e`): P2 (Stream M) COMPLETE. P3
-> (Stream F) UNDERWAY — spine + Wave 1a (11/11) + Wave 1b (11/13) + Wave 1d
-> (7/9) done. Remaining decode spine: Wave 1c attention (4) + moe_sort_by_expert
-> + sampler_topk_softmax.** cert-check green hip 82 / cuda 20 throughout. See
-> `doc/P3-STREAM-F-PORT.md` for the wave tracker.
-> - **Two reusable cross-backend reduce seams landed:**
->   `kernels-shared/include/block_reduce.cuh` (`block_reduce_sum<THREADS>` — sum,
->   broadcast) and the **argmax** pattern in `topk.cuh` (value+index butterfly
->   over `WARP_SIZE`). Both close the wave64 reduce leak (`tid>>6`,
->   `__shfl_xor(...,64)`, `WARPS=THREADS/64`) for the daily gfx906 ↔ sm_86.
+> **CURRENT STATUS (2026-06-18, tip `305ac1b`): P2 (Stream M) COMPLETE. P3
+> (Stream F) — WAVE 1 DECODE SPINE COMPLETE (32/32).** Every decode-path Stream F
+> kernel is cross-backend (HIP gfx906 ↔ CUDA sm_86); BOTH decode-attention
+> kernels are BIT-IDENTICAL to the hand kernels (all 14 attention parity tests
+> green). cert-check green hip 82 / cuda 20 throughout. **P3 is unblocked for the
+> P5 qwen35moe-v2 Q4_K single-GPU decode-parity gate.** Remaining P3 = Waves 2-4
+> (prefill / Q8 KV / paged-serving / GDN) — NOT on the minimal decode path — plus
+> two non-blocking deferrals (`rmsnorm_rope_neox_partial_f16` launch-bounds,
+> `quantize_f16_q8_1_mmq` orphan). See `doc/P3-STREAM-F-PORT.md`.
+> - **Three reusable cross-backend reduce seams landed** (all in
+>   `kernels-shared/include/`): `block_reduce.cuh` (`block_reduce_sum<THREADS>` —
+>   sum + broadcast), `block_reduce_softmax.cuh` (`block_reduce_softmax<THREADS>` —
+>   the NaN-safe online (max, sum_exp) rescaling merge; backs softmax_masked +
+>   sampler_topk + attention), and the **argmax** pattern in `topk.cuh`
+>   (value+index butterfly). All close the wave64 reduce leak (`tid>>6`,
+>   `__shfl_xor(...,64)`, `WARPS=THREADS/64`) over the `WARP_SIZE` seam.
+> - **BIT-IDENTITY LESSON (attention):** for kernels guarded by a bit-exact
+>   parity test, the neutral body must use the SAME reduce the hand kernel used —
+>   a plain `__shfl_xor` butterfly over `WARP_SIZE`, NOT gfx906's DPP
+>   `warp_reduce_sum` (different intermediate rounding → ~1e-6 drift). Also match
+>   the exact FP form (`norm = 1/sum; out*norm`, not `out/sum`). `block_reduce_sum`
+>   uses the DPP reduce, so it's fine where the cert tolerance is ≥1e-5 (norms),
+>   but attention needed the inline `__shfl_xor`. The
+>   `attention_decode_f16_batched_parity` test (batched == serial, bit-for-bit) is
+>   the guard.
+> - **P3 Wave 1c (attention) — 4/4 DONE** (`96a4cad`, `7ac397f`, `4c24bef`,
+>   `5a18f9c`): attention_decode_f16 (online softmax, Q·K dot over WARP_SIZE,
+>   bit-identical) + attention_decode_f16_splitk (2 entries: chunk tile-4 reduce +
+>   per-lane combine, bit-identical) + softmax_masked_f16 (block_reduce_softmax,
+>   NaN-safe) + kv_append_f16_batched_slots (MIRROR gather/scatter).
+> - **P3 Wave 1d (MoE glue + sampler) — 9/9 DONE** (`a3c2ca5`…`517e6e3`,
+>   `305ac1b`): moe_combine ×3, apply_per_expert_scale, shared_expert_scale, topk,
+>   sampler_apply_penalties, sampler_topk_softmax (block_reduce_softmax Phase-1 +
+>   wave-agnostic bitonic sort), moe_sort_by_expert (MIRROR — atomics + LDS scan,
+>   no warp ops).
 > - **P3 Wave 1b (Tier-B) — 11/13 DONE** (`6cff4c7`…`c2f87bf`): full norm family
 >   (rmsnorm_f16/f32/f32_to_f16 ×3/f16_add_residual/q8_1_fused, l2_norm_f32) via
 >   `block_reduce_sum`, F16→Q8 activation quantizers (q8_0/q8_1), rope_f16/

@@ -17,7 +17,7 @@ phase ledger; `doc/HANDOFF.md` is the detailed chronological log.
 | P2c | `mmq` (wave64 single-pass + DS4 4-warp LDS-tiled), 21 kernels | ✅ | `58f52f0` / `df58e84` |
 | P2d | `indexed_moe` (mmvq + tile8 + Q4_K lds_tiled) + dead-orphan cleanup | ✅ | `c082e39` / `58d73b0` |
 | **P2** | **Stream M rollout — 196 hand `.cu` → templates, both dispatch tables cross-backend** | **✅** | **`c082e39`** |
-| P3 | Stream F port — ~70 fixed kernels → CUDA (attention, norms, rope, softmax, sampler, gdn, moe sort/combine, kv_append, …) | 🔄 in progress — spine + Wave 1a (11/11) + 1b (11/13) + 1d (7/9) done; `block_reduce_sum` + topk-argmax seams landed; next = online-softmax reduce → 1c attention + sampler_topk + moe_sort | — |
+| P3 | Stream F port — ~70 fixed kernels → CUDA (attention, norms, rope, softmax, sampler, gdn, moe sort/combine, kv_append, …) | 🔄 **Wave 1 decode spine COMPLETE (32/32)** — both decode-attention kernels bit-identical (14 parity tests green); 3 reduce seams landed (sum / online-softmax / argmax). Remaining = Waves 2-4 (prefill / Q8 KV / paged / GDN), off the decode-parity path. **P5 decode gate unblocked.** | — |
 | P4 | CUDA multi-GPU runtime — NCCL `Collectives` + CUDA Graphs `GraphExec` (multi-GPU only) | ⬜ | — |
 | P5 | End-to-end CUDA decode parity — qwen35moe-v2 Q4_K via `ForwardEngine<CudaBackend>`, logit-cosine ≥ 0.9999 (gated on P3) | ⬜ | — |
 | P6 | Arch breadth (sm_80/89, gfx1031 wave32, gfx908/90a/942) + autotune-as-CI | ⬜ | — |
