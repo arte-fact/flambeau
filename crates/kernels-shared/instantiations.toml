@@ -2881,3 +2881,35 @@ params = """
     const int n_sb_per_row,
     const int n_experts"""
 body = "indexed_moe_mmq_q4_k_down_lds_tiled_row<8, 128, 4, float>(down_w, y_mmq, expert_ids, sorted_pair_idx_padded, padded_offsets, dst, n_rows, n_pairs, n_sb_per_row, n_experts);"
+
+# P3 Stream F — Tier-B block-reduce kernels neutralized to shared `.cuh`
+# (block_reduce_sum over the WARP_SIZE seam → correct on wave64 + wave32).
+
+[[kernel]]
+stem = "rmsnorm_f32"
+includes = ["block_reduce.cuh", "rmsnorm.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_rmsnorm_f32"
+params = """
+    const float* __restrict__ x,
+    const float* __restrict__ weight,
+    float* __restrict__ y,
+    const int n_rows,
+    const int k,
+    const float eps"""
+body = "rmsnorm_f32_row<256>(x, weight, y, n_rows, k, eps);"
+
+[[kernel]]
+stem = "l2_norm_f32"
+includes = ["block_reduce.cuh", "l2_norm.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_l2_norm_f32"
+params = """
+    const float* __restrict__ x,
+    float* __restrict__ y,
+    const int n_rows,
+    const int k,
+    const float eps"""
+body = "l2_norm_f32_row<256>(x, y, n_rows, k, eps);"

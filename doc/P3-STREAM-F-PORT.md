@@ -98,11 +98,21 @@ rope / activation-quant** (block-reduce + index math).
 
 **1b — Tier-B norms / rope / activation-quant** (block-reduce + index math):
 - [ ] rmsnorm_f16
-- [ ] rmsnorm_f32
+- [x] rmsnorm_f32  *(neutralized to shared `.cuh`; block_reduce_sum seam)*
 - [ ] rmsnorm_f32_to_f16
 - [ ] rmsnorm_f16_add_residual
 - [ ] rmsnorm_q8_1_fused
-- [ ] l2_norm_f32
+- [x] l2_norm_f32  *(same block_reduce seam; bit-exact-tol 1e-5 both rigs)*
+
+**1b enabling primitive landed:** `kernels-shared/include/block_reduce.cuh` —
+`block_reduce_sum<THREADS>` reduces block-wide and broadcasts via `WARP_SIZE` +
+the neutral `warp_reduce_sum`, correct on wave64 (gfx906) AND wave32 (sm_8x).
+The wave64-hardcoded reduce (`tid>>6`, `__shfl_xor(...,64)`, `WARPS=THREADS/64`)
+in the hand kernels was the rule-5 leak; this seams it. `rmsnorm_f32` /
+`l2_norm_f32` are neutralized to shared `.cuh` (`rmsnorm.cuh` / `l2_norm.cuh`) +
+manifest cells, hand `.cu` retired (generated wrappers inject the arch header).
+The remaining 1b norms reuse this primitive; rope/quantize add index/quant math
+on top.
 - [ ] rope_f16
 - [ ] rope_neox_partial_f16
 - [ ] rmsnorm_rope_neox_partial_f16

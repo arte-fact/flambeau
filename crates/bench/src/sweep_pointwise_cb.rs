@@ -41,6 +41,8 @@ pub fn run_pointwise_sweep<B: BenchBackend>(
         "sigmoid_mul_f16" => run_sigmoid_mul_f16_sweep::<B>(repo_root, arch),
         "swiglu_f32_to_q8_1" => run_swiglu_f32_to_q8_1_sweep::<B>(repo_root, arch),
         "split_q_gate_f16" => run_split_q_gate_f16_sweep::<B>(repo_root, arch),
+        "rmsnorm_f32" => run_rmsnorm_f32_sweep::<B>(repo_root, arch),
+        "l2_norm_f32" => run_l2_norm_f32_sweep::<B>(repo_root, arch),
         _ => return None,
     };
     Some(cert)
@@ -586,6 +588,176 @@ pub fn run_swiglu_f32_to_q8_1_sweep<B: BenchBackend>(repo_root: &Path, arch: &st
         dtype_weight: "F32".to_string(),
         dtype_activation: "Q8_1".to_string(),
         tolerance_formula: "|dequant - oracle| <= 5e-3 * max(|oracle|, 1) (Q8_1 step + __expf)".to_string(),
+        results,
+        pass,
+        emitted_at: now_utc_iso8601(),
+        rig: rig_for(arch),
+        pmc: Some(pmc),
+    };
+    cert.write_to_disk(repo_root)?;
+    Ok(cert)
+}
+
+/// `rmsnorm_f32` — per-row RMSNorm (GDN ssm_norm). One block per row; the
+/// block-wide sum-of-squares reduce rides the neutral `block_reduce_sum` over
+/// the `WARP_SIZE` seam (correct on wave64 and wave32).
+pub fn run_rmsnorm_f32_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) -> Result<Cert> {
+    let dev = B::new_device(0)?;
+    let image = B::image("rmsnorm_f32").ok_or_else(|| anyhow!("rmsnorm_f32 not compiled"))?;
+    let module = B::load(&dev, image)?;
+    let kernel = B::kernel(&module, "flambeau_rmsnorm_f32")?;
+    let pmc = B::attributes(&kernel)?;
+
+    let shapes = [(32usize, 128usize), (16, 128), (1, 512)];
+    let eps = 1e-6f32;
+    let mut results = Vec::new();
+    for (m, k) in shapes {
+        let seed = 0xC0FFEE ^ ((m as u64) * 1049 + (k as u64) * 11);
+        let x = seeded_f32_range(seed, m * k, -0.5, 0.5);
+        let w = seeded_f32_range(seed ^ 0xEE, k, -0.5, 0.5);
+        let mut reference = vec![0.0f32; m * k];
+        for r in 0..m {
+            let row = &x[r * k..(r + 1) * k];
+            let sum_sq: f64 = row.iter().map(|&v| (v as f64) * (v as f64)).sum();
+            let rsqrt = 1.0 / ((sum_sq / (k as f64)) + eps as f64).sqrt();
+            for i in 0..k {
+                reference[r * k + i] = (row[i] as f64 * w[i] as f64 * rsqrt) as f32;
+            }
+        }
+
+        let d_x = alloc_and_upload(&dev, &x);
+        let d_w = alloc_and_upload(&dev, &w);
+        let d_y = dev.alloc(m * k * 4)?;
+        {
+            let stream = dev.default_stream();
+            let m_i = m as i32;
+            let k_i = k as i32;
+            let x_ptr: u64 = d_x.as_usize() as u64;
+            let w_ptr: u64 = d_w.as_usize() as u64;
+            let y_ptr: u64 = d_y.as_usize() as u64;
+            let mut args = <B::Args<'_>>::default();
+            args.push_arg(&x_ptr);
+            args.push_arg(&w_ptr);
+            args.push_arg(&y_ptr);
+            args.push_arg(&m_i);
+            args.push_arg(&k_i);
+            args.push_arg(&eps);
+            B::launch(&kernel, stream, LaunchCfg::one_d(m as u32, 256), args)?;
+            stream.synchronize()?;
+        }
+        let mut got = vec![0.0f32; m * k];
+        unsafe {
+            dev.memcpy_async(
+                dev.default_stream(),
+                CopyDirection::DeviceToHost,
+                DevicePtr(got.as_mut_ptr() as usize),
+                d_y,
+                m * k * 4,
+            )?;
+        }
+        dev.default_stream().synchronize()?;
+        unsafe {
+            dev.dealloc(d_x, m * k * 4)?;
+            dev.dealloc(d_w, k * 4)?;
+            dev.dealloc(d_y, m * k * 4)?;
+        }
+
+        let err = max_rel_err_with_floor(&got, &reference, 1.0);
+        results.push(ShapeResult { m, k, n: 1, seed, max_rel_err: err, tolerance: 1e-5, pass: err <= 1e-5 });
+    }
+
+    let pass = results.iter().all(|r| r.pass);
+    let cert = Cert {
+        schema_version: SCHEMA_VERSION,
+        impl_id: "rmsnorm_f32".to_string(),
+        backend: dev.backend().to_string(),
+        arch: arch.to_string(),
+        op: "rmsnorm_f32".to_string(),
+        dtype_weight: "F32".to_string(),
+        dtype_activation: "F32".to_string(),
+        tolerance_formula: "|err| <= 1e-5 * max(|ref|, 1) vs F64 oracle".to_string(),
+        results,
+        pass,
+        emitted_at: now_utc_iso8601(),
+        rig: rig_for(arch),
+        pmc: Some(pmc),
+    };
+    cert.write_to_disk(repo_root)?;
+    Ok(cert)
+}
+
+/// `l2_norm_f32` — per-row L2 normalization (GDN Q/K). Same neutral block-reduce
+/// seam as `rmsnorm_f32`.
+pub fn run_l2_norm_f32_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) -> Result<Cert> {
+    let dev = B::new_device(0)?;
+    let image = B::image("l2_norm_f32").ok_or_else(|| anyhow!("l2_norm_f32 not compiled"))?;
+    let module = B::load(&dev, image)?;
+    let kernel = B::kernel(&module, "flambeau_l2_norm_f32")?;
+    let pmc = B::attributes(&kernel)?;
+
+    let shapes = [(16usize, 128usize), (2048, 128), (16, 256), (1, 512)];
+    let eps = 1e-6f32;
+    let mut results = Vec::new();
+    for (m, k) in shapes {
+        let seed = 0xC0FFEE ^ ((m as u64) * 1049 + (k as u64) * 11);
+        let x = seeded_f32_range(seed, m * k, -0.5, 0.5);
+        let mut reference = vec![0.0f32; m * k];
+        for r in 0..m {
+            let row = &x[r * k..(r + 1) * k];
+            let sum_sq: f64 = row.iter().map(|&v| (v as f64) * (v as f64)).sum();
+            let inv = 1.0 / (sum_sq + eps as f64).sqrt();
+            for i in 0..k {
+                reference[r * k + i] = (row[i] as f64 * inv) as f32;
+            }
+        }
+
+        let d_x = alloc_and_upload(&dev, &x);
+        let d_y = dev.alloc(m * k * 4)?;
+        {
+            let stream = dev.default_stream();
+            let m_i = m as i32;
+            let k_i = k as i32;
+            let x_ptr: u64 = d_x.as_usize() as u64;
+            let y_ptr: u64 = d_y.as_usize() as u64;
+            let mut args = <B::Args<'_>>::default();
+            args.push_arg(&x_ptr);
+            args.push_arg(&y_ptr);
+            args.push_arg(&m_i);
+            args.push_arg(&k_i);
+            args.push_arg(&eps);
+            B::launch(&kernel, stream, LaunchCfg::one_d(m as u32, 256), args)?;
+            stream.synchronize()?;
+        }
+        let mut got = vec![0.0f32; m * k];
+        unsafe {
+            dev.memcpy_async(
+                dev.default_stream(),
+                CopyDirection::DeviceToHost,
+                DevicePtr(got.as_mut_ptr() as usize),
+                d_y,
+                m * k * 4,
+            )?;
+        }
+        dev.default_stream().synchronize()?;
+        unsafe {
+            dev.dealloc(d_x, m * k * 4)?;
+            dev.dealloc(d_y, m * k * 4)?;
+        }
+
+        let err = max_rel_err_with_floor(&got, &reference, 1.0);
+        results.push(ShapeResult { m, k, n: 1, seed, max_rel_err: err, tolerance: 1e-5, pass: err <= 1e-5 });
+    }
+
+    let pass = results.iter().all(|r| r.pass);
+    let cert = Cert {
+        schema_version: SCHEMA_VERSION,
+        impl_id: "l2_norm_f32".to_string(),
+        backend: dev.backend().to_string(),
+        arch: arch.to_string(),
+        op: "l2_norm_f32".to_string(),
+        dtype_weight: "F32".to_string(),
+        dtype_activation: "F32".to_string(),
+        tolerance_formula: "|err| <= 1e-5 * max(|ref|, 1) vs F64 oracle".to_string(),
         results,
         pass,
         emitted_at: now_utc_iso8601(),

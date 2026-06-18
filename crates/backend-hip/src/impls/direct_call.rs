@@ -807,4 +807,15 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
         impl_id: "split_q_gate_f16",
         cert_rel_path: "certs/hip/gfx906/split_q_gate_f16.json",
     },
+    // Tier-B block-reduce kernels, neutralized to a shared `.cuh` (the body
+    // rides block_reduce_sum over the WARP_SIZE seam). The `_gfx906` rows above
+    // remain the dispatch certs; these are the cross-backend baselines.
+    DirectCallKernel {
+        impl_id: "rmsnorm_f32",
+        cert_rel_path: "certs/hip/gfx906/rmsnorm_f32.json",
+    },
+    DirectCallKernel {
+        impl_id: "l2_norm_f32",
+        cert_rel_path: "certs/hip/gfx906/l2_norm_f32.json",
+    },
 ];
