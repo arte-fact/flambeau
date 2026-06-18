@@ -76,19 +76,23 @@ behaviour-preserving.
   - ✅ **Batch 1** (`237116d`): `cast`, `softcap`, `softmax`, `conv`, `pe`
     (rope ×3), `sampling`, `router` (dense_gemv ×4).
   - ✅ **Batch 2** (`b78bf6e`): `norm` (14), `mlp` (12), `recurrent` (7 GDN).
-  - Guardrail green throughout: `ops_smoke` 5/5, `synth_dense/gdn/gemma_mixed` +
-    `parity_snapshot_dense/gdn/attn_gated` + `snapshot_restore` bit-identical.
-  - ⏸️ **Remaining (the big three):**
-    - **`attention.rs` — blocked.** Uses 6 `KernelArgs::push_slot` graph-slot
-      bindings (`ScalarSlot`); the generic `LaunchArgs` has no slot surface yet.
-      Needs `LaunchArgs` extended with a `push_slot` (or the slot path lifted) —
-      the same progressive-dispatch slot support the P4.4 graph slot-map needs.
-      Do that seam extension first, then migrate.
-    - **`qmatmul.rs`** (24 op fns + 10 helper fns) and **`moe.rs`** (74 op fns +
-      2 helpers) — migratable mechanically, but the script needs two additions
-      first: `KernelArgs::with_capacity(n)` → `<B::Args<'_>>::default()`, and the
-      private helper fns that take `reg`/module must also gain `<B>` (the `pub fn`
-      regex misses them). Large but low-risk once those are handled.
+  - ✅ **Batch 3** (`5de5a58`): `moe` (74 fns — the biggest file). Pure launch
+    glue (hardcoded/parameterised stems, no dispatch-table lookup); migrated
+    mechanically (named-kernel launches + `with_capacity` handled).
+  - Guardrail green throughout: `ops_smoke` 5/5, `synth_dense/gdn/gemma_mixed/moe`
+    + `parity_snapshot_dense/gdn/attn_gated` + `snapshot_restore` bit-identical.
+  - **All mechanically-migratable bodies are now done (11 of 13 domains).** The 2
+    remaining are blocked on real seam extensions (they fold into P5.2/P5.3):
+    - **`attention.rs` — blocked on the slot seam.** Uses 6 `KernelArgs::push_slot`
+      graph-slot bindings (`ScalarSlot`); the generic `LaunchArgs` has no slot
+      surface. Needs `LaunchArgs` extended with `push_slot` — the same
+      progressive-dispatch slot support P4.4's graph slot-map needs.
+    - **`qmatmul.rs` — blocked on the dispatch seam.** Calls `dispatch_qmatmul`
+      → the HIP-gfx906 `QMATMUL_GFX906` table (`backend-hip::impls`); the variant
+      choice is *arch-specific by design*, so it must become a per-backend
+      dispatch method, and the CUDA dispatch-table Rust mirror
+      (`QMATMUL_SM86`, from `dispatch/cuda/sm_86.toml`) must be built. That is
+      P5.2/P5.3 work, not a mechanical body migration.
 - **P5.2 — `CudaBackend` + CUDA `Registry`/`CudaOps`.** Implement `Backend` for
   `CudaBackend` (Device/Stream/Event/Cluster already done); `Registry<CudaBackend>`
   loads `flambeau_kernels_cuda::cubin(stem)`; `CudaOps` is the generic `Ops` over
