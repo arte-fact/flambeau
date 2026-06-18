@@ -56,11 +56,18 @@ behaviour-preserving.
 
 ## Phasing
 
-- **P5.0 — Lift the launch primitives.** Genericize `OpsRegistry` →
-  `Registry<B>` (`HashMap<&str, B::Module>`, loads `B::image(stem)`) and `OpCtx`
-  → `OpCtx<'_, B>` over a backend launch trait (extend the `Backend` bundle or
-  reuse a `BenchBackend`-shaped seam: `Module`/`Kernel`/`Args`/`launch`). Keep
-  `HipOps` working unchanged. Gate: HIP build + forward-parity snapshots green.
+- ✅ **P5.0 — Lift the launch primitives.** Done (`65a8e1c`/`dc5ee2d`/`1d28e52`):
+  `core::KernelBackend` + `LaunchArgs` is the launch seam (module load / entry
+  resolve / launch + `bind`), impl'd by `HipKernels` (backend-hip) and
+  `CudaKernels` (backend-cuda). `OpsRegistry` is now `Registry<HipKernels>` (a
+  type alias over the ungated `ops::registry`), so every existing body + all
+  `OpsRegistry::new` sites compile unchanged via `expect_module → &B::Module`.
+  `cast.rs` is the first body migrated to the generic form (`B::kernel`/
+  `B::Args`/`B::launch`), with `ops_impl` inferring `B=HipKernels` at the call
+  site. `BenchBackend` now *extends* `KernelBackend` (parallel trait removed).
+  Guardrail green: `ops_smoke` 5/5, `parity_snapshot_dense`/`gdn` +
+  `snapshot_restore` bit-identical on gfx906; `add_f16` sweep certs both
+  backends.
 - **P5.1 — Genericize the launch bodies, domain by domain.** Smallest first
   (`cast`, `softmax`, `softcap`, `pe`, `sampling`, `norm`), then `attention`,
   `qmatmul`, `moe`. Each domain: bodies take `OpCtx<'_, B>`; HIP parity stays
