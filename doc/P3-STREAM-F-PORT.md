@@ -16,6 +16,28 @@ everything else is pure arithmetic + a block-reduce.
 Currently on CUDA: `add_f32`, `quantize_q8_1`, `quantize_q8_1_mmq` only. So **69
 remain** (add_f32 already done). All 70 are still HIP-only hand `.cu`.
 
+## Harness spine (the real P3 prerequisite — discovered 2026-06-18)
+
+The entire Stream F sweep surface is **HIP-only**: `sweep_f32_pointwise.rs` (9
+fns) + ~20 sibling modules (`sweep_rmsnorm`, `sweep_swiglu`, `sweep_rope`,
+`sweep_cast`, `sweep_softmax`, `sweep_attention*`, `sweep_gdn_*`, …) all use
+`flambeau_backend_hip` directly, `KernelArgs`, and hardcoded `_gfx906` /
+`backend:"hip"` / `rig()`. **None can emit a CUDA cert.** So P3's first
+deliverable is the generic harness, analogous to the P1 matmul spine:
+`crates/bench/src/sweep_pointwise_cb.rs` — the same sweeps over `BenchBackend`,
+one driver certing both rigs. Each ported kernel moves from its HIP-only
+`run_*_sweep(&Path)` to a generic `run_*_sweep::<B>(&Path, arch)` here, wired
+into both the HIP `match op` arm and `sweep_cuda`. CUDA kernel = hand `.cu`
+mirror in `kernels-cuda/src/kernels/` (precedent: `add_f32`, the quantizers).
+
+**Pilot — `add_f16`** (the P3 spine proof): generic sweep module + CUDA `.cu`
+mirror + both cli arms. HIP gfx906 ✅ (5/5 bit-exact, `certs/hip/gfx906/add_f16.json`).
+CUDA sm_86 ⏳ **cert pending** — blocked on a CUDA-wide `cuInit 999` on the rig
+(affects every sweep incl. matmul; host-side device recovery needed, not a code
+issue); the kernel compiles clean and the wiring matches the proven matmul path,
+so the cert is one `flambeau sweep --arch sm_86 --op add_f16` away once cuInit
+recovers.
+
 ## Port mechanics (per kernel)
 
 Same neutralize-to-`.cuh` recipe as Stream M where it fits: move the body to
@@ -53,7 +75,7 @@ focused decode spine.
 ## Wave 1 — decode spine (unblocks first single-GPU qwen35moe decode → P5)
 
 **1a — Tier-A leaves** (port first, derisk harness):
-- [ ] add_f16
+- [~] add_f16  *(HIP ✅ / CUDA cert pending cuInit recovery — spine pilot)*
 - [ ] cast_f16_f32
 - [ ] cast_f32_f16
 - [ ] scale_f16

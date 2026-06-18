@@ -61,6 +61,9 @@ pub mod sweep_cast;
 #[cfg(feature = "hip")]
 pub mod sweep_f32_pointwise;
 
+#[cfg(any(feature = "hip", feature = "cuda"))]
+pub mod sweep_pointwise_cb;
+
 #[cfg(feature = "hip")]
 pub mod sweep_peer_copy;
 

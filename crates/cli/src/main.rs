@@ -741,10 +741,6 @@ const SIMPLE_SWEEPS: &[(&str, SweepFn)] = &[
         flambeau_bench::sweep_f32_pointwise::run_dense_gemv_sweep,
     ),
     (
-        "add_f16",
-        flambeau_bench::sweep_f32_pointwise::run_add_f16_sweep,
-    ),
-    (
         "peer_copy_via_host",
         flambeau_bench::sweep_peer_copy::run_sweep,
     ),
@@ -1351,6 +1347,17 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                 );
                 Ok(())
             }
+            "add_f16" => {
+                use flambeau_bench::sweep_pointwise_cb::run_add_f16_sweep;
+                let cert = run_add_f16_sweep::<flambeau_bench::backend::Hip>(&repo_root(), arch)?;
+                println!(
+                    "sweep add_f16: pass={} shapes={} rig={}",
+                    cert.pass,
+                    cert.results.len(),
+                    cert.rig
+                );
+                Ok(())
+            }
             other => {
                 if let Some(run) = find_simple_sweep(other) {
                     let _ = dtype;
@@ -1676,9 +1683,21 @@ fn sweep_cuda(op: &str, dtype: &str) -> Result<()> {
     use flambeau_bench::backend::Cuda;
     use flambeau_bench::sweep_mmvq::{run_sweep, Dtype, SweepSpec};
 
+    if op == "add_f16" {
+        use flambeau_bench::sweep_pointwise_cb::run_add_f16_sweep;
+        let cert = run_add_f16_sweep::<Cuda>(&repo_root(), "sm_86")?;
+        println!(
+            "sweep add_f16: pass={} shapes={} rig={}",
+            cert.pass,
+            cert.results.len(),
+            cert.rig
+        );
+        return Ok(());
+    }
     if op != "qmatmul" {
         anyhow::bail!(
-            "--arch sm_86: only --op qmatmul (mmvq) has CUDA kernels; other ops are gfx906-only"
+            "--arch sm_86: only --op qmatmul (mmvq) has CUDA kernels; \
+             other ops are gfx906-only (Stream F port in progress, see P3-STREAM-F-PORT.md)"
         );
     }
     if let Some(gu) = gate_up_dtype(dtype) {
