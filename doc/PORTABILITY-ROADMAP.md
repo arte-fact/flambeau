@@ -138,7 +138,9 @@ certs committed.
     sorted-scatter `Epilogue`).
   - Outcome: 196 hand `.cu` → ~5 templates + ~21 traits + manifests; both dispatch
     tables autotuned.
-- ⬜ **P3 — Stream F port (parallel to P2).** Port the ~70 fixed kernels to CUDA —
+- ⬜ **P3 — Stream F port (parallel to P2).** Work-list + wave order:
+  `doc/P3-STREAM-F-PORT.md` (Wave 1 = 32-kernel decode spine on the P5 path).
+  Port the ~70 fixed kernels to CUDA —
   attention (decode/prefill/splitk; cp.async on CUDA vs prefetch on HIP, seamed),
   norms/rope/softmax, elementwise, moe_combine/sort, gdn, sampler, kv_append,
   dense_gemv, topk, l2_norm. Cert each on both rigs; one dispatch row each.
