@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "impl_id": "kv_append_f16_batched_slots",
+  "backend": "hip",
+  "arch": "gfx906",
+  "op": "kv_append_f16_batched_slots",
+  "dtype_weight": "F16",
+  "dtype_activation": "F16",
+  "tolerance_formula": "exact (strided gather/scatter copy)",
+  "results": [
+    {
+      "m": 1,
+      "k": 1024,
+      "n": 16,
+      "seed": 12636151,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 4,
+      "k": 2048,
+      "n": 32,
+      "seed": 12621706,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 8,
+      "k": 512,
+      "n": 8,
+      "seed": 12634406,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-06-18T12:18:01Z",
+  "rig": "threadreaper-gfx906",
+  "pmc": {
+    "vgpr_count": 11,
+    "sgpr_count": null,
+    "waves_per_simd": 10,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

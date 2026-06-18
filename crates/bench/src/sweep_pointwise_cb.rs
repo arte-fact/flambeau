@@ -70,6 +70,7 @@ pub fn run_pointwise_sweep<B: BenchBackend>(
         "sampler_apply_penalties_f32" => run_sampler_apply_penalties_sweep::<B>(repo_root, arch),
         "softmax_masked_f16" => run_softmax_masked_f16_sweep::<B>(repo_root, arch),
         "sampler_topk_softmax_f32" => run_sampler_topk_softmax_sweep::<B>(repo_root, arch),
+        "kv_append_f16_batched_slots" => run_kv_append_f16_batched_slots_sweep::<B>(repo_root, arch),
         _ => return None,
     };
     Some(cert)
@@ -970,6 +971,105 @@ pub fn run_rope_f16_sweep<B: BenchBackend>(repo_root: &Path, arch: &str, neox: b
     }
     finish_cert(&dev, repo_root, arch, impl_id, impl_id, "F16", "F16",
         "|err| <= 5e-3 * max(|ref|, 1e-2) vs F64 angle oracle", results, pmc)
+}
+
+/// `kv_append_f16_batched_slots` — append one K+V token row into each of N
+/// per-slot KV caches (per-slot base pointers + write positions). Strided copy;
+/// bit-exact both rigs. Builds N independent cache buffers + a device array of
+/// their pointers.
+pub fn run_kv_append_f16_batched_slots_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) -> Result<Cert> {
+    let dev = B::new_device(0)?;
+    let image = B::image("kv_append_f16_batched_slots").ok_or_else(|| anyhow!("kv_append_f16_batched_slots not compiled"))?;
+    let module = B::load(&dev, image)?;
+    let kernel = B::kernel(&module, "flambeau_kv_append_f16_batched_slots")?;
+    let pmc = B::attributes(&kernel)?;
+
+    let shapes = [(1usize, 1024usize, 16usize), (4, 2048, 32), (8, 512, 8)];
+    let ring_depth = 0i32;
+    let mut results = Vec::new();
+    for (n_slots, kv_width, max_seq) in shapes {
+        let seed = 0xC0FFEE ^ ((n_slots as u64) * 1049 + (kv_width as u64) * 11);
+        let k_src = f16_input(seed, n_slots * kv_width);
+        let v_src = f16_input(seed ^ 0xAA, n_slots * kv_width);
+        let write_pos: Vec<i32> = (0..n_slots).map(|s| (s % max_seq) as i32).collect();
+
+        let d_ksrc = alloc_and_upload(&dev, &k_src);
+        let d_vsrc = alloc_and_upload(&dev, &v_src);
+        let d_wp = alloc_and_upload(&dev, &write_pos);
+        // Per-slot cache buffers + device arrays of their base pointers.
+        let cache_elems = max_seq * kv_width;
+        let mut k_caches = Vec::with_capacity(n_slots);
+        let mut v_caches = Vec::with_capacity(n_slots);
+        let mut k_ptrs = vec![0u64; n_slots];
+        let mut v_ptrs = vec![0u64; n_slots];
+        for s in 0..n_slots {
+            let kc = dev.alloc(cache_elems * 2)?;
+            let vc = dev.alloc(cache_elems * 2)?;
+            k_ptrs[s] = kc.as_usize() as u64;
+            v_ptrs[s] = vc.as_usize() as u64;
+            k_caches.push(kc);
+            v_caches.push(vc);
+        }
+        let d_kptrs = alloc_and_upload(&dev, &k_ptrs);
+        let d_vptrs = alloc_and_upload(&dev, &v_ptrs);
+        {
+            let stream = dev.default_stream();
+            let ns = n_slots as i32;
+            let kw = kv_width as i32;
+            let rd = ring_depth;
+            let ks: u64 = d_ksrc.as_usize() as u64;
+            let vs: u64 = d_vsrc.as_usize() as u64;
+            let kp: u64 = d_kptrs.as_usize() as u64;
+            let vp: u64 = d_vptrs.as_usize() as u64;
+            let wp: u64 = d_wp.as_usize() as u64;
+            let mut args = <B::Args<'_>>::default();
+            args.push_arg(&ks);
+            args.push_arg(&vs);
+            args.push_arg(&kp);
+            args.push_arg(&vp);
+            args.push_arg(&wp);
+            args.push_arg(&ns);
+            args.push_arg(&kw);
+            args.push_arg(&rd);
+            let cfg = LaunchCfg { grid: (n_slots as u32, 1, 1), block: (128, 1, 1), shared_bytes: 0 };
+            B::launch(&kernel, stream, cfg, args)?;
+            stream.synchronize()?;
+        }
+        // Read back each slot's written row and compare to the source row.
+        let mut mismatches = 0u32;
+        for s in 0..n_slots {
+            let dst_pos = write_pos[s] as usize; // ring_depth=0 → absolute
+            let mut got_k = vec![f16::from_f32(0.0); kv_width];
+            let mut got_v = vec![f16::from_f32(0.0); kv_width];
+            let row_off = dst_pos * kv_width * 2;
+            unsafe {
+                dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost,
+                    DevicePtr(got_k.as_mut_ptr() as usize), DevicePtr(k_caches[s].as_usize() + row_off), kv_width * 2)?;
+                dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost,
+                    DevicePtr(got_v.as_mut_ptr() as usize), DevicePtr(v_caches[s].as_usize() + row_off), kv_width * 2)?;
+            }
+            dev.default_stream().synchronize()?;
+            for i in 0..kv_width {
+                if got_k[i].to_bits() != k_src[s * kv_width + i].to_bits() { mismatches += 1; }
+                if got_v[i].to_bits() != v_src[s * kv_width + i].to_bits() { mismatches += 1; }
+            }
+        }
+        unsafe {
+            dev.dealloc(d_ksrc, n_slots * kv_width * 2)?;
+            dev.dealloc(d_vsrc, n_slots * kv_width * 2)?;
+            dev.dealloc(d_wp, n_slots * 4)?;
+            dev.dealloc(d_kptrs, n_slots * 8)?;
+            dev.dealloc(d_vptrs, n_slots * 8)?;
+            for s in 0..n_slots {
+                dev.dealloc(k_caches[s], cache_elems * 2)?;
+                dev.dealloc(v_caches[s], cache_elems * 2)?;
+            }
+        }
+        let err = mismatches as f32;
+        results.push(ShapeResult { m: n_slots, k: kv_width, n: max_seq, seed, max_rel_err: err, tolerance: 0.0, pass: err == 0.0 });
+    }
+    finish_cert(&dev, repo_root, arch, "kv_append_f16_batched_slots", "kv_append_f16_batched_slots",
+        "F16", "F16", "exact (strided gather/scatter copy)", results, pmc)
 }
 
 /// `sampler_topk_softmax_f32` — single-block top-K + full-vocab softmax over a

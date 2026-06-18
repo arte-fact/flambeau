@@ -132,7 +132,7 @@ rope + activation quantizers are all cross-backend.
 - [ ] attention_decode_f16
 - [ ] attention_decode_f16_splitk
 - [x] softmax_masked_f16  *(NEUTRALIZE — `block_reduce_softmax`; NaN-safe; 5e-3)*
-- [ ] kv_append_f16_batched_slots
+- [x] kv_append_f16_batched_slots  *(MIRROR — per-slot gather/scatter copy; bit-exact)*
 
 **1d — MoE decode glue + sampler:**
 - [x] topk_f32  *(NEUTRALIZE — per-token block argmax×k + softmax over the
