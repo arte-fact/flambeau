@@ -6,12 +6,14 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 pub mod device;
+pub mod kernel_backend;
 pub mod kernel_limits;
 pub mod launch;
 pub mod op;
 pub mod slot;
 
 pub use device::{CopyDirection, Device, DeviceError, DevicePtr, DeviceResult, Event, Stream};
+pub use kernel_backend::{KernelBackend, LaunchArgs};
 pub use kernel_limits::{MOE_SORT_MAX_EXPERTS, TOPK_MAX_EXPERTS};
 pub use launch::LaunchCfg;
 pub use slot::{MemcpySlot, ScalarSlot};

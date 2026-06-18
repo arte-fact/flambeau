@@ -12,6 +12,7 @@ pub mod cluster;
 pub mod device;
 pub mod graph_capture;
 pub mod impls;
+pub mod kernel_backend;
 pub mod kv_cache_slot;
 pub mod module;
 pub mod probe;
@@ -25,6 +26,7 @@ pub use bar_p2p::{
 pub use cluster::{HipCluster, PeerCopyEvents, PeerCopySpec, PeerCopyStreams};
 pub use graph_capture::{MemcpyBinding, MemcpySlot, ScalarSlot, SlotBinding, SlotMap};
 pub use impls::{dispatch_qmatmul, QMATMUL_GFX906};
+pub use kernel_backend::HipKernels;
 pub use kv_cache_slot::{kv_cache_append_hip_slot, KvAppendSlots, KvAppendSrc};
 pub use module::{FuncAttributes, HipKernel, HipModule, KernelArgs, LaunchCfg};
 

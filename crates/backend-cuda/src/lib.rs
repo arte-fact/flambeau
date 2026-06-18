@@ -10,6 +10,7 @@
 pub mod cluster;
 pub mod device;
 pub mod graph;
+pub mod kernel_backend;
 pub mod module;
 #[cfg(feature = "nccl")]
 pub mod nccl_sys;
@@ -18,4 +19,5 @@ pub mod sys;
 pub use cluster::CudaCluster;
 pub use device::{device_count, CudaDevice, CudaEvent, CudaStream};
 pub use graph::CudaGraphExec;
+pub use kernel_backend::CudaKernels;
 pub use module::{CudaKernel, CudaModule, FuncAttributes, KernelArgs, LaunchCfg};
