@@ -3,19 +3,10 @@
 //! runs the recurrence loop over `L` tokens with the state held in registers,
 //! so decode (L=1) and prefill (L>1) share the same dispatch path.
 
-#![expect(
-    clippy::undocumented_unsafe_blocks,
-    reason = "op wrapper — every unsafe block is a kernel.launch or memcpy_async over \
-              DevicePtrs validated by the caller; the kernel stem + entry are resolved \
-              through the validated registry and the ABI matches the kernels extern-C \
-              signature."
-)]
-
 use anyhow::Result;
-use flambeau_backend_hip::{HipStream, KernelArgs, LaunchCfg};
+use flambeau_core::{LaunchArgs, LaunchCfg};
 use flambeau_core::DevicePtr;
 
-use super::OpsRegistry;
 
 /// Fused GDN step. S_v = 128 (Qwen3.6-35B: `head_k_dim = head_v_dim = 128`).
 /// Shapes (row-major, contiguous, F32):
@@ -31,12 +22,12 @@ use super::OpsRegistry;
 ///   Launch: grid `(H, B, ceil(S_v / warps_per_block))`, block
 ///   `(WARP_SIZE=64, 4, 1)` — 4 warps per block, each warp owns one output
 ///   column. `warps_per_block = 4` ⇒ grid_z = `S_v / 4 = 32` at S_v=128.
-pub fn gdn_state_step_f32_s128(
-    ctx: crate::OpCtx<'_>,
+pub fn gdn_state_step_f32_s128<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     bufs: crate::GdnStepBuffers,
     shape: crate::GdnStepShape,
 ) -> Result<()> {
-    let crate::OpCtx { reg, stream } = ctx;
     let crate::GdnStepBuffers { q, k, v, gate, beta, state_in, state_out, attn_out } = bufs;
     let crate::GdnStepShape { b, h_v, l, n_rep, rep_inner_layout } = shape;
     const S_V: u32 = 128;
@@ -44,7 +35,7 @@ pub fn gdn_state_step_f32_s128(
     const WARPS_PER_BLOCK: u32 = 4;
 
     let module = reg.expect_module("gdn_state_step_f32")?;
-    let kernel = module.kernel("flambeau_gdn_state_step_f32_s128")?;
+    let kernel = B::kernel(module, "flambeau_gdn_state_step_f32_s128")?;
 
     let b_i = b as i32;
     let h_i = h_v as i32;
@@ -59,20 +50,20 @@ pub fn gdn_state_step_f32_s128(
     let sin_ptr: u64 = state_in.as_usize() as u64;
     let sout_ptr: u64 = state_out.as_usize() as u64;
     let ao_ptr: u64 = attn_out.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&q_ptr);
-    args.push(&k_ptr);
-    args.push(&v_ptr);
-    args.push(&gate_ptr);
-    args.push(&beta_ptr);
-    args.push(&sin_ptr);
-    args.push(&sout_ptr);
-    args.push(&ao_ptr);
-    args.push(&b_i);
-    args.push(&h_i);
-    args.push(&l_i);
-    args.push(&n_rep_i);
-    args.push(&rep_inner_i);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&q_ptr);
+    args.push_arg(&k_ptr);
+    args.push_arg(&v_ptr);
+    args.push_arg(&gate_ptr);
+    args.push_arg(&beta_ptr);
+    args.push_arg(&sin_ptr);
+    args.push_arg(&sout_ptr);
+    args.push_arg(&ao_ptr);
+    args.push_arg(&b_i);
+    args.push_arg(&h_i);
+    args.push_arg(&l_i);
+    args.push_arg(&n_rep_i);
+    args.push_arg(&rep_inner_i);
 
     let grid_z = S_V / WARPS_PER_BLOCK;
     let cfg = LaunchCfg {
@@ -80,7 +71,7 @@ pub fn gdn_state_step_f32_s128(
         block: (WARP_SIZE, WARPS_PER_BLOCK, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 
@@ -95,12 +86,12 @@ pub fn gdn_state_step_f32_s128(
 /// layers that fired 12k tiny launches dominated by argument
 /// marshalling (profile 2026-04-22: ~50 ms in the kernel + ~150 ms
 /// rocclr_copyBuffer overhead).
-pub fn gdn_alpha_beta_f32(
-    ctx: crate::OpCtx<'_>,
+pub fn gdn_alpha_beta_f32<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     bufs: crate::GdnAlphaBetaBuffers,
     shape: crate::GdnAlphaBetaShape,
 ) -> Result<()> {
-    let crate::OpCtx { reg, stream } = ctx;
     let crate::GdnAlphaBetaBuffers {
         alpha_in,
         beta_in,
@@ -116,7 +107,7 @@ pub fn gdn_alpha_beta_f32(
         "gdn_alpha_beta_f32 expects num_v_heads <= block-size cap 1024"
     );
     let module = reg.expect_module("gdn_alpha_beta_f32")?;
-    let kernel = module.kernel("flambeau_gdn_alpha_beta_f32")?;
+    let kernel = B::kernel(module, "flambeau_gdn_alpha_beta_f32")?;
     let num_v_i = num_v_heads as i32;
     let n_tokens_i = n_tokens as i32;
     let a_ptr: u64 = alpha_in.as_usize() as u64;
@@ -125,21 +116,21 @@ pub fn gdn_alpha_beta_f32(
     let sa_ptr: u64 = ssm_a.as_usize() as u64;
     let g_ptr: u64 = gate_out.as_usize() as u64;
     let bo_ptr: u64 = beta_out.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&a_ptr);
-    args.push(&b_ptr);
-    args.push(&dt_ptr);
-    args.push(&sa_ptr);
-    args.push(&g_ptr);
-    args.push(&bo_ptr);
-    args.push(&num_v_i);
-    args.push(&n_tokens_i);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&a_ptr);
+    args.push_arg(&b_ptr);
+    args.push_arg(&dt_ptr);
+    args.push_arg(&sa_ptr);
+    args.push_arg(&g_ptr);
+    args.push_arg(&bo_ptr);
+    args.push_arg(&num_v_i);
+    args.push_arg(&n_tokens_i);
     let cfg = LaunchCfg {
         grid: (n_tokens as u32, 1, 1),
         block: (num_v_heads as u32, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 
@@ -153,12 +144,12 @@ pub fn gdn_alpha_beta_f32(
 /// same warp-reduce signatures); the cert sweep verifies parity
 /// against `gdn_state_step_f32_s128 ∘ gdn_alpha_beta_f32` on Qwen3.6
 /// shapes.
-pub fn gdn_state_step_alphabeta_f32_s128(
-    ctx: crate::OpCtx<'_>,
+pub fn gdn_state_step_alphabeta_f32_s128<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     bufs: crate::GdnStepAlphaBetaBuffers,
     shape: crate::GdnStepShape,
 ) -> Result<()> {
-    let crate::OpCtx { reg, stream } = ctx;
     let crate::GdnStepAlphaBetaBuffers {
         q,
         k,
@@ -177,7 +168,7 @@ pub fn gdn_state_step_alphabeta_f32_s128(
     const WARPS_PER_BLOCK: u32 = 4;
 
     let module = reg.expect_module("gdn_state_step_alphabeta_f32")?;
-    let kernel = module.kernel("flambeau_gdn_state_step_alphabeta_f32_s128")?;
+    let kernel = B::kernel(module, "flambeau_gdn_state_step_alphabeta_f32_s128")?;
 
     let b_i = b as i32;
     let h_i = h_v as i32;
@@ -194,22 +185,22 @@ pub fn gdn_state_step_alphabeta_f32_s128(
     let sin_ptr: u64 = state_in.as_usize() as u64;
     let sout_ptr: u64 = state_out.as_usize() as u64;
     let ao_ptr: u64 = attn_out.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&q_ptr);
-    args.push(&k_ptr);
-    args.push(&v_ptr);
-    args.push(&alpha_ptr);
-    args.push(&beta_ptr);
-    args.push(&dt_ptr);
-    args.push(&sa_ptr);
-    args.push(&sin_ptr);
-    args.push(&sout_ptr);
-    args.push(&ao_ptr);
-    args.push(&b_i);
-    args.push(&h_i);
-    args.push(&l_i);
-    args.push(&n_rep_i);
-    args.push(&rep_inner_i);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&q_ptr);
+    args.push_arg(&k_ptr);
+    args.push_arg(&v_ptr);
+    args.push_arg(&alpha_ptr);
+    args.push_arg(&beta_ptr);
+    args.push_arg(&dt_ptr);
+    args.push_arg(&sa_ptr);
+    args.push_arg(&sin_ptr);
+    args.push_arg(&sout_ptr);
+    args.push_arg(&ao_ptr);
+    args.push_arg(&b_i);
+    args.push_arg(&h_i);
+    args.push_arg(&l_i);
+    args.push_arg(&n_rep_i);
+    args.push_arg(&rep_inner_i);
 
     let grid_z = S_V / WARPS_PER_BLOCK;
     let cfg = LaunchCfg {
@@ -217,7 +208,7 @@ pub fn gdn_state_step_alphabeta_f32_s128(
         block: (WARP_SIZE, WARPS_PER_BLOCK, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 
@@ -233,12 +224,12 @@ pub fn gdn_state_step_alphabeta_f32_s128(
 /// `u64` array on the device containing the per-slot
 /// `GdnLayerState::state` base pointers. Same buffer for both is fine
 /// when in-place (the existing kernel's pattern).
-pub fn gdn_state_step_alphabeta_f32_s128_batched_slots(
-    ctx: crate::OpCtx<'_>,
+pub fn gdn_state_step_alphabeta_f32_s128_batched_slots<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     bufs: crate::GdnStepAlphaBetaBatchedSlotsBuffers,
     shape: crate::GdnStepShape,
 ) -> Result<()> {
-    let crate::OpCtx { reg, stream } = ctx;
     let crate::GdnStepAlphaBetaBatchedSlotsBuffers {
         q,
         k,
@@ -257,7 +248,7 @@ pub fn gdn_state_step_alphabeta_f32_s128_batched_slots(
     const WARPS_PER_BLOCK: u32 = 4;
 
     let module = reg.expect_module("gdn_state_step_alphabeta_f32_batched_slots")?;
-    let kernel = module.kernel("flambeau_gdn_state_step_alphabeta_f32_s128_batched_slots")?;
+    let kernel = B::kernel(module, "flambeau_gdn_state_step_alphabeta_f32_s128_batched_slots")?;
 
     let b_i = b as i32;
     let h_i = h_v as i32;
@@ -274,22 +265,22 @@ pub fn gdn_state_step_alphabeta_f32_s128_batched_slots(
     let sin_arr: u64 = state_in_ptrs.as_usize() as u64;
     let sout_arr: u64 = state_out_ptrs.as_usize() as u64;
     let ao_ptr: u64 = attn_out.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&q_ptr);
-    args.push(&k_ptr);
-    args.push(&v_ptr);
-    args.push(&alpha_ptr);
-    args.push(&beta_ptr);
-    args.push(&dt_ptr);
-    args.push(&sa_ptr);
-    args.push(&sin_arr);
-    args.push(&sout_arr);
-    args.push(&ao_ptr);
-    args.push(&b_i);
-    args.push(&h_i);
-    args.push(&l_i);
-    args.push(&n_rep_i);
-    args.push(&rep_inner_i);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&q_ptr);
+    args.push_arg(&k_ptr);
+    args.push_arg(&v_ptr);
+    args.push_arg(&alpha_ptr);
+    args.push_arg(&beta_ptr);
+    args.push_arg(&dt_ptr);
+    args.push_arg(&sa_ptr);
+    args.push_arg(&sin_arr);
+    args.push_arg(&sout_arr);
+    args.push_arg(&ao_ptr);
+    args.push_arg(&b_i);
+    args.push_arg(&h_i);
+    args.push_arg(&l_i);
+    args.push_arg(&n_rep_i);
+    args.push_arg(&rep_inner_i);
 
     let grid_z = S_V / WARPS_PER_BLOCK;
     let cfg = LaunchCfg {
@@ -297,7 +288,7 @@ pub fn gdn_state_step_alphabeta_f32_s128_batched_slots(
         block: (WARP_SIZE, WARPS_PER_BLOCK, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 
@@ -309,12 +300,12 @@ pub fn gdn_state_step_alphabeta_f32_s128_batched_slots(
 /// no inter-block sync). Caller writes per-slot history base pointers
 /// into a device array sized `[N] u64` and passes its base via
 /// `slot_history_ptrs`.
-pub fn gdn_conv_trio_decode_f32_batched_slots(
-    ctx: crate::OpCtx<'_>,
+pub fn gdn_conv_trio_decode_f32_batched_slots<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     bufs: crate::GdnConvTrioBatchedSlotsBuffers,
     shape: crate::GdnConvTrioShape,
 ) -> Result<()> {
-    let crate::OpCtx { reg, stream } = ctx;
     let crate::GdnConvTrioBatchedSlotsBuffers {
         slot_history_ptrs,
         qkv_mixed,
@@ -329,7 +320,7 @@ pub fn gdn_conv_trio_decode_f32_batched_slots(
         "gdn_conv_trio_decode_f32_batched_slots: conv_kernel {conv_kernel} > KERNEL_MAX {KERNEL_MAX}"
     );
     let module = reg.expect_module("gdn_conv_trio_decode_f32_batched_slots")?;
-    let kernel = module.kernel("flambeau_gdn_conv_trio_decode_f32_batched_slots")?;
+    let kernel = B::kernel(module, "flambeau_gdn_conv_trio_decode_f32_batched_slots")?;
 
     let n_slots_i = n_slots as i32;
     let conv_channels_i = conv_channels as i32;
@@ -338,20 +329,20 @@ pub fn gdn_conv_trio_decode_f32_batched_slots(
     let q_ptr: u64 = qkv_mixed.as_usize() as u64;
     let w_ptr: u64 = weight.as_usize() as u64;
     let o_ptr: u64 = conv_out.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&ptrs_arr);
-    args.push(&q_ptr);
-    args.push(&w_ptr);
-    args.push(&o_ptr);
-    args.push(&n_slots_i);
-    args.push(&conv_channels_i);
-    args.push(&conv_kernel_i);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&ptrs_arr);
+    args.push_arg(&q_ptr);
+    args.push_arg(&w_ptr);
+    args.push_arg(&o_ptr);
+    args.push_arg(&n_slots_i);
+    args.push_arg(&conv_channels_i);
+    args.push_arg(&conv_kernel_i);
     let cfg = LaunchCfg {
         grid: ((conv_channels as u32).div_ceil(THREADS), n_slots as u32, 1),
         block: (THREADS, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 
@@ -359,9 +350,9 @@ pub fn gdn_conv_trio_decode_f32_batched_slots(
 /// back-to-back DtoD memcpys in `forward/gdn.rs::assemble_conv_input` (decode
 /// path) with a single elementwise kernel. Each GDN layer at decode fires
 /// this pattern once per token.
-pub fn gdn_assemble_conv_input_f32(
-    reg: &OpsRegistry,
-    stream: &HipStream,
+pub fn gdn_assemble_conv_input_f32<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     history: DevicePtr,
     current: DevicePtr,
     conv_input: DevicePtr,
@@ -369,39 +360,39 @@ pub fn gdn_assemble_conv_input_f32(
     conv_kernel: usize,
 ) -> Result<()> {
     let module = reg.expect_module("gdn_assemble_conv_input_f32")?;
-    let kernel = module.kernel("flambeau_gdn_assemble_conv_input_f32")?;
+    let kernel = B::kernel(module, "flambeau_gdn_assemble_conv_input_f32")?;
     let total = conv_channels * conv_kernel;
     let h_ptr: u64 = history.as_usize() as u64;
     let c_ptr: u64 = current.as_usize() as u64;
     let o_ptr: u64 = conv_input.as_usize() as u64;
     let cc_i = conv_channels as i32;
     let ck_i = conv_kernel as i32;
-    let mut args = KernelArgs::new();
-    args.push(&h_ptr);
-    args.push(&c_ptr);
-    args.push(&o_ptr);
-    args.push(&cc_i);
-    args.push(&ck_i);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&h_ptr);
+    args.push_arg(&c_ptr);
+    args.push_arg(&o_ptr);
+    args.push_arg(&cc_i);
+    args.push_arg(&ck_i);
     const BLOCK: u32 = 256;
     let grid = (total as u32).div_ceil(BLOCK);
     let cfg = LaunchCfg::one_d(grid, BLOCK);
-    unsafe { kernel.launch(stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 
 /// fused split: replaces the 3×L DtoD memcpy loop in
 /// `forward.rs::gather_qkv_strided`. Reads one row of silu_out per token
 /// and strided-writes into q_out / k_out / v_out.
-pub fn gdn_split_qkv_f32(
-    ctx: crate::OpCtx<'_>,
+pub fn gdn_split_qkv_f32<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     bufs: crate::GdnSplitQkvBuffers,
     shape: crate::GdnSplitQkvShape,
 ) -> Result<()> {
-    let crate::OpCtx { reg, stream } = ctx;
     let crate::GdnSplitQkvBuffers { silu_out, q_out, k_out, v_out } = bufs;
     let crate::GdnSplitQkvShape { n_tokens, qk_size, v_size } = shape;
     let module = reg.expect_module("gdn_split_qkv_f32")?;
-    let kernel = module.kernel("flambeau_gdn_split_qkv_f32")?;
+    let kernel = B::kernel(module, "flambeau_gdn_split_qkv_f32")?;
     let conv_channels = 2 * qk_size + v_size;
     let total = n_tokens * conv_channels;
     let s_ptr: u64 = silu_out.as_usize() as u64;
@@ -411,17 +402,17 @@ pub fn gdn_split_qkv_f32(
     let n_tokens_i = n_tokens as i32;
     let qk_i = qk_size as i32;
     let v_i = v_size as i32;
-    let mut args = KernelArgs::new();
-    args.push(&s_ptr);
-    args.push(&q_ptr);
-    args.push(&k_ptr);
-    args.push(&v_ptr);
-    args.push(&n_tokens_i);
-    args.push(&qk_i);
-    args.push(&v_i);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&s_ptr);
+    args.push_arg(&q_ptr);
+    args.push_arg(&k_ptr);
+    args.push_arg(&v_ptr);
+    args.push_arg(&n_tokens_i);
+    args.push_arg(&qk_i);
+    args.push_arg(&v_i);
     const BLOCK: u32 = 256;
     let grid = (total as u32).div_ceil(BLOCK);
     let cfg = LaunchCfg::one_d(grid, BLOCK);
-    unsafe { kernel.launch(stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }

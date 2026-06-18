@@ -119,10 +119,8 @@ fn rmsnorm_f16_runs() -> Result<()> {
     let d_w = upload(&dev, &w);
     let d_y = dev.alloc(m * k * 2)?;
     norm::rmsnorm_f16(
-        flambeau_ops::OpCtx {
-            reg: &reg,
-            stream: dev.default_stream(),
-        },
+        &reg,
+        dev.default_stream(),
         flambeau_ops::NormBuffers {
             input: d_x,
             weight: d_w,

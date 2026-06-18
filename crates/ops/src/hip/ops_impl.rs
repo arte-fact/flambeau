@@ -523,7 +523,7 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::NormShape,
         eps: f32,
     ) -> Result<()> {
-        super::norm::rmsnorm_f16(self.ctx(), buf, shape, eps)
+        super::norm::rmsnorm_f16(self.reg, self.stream, buf, shape, eps)
     }
 
     fn rmsnorm_f16_add_residual(
@@ -532,7 +532,7 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::NormShape,
         eps: f32,
     ) -> Result<()> {
-        super::norm::rmsnorm_f16_add_residual(self.ctx(), buf, shape, eps)
+        super::norm::rmsnorm_f16_add_residual(self.reg, self.stream, buf, shape, eps)
     }
 
     fn v_unit_norm_per_head_f16(
@@ -560,7 +560,7 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::NormShape,
         eps: f32,
     ) -> Result<()> {
-        super::norm::rmsnorm_quant_q8_1(self.ctx(), buf, shape, eps)
+        super::norm::rmsnorm_quant_q8_1(self.reg, self.stream, buf, shape, eps)
     }
 
     fn rmsnorm_f32(
@@ -569,7 +569,7 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::NormShape,
         eps: f32,
     ) -> Result<()> {
-        super::norm::rmsnorm_f32(self.ctx(), buf, shape, eps)
+        super::norm::rmsnorm_f32(self.reg, self.stream, buf, shape, eps)
     }
 
     fn rmsnorm_f32_to_f16(
@@ -578,7 +578,7 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::NormShape,
         eps: f32,
     ) -> Result<()> {
-        super::norm::rmsnorm_f32_to_f16(self.ctx(), buf, shape, eps)
+        super::norm::rmsnorm_f32_to_f16(self.reg, self.stream, buf, shape, eps)
     }
 
     fn rmsnorm_f32_to_f16_add_residual(
@@ -587,7 +587,7 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::NormShape,
         eps: f32,
     ) -> Result<()> {
-        super::norm::rmsnorm_f32_to_f16_add_residual(self.ctx(), buf, shape, eps)
+        super::norm::rmsnorm_f32_to_f16_add_residual(self.reg, self.stream, buf, shape, eps)
     }
 
     fn rmsnorm_f16_to_f16_add_residual(
@@ -596,7 +596,7 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::NormShape,
         eps: f32,
     ) -> Result<()> {
-        super::norm::rmsnorm_f16_to_f16_add_residual(self.ctx(), buf, shape, eps)
+        super::norm::rmsnorm_f16_to_f16_add_residual(self.reg, self.stream, buf, shape, eps)
     }
 
     fn l2_norm_f32(
@@ -766,7 +766,7 @@ impl<'a> Ops for HipOps<'a> {
         bufs: crate::GdnStepBuffers,
         shape: crate::GdnStepShape,
     ) -> Result<()> {
-        super::recurrent::gdn_state_step_f32_s128(self.ctx(), bufs, shape)
+        super::recurrent::gdn_state_step_f32_s128(self.reg, self.stream, bufs, shape)
     }
 
     fn gdn_alpha_beta_f32(
@@ -774,7 +774,7 @@ impl<'a> Ops for HipOps<'a> {
         bufs: crate::GdnAlphaBetaBuffers,
         shape: crate::GdnAlphaBetaShape,
     ) -> Result<()> {
-        super::recurrent::gdn_alpha_beta_f32(self.ctx(), bufs, shape)
+        super::recurrent::gdn_alpha_beta_f32(self.reg, self.stream, bufs, shape)
     }
 
     fn gdn_state_step_alphabeta_f32_s128(
@@ -782,7 +782,7 @@ impl<'a> Ops for HipOps<'a> {
         bufs: crate::GdnStepAlphaBetaBuffers,
         shape: crate::GdnStepShape,
     ) -> Result<()> {
-        super::recurrent::gdn_state_step_alphabeta_f32_s128(self.ctx(), bufs, shape)
+        super::recurrent::gdn_state_step_alphabeta_f32_s128(self.reg, self.stream, bufs, shape)
     }
 
     fn gdn_assemble_conv_input_f32(
@@ -810,7 +810,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::GdnStepShape,
     ) -> Result<()> {
         super::recurrent::gdn_state_step_alphabeta_f32_s128_batched_slots(
-            self.ctx(),
+            self.reg,
+            self.stream,
             bufs,
             shape,
         )
@@ -821,7 +822,7 @@ impl<'a> Ops for HipOps<'a> {
         bufs: crate::GdnConvTrioBatchedSlotsBuffers,
         shape: crate::GdnConvTrioShape,
     ) -> Result<()> {
-        super::recurrent::gdn_conv_trio_decode_f32_batched_slots(self.ctx(), bufs, shape)
+        super::recurrent::gdn_conv_trio_decode_f32_batched_slots(self.reg, self.stream, bufs, shape)
     }
 
     fn gdn_split_qkv_f32(
@@ -829,7 +830,7 @@ impl<'a> Ops for HipOps<'a> {
         bufs: crate::GdnSplitQkvBuffers,
         shape: crate::GdnSplitQkvShape,
     ) -> Result<()> {
-        super::recurrent::gdn_split_qkv_f32(self.ctx(), bufs, shape)
+        super::recurrent::gdn_split_qkv_f32(self.reg, self.stream, bufs, shape)
     }
 
     // -- router --
