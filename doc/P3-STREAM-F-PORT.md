@@ -80,18 +80,21 @@ focused decode spine.
 - [x] scale_f16  *(bit-exact both rigs)*
 - [x] scale_f32  *(bit-exact both rigs)*
 - [x] silu_f32  *(1e-5 vs F64 oracle; fast `__expf` holds cross-backend)*
-- [ ] swiglu_f16
-- [ ] swiglu_f32_to_q8_1
-- [ ] sigmoid_mul_f16
+- [x] swiglu_f16  *(silu(gate)*up; 5e-3 F16 envelope)*
+- [x] swiglu_f32_to_q8_1  *(fused activation→Q8_1; width-32 `__shfl_xor` reduce)*
+- [x] sigmoid_mul_f16  *(logistic gate; 5e-3 F16 envelope)*
 - [x] apply_softcap_f32  *(1e-5 vs F64 oracle; `tanhf`)*
-- [ ] split_q_gate_f16
+- [x] split_q_gate_f16  *(3D-grid strided copy; bit-exact)*
 
-The 1a unary leaves ride a shared `run_unary_sweep<B, IE, OE>` driver in
-`sweep_pointwise_cb.rs` (1 input buffer + optional trailing f32 scalar) and a
-single `run_pointwise_sweep<B>(op, …)` dispatcher the cli's HIP and CUDA arms
-both call — a newly-ported pointwise kernel is wired in one place. Each emits a
-neutral-impl_id cert (registered as a bench-reference) alongside the frozen
-`_gfx906` dispatch cert.
+**1a COMPLETE — all 11 Tier-A leaves cross-backend.** They ride
+`sweep_pointwise_cb.rs`: a shared `run_unary_sweep<B, IE, OE>` driver (1 input +
+optional f32 scalar), `run_binary_f16_sweep<B>` (2 F16 inputs), and two bespoke
+drivers (the Q8_1 quantizer, the 3D split). A single
+`run_pointwise_sweep<B>(op, …)` dispatcher the cli's HIP and CUDA arms both call
+wires each kernel in one place. Each emits a neutral-impl_id cert (registered as
+a bench-reference) alongside the frozen `_gfx906` dispatch cert. CUDA `.cu`
+mirrors are auto-globbed by `kernels-cuda/build.rs`. **Next: 1b Tier-B norms /
+rope / activation-quant** (block-reduce + index math).
 
 **1b — Tier-B norms / rope / activation-quant** (block-reduce + index math):
 - [ ] rmsnorm_f16

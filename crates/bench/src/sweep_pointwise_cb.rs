@@ -37,6 +37,10 @@ pub fn run_pointwise_sweep<B: BenchBackend>(
         "scale_f16" => run_scale_f16_sweep::<B>(repo_root, arch),
         "silu_f32" => run_silu_f32_sweep::<B>(repo_root, arch),
         "apply_softcap_f32" => run_apply_softcap_f32_sweep::<B>(repo_root, arch),
+        "swiglu_f16" => run_swiglu_f16_sweep::<B>(repo_root, arch),
+        "sigmoid_mul_f16" => run_sigmoid_mul_f16_sweep::<B>(repo_root, arch),
+        "swiglu_f32_to_q8_1" => run_swiglu_f32_to_q8_1_sweep::<B>(repo_root, arch),
+        "split_q_gate_f16" => run_split_q_gate_f16_sweep::<B>(repo_root, arch),
         _ => return None,
     };
     Some(cert)
@@ -365,4 +369,348 @@ pub fn run_apply_softcap_f32_sweep<B: BenchBackend>(repo_root: &Path, arch: &str
             (err, 1e-5, err <= 1e-5)
         },
     )
+}
+
+/// Shared driver for the two-input F16 elementwise leaves (`silu`/`sigmoid`
+/// gating): two F16 input buffers, one F16 output, `ceil(n/256)×256`. `oracle`
+/// is the F64 host math `(a, b) -> result`; the result is rounded to F16 and
+/// compared in F32 with a `5e-3` rel envelope (F16 step + fast-`__expf` drift).
+fn run_binary_f16_sweep<B: BenchBackend>(
+    repo_root: &Path,
+    arch: &str,
+    stem: &'static str,
+    entry: &'static str,
+    impl_id: &str,
+    op: &str,
+    tolerance_formula: &str,
+    shapes: &[usize],
+    salt: u64,
+    oracle: impl Fn(f64, f64) -> f64,
+) -> Result<Cert> {
+    let dev = B::new_device(0)?;
+    let image = B::image(stem).ok_or_else(|| anyhow!("{stem} not compiled"))?;
+    let module = B::load(&dev, image)?;
+    let kernel = B::kernel(&module, entry)?;
+    let pmc = B::attributes(&kernel)?;
+
+    let mut results = Vec::new();
+    for &n in shapes {
+        let seed = 0xC0FFEE ^ ((n as u64).wrapping_mul(151).wrapping_add(salt));
+        let a = f16_input(seed, n);
+        let b = f16_input(seed ^ 0xAB, n);
+        let reference: Vec<f32> = a
+            .iter()
+            .zip(&b)
+            .map(|(av, bv)| {
+                f16::from_f32(oracle(av.to_f32() as f64, bv.to_f32() as f64) as f32).to_f32()
+            })
+            .collect();
+
+        let d_a = alloc_and_upload(&dev, &a);
+        let d_b = alloc_and_upload(&dev, &b);
+        let d_y = dev.alloc(n * 2)?;
+        {
+            let stream = dev.default_stream();
+            let n_i = n as i32;
+            let a_ptr: u64 = d_a.as_usize() as u64;
+            let b_ptr: u64 = d_b.as_usize() as u64;
+            let y_ptr: u64 = d_y.as_usize() as u64;
+            let mut args = <B::Args<'_>>::default();
+            args.push_arg(&a_ptr);
+            args.push_arg(&b_ptr);
+            args.push_arg(&y_ptr);
+            args.push_arg(&n_i);
+            B::launch(&kernel, stream, LaunchCfg::one_d((n as u32).div_ceil(256), 256), args)?;
+            stream.synchronize()?;
+        }
+        let mut got_f16 = vec![f16::from_f32(0.0); n];
+        unsafe {
+            dev.memcpy_async(
+                dev.default_stream(),
+                CopyDirection::DeviceToHost,
+                DevicePtr(got_f16.as_mut_ptr() as usize),
+                d_y,
+                n * 2,
+            )?;
+        }
+        dev.default_stream().synchronize()?;
+        unsafe {
+            dev.dealloc(d_a, n * 2)?;
+            dev.dealloc(d_b, n * 2)?;
+            dev.dealloc(d_y, n * 2)?;
+        }
+
+        let got: Vec<f32> = got_f16.iter().map(|v| v.to_f32()).collect();
+        let err = max_rel_err_with_floor(&got, &reference, 1e-2);
+        results.push(ShapeResult {
+            m: n,
+            k: 1,
+            n: 1,
+            seed,
+            max_rel_err: err,
+            tolerance: 5e-3,
+            pass: err <= 5e-3,
+        });
+    }
+
+    let pass = results.iter().all(|r| r.pass);
+    let cert = Cert {
+        schema_version: SCHEMA_VERSION,
+        impl_id: impl_id.to_string(),
+        backend: dev.backend().to_string(),
+        arch: arch.to_string(),
+        op: op.to_string(),
+        dtype_weight: "F16".to_string(),
+        dtype_activation: "F16".to_string(),
+        tolerance_formula: tolerance_formula.to_string(),
+        results,
+        pass,
+        emitted_at: now_utc_iso8601(),
+        rig: rig_for(arch),
+        pmc: Some(pmc),
+    };
+    cert.write_to_disk(repo_root)?;
+    Ok(cert)
+}
+
+/// `swiglu_f16` — FFN gate+up activation `silu(gate)*up`, F16 I/O.
+pub fn run_swiglu_f16_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) -> Result<Cert> {
+    run_binary_f16_sweep::<B>(
+        repo_root, arch, "swiglu_f16", "flambeau_swiglu_f16", "swiglu_f16", "swiglu_f16",
+        "|err| <= 5e-3 * max(|ref|, 1e-2) vs F64 oracle (fast __expf)",
+        &[2048, 15360, 4096], 0x41,
+        |g, u| (g / (1.0 + (-g).exp())) * u,
+    )
+}
+
+/// `sigmoid_mul_f16` — full-attention output gate `sigmoid(gate)*x`, F16 I/O.
+pub fn run_sigmoid_mul_f16_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) -> Result<Cert> {
+    run_binary_f16_sweep::<B>(
+        repo_root, arch, "sigmoid_mul_f16", "flambeau_sigmoid_mul_f16", "sigmoid_mul_f16",
+        "sigmoid_mul_f16", "|err| <= 5e-3 * max(|ref|, 1e-2) vs F64 oracle (logistic)",
+        &[256, 4096, 8192], 0x53,
+        |g, x| (1.0 / (1.0 + (-g).exp())) * x,
+    )
+}
+
+/// `swiglu_f32_to_q8_1` — fused `silu(a)*b` (F32) → Q8_1 blocks (36 B: d, s,
+/// qs[32]). 32 threads/block = one 32-lane group; the amax/sum reduce is a
+/// width-32 `__shfl_xor` (one warp on wave32, a sub-warp on wave64). Scored by
+/// dequantizing the GPU output and comparing to the F64 oracle `silu(a)*b`.
+pub fn run_swiglu_f32_to_q8_1_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) -> Result<Cert> {
+    let dev = B::new_device(0)?;
+    let image = B::image("swiglu_f32_to_q8_1").ok_or_else(|| anyhow!("swiglu_f32_to_q8_1 not compiled"))?;
+    let module = B::load(&dev, image)?;
+    let kernel = B::kernel(&module, "flambeau_swiglu_f32_to_q8_1")?;
+    let pmc = B::attributes(&kernel)?;
+
+    let shapes = [32usize, 256, 4096];
+    let mut results = Vec::new();
+    for n in shapes {
+        let seed = 0xC0FFEE ^ ((n as u64).wrapping_mul(167).wrapping_add(0x61));
+        let a = seeded_f32_range(seed, n, -0.5, 0.5);
+        let b = seeded_f32_range(seed ^ 0xCD, n, -0.5, 0.5);
+        // F64 oracle: the un-quantized fused activation per element.
+        let xi: Vec<f32> = a
+            .iter()
+            .zip(&b)
+            .map(|(&av, &bv)| {
+                let d = av as f64;
+                ((d / (1.0 + (-d).exp())) * bv as f64) as f32
+            })
+            .collect();
+
+        let d_a = alloc_and_upload(&dev, &a);
+        let d_b = alloc_and_upload(&dev, &b);
+        let n_blocks = n / 32;
+        let out_bytes = n_blocks * 36;
+        let d_y = dev.alloc(out_bytes)?;
+        {
+            let stream = dev.default_stream();
+            let n_i = n as i32;
+            let a_ptr: u64 = d_a.as_usize() as u64;
+            let b_ptr: u64 = d_b.as_usize() as u64;
+            let y_ptr: u64 = d_y.as_usize() as u64;
+            let mut args = <B::Args<'_>>::default();
+            args.push_arg(&a_ptr);
+            args.push_arg(&b_ptr);
+            args.push_arg(&y_ptr);
+            args.push_arg(&n_i);
+            B::launch(&kernel, stream, LaunchCfg::one_d(n_blocks as u32, 32), args)?;
+            stream.synchronize()?;
+        }
+        let mut got = vec![0u8; out_bytes];
+        unsafe {
+            dev.memcpy_async(
+                dev.default_stream(),
+                CopyDirection::DeviceToHost,
+                DevicePtr(got.as_mut_ptr() as usize),
+                d_y,
+                out_bytes,
+            )?;
+        }
+        dev.default_stream().synchronize()?;
+        unsafe {
+            dev.dealloc(d_a, n * 4)?;
+            dev.dealloc(d_b, n * 4)?;
+            dev.dealloc(d_y, out_bytes)?;
+        }
+
+        // Dequantize GPU output (d * qs) and compare to the oracle xi.
+        let mut dequant = vec![0.0f32; n];
+        for (blk_idx, block) in got.chunks(36).enumerate() {
+            let d = f16::from_bits(u16::from_le_bytes([block[0], block[1]])).to_f32();
+            for (lane, &qb) in block[4..36].iter().enumerate() {
+                dequant[blk_idx * 32 + lane] = d * (qb as i8) as f32;
+            }
+        }
+        let err = max_rel_err_with_floor(&dequant, &xi, 1.0);
+        results.push(ShapeResult {
+            m: n,
+            k: 1,
+            n: 1,
+            seed,
+            max_rel_err: err,
+            tolerance: 5e-3,
+            pass: err <= 5e-3,
+        });
+    }
+
+    let pass = results.iter().all(|r| r.pass);
+    let cert = Cert {
+        schema_version: SCHEMA_VERSION,
+        impl_id: "swiglu_f32_to_q8_1".to_string(),
+        backend: dev.backend().to_string(),
+        arch: arch.to_string(),
+        op: "swiglu_f32_to_q8_1".to_string(),
+        dtype_weight: "F32".to_string(),
+        dtype_activation: "Q8_1".to_string(),
+        tolerance_formula: "|dequant - oracle| <= 5e-3 * max(|oracle|, 1) (Q8_1 step + __expf)".to_string(),
+        results,
+        pass,
+        emitted_at: now_utc_iso8601(),
+        rig: rig_for(arch),
+        pmc: Some(pmc),
+    };
+    cert.write_to_disk(repo_root)?;
+    Ok(cert)
+}
+
+/// `split_q_gate_f16` — strided split of fused `[tok, head, 2*head_dim]` into
+/// contiguous `q` + `gate`. Pure copy, no arithmetic → bit-exact both backends.
+/// 3D grid `(n_tokens, n_head, ceil(head_dim/128))`.
+pub fn run_split_q_gate_f16_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) -> Result<Cert> {
+    let dev = B::new_device(0)?;
+    let image = B::image("split_q_gate_f16").ok_or_else(|| anyhow!("split_q_gate_f16 not compiled"))?;
+    let module = B::load(&dev, image)?;
+    let kernel = B::kernel(&module, "flambeau_split_q_gate_f16")?;
+    let pmc = B::attributes(&kernel)?;
+
+    let shapes = [(1usize, 16usize, 256usize), (128, 16, 256), (1, 2, 256)];
+    let mut results = Vec::new();
+    for (n_tokens, n_head, head_dim) in shapes {
+        let seed = 0xC0FFEE ^ ((n_tokens as u64) * 1049 + (n_head as u64) * 53 + (head_dim as u64) * 11);
+        let total_fused = n_tokens * n_head * 2 * head_dim;
+        let total_split = n_tokens * n_head * head_dim;
+        let fused = f16_input(seed, total_fused);
+        let mut ref_q = vec![f16::from_f32(0.0); total_split];
+        let mut ref_g = vec![f16::from_f32(0.0); total_split];
+        for t in 0..n_tokens {
+            for h in 0..n_head {
+                let fb = (t * n_head + h) * (2 * head_dim);
+                let sb = (t * n_head + h) * head_dim;
+                for d in 0..head_dim {
+                    ref_q[sb + d] = fused[fb + d];
+                    ref_g[sb + d] = fused[fb + head_dim + d];
+                }
+            }
+        }
+
+        let d_f = alloc_and_upload(&dev, &fused);
+        let d_q = dev.alloc(total_split * 2)?;
+        let d_g = dev.alloc(total_split * 2)?;
+        {
+            let stream = dev.default_stream();
+            let n_tokens_i = n_tokens as i32;
+            let n_head_i = n_head as i32;
+            let head_dim_i = head_dim as i32;
+            let f_ptr: u64 = d_f.as_usize() as u64;
+            let q_ptr: u64 = d_q.as_usize() as u64;
+            let g_ptr: u64 = d_g.as_usize() as u64;
+            let mut args = <B::Args<'_>>::default();
+            args.push_arg(&f_ptr);
+            args.push_arg(&q_ptr);
+            args.push_arg(&g_ptr);
+            args.push_arg(&n_tokens_i);
+            args.push_arg(&n_head_i);
+            args.push_arg(&head_dim_i);
+            let threads = 128u32;
+            let cfg = LaunchCfg {
+                grid: (n_tokens as u32, n_head as u32, (head_dim as u32).div_ceil(threads)),
+                block: (threads, 1, 1),
+                shared_bytes: 0,
+            };
+            B::launch(&kernel, stream, cfg, args)?;
+            stream.synchronize()?;
+        }
+        let mut got_q = vec![f16::from_f32(0.0); total_split];
+        let mut got_g = vec![f16::from_f32(0.0); total_split];
+        unsafe {
+            dev.memcpy_async(
+                dev.default_stream(),
+                CopyDirection::DeviceToHost,
+                DevicePtr(got_q.as_mut_ptr() as usize),
+                d_q,
+                total_split * 2,
+            )?;
+            dev.memcpy_async(
+                dev.default_stream(),
+                CopyDirection::DeviceToHost,
+                DevicePtr(got_g.as_mut_ptr() as usize),
+                d_g,
+                total_split * 2,
+            )?;
+        }
+        dev.default_stream().synchronize()?;
+        unsafe {
+            dev.dealloc(d_f, total_fused * 2)?;
+            dev.dealloc(d_q, total_split * 2)?;
+            dev.dealloc(d_g, total_split * 2)?;
+        }
+
+        let mismatches = got_q
+            .iter()
+            .zip(&ref_q)
+            .chain(got_g.iter().zip(&ref_g))
+            .filter(|(g, r)| g.to_bits() != r.to_bits())
+            .count() as f32;
+        results.push(ShapeResult {
+            m: n_tokens,
+            k: n_head,
+            n: head_dim,
+            seed,
+            max_rel_err: mismatches,
+            tolerance: 0.0,
+            pass: mismatches == 0.0,
+        });
+    }
+
+    let pass = results.iter().all(|r| r.pass);
+    let cert = Cert {
+        schema_version: SCHEMA_VERSION,
+        impl_id: "split_q_gate_f16".to_string(),
+        backend: dev.backend().to_string(),
+        arch: arch.to_string(),
+        op: "split_q_gate_f16".to_string(),
+        dtype_weight: "F16".to_string(),
+        dtype_activation: "F16".to_string(),
+        tolerance_formula: "exact match (strided copy, no arithmetic)".to_string(),
+        results,
+        pass,
+        emitted_at: now_utc_iso8601(),
+        rig: rig_for(arch),
+        pmc: Some(pmc),
+    };
+    cert.write_to_disk(repo_root)?;
+    Ok(cert)
 }

@@ -1,5 +1,5 @@
 // scale_f16 — elementwise `y[i] = (fp16)((float)x[i] * scale)`. F16 I/O.
-// CUDA mirror of the HIP kernel. In-place safe.
+// In-place safe.
 
 #include <cuda_runtime.h>
 #include "block_quant.cuh"

@@ -1,5 +1,5 @@
 // apply_softcap_f32 — elementwise final-logit softcap: y[i] = tanh(x[i]/cap)*cap.
-// CUDA mirror of the HIP kernel. In-place safe (x and y may alias).
+// In-place safe (x and y may alias).
 // Launch: 1D, ceil(n/256) blocks × 256 threads.
 
 #include <cuda_runtime.h>

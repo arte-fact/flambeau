@@ -1,4 +1,4 @@
-// cast_f16_f32 — pointwise F16 → F32. CUDA mirror of the HIP kernel.
+// cast_f16_f32 — pointwise F16 → F32
 // Launch: 1D, ceil(n/256) blocks × 256 threads.
 
 #include <cuda_runtime.h>

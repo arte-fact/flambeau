@@ -1,6 +1,6 @@
 // add_f16 — pointwise `y[i] = a[i] + b[i]` in F16 (F32 accum, saturated at
 // ±F16_MAX so a near-max sum can't overflow to ±inf and NaN through downstream
-// rmsnorm). CUDA mirror of the HIP kernel.
+// rmsnorm)
 // Launch: 1D, ceil(n/256) blocks × 256 threads. One element per thread.
 
 #include <cuda_runtime.h>

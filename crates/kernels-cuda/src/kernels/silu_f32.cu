@@ -1,5 +1,5 @@
 // silu_f32 — pointwise SiLU / swish: y[i] = x[i] / (1 + exp(-x[i])).
-// CUDA mirror of the HIP kernel. Launch: 1D, ceil(n/256) blocks × 256 threads.
+// Launch: 1D, ceil(n/256) blocks × 256 threads.
 
 #include <cuda_runtime.h>
 

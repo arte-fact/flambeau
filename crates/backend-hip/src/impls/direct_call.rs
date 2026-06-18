@@ -791,4 +791,20 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
         impl_id: "apply_softcap_f32",
         cert_rel_path: "certs/hip/gfx906/apply_softcap_f32.json",
     },
+    DirectCallKernel {
+        impl_id: "swiglu_f16",
+        cert_rel_path: "certs/hip/gfx906/swiglu_f16.json",
+    },
+    DirectCallKernel {
+        impl_id: "sigmoid_mul_f16",
+        cert_rel_path: "certs/hip/gfx906/sigmoid_mul_f16.json",
+    },
+    DirectCallKernel {
+        impl_id: "swiglu_f32_to_q8_1",
+        cert_rel_path: "certs/hip/gfx906/swiglu_f32_to_q8_1.json",
+    },
+    DirectCallKernel {
+        impl_id: "split_q_gate_f16",
+        cert_rel_path: "certs/hip/gfx906/split_q_gate_f16.json",
+    },
 ];

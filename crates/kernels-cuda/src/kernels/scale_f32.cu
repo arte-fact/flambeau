@@ -1,4 +1,4 @@
-// scale_f32 — pointwise `y[i] = x[i] * scale`. CUDA mirror of the HIP kernel.
+// scale_f32 — pointwise `y[i] = x[i] * scale`
 // Launch: 1D, ceil(n/256) blocks × 256 threads.
 
 #include <cuda_runtime.h>

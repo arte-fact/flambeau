@@ -1,6 +1,6 @@
 // cast_f32_f16 — pointwise F32 → F16, saturating at ±F16_MAX so ±inf can't
-// poison downstream F16 buffers. NaN inputs pass through. CUDA mirror of the
-// HIP kernel. Launch: 1D, ceil(n/256) blocks × 256 threads.
+// poison downstream F16 buffers. NaN inputs pass through.
+// Launch: 1D, ceil(n/256) blocks × 256 threads.
 
 #include <cuda_runtime.h>
 #include "block_quant.cuh"
