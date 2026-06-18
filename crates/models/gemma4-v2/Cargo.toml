@@ -10,9 +10,21 @@ description = "Gemma-4 dense (31B) on the v2 stack. GELU-tanh FFN, final-logit s
 default = []
 hip = [
   "dep:flambeau-backend-hip",
+  "dep:flambeau-backend",
+  "flambeau-backend/hip",
   "flambeau-forward/hip",
   "flambeau-model-ops/hip",
   "flambeau-ops/hip",
+]
+# CUDA is enabled alongside hip on the dual rig for the cross-backend parity
+# test; the lib itself is backend-generic (`Arch` over `ForwardCtx`).
+cuda = [
+  "dep:flambeau-backend-cuda",
+  "dep:flambeau-backend",
+  "flambeau-backend/cuda",
+  "flambeau-forward/cuda",
+  "flambeau-model-ops/cuda",
+  "flambeau-ops/cuda",
 ]
 
 [dependencies]
@@ -21,7 +33,9 @@ flambeau-quant = { path = "../../quant" }
 flambeau-model-ops = { path = "../../model-ops" }
 flambeau-ops = { path = "../../ops" }
 flambeau-forward = { path = "../../forward" }
+flambeau-backend = { path = "../../backend", optional = true }
 flambeau-backend-hip = { path = "../../backend-hip", optional = true }
+flambeau-backend-cuda = { path = "../../backend-cuda", optional = true }
 anyhow.workspace = true
 thiserror.workspace = true
 half.workspace = true
