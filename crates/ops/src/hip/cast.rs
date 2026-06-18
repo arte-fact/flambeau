@@ -3,8 +3,7 @@
 //! swiglu consume F16. Keeping a one-kernel cast here avoids writing an F16
 //! accumulator variant of every MMVQ kernel.
 //!
-//! Backend-generic over [`KernelBackend`] — the first body migrated off the
-//! concrete HIP launch types (P5.0). One body serves HIP and CUDA.
+//! Backend-generic over [`KernelBackend`]: one body serves HIP and CUDA.
 
 use anyhow::Result;
 use flambeau_core::{Device, DevicePtr, KernelBackend, LaunchArgs, LaunchCfg};
