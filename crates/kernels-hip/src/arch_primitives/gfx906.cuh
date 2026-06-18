@@ -159,6 +159,8 @@ static __device__ __forceinline__ float half_warp_reduce_sum(float x)    { retur
 static __device__ __forceinline__ float quarter_warp_reduce_sum(float x) { return gfx906_quarter_warp_reduce_sum(x); }
 static __device__ __forceinline__ float eighth_warp_reduce_sum(float x)  { return gfx906_eighth_warp_reduce_sum(x); }
 static __device__ __forceinline__ int   dp4a(int a, int b, int c)        { return gfx906_dp4a(a, b, c); }
+static __device__ __forceinline__ float fast_exp(float x)                { return gfx906_fast_exp(x); }
+static __device__ __forceinline__ float fast_rcp(float x)                { return gfx906_rcp(x); }
 
 // Byte-select permute for codebook LUTs (IQ4_NL/XS). out.byte[i] =
 // src8[sel.byte[i]] where src8 = {b.0..3 (low), a.0..3 (high)}; selector bytes
