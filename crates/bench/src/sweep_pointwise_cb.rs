@@ -67,6 +67,7 @@ pub fn run_pointwise_sweep<B: BenchBackend>(
         "apply_per_expert_scale_f32" => run_apply_per_expert_scale_sweep::<B>(repo_root, arch),
         "shared_expert_scale_f32" => run_shared_expert_scale_sweep::<B>(repo_root, arch),
         "topk_f32" => run_topk_f32_sweep::<B>(repo_root, arch),
+        "sampler_apply_penalties_f32" => run_sampler_apply_penalties_sweep::<B>(repo_root, arch),
         _ => return None,
     };
     Some(cert)
@@ -967,6 +968,80 @@ pub fn run_rope_f16_sweep<B: BenchBackend>(repo_root: &Path, arch: &str, neox: b
     }
     finish_cert(&dev, repo_root, arch, impl_id, impl_id, "F16", "F16",
         "|err| <= 5e-3 * max(|ref|, 1e-2) vs F64 angle oracle", results, pmc)
+}
+
+/// `sampler_apply_penalties_f32` — repetition/presence/frequency penalties on
+/// F32 logits, one thread per deduped (tok, count) pair. Exact f32 arithmetic,
+/// bit-exact both rigs.
+pub fn run_sampler_apply_penalties_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) -> Result<Cert> {
+    let dev = B::new_device(0)?;
+    let image = B::image("sampler_apply_penalties_f32").ok_or_else(|| anyhow!("sampler_apply_penalties_f32 not compiled"))?;
+    let module = B::load(&dev, image)?;
+    let kernel = B::kernel(&module, "flambeau_sampler_apply_penalties_f32")?;
+    let pmc = B::attributes(&kernel)?;
+
+    let (rep, pres, freq) = (1.1f32, 0.5f32, 0.3f32);
+    let shapes = [(1000usize, 50usize), (50000, 200), (151000, 500)];
+    let mut results = Vec::new();
+    for (vocab, n_pairs) in shapes {
+        let seed = 0xC0FFEE ^ ((vocab as u64) * 17 + (n_pairs as u64) * 7);
+        let logits = seeded_f32_range(seed, vocab, -8.0, 8.0);
+        // Unique token ids (stride through the vocab) + small counts.
+        let stride = (vocab / n_pairs).max(1);
+        let mut token_counts = vec![0u32; n_pairs * 2];
+        for p in 0..n_pairs {
+            let tok = ((p * stride) % vocab) as u32;
+            token_counts[p * 2] = tok;
+            token_counts[p * 2 + 1] = ((p % 5) + 1) as u32;
+        }
+        // F64 oracle — the device may contract `l - freq*count` into an FMA,
+        // so compare to a higher-precision reference with a small rel tol
+        // rather than bit-exact.
+        let mut reference = logits.clone();
+        for p in 0..n_pairs {
+            let tok = token_counts[p * 2] as usize;
+            let count = token_counts[p * 2 + 1] as f64;
+            let mut l = reference[tok] as f64;
+            if l > 0.0 { l /= rep as f64; } else { l *= rep as f64; }
+            l -= pres as f64;
+            l -= freq as f64 * count;
+            reference[tok] = l as f32;
+        }
+
+        let d_logits = alloc_and_upload(&dev, &logits);
+        let d_tc = alloc_and_upload(&dev, &token_counts);
+        {
+            let stream = dev.default_stream();
+            let np = n_pairs as i32;
+            let v = vocab as i32;
+            let l_ptr: u64 = d_logits.as_usize() as u64;
+            let tc_ptr: u64 = d_tc.as_usize() as u64;
+            let mut args = <B::Args<'_>>::default();
+            args.push_arg(&l_ptr);
+            args.push_arg(&tc_ptr);
+            args.push_arg(&np);
+            args.push_arg(&v);
+            args.push_arg(&rep);
+            args.push_arg(&pres);
+            args.push_arg(&freq);
+            B::launch(&kernel, stream, LaunchCfg::one_d((n_pairs as u32).div_ceil(256), 256), args)?;
+            stream.synchronize()?;
+        }
+        let mut got = vec![0.0f32; vocab];
+        unsafe {
+            dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost,
+                DevicePtr(got.as_mut_ptr() as usize), d_logits, vocab * 4)?;
+        }
+        dev.default_stream().synchronize()?;
+        unsafe {
+            dev.dealloc(d_logits, vocab * 4)?;
+            dev.dealloc(d_tc, n_pairs * 2 * 4)?;
+        }
+        let err = max_rel_err_with_floor(&got, &reference, 1.0);
+        results.push(ShapeResult { m: vocab, k: n_pairs, n: 1, seed, max_rel_err: err, tolerance: 1e-5, pass: err <= 1e-5 });
+    }
+    finish_cert(&dev, repo_root, arch, "sampler_apply_penalties_f32", "sampler_apply_penalties_f32",
+        "F32", "F32", "|err| <= 1e-5 * max(|ref|, 1) vs F64 oracle (device FMA contraction)", results, pmc)
 }
 
 /// `topk_f32` — per-token router top-k + softmax. One block per token,
