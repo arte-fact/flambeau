@@ -69,6 +69,7 @@ pub fn run_pointwise_sweep<B: BenchBackend>(
         "topk_f32" => run_topk_f32_sweep::<B>(repo_root, arch),
         "sampler_apply_penalties_f32" => run_sampler_apply_penalties_sweep::<B>(repo_root, arch),
         "softmax_masked_f16" => run_softmax_masked_f16_sweep::<B>(repo_root, arch),
+        "sampler_topk_softmax_f32" => run_sampler_topk_softmax_sweep::<B>(repo_root, arch),
         _ => return None,
     };
     Some(cert)
@@ -969,6 +970,75 @@ pub fn run_rope_f16_sweep<B: BenchBackend>(repo_root: &Path, arch: &str, neox: b
     }
     finish_cert(&dev, repo_root, arch, impl_id, impl_id, "F16", "F16",
         "|err| <= 5e-3 * max(|ref|, 1e-2) vs F64 angle oracle", results, pmc)
+}
+
+/// `sampler_topk_softmax_f32` — single-block top-K + full-vocab softmax over a
+/// large vocab. Phase-1 online reduce rides `block_reduce_softmax`; phases 2-5
+/// (per-thread heap + bitonic sort) are wave-agnostic. Indices match the CPU
+/// oracle exactly (lower-id tiebreak); full-vocab probs to 1e-4.
+pub fn run_sampler_topk_softmax_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) -> Result<Cert> {
+    let dev = B::new_device(0)?;
+    let image = B::image("sampler_topk_softmax_f32").ok_or_else(|| anyhow!("sampler_topk_softmax_f32 not compiled"))?;
+    let module = B::load(&dev, image)?;
+    let kernel = B::kernel(&module, "flambeau_sampler_topk_softmax_f32")?;
+    let pmc = B::attributes(&kernel)?;
+
+    let shapes = [(1000usize, 50usize, 1.0f32), (50000, 256, 0.8), (151000, 100, 1.25)];
+    let mut results = Vec::new();
+    for (vocab, k, inv_temp) in shapes {
+        let seed = 0xC0FFEE ^ ((vocab as u64) * 17 + (k as u64) * 7);
+        let logits = seeded_f32_range(seed, vocab, -8.0, 8.0);
+        // CPU oracle: top-k by (value desc, id asc); full-vocab softmax probs.
+        let v: Vec<f64> = logits.iter().map(|&l| l as f64 * inv_temp as f64).collect();
+        let m = v.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let sum: f64 = v.iter().map(|&x| (x - m).exp()).sum();
+        let mut order: Vec<usize> = (0..vocab).collect();
+        order.sort_by(|&a, &b| v[b].partial_cmp(&v[a]).unwrap().then(a.cmp(&b)));
+        let ref_ids: Vec<i32> = order[..k].iter().map(|&i| i as i32).collect();
+        let ref_probs: Vec<f32> = order[..k].iter().map(|&i| ((v[i] - m).exp() / sum) as f32).collect();
+
+        let d_logits = alloc_and_upload(&dev, &logits);
+        let d_ids = dev.alloc(k * 4)?;
+        let d_probs = dev.alloc(k * 4)?;
+        {
+            let stream = dev.default_stream();
+            let vv = vocab as i32;
+            let kk = k as i32;
+            let l_ptr: u64 = d_logits.as_usize() as u64;
+            let id_ptr: u64 = d_ids.as_usize() as u64;
+            let p_ptr: u64 = d_probs.as_usize() as u64;
+            let mut args = <B::Args<'_>>::default();
+            args.push_arg(&l_ptr);
+            args.push_arg(&id_ptr);
+            args.push_arg(&p_ptr);
+            args.push_arg(&vv);
+            args.push_arg(&kk);
+            args.push_arg(&inv_temp);
+            let cfg = LaunchCfg { grid: (1, 1, 1), block: (256, 1, 1), shared_bytes: 0 };
+            B::launch(&kernel, stream, cfg, args)?;
+            stream.synchronize()?;
+        }
+        let mut got_ids = vec![0i32; k];
+        let mut got_probs = vec![0.0f32; k];
+        unsafe {
+            dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost,
+                DevicePtr(got_ids.as_mut_ptr() as usize), d_ids, k * 4)?;
+            dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost,
+                DevicePtr(got_probs.as_mut_ptr() as usize), d_probs, k * 4)?;
+        }
+        dev.default_stream().synchronize()?;
+        unsafe {
+            dev.dealloc(d_logits, vocab * 4)?;
+            dev.dealloc(d_ids, k * 4)?;
+            dev.dealloc(d_probs, k * 4)?;
+        }
+        let idx_mismatch = got_ids.iter().zip(&ref_ids).filter(|(g, r)| g != r).count() as f32;
+        let p_err = max_rel_err_with_floor(&got_probs, &ref_probs, 1.0);
+        let err = idx_mismatch.max(p_err);
+        results.push(ShapeResult { m: vocab, k, n: 1, seed, max_rel_err: err, tolerance: 1e-4, pass: err <= 1e-4 });
+    }
+    finish_cert(&dev, repo_root, arch, "sampler_topk_softmax_f32", "sampler_topk_softmax_f32",
+        "F32", "F32", "indices exact + full-vocab probs |err| <= 1e-4 vs CPU oracle", results, pmc)
 }
 
 /// `softmax_masked_f16` — per-row masked attention softmax. Two-pass online

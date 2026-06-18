@@ -131,7 +131,7 @@ rope + activation quantizers are all cross-backend.
 **1c — Tier-C attention decode + KV append** (the hard tier):
 - [ ] attention_decode_f16
 - [ ] attention_decode_f16_splitk
-- [ ] softmax_masked_f16
+- [x] softmax_masked_f16  *(NEUTRALIZE — `block_reduce_softmax`; NaN-safe; 5e-3)*
 - [ ] kv_append_f16_batched_slots
 
 **1d — MoE decode glue + sampler:**
@@ -143,10 +143,14 @@ rope + activation quantizers are all cross-backend.
 - [x] moe_combine_two_residuals_f16  *(MIRROR — fan-in + 2 residuals)*
 - [x] apply_per_expert_scale_f32  *(MIRROR — trivial; bit-exact both rigs)*
 - [x] shared_expert_scale_f32  *(NEUTRALIZE — block_reduce_sum dot + sigmoid scale)*
-- [ ] sampler_topk_softmax_f32  *(Tier C — online-softmax reduce + bitonic top-k;
-      the Phase-1 (max,sum) reduce needs a `block_reduce_softmax` primitive shared
-      with softmax_masked + attention)*
+- [x] sampler_topk_softmax_f32  *(NEUTRALIZE — Phase-1 online reduce on
+      `block_reduce_softmax`; bitonic sort wave-agnostic; indices exact + probs 1e-4)*
 - [x] sampler_apply_penalties_f32  *(MIRROR — pointwise; 1e-5 vs F64, device FMA)*
+
+**1d status: 8/9.** Only moe_sort_by_expert (Tier-C segmented sort) remains.
+**The `block_reduce_softmax` primitive** (`block_reduce_softmax.cuh`, NaN-safe
+online (max,sum) merge over the WARP_SIZE seam) now backs softmax_masked_f16 +
+sampler_topk_softmax_f32, and is the online-softmax core for Wave 1c attention.
 
 The MoE-combine fan-in kernels + the per-expert/shared-expert scales + router
 top-k are cross-backend. Remaining 1d: moe_sort_by_expert (segmented sort —

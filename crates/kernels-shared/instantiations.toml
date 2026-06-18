@@ -3052,3 +3052,18 @@ params = """
     const int k,
     const float scale"""
 body = "softmax_masked_f16_row<256>(scores, mask, out, n_rows, k, scale);"
+
+[[kernel]]
+stem = "sampler_topk_softmax_f32"
+includes = ["backend_compat.cuh", "block_reduce_softmax.cuh", "sampler_topk_softmax.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_sampler_topk_softmax_f32"
+params = """
+    const float* __restrict__ logits,
+    int* __restrict__ out_ids,
+    float* __restrict__ out_probs,
+    const int V,
+    const int K,
+    const float inv_temp"""
+body = "sampler_topk_softmax_f32_body(logits, out_ids, out_probs, V, K, inv_temp);"
