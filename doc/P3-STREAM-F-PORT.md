@@ -32,11 +32,10 @@ mirror in `kernels-cuda/src/kernels/` (precedent: `add_f32`, the quantizers).
 
 **Pilot — `add_f16`** (the P3 spine proof): generic sweep module + CUDA `.cu`
 mirror + both cli arms. HIP gfx906 ✅ (5/5 bit-exact, `certs/hip/gfx906/add_f16.json`).
-CUDA sm_86 ⏳ **cert pending** — blocked on a CUDA-wide `cuInit 999` on the rig
-(affects every sweep incl. matmul; host-side device recovery needed, not a code
-issue); the kernel compiles clean and the wiring matches the proven matmul path,
-so the cert is one `flambeau sweep --arch sm_86 --op add_f16` away once cuInit
-recovers.
+CUDA sm_86 ✅ (5/5 bit-exact, `certs/cuda/sm_86/add_f16.json`) — landed once the
+rig's `/dev/nvidia-uvm` returned (the earlier `cuInit 999` was the missing uvm
+node, not a code issue). **The spine is validated end-to-end on both rigs**;
+every subsequent Stream F kernel rides `run_*_sweep::<B>` here.
 
 ## Port mechanics (per kernel)
 
