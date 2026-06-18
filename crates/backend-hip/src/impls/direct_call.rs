@@ -830,4 +830,24 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
         impl_id: "quantize_f16_q8_0",
         cert_rel_path: "certs/hip/gfx906/quantize_f16_q8_0.json",
     },
+    DirectCallKernel {
+        impl_id: "rmsnorm_f32_to_f16",
+        cert_rel_path: "certs/hip/gfx906/rmsnorm_f32_to_f16.json",
+    },
+    DirectCallKernel {
+        impl_id: "rmsnorm_f32_to_f16_add_residual",
+        cert_rel_path: "certs/hip/gfx906/rmsnorm_f32_to_f16_add_residual.json",
+    },
+    DirectCallKernel {
+        impl_id: "rmsnorm_f16_to_f16_add_residual",
+        cert_rel_path: "certs/hip/gfx906/rmsnorm_f16_to_f16_add_residual.json",
+    },
+    DirectCallKernel {
+        impl_id: "rmsnorm_f16_add_residual",
+        cert_rel_path: "certs/hip/gfx906/rmsnorm_f16_add_residual.json",
+    },
+    DirectCallKernel {
+        impl_id: "rmsnorm_q8_1_fused",
+        cert_rel_path: "certs/hip/gfx906/rmsnorm_q8_1_fused.json",
+    },
 ];

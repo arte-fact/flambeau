@@ -2928,3 +2928,77 @@ params = """
     const int k,
     const float eps"""
 body = "rmsnorm_f16_row<256>(x, weight, y, n_rows, k, eps);"
+
+# Fused RMSNorm family — gemma4 cast/residual paths + the decode RMSNorm→Q8_1
+# edge, sharing block_reduce_sum (rmsnorm_fused.cuh).
+
+[[kernel]]
+stem = "rmsnorm_f32_to_f16"
+includes = ["block_quant.cuh", "block_reduce.cuh", "rmsnorm_fused.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_rmsnorm_f32_to_f16"
+params = """
+    const float* __restrict__ x,
+    const fb_fp16_t* __restrict__ weight,
+    fb_fp16_t* __restrict__ y,
+    const int n_rows,
+    const int k,
+    const float eps"""
+body = "rmsnorm_f32_to_f16_row<256>(x, weight, y, n_rows, k, eps);"
+
+[[kernel.entry]]
+name = "flambeau_rmsnorm_f32_to_f16_add_residual"
+params = """
+    const float* __restrict__ x,
+    const fb_fp16_t* __restrict__ weight,
+    const fb_fp16_t* __restrict__ resid_in,
+    fb_fp16_t* __restrict__ resid_out,
+    const int n_rows,
+    const int k,
+    const float eps"""
+body = "rmsnorm_f32_to_f16_add_residual_row<256>(x, weight, resid_in, resid_out, n_rows, k, eps);"
+
+[[kernel.entry]]
+name = "flambeau_rmsnorm_f16_to_f16_add_residual"
+params = """
+    const fb_fp16_t* __restrict__ x,
+    const fb_fp16_t* __restrict__ weight,
+    const fb_fp16_t* __restrict__ resid_in,
+    fb_fp16_t* __restrict__ resid_out,
+    const int n_rows,
+    const int k,
+    const float eps"""
+body = "rmsnorm_f16_to_f16_add_residual_row<256>(x, weight, resid_in, resid_out, n_rows, k, eps);"
+
+[[kernel]]
+stem = "rmsnorm_f16_add_residual"
+includes = ["block_quant.cuh", "block_reduce.cuh", "rmsnorm_fused.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_rmsnorm_f16_add_residual"
+params = """
+    const fb_fp16_t* __restrict__ x_in,
+    const fb_fp16_t* __restrict__ delta,
+    const fb_fp16_t* __restrict__ weight,
+    fb_fp16_t* __restrict__ mid,
+    fb_fp16_t* __restrict__ mid_norm,
+    const int n_rows,
+    const int k,
+    const float eps"""
+body = "rmsnorm_f16_add_residual_row<256>(x_in, delta, weight, mid, mid_norm, n_rows, k, eps);"
+
+[[kernel]]
+stem = "rmsnorm_q8_1_fused"
+includes = ["block_quant.cuh", "block_reduce.cuh", "rmsnorm_fused.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_rmsnorm_q8_1_fused"
+params = """
+    const fb_fp16_t* __restrict__ x,
+    const fb_fp16_t* __restrict__ weight,
+    flambeau_block_q8_1* __restrict__ y,
+    const int n_rows,
+    const int k,
+    const float eps"""
+body = "rmsnorm_q8_1_fused_row<256>(x, weight, y, n_rows, k, eps);"

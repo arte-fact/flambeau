@@ -99,9 +99,9 @@ rope / activation-quant** (block-reduce + index math).
 **1b — Tier-B norms / rope / activation-quant** (block-reduce + index math):
 - [x] rmsnorm_f16  *(every-layer decode norm; block_reduce_sum seam; 1e-2/sqrt(k))*
 - [x] rmsnorm_f32  *(neutralized to shared `.cuh`; block_reduce_sum seam)*
-- [ ] rmsnorm_f32_to_f16
-- [ ] rmsnorm_f16_add_residual
-- [ ] rmsnorm_q8_1_fused
+- [x] rmsnorm_f32_to_f16  *(3 entries: _to_f16, _to_f16_add_residual, _f16_to_f16_add_residual)*
+- [x] rmsnorm_f16_add_residual  *(fused add → mid + mid_norm, 2 outputs)*
+- [x] rmsnorm_q8_1_fused  *(decode RMSNorm→Q8_1 edge; phase-2 already wave-agnostic)*
 - [x] l2_norm_f32  *(same block_reduce seam; bit-exact-tol 1e-5 both rigs)*
 
 **1b enabling primitive landed:** `kernels-shared/include/block_reduce.cuh` —

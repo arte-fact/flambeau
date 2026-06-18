@@ -50,6 +50,15 @@ pub fn run_pointwise_sweep<B: BenchBackend>(
         "quantize_f16_q8_0" => run_quantize_f16_q8_sweep::<B>(
             repo_root, arch, "quantize_f16_q8_0", "flambeau_quantize_row_f16_q8_0", "Q8_0", 34, 2,
         ),
+        "rmsnorm_f32_to_f16" => run_rmsnorm_f32_to_f16_sweep::<B>(repo_root, arch),
+        "rmsnorm_f32_to_f16_add_residual" => {
+            run_rmsnorm_add_residual_sweep::<B>(repo_root, arch, false)
+        }
+        "rmsnorm_f16_to_f16_add_residual" => {
+            run_rmsnorm_add_residual_sweep::<B>(repo_root, arch, true)
+        }
+        "rmsnorm_f16_add_residual" => run_rmsnorm_f16_add_residual_sweep::<B>(repo_root, arch),
+        "rmsnorm_q8_1_fused" => run_rmsnorm_q8_1_fused_sweep::<B>(repo_root, arch),
         _ => return None,
     };
     Some(cert)
@@ -500,6 +509,361 @@ pub fn run_sigmoid_mul_f16_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) 
         &[256, 4096, 8192], 0x53,
         |g, x| (1.0 / (1.0 + (-g).exp())) * x,
     )
+}
+
+const RMS_SHAPES: [(usize, usize); 3] = [(1, 2048), (8, 2048), (1, 5120)];
+const RMS_EPS: f32 = 1e-6;
+
+/// Assemble + write a cert from finished per-shape results. Shared tail for the
+/// row-shaped (norm / fused) sweeps whose only variation is metadata.
+#[expect(clippy::too_many_arguments, reason = "each arg is a distinct cert column.")]
+fn finish_cert<D: Device>(
+    dev: &D,
+    repo_root: &Path,
+    arch: &str,
+    impl_id: &str,
+    op: &str,
+    dtype_weight: &str,
+    dtype_activation: &str,
+    tolerance_formula: &str,
+    results: Vec<ShapeResult>,
+    pmc: crate::cert::PmcSnapshot,
+) -> Result<Cert> {
+    let pass = results.iter().all(|r| r.pass);
+    let cert = Cert {
+        schema_version: SCHEMA_VERSION,
+        impl_id: impl_id.to_string(),
+        backend: dev.backend().to_string(),
+        arch: arch.to_string(),
+        op: op.to_string(),
+        dtype_weight: dtype_weight.to_string(),
+        dtype_activation: dtype_activation.to_string(),
+        tolerance_formula: tolerance_formula.to_string(),
+        results,
+        pass,
+        emitted_at: now_utc_iso8601(),
+        rig: rig_for(arch),
+        pmc: Some(pmc),
+    };
+    cert.write_to_disk(repo_root)?;
+    Ok(cert)
+}
+
+fn rms_rsqrt(row: &[f32], eps: f32) -> f64 {
+    let sum_sq: f64 = row.iter().map(|&v| (v as f64) * (v as f64)).sum();
+    1.0 / ((sum_sq / (row.len() as f64)) + eps as f64).sqrt()
+}
+
+/// `rmsnorm_f32_to_f16` — F32 input, F16 weight + output (gemma4 cast+norm).
+pub fn run_rmsnorm_f32_to_f16_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) -> Result<Cert> {
+    let dev = B::new_device(0)?;
+    let image = B::image("rmsnorm_f32_to_f16").ok_or_else(|| anyhow!("rmsnorm_f32_to_f16 not compiled"))?;
+    let module = B::load(&dev, image)?;
+    let kernel = B::kernel(&module, "flambeau_rmsnorm_f32_to_f16")?;
+    let pmc = B::attributes(&kernel)?;
+
+    let mut results = Vec::new();
+    for (m, k) in RMS_SHAPES {
+        let seed = 0xC0FFEE ^ ((m as u64) * 1049 + (k as u64) * 11);
+        let x = seeded_f32_range(seed, m * k, -0.5, 0.5);
+        let w = f16_input(seed ^ 0xEE, k);
+        let mut reference = vec![0.0f32; m * k];
+        for r in 0..m {
+            let rsqrt = rms_rsqrt(&x[r * k..(r + 1) * k], RMS_EPS);
+            for i in 0..k {
+                let v = x[r * k + i] as f64 * w[i].to_f32() as f64 * rsqrt;
+                reference[r * k + i] = f16::from_f32(v as f32).to_f32();
+            }
+        }
+
+        let d_x = alloc_and_upload(&dev, &x);
+        let d_w = alloc_and_upload(&dev, &w);
+        let d_y = dev.alloc(m * k * 2)?;
+        {
+            let stream = dev.default_stream();
+            let m_i = m as i32;
+            let k_i = k as i32;
+            let x_ptr: u64 = d_x.as_usize() as u64;
+            let w_ptr: u64 = d_w.as_usize() as u64;
+            let y_ptr: u64 = d_y.as_usize() as u64;
+            let eps = RMS_EPS;
+            let mut args = <B::Args<'_>>::default();
+            args.push_arg(&x_ptr);
+            args.push_arg(&w_ptr);
+            args.push_arg(&y_ptr);
+            args.push_arg(&m_i);
+            args.push_arg(&k_i);
+            args.push_arg(&eps);
+            B::launch(&kernel, stream, LaunchCfg::one_d(m as u32, 256), args)?;
+            stream.synchronize()?;
+        }
+        let mut got_f16 = vec![f16::from_f32(0.0); m * k];
+        unsafe {
+            dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost,
+                DevicePtr(got_f16.as_mut_ptr() as usize), d_y, m * k * 2)?;
+        }
+        dev.default_stream().synchronize()?;
+        unsafe {
+            dev.dealloc(d_x, m * k * 4)?;
+            dev.dealloc(d_w, k * 2)?;
+            dev.dealloc(d_y, m * k * 2)?;
+        }
+        let got: Vec<f32> = got_f16.iter().map(|v| v.to_f32()).collect();
+        let err = max_rel_err_with_floor(&got, &reference, (k as f32).sqrt() * 0.01);
+        results.push(ShapeResult { m, k, n: 1, seed, max_rel_err: err, tolerance: 1e-2, pass: err <= 1e-2 });
+    }
+    finish_cert(&dev, repo_root, arch, "rmsnorm_f32_to_f16", "rmsnorm_f32_to_f16", "F32", "F16",
+        "|err| <= 1e-2 * max(|ref|, sqrt(k))", results, pmc)
+}
+
+/// `rmsnorm_{f32,f16}_to_f16_add_residual` — norm a delta, add into the F16
+/// residual stream (saturated). `f16_delta` selects the delta input dtype.
+pub fn run_rmsnorm_add_residual_sweep<B: BenchBackend>(
+    repo_root: &Path,
+    arch: &str,
+    f16_delta: bool,
+) -> Result<Cert> {
+    let (stem, entry, dw) = if f16_delta {
+        ("rmsnorm_f32_to_f16", "flambeau_rmsnorm_f16_to_f16_add_residual", "F16")
+    } else {
+        ("rmsnorm_f32_to_f16", "flambeau_rmsnorm_f32_to_f16_add_residual", "F32")
+    };
+    let impl_id = if f16_delta { "rmsnorm_f16_to_f16_add_residual" } else { "rmsnorm_f32_to_f16_add_residual" };
+    let dev = B::new_device(0)?;
+    let image = B::image(stem).ok_or_else(|| anyhow!("{stem} not compiled"))?;
+    let module = B::load(&dev, image)?;
+    let kernel = B::kernel(&module, entry)?;
+    let pmc = B::attributes(&kernel)?;
+
+    let mut results = Vec::new();
+    for (m, k) in RMS_SHAPES {
+        let seed = 0xC0FFEE ^ ((m as u64) * 1049 + (k as u64) * 11) ^ if f16_delta { 0xF16 } else { 0 };
+        // Delta values; for the f16 path they round-trip through f16 first.
+        let delta_f32 = seeded_f32_range(seed, m * k, -0.5, 0.5);
+        let delta: Vec<f32> = if f16_delta {
+            delta_f32.iter().map(|v| f16::from_f32(*v).to_f32()).collect()
+        } else {
+            delta_f32.clone()
+        };
+        let w = f16_input(seed ^ 0xEE, k);
+        let resid = f16_input(seed ^ 0x5A, m * k);
+        let mut reference = vec![0.0f32; m * k];
+        for r in 0..m {
+            let rsqrt = rms_rsqrt(&delta[r * k..(r + 1) * k], RMS_EPS);
+            for i in 0..k {
+                let normed = delta[r * k + i] as f64 * w[i].to_f32() as f64 * rsqrt;
+                let sum = (resid[r * k + i].to_f32() as f64 + normed) as f32;
+                reference[r * k + i] = f16::from_f32(sum.clamp(-65504.0, 65504.0)).to_f32();
+            }
+        }
+
+        // Upload delta as f16 or f32 depending on the kernel's input type.
+        let d_x = if f16_delta {
+            let d16: Vec<f16> = delta.iter().map(|v| f16::from_f32(*v)).collect();
+            alloc_and_upload(&dev, &d16)
+        } else {
+            alloc_and_upload(&dev, &delta)
+        };
+        let x_bytes = if f16_delta { m * k * 2 } else { m * k * 4 };
+        let d_w = alloc_and_upload(&dev, &w);
+        let d_resid = alloc_and_upload(&dev, &resid);
+        let d_out = dev.alloc(m * k * 2)?;
+        {
+            let stream = dev.default_stream();
+            let m_i = m as i32;
+            let k_i = k as i32;
+            let x_ptr: u64 = d_x.as_usize() as u64;
+            let w_ptr: u64 = d_w.as_usize() as u64;
+            let ri_ptr: u64 = d_resid.as_usize() as u64;
+            let ro_ptr: u64 = d_out.as_usize() as u64;
+            let eps = RMS_EPS;
+            let mut args = <B::Args<'_>>::default();
+            args.push_arg(&x_ptr);
+            args.push_arg(&w_ptr);
+            args.push_arg(&ri_ptr);
+            args.push_arg(&ro_ptr);
+            args.push_arg(&m_i);
+            args.push_arg(&k_i);
+            args.push_arg(&eps);
+            B::launch(&kernel, stream, LaunchCfg::one_d(m as u32, 256), args)?;
+            stream.synchronize()?;
+        }
+        let mut got_f16 = vec![f16::from_f32(0.0); m * k];
+        unsafe {
+            dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost,
+                DevicePtr(got_f16.as_mut_ptr() as usize), d_out, m * k * 2)?;
+        }
+        dev.default_stream().synchronize()?;
+        unsafe {
+            dev.dealloc(d_x, x_bytes)?;
+            dev.dealloc(d_w, k * 2)?;
+            dev.dealloc(d_resid, m * k * 2)?;
+            dev.dealloc(d_out, m * k * 2)?;
+        }
+        let got: Vec<f32> = got_f16.iter().map(|v| v.to_f32()).collect();
+        let err = max_rel_err_with_floor(&got, &reference, (k as f32).sqrt() * 0.01);
+        results.push(ShapeResult { m, k, n: 1, seed, max_rel_err: err, tolerance: 1e-2, pass: err <= 1e-2 });
+    }
+    finish_cert(&dev, repo_root, arch, impl_id, impl_id, dw, "F16",
+        "|err| <= 1e-2 * max(|ref|, sqrt(k))", results, pmc)
+}
+
+/// `rmsnorm_f16_add_residual` — fused add (`mid = x_in + delta`) + rmsnorm
+/// (`mid_norm = rmsnorm(mid) * weight`); both outputs emitted. Scored on the
+/// worse of the two outputs.
+pub fn run_rmsnorm_f16_add_residual_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) -> Result<Cert> {
+    let dev = B::new_device(0)?;
+    let image = B::image("rmsnorm_f16_add_residual").ok_or_else(|| anyhow!("rmsnorm_f16_add_residual not compiled"))?;
+    let module = B::load(&dev, image)?;
+    let kernel = B::kernel(&module, "flambeau_rmsnorm_f16_add_residual")?;
+    let pmc = B::attributes(&kernel)?;
+
+    let mut results = Vec::new();
+    for (m, k) in RMS_SHAPES {
+        let seed = 0xC0FFEE ^ ((m as u64) * 1049 + (k as u64) * 17);
+        let x_in = f16_input(seed, m * k);
+        let delta = f16_input(seed ^ 0xD0, m * k);
+        let w = f16_input(seed ^ 0xEE, k);
+        // mid uses the unrounded sum for the reduce, the f16-rounded mid for norm.
+        let mut ref_mid = vec![0.0f32; m * k];
+        let mut ref_norm = vec![0.0f32; m * k];
+        for r in 0..m {
+            let mid_unrounded: Vec<f32> = (0..k)
+                .map(|i| x_in[r * k + i].to_f32() + delta[r * k + i].to_f32())
+                .collect();
+            let mid_f16: Vec<f32> = mid_unrounded.iter().map(|v| f16::from_f32(*v).to_f32()).collect();
+            for i in 0..k {
+                ref_mid[r * k + i] = mid_f16[i];
+            }
+            let rsqrt = rms_rsqrt(&mid_unrounded, RMS_EPS);
+            for i in 0..k {
+                let v = mid_f16[i] as f64 * w[i].to_f32() as f64 * rsqrt;
+                ref_norm[r * k + i] = f16::from_f32(v as f32).to_f32();
+            }
+        }
+
+        let d_xin = alloc_and_upload(&dev, &x_in);
+        let d_delta = alloc_and_upload(&dev, &delta);
+        let d_w = alloc_and_upload(&dev, &w);
+        let d_mid = dev.alloc(m * k * 2)?;
+        let d_norm = dev.alloc(m * k * 2)?;
+        {
+            let stream = dev.default_stream();
+            let m_i = m as i32;
+            let k_i = k as i32;
+            let xin_ptr: u64 = d_xin.as_usize() as u64;
+            let dl_ptr: u64 = d_delta.as_usize() as u64;
+            let w_ptr: u64 = d_w.as_usize() as u64;
+            let mid_ptr: u64 = d_mid.as_usize() as u64;
+            let norm_ptr: u64 = d_norm.as_usize() as u64;
+            let eps = RMS_EPS;
+            let mut args = <B::Args<'_>>::default();
+            args.push_arg(&xin_ptr);
+            args.push_arg(&dl_ptr);
+            args.push_arg(&w_ptr);
+            args.push_arg(&mid_ptr);
+            args.push_arg(&norm_ptr);
+            args.push_arg(&m_i);
+            args.push_arg(&k_i);
+            args.push_arg(&eps);
+            B::launch(&kernel, stream, LaunchCfg::one_d(m as u32, 256), args)?;
+            stream.synchronize()?;
+        }
+        let mut got_mid = vec![f16::from_f32(0.0); m * k];
+        let mut got_norm = vec![f16::from_f32(0.0); m * k];
+        unsafe {
+            dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost,
+                DevicePtr(got_mid.as_mut_ptr() as usize), d_mid, m * k * 2)?;
+            dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost,
+                DevicePtr(got_norm.as_mut_ptr() as usize), d_norm, m * k * 2)?;
+        }
+        dev.default_stream().synchronize()?;
+        unsafe {
+            dev.dealloc(d_xin, m * k * 2)?;
+            dev.dealloc(d_delta, m * k * 2)?;
+            dev.dealloc(d_w, k * 2)?;
+            dev.dealloc(d_mid, m * k * 2)?;
+            dev.dealloc(d_norm, m * k * 2)?;
+        }
+        let gm: Vec<f32> = got_mid.iter().map(|v| v.to_f32()).collect();
+        let gn: Vec<f32> = got_norm.iter().map(|v| v.to_f32()).collect();
+        let err = max_rel_err_with_floor(&gm, &ref_mid, (k as f32).sqrt() * 0.01)
+            .max(max_rel_err_with_floor(&gn, &ref_norm, (k as f32).sqrt() * 0.01));
+        results.push(ShapeResult { m, k, n: 1, seed, max_rel_err: err, tolerance: 1e-2, pass: err <= 1e-2 });
+    }
+    finish_cert(&dev, repo_root, arch, "rmsnorm_f16_add_residual", "rmsnorm_f16_add_residual",
+        "F16", "F16", "|err| <= 1e-2 * max(|ref|, sqrt(k)) on both outputs", results, pmc)
+}
+
+/// `rmsnorm_q8_1_fused` — RMSNorm → Q8_1 quantize (decode hot edge). Scored by
+/// dequantizing the output and comparing to the F64 rmsnorm oracle.
+pub fn run_rmsnorm_q8_1_fused_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) -> Result<Cert> {
+    let dev = B::new_device(0)?;
+    let image = B::image("rmsnorm_q8_1_fused").ok_or_else(|| anyhow!("rmsnorm_q8_1_fused not compiled"))?;
+    let module = B::load(&dev, image)?;
+    let kernel = B::kernel(&module, "flambeau_rmsnorm_q8_1_fused")?;
+    let pmc = B::attributes(&kernel)?;
+
+    let mut results = Vec::new();
+    for (m, k) in RMS_SHAPES {
+        let seed = 0xC0FFEE ^ ((m as u64) * 1049 + (k as u64) * 23);
+        let x = f16_input(seed, m * k);
+        let w = f16_input(seed ^ 0xEE, k);
+        let mut normed = vec![0.0f32; m * k];
+        for r in 0..m {
+            let row: Vec<f32> = (0..k).map(|i| x[r * k + i].to_f32()).collect();
+            let rsqrt = rms_rsqrt(&row, RMS_EPS);
+            for i in 0..k {
+                normed[r * k + i] = (row[i] as f64 * w[i].to_f32() as f64 * rsqrt) as f32;
+            }
+        }
+
+        let d_x = alloc_and_upload(&dev, &x);
+        let d_w = alloc_and_upload(&dev, &w);
+        let n_blocks = m * (k / 32);
+        let out_bytes = n_blocks * 36;
+        let d_y = dev.alloc(out_bytes)?;
+        {
+            let stream = dev.default_stream();
+            let m_i = m as i32;
+            let k_i = k as i32;
+            let x_ptr: u64 = d_x.as_usize() as u64;
+            let w_ptr: u64 = d_w.as_usize() as u64;
+            let y_ptr: u64 = d_y.as_usize() as u64;
+            let eps = RMS_EPS;
+            let mut args = <B::Args<'_>>::default();
+            args.push_arg(&x_ptr);
+            args.push_arg(&w_ptr);
+            args.push_arg(&y_ptr);
+            args.push_arg(&m_i);
+            args.push_arg(&k_i);
+            args.push_arg(&eps);
+            B::launch(&kernel, stream, LaunchCfg::one_d(m as u32, 256), args)?;
+            stream.synchronize()?;
+        }
+        let mut got = vec![0u8; out_bytes];
+        unsafe {
+            dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost,
+                DevicePtr(got.as_mut_ptr() as usize), d_y, out_bytes)?;
+        }
+        dev.default_stream().synchronize()?;
+        unsafe {
+            dev.dealloc(d_x, m * k * 2)?;
+            dev.dealloc(d_w, k * 2)?;
+            dev.dealloc(d_y, out_bytes)?;
+        }
+        let mut dequant = vec![0.0f32; m * k];
+        for (blk_idx, block) in got.chunks(36).enumerate() {
+            let d = f16::from_bits(u16::from_le_bytes([block[0], block[1]])).to_f32();
+            for lane in 0..32 {
+                dequant[blk_idx * 32 + lane] = d * (block[4 + lane] as i8) as f32;
+            }
+        }
+        let err = max_rel_err_with_floor(&dequant, &normed, 1.0);
+        results.push(ShapeResult { m, k, n: 1, seed, max_rel_err: err, tolerance: 2e-2, pass: err <= 2e-2 });
+    }
+    finish_cert(&dev, repo_root, arch, "rmsnorm_q8_1_fused", "rmsnorm_q8_1_fused", "F16", "Q8_1",
+        "|dequant - rmsnorm oracle| <= 2e-2 * max(|ref|, 1)", results, pmc)
 }
 
 /// `quantize_f16_q8_{0,1}` — F16 activation → Q8 blocks (32 threads/block,

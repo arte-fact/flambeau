@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "impl_id": "rmsnorm_q8_1_fused",
+  "backend": "hip",
+  "arch": "gfx906",
+  "op": "rmsnorm_q8_1_fused",
+  "dtype_weight": "F16",
+  "dtype_activation": "Q8_1",
+  "tolerance_formula": "|dequant - rmsnorm oracle| <= 2e-2 * max(|ref|, 1)",
+  "results": [
+    {
+      "m": 1,
+      "k": 2048,
+      "n": 1,
+      "seed": 12600311,
+      "max_rel_err": 0.003422603,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 8,
+      "k": 2048,
+      "n": 1,
+      "seed": 12592934,
+      "max_rel_err": 0.0034221709,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 5120,
+      "n": 1,
+      "seed": 12660727,
+      "max_rel_err": 0.0032767057,
+      "tolerance": 0.02,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-06-18T11:23:20Z",
+  "rig": "threadreaper-gfx906",
+  "pmc": {
+    "vgpr_count": 24,
+    "sgpr_count": null,
+    "waves_per_simd": 10,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}
