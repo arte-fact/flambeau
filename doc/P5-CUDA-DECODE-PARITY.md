@@ -1,0 +1,111 @@
+# P5 — CUDA single-GPU end-to-end decode parity
+
+**Status:** scoped 2026-06-18 (post-P3, parallel to P4). Tracker for roadmap
+phase **P5**; `CUDA-PORT-PLAN.md` §B7. Gate: **`flambeau infer --backend cuda`
+on qwen35moe-v2 Q4_K → logit-cosine ≥ 0.9999 vs llama.cpp CUDA over 64 tokens.**
+No perf gate — the bar is correctness + portability on one sm_86 GPU (the RTX
+3090 we have). This is the phase that proves the whole CUDA port runs a real
+model.
+
+## The one missing piece: `CudaBackend` (Registry + Ops)
+
+Everything *around* the op-launch layer is already vendor-clean and ready:
+
+| layer | state |
+| --- | --- |
+| `ForwardEngine<B>`, `StageHooks`/topology, models, server, loaders | ✅ generic over the `Backend` bundle (A0–A3 decoupling; `engine.rs` names `B::Registry`) |
+| `Device` / `Stream` / `Event` / `Cluster` (CUDA) | ✅ `CudaDevice`/`CudaStream`/`CudaEvent`/`CudaCluster` (P1–P4) |
+| CUDA kernels (`.cubin`) | ✅ all of P2 (mmvq/mmq) + P3 (attention/norm/rope/sampler/gdn/…) compiled for sm_86 |
+| `dispatch/cuda/sm_86.toml` | 🟡 seeded with the autotuned `qmatmul` rows; needs the rest of the decode-path ops filled in |
+| **`CudaBackend: Backend`** = CUDA **`Registry`** (load cubins) + **`CudaOps: Ops`** (145-method launch layer) | ❌ **not started — this is P5** |
+
+The `Backend` bundle (`crates/backend/src/lib.rs`) already declares
+`type Registry` + `type Ops<'a>: Ops` + `fn ops(reg, stream)`; `HipBackend`
+fills them with `OpsRegistry` + `HipOps`. **P5 is: fill those two slots for
+CUDA.** Once `CudaBackend` exists, `ForwardEngine<CudaBackend>` is the existing
+generic engine — no forward/model/server changes.
+
+## Central decision: genericize the launch glue, do not copy it
+
+The HIP op-launch glue is large — `crates/ops/src/hip/` is ~450 KB across
+`qmatmul.rs` (98 KB), `moe.rs` (136 KB), `attention.rs` (49 KB), `ops_impl.rs`
+(48 KB), norm/cast/pe/rope/sampling/recurrent. Each launch body is the same
+shape: `reg.expect_module(stem) → module.kernel(name) → push args → launch with
+grid/block`. The **only** HIP-specific things are the module/kernel/args/launch
+*types* (`HipModule`/`HipKernel`/`KernelArgs`); the dispatch arithmetic (shape →
+variant, grid/block) is backend-identical.
+
+**Recommendation: genericize `OpsRegistry`/`OpCtx` + the launch bodies over a
+backend launch trait, so one body serves both backends** — not a parallel
+`cuda/` copy. Rationale:
+- **Proven**: `crates/bench/src/backend.rs` `BenchBackend` already abstracts
+  `Module`/`Kernel`/`Args` + `image`/`load`/`kernel`/`launch` and runs the
+  *same* sweep bodies on HIP **and** CUDA across ~90 kernels (all of P2/P3). P5
+  extends that exact proven pattern from the sweep harness to the runtime layer.
+- **Rule 14**: copying 450 KB of launch glue is the canonical "don't duplicate
+  100-LOC blocks across backends" violation; it doubles maintenance for every
+  future kernel/arch forever.
+- **Consistency**: A0–A3 already genericized Device/Stream/Event/Cluster + the
+  whole forward/model/server stack. The op-launch layer is the last HIP-concrete
+  island; genericizing it finishes the decoupling rather than forking it.
+
+Trade-off: a larger upfront refactor (touching the big `hip/` files) vs. faster
+first-decode-but-permanent-duplication. The refactor is the right multi-session
+investment; the HIP forward-parity snapshots are the guardrail that it stays
+behaviour-preserving.
+
+## Phasing
+
+- **P5.0 — Lift the launch primitives.** Genericize `OpsRegistry` →
+  `Registry<B>` (`HashMap<&str, B::Module>`, loads `B::image(stem)`) and `OpCtx`
+  → `OpCtx<'_, B>` over a backend launch trait (extend the `Backend` bundle or
+  reuse a `BenchBackend`-shaped seam: `Module`/`Kernel`/`Args`/`launch`). Keep
+  `HipOps` working unchanged. Gate: HIP build + forward-parity snapshots green.
+- **P5.1 — Genericize the launch bodies, domain by domain.** Smallest first
+  (`cast`, `softmax`, `softcap`, `pe`, `sampling`, `norm`), then `attention`,
+  `qmatmul`, `moe`. Each domain: bodies take `OpCtx<'_, B>`; HIP parity stays
+  green after every domain (the guardrail). This is the bulk of P5.
+- **P5.2 — `CudaBackend` + CUDA `Registry`/`CudaOps`.** Implement `Backend` for
+  `CudaBackend` (Device/Stream/Event/Cluster already done); `Registry<CudaBackend>`
+  loads `flambeau_kernels_cuda::cubin(stem)`; `CudaOps` is the generic `Ops` over
+  `CudaBackend`. Gate: a CUDA op smoke (e.g. `rmsnorm_f16` / `attention_decode_f16`
+  vs the F64 oracle) through the runtime path, not just the sweep.
+- **P5.3 — Fill `dispatch/cuda/sm_86.toml` for the decode path.** The
+  qwen35moe-v2 Q4_K decode ops (Q4_K mmvq/mmq, attention_decode_f16, rmsnorm,
+  rope, swiglu, moe sort/combine/topk, sampler). Each row needs a green
+  `certs/cuda/sm_86/<impl>.json` (rule 2). `flambeau autotune --backend cuda`
+  seeds the mmvq rows; the rest from the P3 certs.
+- **P5.4 — The parity gate.** `flambeau infer --backend cuda --model
+  qwen35moe-v2-Q4_K`: single token first (logit-cosine vs llama.cpp CUDA), then
+  64 tokens ≥ 0.9999. File the diff; no perf claim.
+
+## Validation posture
+
+- **HIP forward-parity snapshots are the guardrail** through P5.0–P5.1 — every
+  genericization step must leave the gfx906 forward bit-identical (the same
+  snapshot suite that protected A0–A3). A red snapshot means the refactor
+  changed behaviour; stop and fix before proceeding.
+- **CUDA correctness** rides the existing sweep certs (per-op) → a runtime op
+  smoke (P5.2) → the end-to-end logit-cosine (P5.4).
+
+## What P5 unblocks
+
+- **P4.3 `FusedAllReduce`** — needs `CudaOps` to dispatch the `add_f16` /
+  `rmsnorm_*_add_residual` epilogues after `ncclAllReduce`. Once P5.2 lands the
+  CUDA op-launch layer, P4.3 is `ncclAllReduce` + an existing op call.
+- **P4.4 graph slot-map** — the progressive-dispatch param rebind needs the CUDA
+  kernel-node param surface, which the CUDA `Ops` launch path establishes.
+- **B8** — sm_80 / sm_89 are then recompiles + per-arch cert grids over the same
+  generic Ops (no launch-glue changes).
+
+## Risks / notes
+
+- The big-file genericization (`moe.rs`, `qmatmul.rs`) is where subtle
+  HIP-isms may hide (wave64 assumptions in *host-side* launch arithmetic, e.g.
+  block dims hard-coded to 64). Audit each for the `WARP_SIZE` host analog as the
+  bodies go generic — the kernel side is already arch-seamed from P3.
+- `KernelArgs` vs a CUDA args type: the launch trait must abstract arg-pushing
+  (the `LaunchArgs` trait in `bench/backend.rs` already does this — reuse it).
+- qwen35moe-v2 Q4_K is the smallest full MoE; it exercises mmvq/mmq + attention
+  + moe routing + sampler — a broad first end-to-end, but the right one (it has
+  a glue crate already).
