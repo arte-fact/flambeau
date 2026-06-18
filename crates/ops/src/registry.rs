@@ -279,8 +279,6 @@ pub const KERNEL_STEMS: &[&str] = &[
 /// Load failure for [`Registry::new`].
 #[derive(Debug, thiserror::Error)]
 pub enum RegistryError {
-    #[error("kernel stem `{0}` not present in the compiled catalogue")]
-    Missing(&'static str),
     #[error("module load for `{stem}` failed: {source}")]
     Load {
         stem: &'static str,
@@ -294,22 +292,36 @@ pub enum RegistryError {
 pub struct Registry<B: KernelBackend> {
     device_id: i32,
     modules: HashMap<&'static str, B::Module>,
+    skipped: Vec<&'static str>,
 }
 
 impl<B: KernelBackend> Registry<B> {
-    /// Load every [`KERNEL_STEMS`] entry into a fresh module on `dev`. Binds
-    /// `dev` first so loads land on the right device. Fails fast on a missing
-    /// stem or a backend load error.
+    /// Load each [`KERNEL_STEMS`] entry that `B`'s compiled catalogue actually
+    /// contains into a fresh module on `dev`, binding `dev` first so loads land
+    /// on the right device.
+    ///
+    /// `KERNEL_STEMS` is the union over every backend; each backend compiles a
+    /// different subset (CUDA hasn't ported the legacy single-row oracles / the
+    /// out-of-scope IQ quants, HIP has them all). A stem absent from this
+    /// backend's catalogue is **skipped**, not an error — the load-present
+    /// contract for N partial catalogues. Drift safety moves to first use:
+    /// [`expect_module`](Self::expect_module) errors at launch, naming the stem,
+    /// if a *dispatched* op asks for one that was skipped. Inspect the skip set
+    /// with [`skipped`](Self::skipped).
     /// # Errors
-    /// [`RegistryError::Missing`] / [`RegistryError::Load`].
+    /// [`RegistryError::Load`] if a present stem fails to load on the device.
     pub fn new(dev: &B::Device) -> Result<Self, RegistryError> {
         B::bind(dev).map_err(|e| RegistryError::Load {
             stem: "<bind>",
             source: anyhow::anyhow!("{e:?}"),
         })?;
         let mut modules = HashMap::with_capacity(KERNEL_STEMS.len());
+        let mut skipped = Vec::new();
         for &stem in KERNEL_STEMS {
-            let image = B::image(stem).ok_or(RegistryError::Missing(stem))?;
+            let Some(image) = B::image(stem) else {
+                skipped.push(stem);
+                continue;
+            };
             let module = B::load(dev, image).map_err(|e| RegistryError::Load {
                 stem,
                 source: anyhow::anyhow!("{e:?}"),
@@ -319,7 +331,16 @@ impl<B: KernelBackend> Registry<B> {
         Ok(Self {
             device_id: dev.id(),
             modules,
+            skipped,
         })
+    }
+
+    /// Stems from [`KERNEL_STEMS`] absent from this backend's compiled catalogue
+    /// and therefore not loaded. Empty on a backend that compiles every stem
+    /// (HIP today). For CUDA it lists the unported legacy / out-of-scope kernels;
+    /// a dispatched op hitting one of these fails loudly at launch.
+    pub fn skipped(&self) -> &[&'static str] {
+        &self.skipped
     }
 
     /// Look up a loaded module by kernel stem.
