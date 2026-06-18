@@ -68,10 +68,27 @@ behaviour-preserving.
   Guardrail green: `ops_smoke` 5/5, `parity_snapshot_dense`/`gdn` +
   `snapshot_restore` bit-identical on gfx906; `add_f16` sweep certs both
   backends.
-- **P5.1 — Genericize the launch bodies, domain by domain.** Smallest first
-  (`cast`, `softmax`, `softcap`, `pe`, `sampling`, `norm`), then `attention`,
-  `qmatmul`, `moe`. Each domain: bodies take `OpCtx<'_, B>`; HIP parity stays
-  green after every domain (the guardrail). This is the bulk of P5.
+- 🔄 **P5.1 — Genericize the launch bodies, domain by domain.** Bodies move to
+  `<B: KernelBackend>(reg: &Registry<B>, stream, …)` with `B::kernel`/`B::Args`/
+  `B::launch`; `ops_impl` callers pass `self.reg, self.stream`. Done via a
+  scripted mechanical pass (`/tmp/migrate_ops.py`) + per-file import fixes, each
+  batch gated on the gfx906 parity snapshots.
+  - ✅ **Batch 1** (`237116d`): `cast`, `softcap`, `softmax`, `conv`, `pe`
+    (rope ×3), `sampling`, `router` (dense_gemv ×4).
+  - ✅ **Batch 2** (`b78bf6e`): `norm` (14), `mlp` (12), `recurrent` (7 GDN).
+  - Guardrail green throughout: `ops_smoke` 5/5, `synth_dense/gdn/gemma_mixed` +
+    `parity_snapshot_dense/gdn/attn_gated` + `snapshot_restore` bit-identical.
+  - ⏸️ **Remaining (the big three):**
+    - **`attention.rs` — blocked.** Uses 6 `KernelArgs::push_slot` graph-slot
+      bindings (`ScalarSlot`); the generic `LaunchArgs` has no slot surface yet.
+      Needs `LaunchArgs` extended with a `push_slot` (or the slot path lifted) —
+      the same progressive-dispatch slot support the P4.4 graph slot-map needs.
+      Do that seam extension first, then migrate.
+    - **`qmatmul.rs`** (24 op fns + 10 helper fns) and **`moe.rs`** (74 op fns +
+      2 helpers) — migratable mechanically, but the script needs two additions
+      first: `KernelArgs::with_capacity(n)` → `<B::Args<'_>>::default()`, and the
+      private helper fns that take `reg`/module must also gain `<B>` (the `pub fn`
+      regex misses them). Large but low-risk once those are handled.
 - **P5.2 — `CudaBackend` + CUDA `Registry`/`CudaOps`.** Implement `Backend` for
   `CudaBackend` (Device/Stream/Event/Cluster already done); `Registry<CudaBackend>`
   loads `flambeau_kernels_cuda::cubin(stem)`; `CudaOps` is the generic `Ops` over
