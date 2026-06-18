@@ -1001,4 +1001,20 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
         impl_id: "kv_append_f16_paged_prefill",
         cert_rel_path: "certs/hip/gfx906/kv_append_f16_paged_prefill.json",
     },
+    DirectCallKernel {
+        impl_id: "attention_prefill_f16",
+        cert_rel_path: "certs/hip/gfx906/attention_prefill_f16.json",
+    },
+    DirectCallKernel {
+        impl_id: "attention_decode_f16_batched",
+        cert_rel_path: "certs/hip/gfx906/attention_decode_f16_batched.json",
+    },
+    DirectCallKernel {
+        impl_id: "attention_decode_f16_paged",
+        cert_rel_path: "certs/hip/gfx906/attention_decode_f16_paged.json",
+    },
+    DirectCallKernel {
+        impl_id: "attention_prefill_f16_paged",
+        cert_rel_path: "certs/hip/gfx906/attention_prefill_f16_paged.json",
+    },
 ];
