@@ -30,6 +30,13 @@ pub trait KernelBackend: 'static {
     type Kernel<'m>;
     type Args<'a>: LaunchArgs<'a>;
 
+    /// Hardware warp/wave width for this backend's daily arch (gfx906 = 64,
+    /// sm_8x = 32). Host-side launch arithmetic for warp-shaped blocks must use
+    /// this, never a hard-coded `64` — a wave64 block dim on a wave32 GPU
+    /// launches twice the lanes the kernel's `WARP_SIZE`-templated body expects,
+    /// so the extra lanes race the cooperative loads and read past their tiles.
+    const WARP_SIZE: u32;
+
     /// Bind `dev` as the calling thread's current device, so subsequent module
     /// loads / launches land on it (matters when several registries are built
     /// back-to-back on a multi-GPU cluster).

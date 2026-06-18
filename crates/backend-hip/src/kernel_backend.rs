@@ -27,6 +27,8 @@ impl KernelBackend for HipKernels {
     type Kernel<'m> = HipKernel<'m>;
     type Args<'a> = KernelArgs<'a>;
 
+    const WARP_SIZE: u32 = 64;
+
     fn bind(dev: &HipDevice) -> DeviceResult<()> {
         dev.bind()
     }

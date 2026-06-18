@@ -23,6 +23,8 @@ impl KernelBackend for CudaKernels {
     type Kernel<'m> = CudaKernel<'m>;
     type Args<'a> = KernelArgs<'a>;
 
+    const WARP_SIZE: u32 = 32;
+
     fn bind(dev: &CudaDevice) -> DeviceResult<()> {
         dev.bind()
     }

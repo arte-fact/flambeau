@@ -1020,10 +1020,9 @@ pub fn attention_prefill_q8_kv<B: flambeau_core::KernelBackend>(
         args.push_arg(&window_size);
         args.push_arg(&ring_depth);
         let br: u32 = if head_dim == 256 { 8 } else { 4 };
-        const WARP: u32 = 64;
         let cfg = LaunchCfg {
             grid: ((n_q_tokens as u32).div_ceil(br), n_heads_q as u32, 1),
-            block: (WARP, br, 1),
+            block: (B::WARP_SIZE, br, 1),
             shared_bytes: 0,
         };
         B::launch(&kernel, stream, cfg, args)?;
@@ -1206,10 +1205,9 @@ pub fn attention_prefill_f16_slots<B: flambeau_core::KernelBackend>(
         // d256_br8 uses BR=8 (more Q rows per block, fewer blocks);
         // other head_dims still use BR=4.
         let br: u32 = if head_dim == 256 { 8 } else { 4 };
-        const WARP: u32 = 64;
         let cfg = LaunchCfg {
             grid: ((n_q_tokens as u32).div_ceil(br), n_heads_q as u32, 1),
-            block: (WARP, br, 1),
+            block: (B::WARP_SIZE, br, 1),
             shared_bytes: 0,
         };
         B::launch(&kernel, stream, cfg, args)?;
