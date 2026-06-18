@@ -19,4 +19,45 @@ fn main() {
         }
     }
     println!("cargo:rustc-link-lib=dylib=cuda");
+
+    // NCCL (multi-GPU Collectives seam) — only under the `nccl` feature. The
+    // wheel ships `libnccl.so.2` with no `.so` dev symlink, so `-lnccl` can't
+    // find it directly: symlink `libnccl.so` into OUT_DIR and point both the
+    // link search and the runtime rpath at the real lib dir.
+    if env::var("CARGO_FEATURE_NCCL").is_ok() {
+        link_nccl();
+    }
+}
+
+fn link_nccl() {
+    use std::path::PathBuf;
+    println!("cargo:rerun-if-env-changed=NCCL_LIB_DIR");
+    let lib_dir = env::var("NCCL_LIB_DIR")
+        .ok()
+        .or_else(find_nccl_lib_dir)
+        .expect("NCCL requested (feature `nccl`) but libnccl.so.2 not found; set NCCL_LIB_DIR");
+    let real = Path::new(&lib_dir).join("libnccl.so.2");
+    assert!(real.exists(), "NCCL_LIB_DIR={lib_dir} has no libnccl.so.2");
+
+    let out_dir = env::var("OUT_DIR").unwrap();
+    let link = PathBuf::from(&out_dir).join("libnccl.so");
+    let _ = std::fs::remove_file(&link);
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&real, &link).expect("symlink libnccl.so");
+
+    println!("cargo:rustc-link-search=native={out_dir}");
+    println!("cargo:rustc-link-lib=dylib=nccl");
+    println!("cargo:rustc-link-arg=-Wl,-rpath,{lib_dir}");
+}
+
+fn find_nccl_lib_dir() -> Option<String> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let candidates = [
+        format!("{home}/.local/lib/python3.14/site-packages/nvidia/nccl/lib"),
+        format!("{home}/.local/lib/python3.12/site-packages/nvidia/nccl/lib"),
+        "/usr/lib/x86_64-linux-gnu".to_string(),
+    ];
+    candidates
+        .into_iter()
+        .find(|d| Path::new(d).join("libnccl.so.2").exists())
 }

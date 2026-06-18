@@ -45,6 +45,8 @@ extern "C" {
     pub fn cuInit(flags: c_uint) -> c_int;
     pub fn cuDeviceGetCount(count: *mut c_int) -> c_int;
     pub fn cuDeviceGet(device: *mut CUdevice, ordinal: c_int) -> c_int;
+    /// `*can = 1` iff `dev` can directly dereference allocations on `peer`.
+    pub fn cuDeviceCanAccessPeer(can: *mut c_int, dev: CUdevice, peer: CUdevice) -> c_int;
     /// Retain the device's primary context; ref-counted, released by
     /// `cuDevicePrimaryCtxRelease`.
     pub fn cuDevicePrimaryCtxRetain(ctx: *mut CUcontext, device: CUdevice) -> c_int;

@@ -23,7 +23,7 @@ use crate::sys::{
 
 const BACKEND: &str = "cuda";
 
-fn check(code: std::os::raw::c_int, ctx: &'static str) -> DeviceResult<()> {
+pub(crate) fn check(code: std::os::raw::c_int, ctx: &'static str) -> DeviceResult<()> {
     if code == CUDA_SUCCESS {
         Ok(())
     } else {
@@ -271,6 +271,11 @@ impl CudaDevice {
         // SAFETY: `self.ctx` is the retained primary context, valid for the
         // lifetime of `self`.
         check(unsafe { cuCtxSetCurrent(self.ctx) }, "cuCtxSetCurrent")
+    }
+
+    /// The driver `CUdevice` handle (for peer-access / cluster queries).
+    pub(crate) fn cu_device(&self) -> crate::sys::CUdevice {
+        self.device
     }
 }
 

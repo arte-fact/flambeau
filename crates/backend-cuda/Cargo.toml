@@ -16,5 +16,10 @@ bytemuck.workspace = true
 half.workspace = true
 tracing.workspace = true
 
+[features]
+# Link NCCL for the multi-GPU Collectives seam (CudaCluster + DeviceAllReduce).
+# Off by default so single-GPU CUDA builds need no libnccl present.
+nccl = []
+
 [lints]
 workspace = true
