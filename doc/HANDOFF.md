@@ -3,27 +3,54 @@
 Transient working note. Start here when the dev rig (2× MI50 gfx906 + 1× RTX 3090
 sm_86) is built and `feature/cuda-decouple` is pulled in.
 
-> **CURRENT STATUS (2026-06-18, tip `c2f87bf`): P2 (Stream M) COMPLETE. P3
-> (Stream F) UNDERWAY — spine + Wave 1a (11/11) + Wave 1b (11/13) done; next =
-> Wave 1c attention.** cert-check green hip 82 / cuda 20 throughout. See
+> **CURRENT STATUS (2026-06-18, tip `ec0aa8e`): P2 (Stream M) COMPLETE. P3
+> (Stream F) UNDERWAY — spine + Wave 1a (11/11) + Wave 1b (11/13) + Wave 1d
+> (7/9) done. Remaining decode spine: Wave 1c attention (4) + moe_sort_by_expert
+> + sampler_topk_softmax.** cert-check green hip 82 / cuda 20 throughout. See
 > `doc/P3-STREAM-F-PORT.md` for the wave tracker.
-> - **P3 Wave 1b (Tier-B) — 11/13 DONE** (`6cff4c7`…`c2f87bf`): the
->   `block_reduce_sum` seam + the full norm family (rmsnorm_f16/f32/f32_to_f16
->   ×3/f16_add_residual/q8_1_fused, l2_norm_f32), the F16→Q8 activation
->   quantizers (q8_0/q8_1, MIRROR), and rope_f16/rope_neox_partial_f16 (MIRROR,
->   pure index math). NEUTRALIZE for the wave64-reduce kernels (shared `.cuh` +
->   manifest, hand `.cu` retired); MIRROR for the already-neutral ones. Two
->   deferred: **rmsnorm_rope_neox_partial_f16** (4 HEAD_DIM entries carry
->   per-entry `__launch_bounds__` the manifest codegen can't emit + perf-critical
->   on gfx906 — needs manifest launch-bounds support or a careful MIRROR) and
->   **quantize_f16_q8_1_mmq** (orphan, no consumer). Helpers added to the spine:
->   `finish_cert` (shared cert tail), `run_rmsnorm_add_residual_sweep` (both delta
->   dtypes), `run_rope_f16_sweep` (interleaved + neox), `run_quantize_f16_q8_sweep`.
-> - **NEXT = Wave 1c attention** (the hard tier): attention_decode_f16 (+splitk),
->   softmax_masked_f16, kv_append_f16_batched_slots, then 1d MoE-decode glue +
->   sampler. Attention needs online-softmax + LDS tiles + the cp.async↔prefetch
->   seam (some HIP-only sweeps need BenchBackend-genericizing first). See
->   `doc/P3-STREAM-F-PORT.md` Wave 1c.
+> - **Two reusable cross-backend reduce seams landed:**
+>   `kernels-shared/include/block_reduce.cuh` (`block_reduce_sum<THREADS>` — sum,
+>   broadcast) and the **argmax** pattern in `topk.cuh` (value+index butterfly
+>   over `WARP_SIZE`). Both close the wave64 reduce leak (`tid>>6`,
+>   `__shfl_xor(...,64)`, `WARPS=THREADS/64`) for the daily gfx906 ↔ sm_86.
+> - **P3 Wave 1b (Tier-B) — 11/13 DONE** (`6cff4c7`…`c2f87bf`): full norm family
+>   (rmsnorm_f16/f32/f32_to_f16 ×3/f16_add_residual/q8_1_fused, l2_norm_f32) via
+>   `block_reduce_sum`, F16→Q8 activation quantizers (q8_0/q8_1), rope_f16/
+>   rope_neox_partial_f16 (MIRROR). Deferred: **rmsnorm_rope_neox_partial_f16**
+>   (4 HEAD_DIM entries carry per-entry `__launch_bounds__` the manifest can't
+>   emit + perf-critical on gfx906) and **quantize_f16_q8_1_mmq** (orphan).
+> - **P3 Wave 1d (MoE glue + sampler) — 7/9 DONE** (`a3c2ca5`…`ec0aa8e`):
+>   moe_combine ×3 (no-resid/resid/two-resid fan-in, MIRROR),
+>   apply_per_expert_scale_f32 (MIRROR, bit-exact), shared_expert_scale_f32
+>   (NEUTRALIZE, block_reduce_sum dot + sigmoid), **topk_f32** (NEUTRALIZE, the
+>   router top-k — per-token block argmax×k + softmax over the WARP_SIZE seam),
+>   sampler_apply_penalties_f32 (MIRROR; F64-oracle 1e-5 not bit-exact — device
+>   contracts `l-freq*count` to an FMA). Remaining: **moe_sort_by_expert**
+>   (Tier-C segmented sort; CUDA may want `cub`) + **sampler_topk_softmax_f32**.
+> - **NEXT (the coherent unit): the online-softmax block reduce.**
+>   sampler_topk_softmax_f32 Phase-1, softmax_masked_f16, AND attention_decode all
+>   share the **online (max, sum_exp) tree reduce** (rescaling recurrence). Build
+>   `block_reduce_softmax<THREADS>(max, sum, scratch)` (the (max,sum) sibling of
+>   `block_reduce_sum`) ONCE, then sampler_topk (Phase-2..5 bitonic sort is
+>   already wave-agnostic) + softmax_masked fall out, and attention reuses it for
+>   the online-softmax core. Then the rest of **Wave 1c attention**
+>   (attention_decode_f16 +splitk, kv_append_f16_batched_slots) — the cp.async↔
+>   prefetch seam + LDS tiles; **some attention sweeps are HIP-only and need
+>   BenchBackend-genericizing first** (budget that as the family's first kernel,
+>   like the MoE-lds sweep in P2d). moe_sort_by_expert is a separate segmented-
+>   sort problem. See `doc/P3-STREAM-F-PORT.md` Waves 1c/1d.
+> - **Spine helpers** (all in `crates/bench/src/sweep_pointwise_cb.rs`):
+>   `run_pointwise_sweep<B>(op,…)` dispatcher (both cli arms call it — one wiring
+>   site per kernel); `run_unary_sweep<B,IE,OE>`, `run_binary_f16_sweep<B>`,
+>   `run_rmsnorm_add_residual_sweep` (both delta dtypes), `run_rope_f16_sweep`
+>   (interleaved+neox), `run_moe_combine_sweep` (0/1/2 residuals),
+>   `run_quantize_f16_q8_sweep`, `finish_cert` (shared cert tail). **Recipe per
+>   kernel:** MIRROR (CUDA `.cu` copy, kept HIP hand `.cu`) if already
+>   backend-neutral / no wave64 leak; NEUTRALIZE (shared `.cuh` + manifest cell,
+>   retire hand `.cu`) if it has the leak. Either way: neutral-impl_id cert both
+>   rigs, register in `BENCH_REFERENCE_KERNELS_GFX906`, frozen `_gfx906` dispatch
+>   row untouched. Gotchas: `uintptr_t`→`size_t` (nvcc); `__shfl_xor` shim needs
+>   `backend_compat.cuh` in the manifest `includes`.
 > - *(spine + Wave 1a + 1b-pilot detail below.)*
 > - **P3 harness spine DONE.** `crates/bench/src/sweep_pointwise_cb.rs` —
 >   BenchBackend-generic pointwise sweeps, one driver certs HIP gfx906 AND CUDA
