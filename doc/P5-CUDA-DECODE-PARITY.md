@@ -161,11 +161,28 @@ path dispatches** (traced through `dispatch/cuda/sm_86.toml` + `moe_experts.rs`)
   (legacy single-row oracles, non-dispatched variants) are **not** on the decode
   path; the 18 IQ stems are out of scope (prune from `KERNEL_STEMS`).
 
-So the remaining P5.3 decode work is **2 K-quant indexed-MoE kernels** + their
-certs, then fill the MoE dispatch rows. After that `Registry<CudaKernels>::new`
-fully satisfies the qwen35moe-v2 Q4_K decode dispatch and **P5.4** (the
-logit-cosine gate) is runnable. attention's CUDA graph-slot rebind stays deferred
-(P4.4 `CudaGraphExec` slot-map) — not needed for decode parity.
+Tracing the dispatch narrowed the decode-blocking set to **one** kernel: the down
+launch fn picks `indexed_moe_mmvq_q4_k_r2_dp4a` / `_r4_dp4a` by token count (both
+present), so only the fused gate+up — hard-coded to
+`indexed_moe_mmvq_q4_k_gate_up_r4_dp4a` — was missing.
+
+- ✅ **Kernel ported** (`<this commit>`): backend-neutral
+  `indexed_moe_mmvq_q4_k_gate_up_r4_dp4a_row` added to the shared header (the
+  sorted variant minus the `sorted_pair_idx` indirection; reuses the
+  CUDA-certified `flambeau_q4k_subblock_dot` + `mmvq_reduce_store_group<16>`) +
+  a CUDA static wrapper `.cu`. HIP keeps its hand `.cu` untouched (the new
+  template only compiles when instantiated, which HIP cells don't → bit-identical;
+  kernels-hip rebuilds clean, synth/ops_smoke green). Registry smoke: skipped
+  52→51, the stem loads. **The full qwen35moe-v2 Q4_K decode dispatch set now
+  builds + loads on sm_86.**
+- ⬜ **Cert blocked on a harness gap.** The kernel reuses CUDA-certified pieces
+  (high correctness confidence), but `flambeau sweep --arch sm_86` currently
+  errors for any `--op` other than `qmatmul` ("other ops are gfx906-only") — the
+  CUDA sweep harness only wires the mmvq path. **Next concrete step: extend the
+  CUDA sweep to cover `indexed_moe_mmvq_gate_up`** (and the rest of the decode
+  spine) so rule 2 certs land, then **P5.4** (`flambeau infer --backend cuda` →
+  logit-cosine ≥ 0.9999). attention's CUDA graph-slot rebind stays deferred
+  (P4.4 `CudaGraphExec` slot-map) — not needed for decode parity.
 - **P5.4 — The parity gate.** `flambeau infer --backend cuda --model
   qwen35moe-v2-Q4_K`: single token first (logit-cosine vs llama.cpp CUDA), then
   64 tokens ≥ 0.9999. File the diff; no perf claim.
