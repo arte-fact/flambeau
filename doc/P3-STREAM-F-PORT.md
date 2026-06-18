@@ -1,8 +1,14 @@
 # P3 — Stream F port (the ~70 fixed kernels → CUDA)
 
-**Status:** scoped 2026-06-18, not started. The work-list tracker for roadmap
-phase **P3**; see `PORTABILITY-ROADMAP.md` for the phase ledger and
-`CUDA-PORT-PLAN.md` §B4/B5 for the original grouping.
+**Status: ✅ COMPLETE (2026-06-18, tip `7d5c84e`).** Every cross-backend-eligible
+Stream F kernel is on HIP gfx906 + CUDA sm_86 — Waves 1-4 (decode spine, prefill,
+Q8-KV, paged/batched serving, GDN). The two decode-attention kernels are
+bit-identical to the hand kernels (all 14 attention parity tests green); the rest
+cert against F64 / dequant oracles. The only HIP-only kernels are the 3
+`p2p_allreduce_*` collectives (P4/B6 §"Deferred", HIP-only by design — CUDA uses
+NCCL). The work-list tracker for roadmap phase **P3**; see
+`PORTABILITY-ROADMAP.md` for the phase ledger and `CUDA-PORT-PLAN.md` §B4/B5 for
+the original grouping.
 
 ## What Stream F is
 

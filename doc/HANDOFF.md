@@ -3,15 +3,33 @@
 Transient working note. Start here when the dev rig (2× MI50 gfx906 + 1× RTX 3090
 sm_86) is built and `feature/cuda-decouple` is pulled in.
 
-> **CURRENT STATUS (2026-06-18, tip `305ac1b`): P2 (Stream M) COMPLETE. P3
-> (Stream F) — WAVE 1 DECODE SPINE COMPLETE (32/32).** Every decode-path Stream F
-> kernel is cross-backend (HIP gfx906 ↔ CUDA sm_86); BOTH decode-attention
-> kernels are BIT-IDENTICAL to the hand kernels (all 14 attention parity tests
-> green). cert-check green hip 82 / cuda 20 throughout. **P3 is unblocked for the
-> P5 qwen35moe-v2 Q4_K single-GPU decode-parity gate.** Remaining P3 = Waves 2-4
-> (prefill / Q8 KV / paged-serving / GDN) — NOT on the minimal decode path — plus
-> two non-blocking deferrals (`rmsnorm_rope_neox_partial_f16` launch-bounds,
-> `quantize_f16_q8_1_mmq` orphan). See `doc/P3-STREAM-F-PORT.md`.
+> **CURRENT STATUS (2026-06-18, tip `7d5c84e`): P2 (Stream M) COMPLETE. P3
+> (Stream F) COMPLETE.** Every cross-backend-eligible fixed kernel is on HIP
+> gfx906 + CUDA sm_86 — the full attention surface (decode/prefill/splitk +
+> Q8-KV + paged + batched + flash-tile), GDN (8), norms/rope/sampler/gemv/MoE
+> glue, activation quantizers. The two decode-attention kernels are bit-identical
+> (all 14 attention parity tests green); the rest cert vs F64/dequant oracles.
+> **The only HIP-only kernels left are the 3 `p2p_allreduce_*` collectives —
+> HIP-only by design** (CUDA implements the Collectives seam with NCCL in P4/B6,
+> not by porting the BAR1 P2P kernels). cert-check green hip 82 / cuda 20
+> throughout; all HIP parity/smoke/impls tests green. **P3 done → P4 (CUDA
+> multi-GPU NCCL/graph) + P5 (end-to-end CUDA decode parity) are the next gates.**
+> - **Reusable cross-backend reduce seams** (`kernels-shared/include/`):
+>   `block_reduce.cuh` (`block_reduce_sum<THREADS>` + `_dyn` runtime-blockDim +
+>   `block_tree_sum` power-of-2 LDS tree for sub-warp blocks), `block_reduce_softmax.cuh`
+>   (online (max,sum)), `topk.cuh` (argmax). The codegen gained a per-entry
+>   `launch_bounds` field; gfx906.cuh gained neutral `fast_exp`/`fast_rcp` aliases.
+> - **P3 Wave 2/3/4 (this session, after the decode spine):** activations
+>   (gelu/swiglu_f32 ×4, moe_combine_f32 — MIRROR), dense_gemv ×4 + v_unit_norm +
+>   kv_append_v_unit_norm (block_reduce), rmsnorm_rope (launch-bounds deferral
+>   cleared), GDN ×8 (5 MIRROR + 3 state-step NEUTRALIZE via the WARP_SIZE seam),
+>   paged kv_append ×2 (MIRROR), f16 attention ×4 (prefill/batched/paged via the
+>   attn_qk_reduce __shfl_xor recipe — bit-identical), flash_tile_f16 (5 entries,
+>   WARP_SIZE seam), Q8-KV attention ×4 (decode/prefill/splitk/flash_tile via
+>   block_tree_sum + neutral dp4a + load_int_b2 for the offset-2 qs), and the
+>   quantize_f16_q8_1_mmq orphan. **Test-bug fix:** the f16 paged parity tests
+>   pushed incomplete kernel args (UB the hand kernels tolerated) — now explicit.
+> - *(Wave 1 decode-spine detail below.)*
 > - **Three reusable cross-backend reduce seams landed** (all in
 >   `kernels-shared/include/`): `block_reduce.cuh` (`block_reduce_sum<THREADS>` —
 >   sum + broadcast), `block_reduce_softmax.cuh` (`block_reduce_softmax<THREADS>` —
