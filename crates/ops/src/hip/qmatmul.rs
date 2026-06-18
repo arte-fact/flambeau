@@ -7,19 +7,10 @@
 //! `flambeau-backend-hip`, which mirrors the non-overlapping predicates in
 //! `dispatch/hip/gfx906.toml`.
 
-#![expect(
-    clippy::undocumented_unsafe_blocks,
-    reason = "op wrapper — every unsafe block is a `kernel.launch` or `memcpy_async` \
-              over `DevicePtr`s validated by the caller; the kernel stem + entry are \
-              resolved through the validated registry and the ABI matches the kernels \
-              extern-C signature."
-)]
-
 use anyhow::{anyhow, bail, Result};
-use flambeau_backend_hip::{dispatch_qmatmul, HipStream, KernelArgs, LaunchCfg};
+use flambeau_core::{LaunchArgs, LaunchCfg};
 use flambeau_core::{DevicePtr, QDtype, QMatMulCfg};
 
-use super::OpsRegistry;
 
 /// Auto-dispatched QMatMul. Given M, selects MMVQ (M=1..3 for Q8_0, M=1..127
 /// for K-quants) or MMQ (M≥128 for all supported dtypes). For mid-M on
@@ -31,13 +22,13 @@ use super::OpsRegistry;
 /// - `act_q8_1_mmq` → MmqLdsX64 kernel (144 B DS4 blocks)
 ///   Decode-path callers that never hit the MmqLdsX64 recipe can pass a null
 ///   [`DevicePtr`] for `act_q8_1_mmq`; use [`qmatmul_decode`] for ergonomics.
-pub fn qmatmul(
-    ctx: crate::OpCtx<'_>,
+pub fn qmatmul<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     buf: crate::QmatmulBuffers,
     shape: crate::MatmulShape,
     dtype_weight: QDtype,
 ) -> Result<()> {
-    let crate::OpCtx { reg, stream } = ctx;
     let crate::QmatmulBuffers {
         weights,
         act_q8_1,
@@ -54,23 +45,22 @@ pub fn qmatmul(
         // read once per K-sub-block per thread instead of per activation
         // row. 5 multi-row kept for m < 8 where tile partial-fill
         // hurts grid occupancy.
-        let ctx = crate::OpCtx { reg, stream };
         let bufs = crate::MmvqBuffers { weights, act_q8_1, dst };
         if m >= 8 {
-            return mmq_f16_tile_launch(ctx, bufs, n, m, k);
+            return mmq_f16_tile_launch(reg, stream, bufs, n, m, k);
         }
-        return mmq_f16_launch(ctx, bufs, n, m, k);
+        return mmq_f16_launch(reg, stream, bufs, n, m, k);
     }
     // Q4_1 at m ∈ {2, 3, 4}: per-N compile-time batched MMVQ.
     // Sibling of K1's Q4_0 batched path. The first cut of Q4_1 batched
     // (runtime-N=8 loop) hit ~59 VGPRs and lost on every anchor — the
     // per-N template compiles down to ~20-30 VGPRs which preserves
     // gfx906 wave occupancy. Outside this window Q4_1 falls through to
-    // the dispatch_qmatmul() table (row-by-row m-loop).
+    // the B::dispatch_qmatmul() table (row-by-row m-loop).
     if dtype_weight == QDtype::Q4_1 && (2..=4).contains(&m) {
         mmvq_q4_1_batched(
 
-            crate::OpCtx { reg, stream },
+            reg, stream,
 
             crate::MmvqBuffers { weights, act_q8_1, dst },
 
@@ -83,7 +73,7 @@ pub fn qmatmul(
     if dtype_weight == QDtype::Q8_0 && (2..=4).contains(&m) {
         mmvq_q8_0_row_tile_batched(
 
-            crate::OpCtx { reg, stream },
+            reg, stream,
 
             crate::MmvqBuffers { weights, act_q8_1, dst },
 
@@ -96,7 +86,7 @@ pub fn qmatmul(
     if dtype_weight == QDtype::Q4_K && (2..=4).contains(&m) {
         mmvq_q4_k_batched(
 
-            crate::OpCtx { reg, stream },
+            reg, stream,
 
             crate::MmvqBuffers { weights, act_q8_1, dst },
 
@@ -109,7 +99,7 @@ pub fn qmatmul(
     if dtype_weight == QDtype::Q6_K && (2..=4).contains(&m) {
         mmvq_q6_k_batched(
 
-            crate::OpCtx { reg, stream },
+            reg, stream,
 
             crate::MmvqBuffers { weights, act_q8_1, dst },
 
@@ -144,7 +134,7 @@ pub fn qmatmul(
         if dtype_weight == QDtype::Q4_0 && (2..=4).contains(&m) {
             mmvq_q4_0_row_tile_batched(
 
-                crate::OpCtx { reg, stream },
+                reg, stream,
 
                 crate::MmvqBuffers { weights, act_q8_1, dst },
 
@@ -167,7 +157,7 @@ pub fn qmatmul(
         let n_blocks = k / 32;
         for i in 0..m {
             mmvq_simple_launch(
-                crate::OpCtx { reg, stream },
+                reg, stream,
                 KernelEntry { stem, entry },
                 crate::MmvqBuffers {
                     weights,
@@ -190,7 +180,7 @@ pub fn qmatmul(
     if dtype_weight == QDtype::Q5_K && (2..=4).contains(&m) {
         mmvq_q5_k_row_tile_batched(
 
-            crate::OpCtx { reg, stream },
+            reg, stream,
 
             crate::MmvqBuffers { weights, act_q8_1, dst },
 
@@ -208,7 +198,7 @@ pub fn qmatmul(
         k,
         n,
     };
-    let desc = dispatch_qmatmul(&cfg).ok_or_else(|| {
+    let desc = B::dispatch_qmatmul(&cfg).ok_or_else(|| {
         anyhow!(
             "no QMatMul impl for dtype={} m={m} k={k} n={n}",
             dtype_weight.name()
@@ -229,7 +219,7 @@ pub fn qmatmul(
             k,
             n,
         };
-        let mmvq_desc = dispatch_qmatmul(&mmvq_cfg).ok_or_else(|| {
+        let mmvq_desc = B::dispatch_qmatmul(&mmvq_cfg).ok_or_else(|| {
             anyhow!(
                 "no MMVQ fallback impl for dtype={} k={k} n={n} (k % 128 != 0)",
                 dtype_weight.name()
@@ -256,10 +246,8 @@ pub fn qmatmul(
             let act_row_bytes =
                 act_blocks_per_row * std::mem::size_of::<flambeau_quant::BlockQ8_1>();
             let dst_row_bytes = n * 4;
-            let ctx = crate::OpCtx { reg, stream };
             for i in 0..m {
-                mmvq_launch(
-                    ctx,
+                mmvq_launch(reg, stream,
                     recipe,
                     crate::MmvqBuffers {
                         weights: weights.offset_bytes(i * w_row_bytes),
@@ -275,7 +263,7 @@ pub fn qmatmul(
         RecipeKind::MmqOracle | RecipeKind::Mmq4Warp => {
             let nb_per_row = k / block_elems(dtype_weight);
             mmq_launch(
-                crate::OpCtx { reg, stream },
+                reg, stream,
                 recipe,
                 crate::MmvqBuffers { weights, act_q8_1, dst },
                 n,
@@ -295,7 +283,7 @@ pub fn qmatmul(
             }
             let nb_per_row = k / block_elems(dtype_weight);
             mmq_lds_x64_launch(
-                crate::OpCtx { reg, stream },
+                reg, stream,
                 recipe,
                 crate::MmvqBuffers { weights, act_q8_1: act_q8_1_mmq, dst },
                 n,
@@ -305,7 +293,7 @@ pub fn qmatmul(
         }
         RecipeKind::MmqWave64 => {
             mmq_wave64_launch(
-                crate::OpCtx { reg, stream },
+                reg, stream,
                 recipe,
                 crate::MmvqBuffers { weights, act_q8_1, dst },
                 n,
@@ -328,9 +316,9 @@ pub fn qmatmul(
 /// thin-block schedule that wins for Q4_1 on gfx906 per ).
 /// Captures the latency-hiding 2-blocks-per-CU shape that the 256t
 /// `mmvq_q4_0` baseline can't reach. Used through env opt-in.
-pub fn mmvq_q4_0_t128(
-    reg: &OpsRegistry,
-    stream: &HipStream,
+pub fn mmvq_q4_0_t128<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     weights: DevicePtr,
     y_q8_1: DevicePtr,
     dst: DevicePtr,
@@ -338,20 +326,20 @@ pub fn mmvq_q4_0_t128(
     k: usize,
 ) -> Result<()> {
     let module = reg.expect_module("mmvq_q4_0_t128")?;
-    let kernel = module.kernel("flambeau_mmvq_q4_0_t128_q8_1")?;
+    let kernel = B::kernel(module, "flambeau_mmvq_q4_0_t128_q8_1")?;
     let n_rows_i = n_rows as i32;
     let n_blocks_i = (k / 32) as i32;
     let w_ptr: u64 = weights.as_usize() as u64;
     let y_ptr: u64 = y_q8_1.as_usize() as u64;
     let d_ptr: u64 = dst.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&w_ptr);
-    args.push(&y_ptr);
-    args.push(&d_ptr);
-    args.push(&n_rows_i);
-    args.push(&n_blocks_i);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&w_ptr);
+    args.push_arg(&y_ptr);
+    args.push_arg(&d_ptr);
+    args.push_arg(&n_rows_i);
+    args.push_arg(&n_blocks_i);
     let cfg = LaunchCfg::one_d(n_rows as u32, 128);
-    unsafe { kernel.launch(stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 
@@ -375,8 +363,9 @@ pub fn mmvq_q4_0_t128(
 /// `n_slots` loop bounded by MAX_N=8 measured at 59 VGPRs / 4 waves —
 /// occupancy loss drowned the weight-amortization win. Callers outside
 /// {2, 3, 4} should fall back to row-by-row MMVQ.
-pub fn mmvq_q4_0_batched(
-    ctx: crate::OpCtx<'_>,
+pub fn mmvq_q4_0_batched<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     buffers: crate::MmvqBuffers,
     shape: crate::MmvqBatchShape,
 ) -> Result<()> {
@@ -391,21 +380,21 @@ pub fn mmvq_q4_0_batched(
              single-row callers should use mmvq_q4_0 row-by-row"
         ),
     };
-    let module = ctx.reg.expect_module("mmvq_q4_0_batched")?;
-    let kernel = module.kernel(entry)?;
+    let module = reg.expect_module("mmvq_q4_0_batched")?;
+    let kernel = B::kernel(module, entry)?;
     let n_rows_i = n_rows as i32;
     let n_blocks_i = (k / 32) as i32;
     let w_ptr: u64 = weights.as_usize() as u64;
     let y_ptr: u64 = y_q8_1.as_usize() as u64;
     let d_ptr: u64 = dst.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&w_ptr);
-    args.push(&y_ptr);
-    args.push(&d_ptr);
-    args.push(&n_rows_i);
-    args.push(&n_blocks_i);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&w_ptr);
+    args.push_arg(&y_ptr);
+    args.push_arg(&d_ptr);
+    args.push_arg(&n_rows_i);
+    args.push_arg(&n_blocks_i);
     let cfg = LaunchCfg::one_d(n_rows as u32, 256);
-    unsafe { kernel.launch(ctx.stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 
@@ -413,8 +402,9 @@ pub fn mmvq_q4_0_batched(
 /// (64-thread wave64, on-the-fly per-element decode) with an inner N-slot
 /// loop. Kernel arg `n_blocks_per_row` here is *super-blocks* per row
 /// (k / 256), not Q8_1 32-elem blocks — matches the single-row Q4_K MMVQ.
-pub fn mmvq_q4_k_batched(
-    ctx: crate::OpCtx<'_>,
+pub fn mmvq_q4_k_batched<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     buffers: crate::MmvqBuffers,
     shape: crate::MmvqBatchShape,
 ) -> Result<()> {
@@ -426,21 +416,21 @@ pub fn mmvq_q4_k_batched(
         4 => "flambeau_mmvq_q4_k_q8_1_batched_n4",
         _ => bail!("mmvq_q4_k_batched: n_slots={n_slots} outside [2, 4]"),
     };
-    let module = ctx.reg.expect_module("mmvq_q4_k_batched")?;
-    let kernel = module.kernel(entry)?;
+    let module = reg.expect_module("mmvq_q4_k_batched")?;
+    let kernel = B::kernel(module, entry)?;
     let n_rows_i = n_rows as i32;
     let n_superblocks_i = (k / flambeau_quant::QK_K) as i32;
     let w_ptr: u64 = weights.as_usize() as u64;
     let y_ptr: u64 = y_q8_1.as_usize() as u64;
     let d_ptr: u64 = dst.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&w_ptr);
-    args.push(&y_ptr);
-    args.push(&d_ptr);
-    args.push(&n_rows_i);
-    args.push(&n_superblocks_i);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&w_ptr);
+    args.push_arg(&y_ptr);
+    args.push_arg(&d_ptr);
+    args.push_arg(&n_rows_i);
+    args.push_arg(&n_superblocks_i);
     let cfg = LaunchCfg::one_d(n_rows as u32, 64);
-    unsafe { kernel.launch(ctx.stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 
@@ -448,8 +438,9 @@ pub fn mmvq_q4_k_batched(
 /// (4 elements per lane per super-block via the 6-bit ql+qh layout)
 /// with an inner N-slot loop. Takes `k` (counted in elements, not blocks);
 /// kernel arg is `k / QK_K` super-blocks.
-pub fn mmvq_q6_k_batched(
-    ctx: crate::OpCtx<'_>,
+pub fn mmvq_q6_k_batched<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     buffers: crate::MmvqBuffers,
     shape: crate::MmvqBatchShape,
 ) -> Result<()> {
@@ -461,29 +452,30 @@ pub fn mmvq_q6_k_batched(
         4 => "flambeau_mmvq_q6_k_q8_1_batched_n4",
         _ => bail!("mmvq_q6_k_batched: n_slots={n_slots} outside [2, 4]"),
     };
-    let module = ctx.reg.expect_module("mmvq_q6_k_batched")?;
-    let kernel = module.kernel(entry)?;
+    let module = reg.expect_module("mmvq_q6_k_batched")?;
+    let kernel = B::kernel(module, entry)?;
     let n_rows_i = n_rows as i32;
     let n_superblocks_i = (k / flambeau_quant::QK_K) as i32;
     let w_ptr: u64 = weights.as_usize() as u64;
     let y_ptr: u64 = y_q8_1.as_usize() as u64;
     let d_ptr: u64 = dst.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&w_ptr);
-    args.push(&y_ptr);
-    args.push(&d_ptr);
-    args.push(&n_rows_i);
-    args.push(&n_superblocks_i);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&w_ptr);
+    args.push_arg(&y_ptr);
+    args.push_arg(&d_ptr);
+    args.push_arg(&n_rows_i);
+    args.push_arg(&n_superblocks_i);
     let cfg = LaunchCfg::one_d(n_rows as u32, 64);
-    unsafe { kernel.launch(ctx.stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 
 /// Q8_0 sibling of [`mmvq_q4_0_batched`]. Same per-N compile-time
 /// template; symmetric signed-8-bit drops the nibble unpack and the
 /// `-8·s_y` correction.
-pub fn mmvq_q8_0_batched(
-    ctx: crate::OpCtx<'_>,
+pub fn mmvq_q8_0_batched<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     buffers: crate::MmvqBuffers,
     shape: crate::MmvqBatchShape,
 ) -> Result<()> {
@@ -498,21 +490,21 @@ pub fn mmvq_q8_0_batched(
              single-row callers should use mmvq_q8_0 row-by-row"
         ),
     };
-    let module = ctx.reg.expect_module("mmvq_q8_0_batched")?;
-    let kernel = module.kernel(entry)?;
+    let module = reg.expect_module("mmvq_q8_0_batched")?;
+    let kernel = B::kernel(module, entry)?;
     let n_rows_i = n_rows as i32;
     let n_blocks_i = (k / 32) as i32;
     let w_ptr: u64 = weights.as_usize() as u64;
     let y_ptr: u64 = y_q8_1.as_usize() as u64;
     let d_ptr: u64 = dst.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&w_ptr);
-    args.push(&y_ptr);
-    args.push(&d_ptr);
-    args.push(&n_rows_i);
-    args.push(&n_blocks_i);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&w_ptr);
+    args.push_arg(&y_ptr);
+    args.push_arg(&d_ptr);
+    args.push_arg(&n_rows_i);
+    args.push_arg(&n_blocks_i);
     let cfg = LaunchCfg::one_d(n_rows as u32, 256);
-    unsafe { kernel.launch(ctx.stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 
@@ -521,8 +513,9 @@ pub fn mmvq_q8_0_batched(
 /// `min` per block, so the per-block bias is `+ m_x · s_y` rather than
 /// Q4_0's `- 8 · d_x · s_y`. Targets the same dispatch window
 /// (`n_slots` ∈ [2, 4]) and the same weight-amortization regime.
-pub fn mmvq_q4_1_batched(
-    ctx: crate::OpCtx<'_>,
+pub fn mmvq_q4_1_batched<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     buffers: crate::MmvqBuffers,
     shape: crate::MmvqBatchShape,
 ) -> Result<()> {
@@ -537,21 +530,21 @@ pub fn mmvq_q4_1_batched(
              single-row callers should use mmvq_q4_1 row-by-row"
         ),
     };
-    let module = ctx.reg.expect_module("mmvq_q4_1_batched")?;
-    let kernel = module.kernel(entry)?;
+    let module = reg.expect_module("mmvq_q4_1_batched")?;
+    let kernel = B::kernel(module, entry)?;
     let n_rows_i = n_rows as i32;
     let n_blocks_i = (k / 32) as i32;
     let w_ptr: u64 = weights.as_usize() as u64;
     let y_ptr: u64 = y_q8_1.as_usize() as u64;
     let d_ptr: u64 = dst.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&w_ptr);
-    args.push(&y_ptr);
-    args.push(&d_ptr);
-    args.push(&n_rows_i);
-    args.push(&n_blocks_i);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&w_ptr);
+    args.push_arg(&y_ptr);
+    args.push_arg(&d_ptr);
+    args.push_arg(&n_rows_i);
+    args.push_arg(&n_blocks_i);
     let cfg = LaunchCfg::one_d(n_rows as u32, 256);
-    unsafe { kernel.launch(ctx.stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 
@@ -565,8 +558,9 @@ pub fn mmvq_q4_1_batched(
 ///
 /// `n_slots` ∈ [2, 4]. Outside that the caller falls back to the
 /// row-by-row m-loop in [`qmatmul`].
-pub fn mmvq_q5_k_r2_batched(
-    ctx: crate::OpCtx<'_>,
+pub fn mmvq_q5_k_r2_batched<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     buffers: crate::MmvqBuffers,
     shape: crate::MmvqBatchShape,
 ) -> Result<()> {
@@ -578,23 +572,23 @@ pub fn mmvq_q5_k_r2_batched(
         4 => "flambeau_mmvq_q5_k_r2_q8_1_batched_n4",
         _ => bail!("mmvq_q5_k_r2_batched: n_slots={n_slots} outside [2, 4]"),
     };
-    let module = ctx.reg.expect_module("mmvq_q5_k_r2_batched")?;
-    let kernel = module.kernel(entry)?;
+    let module = reg.expect_module("mmvq_q5_k_r2_batched")?;
+    let kernel = B::kernel(module, entry)?;
     let n_rows_i = n_rows as i32;
     let n_superblocks_i = (k / 256) as i32;
     let w_ptr: u64 = weights.as_usize() as u64;
     let y_ptr: u64 = y_q8_1.as_usize() as u64;
     let d_ptr: u64 = dst.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&w_ptr);
-    args.push(&y_ptr);
-    args.push(&d_ptr);
-    args.push(&n_rows_i);
-    args.push(&n_superblocks_i);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&w_ptr);
+    args.push_arg(&y_ptr);
+    args.push_arg(&d_ptr);
+    args.push_arg(&n_rows_i);
+    args.push_arg(&n_superblocks_i);
     // 64 threads/block = 1 wave64 (r2 multi-row pattern); grid = ceil(n_rows / 2).
     let n_row_pairs = n_rows.div_ceil(2) as u32;
     let cfg = LaunchCfg::one_d(n_row_pairs, 64);
-    unsafe { kernel.launch(ctx.stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 
@@ -606,8 +600,9 @@ pub fn mmvq_q5_k_r2_batched(
 ///
 /// `n_slots` ∈ [2, 4]. Output ABI identical to `mmvq_q5_k_r2_batched`
 /// (`dst[N, n_rows]` slot-major F32).
-pub fn mmvq_q5_k_row_tile_batched(
-    ctx: crate::OpCtx<'_>,
+pub fn mmvq_q5_k_row_tile_batched<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     buffers: crate::MmvqBuffers,
     shape: crate::MmvqBatchShape,
 ) -> Result<()> {
@@ -619,37 +614,38 @@ pub fn mmvq_q5_k_row_tile_batched(
         4 => "flambeau_mmvq_q5_k_row_tile_q8_1_batched_n4",
         _ => bail!("mmvq_q5_k_row_tile_batched: n_slots={n_slots} outside [2, 4]"),
     };
-    let module = ctx.reg.expect_module("mmvq_q5_k_row_tile_batched")?;
-    let kernel = module.kernel(entry)?;
+    let module = reg.expect_module("mmvq_q5_k_row_tile_batched")?;
+    let kernel = B::kernel(module, entry)?;
     let n_rows_i = n_rows as i32;
     let n_superblocks_i = (k / 256) as i32;
     let w_ptr: u64 = weights.as_usize() as u64;
     let y_ptr: u64 = y_q8_1.as_usize() as u64;
     let d_ptr: u64 = dst.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&w_ptr);
-    args.push(&y_ptr);
-    args.push(&d_ptr);
-    args.push(&n_rows_i);
-    args.push(&n_superblocks_i);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&w_ptr);
+    args.push_arg(&y_ptr);
+    args.push_arg(&d_ptr);
+    args.push_arg(&n_rows_i);
+    args.push_arg(&n_superblocks_i);
     let grid = (n_rows as u32).div_ceil(8);
     let cfg = LaunchCfg::one_d(grid, 256);
-    unsafe { kernel.launch(ctx.stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 
 /// **TP-perf-c5** — fused gate+up Q4_0 t128. Same gate+up activation
 /// sharing as `mmvq_q4_0_gate_up`, but with the t128 schedule for the
 /// gfx906 latency-bound regime.
-pub fn mmvq_q4_0_gate_up_t128(
-    ctx: crate::OpCtx<'_>,
+pub fn mmvq_q4_0_gate_up_t128<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     buffers: crate::MmvqGateUpBuffers,
     shape: crate::MmvqGateUpShape,
 ) -> Result<()> {
     let crate::MmvqGateUpBuffers { gate_w, up_w, act_q8_1: y_q8_1, gate_out, up_out } = buffers;
     let crate::MmvqGateUpShape { n_rows_gate, n_rows_up, k } = shape;
-    let module = ctx.reg.expect_module("mmvq_q4_0_gate_up_t128_dp4a")?;
-    let kernel = module.kernel("flambeau_mmvq_q4_0_gate_up_t128_dp4a_q8_1")?;
+    let module = reg.expect_module("mmvq_q4_0_gate_up_t128_dp4a")?;
+    let kernel = B::kernel(module, "flambeau_mmvq_q4_0_gate_up_t128_dp4a_q8_1")?;
     let n_rows_g = n_rows_gate as i32;
     let n_rows_u = n_rows_up as i32;
     let n_blocks_i = (k / 32) as i32;
@@ -658,18 +654,18 @@ pub fn mmvq_q4_0_gate_up_t128(
     let y_ptr: u64 = y_q8_1.as_usize() as u64;
     let g_ptr: u64 = gate_out.as_usize() as u64;
     let u_ptr: u64 = up_out.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&gw_ptr);
-    args.push(&uw_ptr);
-    args.push(&y_ptr);
-    args.push(&g_ptr);
-    args.push(&u_ptr);
-    args.push(&n_rows_g);
-    args.push(&n_rows_u);
-    args.push(&n_blocks_i);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&gw_ptr);
+    args.push_arg(&uw_ptr);
+    args.push_arg(&y_ptr);
+    args.push_arg(&g_ptr);
+    args.push_arg(&u_ptr);
+    args.push_arg(&n_rows_g);
+    args.push_arg(&n_rows_u);
+    args.push_arg(&n_blocks_i);
     let grid = n_rows_gate.max(n_rows_up) as u32;
     let cfg = LaunchCfg::one_d(grid, 128);
-    unsafe { kernel.launch(ctx.stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 
@@ -677,9 +673,9 @@ pub fn mmvq_q4_0_gate_up_t128(
 /// targeting an even smaller block to pack more in-flight blocks per CU at
 /// gfx906 decode (where occupancy is the lever, not VALU). One wave64/block
 /// = no LDS reduce, just an in-place gfx906 DPP butterfly.
-pub fn mmvq_q4_0_warpcoop64(
-    reg: &OpsRegistry,
-    stream: &HipStream,
+pub fn mmvq_q4_0_warpcoop64<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     weights: DevicePtr,
     y_q8_1: DevicePtr,
     dst: DevicePtr,
@@ -687,20 +683,20 @@ pub fn mmvq_q4_0_warpcoop64(
     k: usize,
 ) -> Result<()> {
     let module = reg.expect_module("mmvq_q4_0_warpcoop64")?;
-    let kernel = module.kernel("flambeau_mmvq_q4_0_warpcoop64_q8_1")?;
+    let kernel = B::kernel(module, "flambeau_mmvq_q4_0_warpcoop64_q8_1")?;
     let n_rows_i = n_rows as i32;
     let n_blocks_i = (k / 32) as i32;
     let w_ptr: u64 = weights.as_usize() as u64;
     let y_ptr: u64 = y_q8_1.as_usize() as u64;
     let d_ptr: u64 = dst.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&w_ptr);
-    args.push(&y_ptr);
-    args.push(&d_ptr);
-    args.push(&n_rows_i);
-    args.push(&n_blocks_i);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&w_ptr);
+    args.push_arg(&y_ptr);
+    args.push_arg(&d_ptr);
+    args.push_arg(&n_rows_i);
+    args.push_arg(&n_blocks_i);
     let cfg = LaunchCfg::one_d(n_rows as u32, 64);
-    unsafe { kernel.launch(stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 
@@ -710,13 +706,13 @@ pub fn mmvq_q4_0_warpcoop64(
 /// kernel collapses both MMVQs and both downstream `cast_f32_to_f16`
 /// launches into a single launch — net 3 launches saved per full-attn
 /// layer per rank.
-pub fn mmvq_q4_0_kv_f16dst(
-    ctx: crate::OpCtx<'_>,
+pub fn mmvq_q4_0_kv_f16dst<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     buf: crate::MmvqKvF16Buffers,
     n_rows_kv: usize,
     k: usize,
 ) -> Result<()> {
-    let crate::OpCtx { reg, stream } = ctx;
     let crate::MmvqKvF16Buffers {
         k_w,
         v_w,
@@ -725,7 +721,7 @@ pub fn mmvq_q4_0_kv_f16dst(
         v_out_f16,
     } = buf;
     let module = reg.expect_module("mmvq_q4_0_kv_f16dst_dp4a")?;
-    let kernel = module.kernel("flambeau_mmvq_q4_0_kv_f16dst_dp4a_q8_1")?;
+    let kernel = B::kernel(module, "flambeau_mmvq_q4_0_kv_f16dst_dp4a_q8_1")?;
     let n_rows_i = n_rows_kv as i32;
     let n_blocks_i = (k / 32) as i32;
     let kw_ptr: u64 = k_w.as_usize() as u64;
@@ -733,16 +729,16 @@ pub fn mmvq_q4_0_kv_f16dst(
     let y_ptr: u64 = y_q8_1.as_usize() as u64;
     let kout_ptr: u64 = k_out_f16.as_usize() as u64;
     let vout_ptr: u64 = v_out_f16.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&kw_ptr);
-    args.push(&vw_ptr);
-    args.push(&y_ptr);
-    args.push(&kout_ptr);
-    args.push(&vout_ptr);
-    args.push(&n_rows_i);
-    args.push(&n_blocks_i);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&kw_ptr);
+    args.push_arg(&vw_ptr);
+    args.push_arg(&y_ptr);
+    args.push_arg(&kout_ptr);
+    args.push_arg(&vout_ptr);
+    args.push_arg(&n_rows_i);
+    args.push_arg(&n_blocks_i);
     let cfg = LaunchCfg::one_d(n_rows_kv as u32, 256);
-    unsafe { kernel.launch(stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 
@@ -751,15 +747,16 @@ pub fn mmvq_q4_0_kv_f16dst(
 /// weights. Halves the call count (and the Q8_1 activation HBM read)
 /// when both weights are Q4_0 — the common case on Qwen3.6-x-Q4_0
 /// (attn_qkv+attn_gate in GDN, ffn_gate+ffn_up in dense FFN).
-pub fn mmvq_q4_0_gate_up(
-    ctx: crate::OpCtx<'_>,
+pub fn mmvq_q4_0_gate_up<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     buffers: crate::MmvqGateUpBuffers,
     shape: crate::MmvqGateUpShape,
 ) -> Result<()> {
     let crate::MmvqGateUpBuffers { gate_w, up_w, act_q8_1: y_q8_1, gate_out, up_out } = buffers;
     let crate::MmvqGateUpShape { n_rows_gate, n_rows_up, k } = shape;
-    let module = ctx.reg.expect_module("mmvq_q4_0_gate_up_dp4a")?;
-    let kernel = module.kernel("flambeau_mmvq_q4_0_gate_up_dp4a_q8_1")?;
+    let module = reg.expect_module("mmvq_q4_0_gate_up_dp4a")?;
+    let kernel = B::kernel(module, "flambeau_mmvq_q4_0_gate_up_dp4a_q8_1")?;
     let n_rows_g = n_rows_gate as i32;
     let n_rows_u = n_rows_up as i32;
     let n_blocks_i = (k / 32) as i32;
@@ -768,18 +765,18 @@ pub fn mmvq_q4_0_gate_up(
     let y_ptr: u64 = y_q8_1.as_usize() as u64;
     let g_ptr: u64 = gate_out.as_usize() as u64;
     let u_ptr: u64 = up_out.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&gw_ptr);
-    args.push(&uw_ptr);
-    args.push(&y_ptr);
-    args.push(&g_ptr);
-    args.push(&u_ptr);
-    args.push(&n_rows_g);
-    args.push(&n_rows_u);
-    args.push(&n_blocks_i);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&gw_ptr);
+    args.push_arg(&uw_ptr);
+    args.push_arg(&y_ptr);
+    args.push_arg(&g_ptr);
+    args.push_arg(&u_ptr);
+    args.push_arg(&n_rows_g);
+    args.push_arg(&n_rows_u);
+    args.push_arg(&n_blocks_i);
     let grid = n_rows_gate.max(n_rows_up) as u32;
     let cfg = LaunchCfg::one_d(grid, 256);
-    unsafe { kernel.launch(ctx.stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 
@@ -795,8 +792,9 @@ pub fn mmvq_q4_0_gate_up(
 /// n_rows_up may differ; per-row do_gate/do_up short-circuit).
 ///
 /// `n_slots` ∈ [2, 4]. Used by the K6 batched-GDN paired-L=2 forward.
-pub fn mmvq_q4_0_gate_up_batched(
-    ctx: crate::OpCtx<'_>,
+pub fn mmvq_q4_0_gate_up_batched<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     buffers: crate::MmvqGateUpBuffers,
     shape: crate::MmvqGateUpBatchShape,
 ) -> Result<()> {
@@ -808,8 +806,8 @@ pub fn mmvq_q4_0_gate_up_batched(
         4 => "flambeau_mmvq_q4_0_gate_up_dp4a_q8_1_batched_n4",
         _ => bail!("mmvq_q4_0_gate_up_batched: n_slots={n_slots} outside [2, 4]"),
     };
-    let module = ctx.reg.expect_module("mmvq_q4_0_gate_up_batched")?;
-    let kernel = module.kernel(entry)?;
+    let module = reg.expect_module("mmvq_q4_0_gate_up_batched")?;
+    let kernel = B::kernel(module, entry)?;
     let n_rows_g = n_rows_gate as i32;
     let n_rows_u = n_rows_up as i32;
     let n_blocks_i = (k / 32) as i32;
@@ -818,18 +816,18 @@ pub fn mmvq_q4_0_gate_up_batched(
     let y_ptr: u64 = y_q8_1.as_usize() as u64;
     let g_ptr: u64 = gate_out.as_usize() as u64;
     let u_ptr: u64 = up_out.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&gw_ptr);
-    args.push(&uw_ptr);
-    args.push(&y_ptr);
-    args.push(&g_ptr);
-    args.push(&u_ptr);
-    args.push(&n_rows_g);
-    args.push(&n_rows_u);
-    args.push(&n_blocks_i);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&gw_ptr);
+    args.push_arg(&uw_ptr);
+    args.push_arg(&y_ptr);
+    args.push_arg(&g_ptr);
+    args.push_arg(&u_ptr);
+    args.push_arg(&n_rows_g);
+    args.push_arg(&n_rows_u);
+    args.push_arg(&n_blocks_i);
     let grid = n_rows_gate.max(n_rows_up) as u32;
     let cfg = LaunchCfg::one_d(grid, 256);
-    unsafe { kernel.launch(ctx.stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 
@@ -841,8 +839,9 @@ pub fn mmvq_q4_0_gate_up_batched(
 ///
 /// `n_slots` ∈ [2, 4]. Output ABI identical to `mmvq_q4_0_gate_up_batched`
 /// (`gate_out[N, n_rows_gate]`, `up_out[N, n_rows_up]`, slot-major F32).
-pub fn mmvq_q4_0_gate_up_row_tile_batched(
-    ctx: crate::OpCtx<'_>,
+pub fn mmvq_q4_0_gate_up_row_tile_batched<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     buffers: crate::MmvqGateUpBuffers,
     shape: crate::MmvqGateUpBatchShape,
 ) -> Result<()> {
@@ -854,8 +853,8 @@ pub fn mmvq_q4_0_gate_up_row_tile_batched(
         4 => "flambeau_mmvq_q4_0_gate_up_row_tile_dp4a_q8_1_batched_n4",
         _ => bail!("mmvq_q4_0_gate_up_row_tile_batched: n_slots={n_slots} outside [2, 4]"),
     };
-    let module = ctx.reg.expect_module("mmvq_q4_0_gate_up_row_tile_batched")?;
-    let kernel = module.kernel(entry)?;
+    let module = reg.expect_module("mmvq_q4_0_gate_up_row_tile_batched")?;
+    let kernel = B::kernel(module, entry)?;
     let n_rows_g = n_rows_gate as i32;
     let n_rows_u = n_rows_up as i32;
     let n_blocks_i = (k / 32) as i32;
@@ -864,19 +863,19 @@ pub fn mmvq_q4_0_gate_up_row_tile_batched(
     let y_ptr: u64 = y_q8_1.as_usize() as u64;
     let g_ptr: u64 = gate_out.as_usize() as u64;
     let u_ptr: u64 = up_out.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&gw_ptr);
-    args.push(&uw_ptr);
-    args.push(&y_ptr);
-    args.push(&g_ptr);
-    args.push(&u_ptr);
-    args.push(&n_rows_g);
-    args.push(&n_rows_u);
-    args.push(&n_blocks_i);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&gw_ptr);
+    args.push_arg(&uw_ptr);
+    args.push_arg(&y_ptr);
+    args.push_arg(&g_ptr);
+    args.push_arg(&u_ptr);
+    args.push_arg(&n_rows_g);
+    args.push_arg(&n_rows_u);
+    args.push_arg(&n_blocks_i);
     let max_rows = n_rows_gate.max(n_rows_up);
     let grid = (max_rows as u32).div_ceil(4);
     let cfg = LaunchCfg::one_d(grid, 256);
-    unsafe { kernel.launch(ctx.stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 
@@ -888,8 +887,9 @@ pub fn mmvq_q4_0_gate_up_row_tile_batched(
 ///
 /// `n_slots` ∈ [2, 4]. Output ABI identical to `mmvq_q4_0_batched`
 /// (`dst[N, n_rows]`, slot-major F32).
-pub fn mmvq_q4_0_row_tile_batched(
-    ctx: crate::OpCtx<'_>,
+pub fn mmvq_q4_0_row_tile_batched<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     buffers: crate::MmvqBuffers,
     shape: crate::MmvqBatchShape,
 ) -> Result<()> {
@@ -901,22 +901,22 @@ pub fn mmvq_q4_0_row_tile_batched(
         4 => "flambeau_mmvq_q4_0_row_tile_dp4a_q8_1_batched_n4",
         _ => bail!("mmvq_q4_0_row_tile_batched: n_slots={n_slots} outside [2, 4]"),
     };
-    let module = ctx.reg.expect_module("mmvq_q4_0_row_tile_batched")?;
-    let kernel = module.kernel(entry)?;
+    let module = reg.expect_module("mmvq_q4_0_row_tile_batched")?;
+    let kernel = B::kernel(module, entry)?;
     let n_rows_i = n_rows as i32;
     let n_blocks_i = (k / 32) as i32;
     let w_ptr: u64 = weights.as_usize() as u64;
     let y_ptr: u64 = y_q8_1.as_usize() as u64;
     let d_ptr: u64 = dst.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&w_ptr);
-    args.push(&y_ptr);
-    args.push(&d_ptr);
-    args.push(&n_rows_i);
-    args.push(&n_blocks_i);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&w_ptr);
+    args.push_arg(&y_ptr);
+    args.push_arg(&d_ptr);
+    args.push_arg(&n_rows_i);
+    args.push_arg(&n_blocks_i);
     let grid = (n_rows as u32).div_ceil(4);
     let cfg = LaunchCfg::one_d(grid, 256);
-    unsafe { kernel.launch(ctx.stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 
@@ -928,8 +928,9 @@ pub fn mmvq_q4_0_row_tile_batched(
 ///
 /// `n_slots` ∈ [2, 4]. Output ABI identical to `mmvq_q8_0_batched`
 /// (`dst[N, n_rows]`, slot-major F32).
-pub fn mmvq_q8_0_row_tile_batched(
-    ctx: crate::OpCtx<'_>,
+pub fn mmvq_q8_0_row_tile_batched<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     buffers: crate::MmvqBuffers,
     shape: crate::MmvqBatchShape,
 ) -> Result<()> {
@@ -941,37 +942,38 @@ pub fn mmvq_q8_0_row_tile_batched(
         4 => "flambeau_mmvq_q8_0_row_tile_dp4a_q8_1_batched_n4",
         _ => bail!("mmvq_q8_0_row_tile_batched: n_slots={n_slots} outside [2, 4]"),
     };
-    let module = ctx.reg.expect_module("mmvq_q8_0_row_tile_batched")?;
-    let kernel = module.kernel(entry)?;
+    let module = reg.expect_module("mmvq_q8_0_row_tile_batched")?;
+    let kernel = B::kernel(module, entry)?;
     let n_rows_i = n_rows as i32;
     let n_blocks_i = (k / 32) as i32;
     let w_ptr: u64 = weights.as_usize() as u64;
     let y_ptr: u64 = y_q8_1.as_usize() as u64;
     let d_ptr: u64 = dst.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&w_ptr);
-    args.push(&y_ptr);
-    args.push(&d_ptr);
-    args.push(&n_rows_i);
-    args.push(&n_blocks_i);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&w_ptr);
+    args.push_arg(&y_ptr);
+    args.push_arg(&d_ptr);
+    args.push_arg(&n_rows_i);
+    args.push_arg(&n_blocks_i);
     let grid = (n_rows as u32).div_ceil(4);
     let cfg = LaunchCfg::one_d(grid, 256);
-    unsafe { kernel.launch(ctx.stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 
 /// **C8-i1** — fused gate+up Q4_1 dense MMVQ. Sibling of `mmvq_q4_0_gate_up`
 /// for Q4_1 weights (Qwen3.5-9B-Q4_1 / 27B-Q4_1 dense FFN). Reads the Q8_1
 /// activation once per block, produces both gate and up outputs.
-pub fn mmvq_q4_1_gate_up(
-    ctx: crate::OpCtx<'_>,
+pub fn mmvq_q4_1_gate_up<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     buffers: crate::MmvqGateUpBuffers,
     shape: crate::MmvqGateUpShape,
 ) -> Result<()> {
     let crate::MmvqGateUpBuffers { gate_w, up_w, act_q8_1: y_q8_1, gate_out, up_out } = buffers;
     let crate::MmvqGateUpShape { n_rows_gate, n_rows_up, k } = shape;
-    let module = ctx.reg.expect_module("mmvq_q4_1_gate_up_dp4a")?;
-    let kernel = module.kernel("flambeau_mmvq_q4_1_gate_up_dp4a_q8_1")?;
+    let module = reg.expect_module("mmvq_q4_1_gate_up_dp4a")?;
+    let kernel = B::kernel(module, "flambeau_mmvq_q4_1_gate_up_dp4a_q8_1")?;
     let n_rows_g = n_rows_gate as i32;
     let n_rows_u = n_rows_up as i32;
     let n_blocks_i = (k / 32) as i32;
@@ -980,23 +982,24 @@ pub fn mmvq_q4_1_gate_up(
     let y_ptr: u64 = y_q8_1.as_usize() as u64;
     let g_ptr: u64 = gate_out.as_usize() as u64;
     let u_ptr: u64 = up_out.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&gw_ptr);
-    args.push(&uw_ptr);
-    args.push(&y_ptr);
-    args.push(&g_ptr);
-    args.push(&u_ptr);
-    args.push(&n_rows_g);
-    args.push(&n_rows_u);
-    args.push(&n_blocks_i);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&gw_ptr);
+    args.push_arg(&uw_ptr);
+    args.push_arg(&y_ptr);
+    args.push_arg(&g_ptr);
+    args.push_arg(&u_ptr);
+    args.push_arg(&n_rows_g);
+    args.push_arg(&n_rows_u);
+    args.push_arg(&n_blocks_i);
     let grid = n_rows_gate.max(n_rows_up) as u32;
     let cfg = LaunchCfg::one_d(grid, 256);
-    unsafe { kernel.launch(ctx.stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 
-pub fn mmvq_q8_0_gate_up(
-    ctx: crate::OpCtx<'_>,
+pub fn mmvq_q8_0_gate_up<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     buffers: crate::MmvqGateUpBuffers,
     shape: crate::MmvqGateUpShape,
 ) -> Result<()> {
@@ -1007,8 +1010,8 @@ pub fn mmvq_q8_0_gate_up(
         "flambeau_mmvq_q8_0_gate_up_t128_vdr2_q8_1",
         128u32,
     );
-    let module = ctx.reg.expect_module(stem)?;
-    let kernel = module.kernel(entry)?;
+    let module = reg.expect_module(stem)?;
+    let kernel = B::kernel(module, entry)?;
     let n_rows_g = n_rows_gate as i32;
     let n_rows_u = n_rows_up as i32;
     let n_blocks_i = (k / 32) as i32;
@@ -1017,18 +1020,18 @@ pub fn mmvq_q8_0_gate_up(
     let y_ptr: u64 = y_q8_1.as_usize() as u64;
     let g_ptr: u64 = gate_out.as_usize() as u64;
     let u_ptr: u64 = up_out.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&gw_ptr);
-    args.push(&uw_ptr);
-    args.push(&y_ptr);
-    args.push(&g_ptr);
-    args.push(&u_ptr);
-    args.push(&n_rows_g);
-    args.push(&n_rows_u);
-    args.push(&n_blocks_i);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&gw_ptr);
+    args.push_arg(&uw_ptr);
+    args.push_arg(&y_ptr);
+    args.push_arg(&g_ptr);
+    args.push_arg(&u_ptr);
+    args.push_arg(&n_rows_g);
+    args.push_arg(&n_rows_u);
+    args.push_arg(&n_blocks_i);
     let grid = n_rows_gate.max(n_rows_up) as u32;
     let cfg = LaunchCfg::one_d(grid, threads);
-    unsafe { kernel.launch(ctx.stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 
@@ -1036,8 +1039,9 @@ pub fn mmvq_q8_0_gate_up(
 /// the Q8_1 activation once per inner-loop block and computes both dot
 /// products. Used by the qwen3.5/3.6 shared-expert FFN path when
 /// `ffn_gate_shexp` and `ffn_up_shexp` are both Q5_K.
-pub fn mmvq_q5_k_gate_up(
-    ctx: crate::OpCtx<'_>,
+pub fn mmvq_q5_k_gate_up<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     buffers: crate::MmvqGateUpBuffers,
     shape: crate::MmvqGateUpShape,
 ) -> Result<()> {
@@ -1049,8 +1053,8 @@ pub fn mmvq_q5_k_gate_up(
             flambeau_quant::QK_K
         );
     }
-    let module = ctx.reg.expect_module("mmvq_q5_k_gate_up_dp4a")?;
-    let kernel = module.kernel("flambeau_mmvq_q5_k_gate_up_dp4a_q8_1")?;
+    let module = reg.expect_module("mmvq_q5_k_gate_up_dp4a")?;
+    let kernel = B::kernel(module, "flambeau_mmvq_q5_k_gate_up_dp4a_q8_1")?;
     let n_rows_g = n_rows_gate as i32;
     let n_rows_u = n_rows_up as i32;
     let n_sb_per_row = (k / flambeau_quant::QK_K) as i32;
@@ -1059,28 +1063,28 @@ pub fn mmvq_q5_k_gate_up(
     let y_ptr: u64 = y_q8_1.as_usize() as u64;
     let g_ptr: u64 = gate_out.as_usize() as u64;
     let u_ptr: u64 = up_out.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&gw_ptr);
-    args.push(&uw_ptr);
-    args.push(&y_ptr);
-    args.push(&g_ptr);
-    args.push(&u_ptr);
-    args.push(&n_rows_g);
-    args.push(&n_rows_u);
-    args.push(&n_sb_per_row);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&gw_ptr);
+    args.push_arg(&uw_ptr);
+    args.push_arg(&y_ptr);
+    args.push_arg(&g_ptr);
+    args.push_arg(&u_ptr);
+    args.push_arg(&n_rows_g);
+    args.push_arg(&n_rows_u);
+    args.push_arg(&n_sb_per_row);
     let grid = n_rows_gate.max(n_rows_up) as u32;
     let cfg = LaunchCfg::one_d(grid, 256);
-    unsafe { kernel.launch(ctx.stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 
-pub fn mmvq(
-    ctx: crate::OpCtx<'_>,
+pub fn mmvq<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     buf: crate::MmvqBuffers,
     shape: crate::MmvqShape,
     dtype_weight: QDtype,
 ) -> Result<()> {
-    let crate::OpCtx { reg, stream } = ctx;
     let crate::MmvqBuffers {
         weights,
         act_q8_1,
@@ -1089,7 +1093,7 @@ pub fn mmvq(
     let crate::MmvqShape { n_rows, k } = shape;
     if dtype_weight == QDtype::F16 {
         return mmvq_f16_launch(
-            crate::OpCtx { reg, stream },
+            reg, stream,
             crate::MmvqBuffers { weights, act_q8_1, dst },
             n_rows,
             k,
@@ -1106,12 +1110,10 @@ pub fn mmvq(
     // scales block DP4A) but strictly loses on Q4_0's flat-block DP4A path.
     assert_eq!(k % 32, 0, "MMVQ requires k % 32 == 0");
     let n_blocks_q32 = k / 32;
-    let ctx = crate::OpCtx { reg, stream };
     let bufs = crate::MmvqBuffers { weights, act_q8_1, dst };
     let tune = MmvqLaunchTune { threads: 256, rows_per_block: 1 };
     if dtype_weight == QDtype::Q4_0 {
-        return mmvq_simple_launch(
-            ctx,
+        return mmvq_simple_launch(reg, stream,
             KernelEntry { stem: "mmvq_q4_0", entry: "flambeau_mmvq_q4_0_q8_1" },
             bufs,
             n_rows,
@@ -1120,8 +1122,7 @@ pub fn mmvq(
         );
     }
     if dtype_weight == QDtype::Q5_0 {
-        return mmvq_simple_launch(
-            ctx,
+        return mmvq_simple_launch(reg, stream,
             KernelEntry { stem: "mmvq_q5_0", entry: "flambeau_mmvq_q5_0_q8_1" },
             bufs,
             n_rows,
@@ -1130,8 +1131,7 @@ pub fn mmvq(
         );
     }
     if dtype_weight == QDtype::Q5_1 {
-        return mmvq_simple_launch(
-            ctx,
+        return mmvq_simple_launch(reg, stream,
             KernelEntry { stem: "mmvq_q5_1", entry: "flambeau_mmvq_q5_1_q8_1" },
             bufs,
             n_rows,
@@ -1146,7 +1146,7 @@ pub fn mmvq(
         k,
         n: n_rows,
     };
-    let desc = dispatch_qmatmul(&cfg)
+    let desc = B::dispatch_qmatmul(&cfg)
         .ok_or_else(|| anyhow!("no MMVQ impl for dtype={} k={k}", dtype_weight.name()))?;
     let recipe = Recipe::from_impl_id(desc.impl_id)?;
     if recipe.kind != RecipeKind::Mmvq {
@@ -1154,7 +1154,7 @@ pub fn mmvq(
     }
     let nb_per_row = k / block_elems(dtype_weight);
     mmvq_launch(
-        crate::OpCtx { reg, stream },
+        reg, stream,
         recipe,
         crate::MmvqBuffers { weights, act_q8_1, dst },
         n_rows,
@@ -1172,13 +1172,13 @@ pub fn mmvq(
 /// Supported dtypes: `Q4_0`, `Q4_1`, `Q8_0`. Other dtypes bail —
 /// extending the set is mechanical (add the templated thunk in the
 /// kernel + a `match` arm here).
-pub fn mmvq_f16_direct(
-    ctx: crate::OpCtx<'_>,
+pub fn mmvq_f16_direct<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     buf: crate::MmvqBuffers,
     shape: crate::MmvqShape,
     dtype_weight: QDtype,
 ) -> Result<()> {
-    let crate::OpCtx { reg, stream } = ctx;
     let crate::MmvqBuffers {
         weights,
         act_q8_1,
@@ -1336,7 +1336,7 @@ pub fn mmvq_f16_direct(
         other => bail!("mmvq_f16_direct: no F16-direct kernel for {}", other.name()),
     };
     mmvq_simple_launch(
-        crate::OpCtx { reg, stream },
+        reg, stream,
         KernelEntry { stem, entry },
         crate::MmvqBuffers { weights, act_q8_1, dst: dst_f16 },
         n_rows,
@@ -1374,32 +1374,32 @@ pub struct MmvqLaunchTune {
     pub rows_per_block: u32,
 }
 
-pub fn mmvq_simple_launch(
-    ctx: crate::OpCtx<'_>,
+pub fn mmvq_simple_launch<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     entry: KernelEntry,
     bufs: crate::MmvqBuffers,
     n_rows: usize,
     units_per_row: usize,
     tune: MmvqLaunchTune,
 ) -> Result<()> {
-    let crate::OpCtx { reg, stream } = ctx;
     let crate::MmvqBuffers { weights, act_q8_1, dst } = bufs;
     let module = reg.expect_module(entry.stem)?;
-    let kernel = module.kernel(entry.entry)?;
+    let kernel = B::kernel(module, entry.entry)?;
     let n_rows_i = n_rows as i32;
     let n_units_i = units_per_row as i32;
     let w_ptr: u64 = weights.as_usize() as u64;
     let y_ptr: u64 = act_q8_1.as_usize() as u64;
     let d_ptr: u64 = dst.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&w_ptr);
-    args.push(&y_ptr);
-    args.push(&d_ptr);
-    args.push(&n_rows_i);
-    args.push(&n_units_i);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&w_ptr);
+    args.push_arg(&y_ptr);
+    args.push_arg(&d_ptr);
+    args.push_arg(&n_rows_i);
+    args.push_arg(&n_units_i);
     let grid = (n_rows as u32).div_ceil(tune.rows_per_block);
     let cfg = LaunchCfg::one_d(grid, tune.threads);
-    unsafe { kernel.launch(stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 
@@ -1409,34 +1409,34 @@ pub fn mmvq_simple_launch(
 /// is loaded into registers once per K-sub-block and reused 8×. The
 /// activation tile (8 Q8_1 blocks) is read from L1 per sub-block across
 /// the 64 threads.
-fn mmq_f16_tile_launch(
-    ctx: crate::OpCtx<'_>,
+fn mmq_f16_tile_launch<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     bufs: crate::MmvqBuffers,
     n_rows: usize,
     n_tokens: usize,
     k: usize,
 ) -> Result<()> {
-    let crate::OpCtx { reg, stream } = ctx;
     let crate::MmvqBuffers { weights, act_q8_1, dst } = bufs;
     assert_eq!(k % 32, 0, "mmq_f16_tile requires k % 32 == 0");
     if n_tokens == 0 {
         return Ok(());
     }
     let module = reg.expect_module("mmq_f16_tile")?;
-    let kernel = module.kernel("flambeau_mmq_f16_tile_q8_1")?;
+    let kernel = B::kernel(module, "flambeau_mmq_f16_tile_q8_1")?;
     let n_rows_i = n_rows as i32;
     let n_tokens_i = n_tokens as i32;
     let n_blocks_i = (k / 32) as i32;
     let w_ptr: u64 = weights.as_usize() as u64;
     let y_ptr: u64 = act_q8_1.as_usize() as u64;
     let d_ptr: u64 = dst.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&w_ptr);
-    args.push(&y_ptr);
-    args.push(&d_ptr);
-    args.push(&n_rows_i);
-    args.push(&n_tokens_i);
-    args.push(&n_blocks_i);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&w_ptr);
+    args.push_arg(&y_ptr);
+    args.push_arg(&d_ptr);
+    args.push_arg(&n_rows_i);
+    args.push_arg(&n_tokens_i);
+    args.push_arg(&n_blocks_i);
     // Block = 64 threads (wave64), grid = (⌈n_rows / 64⌉, ⌈n_tokens / 8⌉).
     let cfg = LaunchCfg {
         grid: (
@@ -1447,88 +1447,88 @@ fn mmq_f16_tile_launch(
         block: (64, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 
 /// Multi-row F16 MMQ. Same kernel math as mmvq_f16_launch, but
 /// picks up n_tokens via grid.y. Stem `mmq_f16_q8_1`, block = 256, grid =
 /// (n_rows, n_tokens).
-fn mmq_f16_launch(
-    ctx: crate::OpCtx<'_>,
+fn mmq_f16_launch<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     bufs: crate::MmvqBuffers,
     n_rows: usize,
     n_tokens: usize,
     k: usize,
 ) -> Result<()> {
-    let crate::OpCtx { reg, stream } = ctx;
     let crate::MmvqBuffers { weights, act_q8_1, dst } = bufs;
     assert_eq!(k % 32, 0, "mmq_f16_q8_1 requires k % 32 == 0");
     if n_tokens == 0 {
         return Ok(());
     }
     let module = reg.expect_module("mmq_f16_q8_1")?;
-    let kernel = module.kernel("flambeau_mmq_f16_q8_1")?;
+    let kernel = B::kernel(module, "flambeau_mmq_f16_q8_1")?;
     let n_rows_i = n_rows as i32;
     let n_tokens_i = n_tokens as i32;
     let n_blocks_i = (k / 32) as i32;
     let w_ptr: u64 = weights.as_usize() as u64;
     let y_ptr: u64 = act_q8_1.as_usize() as u64;
     let d_ptr: u64 = dst.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&w_ptr);
-    args.push(&y_ptr);
-    args.push(&d_ptr);
-    args.push(&n_rows_i);
-    args.push(&n_tokens_i);
-    args.push(&n_blocks_i);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&w_ptr);
+    args.push_arg(&y_ptr);
+    args.push_arg(&d_ptr);
+    args.push_arg(&n_rows_i);
+    args.push_arg(&n_tokens_i);
+    args.push_arg(&n_blocks_i);
     let cfg = LaunchCfg {
         grid: (n_rows as u32, n_tokens as u32, 1),
         block: (256, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 
 /// Direct launch for the F16-weight × Q8_1-activation MMVQ.
 /// Kernel stem `mmvq_f16_q8_1`, block = 256 threads, grid = n_rows.
-fn mmvq_f16_launch(
-    ctx: crate::OpCtx<'_>,
+fn mmvq_f16_launch<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     bufs: crate::MmvqBuffers,
     n_rows: usize,
     k: usize,
 ) -> Result<()> {
-    let crate::OpCtx { reg, stream } = ctx;
     let crate::MmvqBuffers { weights, act_q8_1, dst } = bufs;
     assert_eq!(k % 32, 0, "mmvq_f16_q8_1 requires k % 32 == 0");
     let module = reg.expect_module("mmvq_f16_q8_1")?;
-    let kernel = module.kernel("flambeau_mmvq_f16_q8_1")?;
+    let kernel = B::kernel(module, "flambeau_mmvq_f16_q8_1")?;
     let n_rows_i = n_rows as i32;
     let n_blocks_i = (k / 32) as i32;
     let w_ptr: u64 = weights.as_usize() as u64;
     let y_ptr: u64 = act_q8_1.as_usize() as u64;
     let d_ptr: u64 = dst.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&w_ptr);
-    args.push(&y_ptr);
-    args.push(&d_ptr);
-    args.push(&n_rows_i);
-    args.push(&n_blocks_i);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&w_ptr);
+    args.push_arg(&y_ptr);
+    args.push_arg(&d_ptr);
+    args.push_arg(&n_rows_i);
+    args.push_arg(&n_blocks_i);
     let cfg = LaunchCfg::one_d(n_rows as u32, 256);
-    unsafe { kernel.launch(stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 
 /// Prefill-path MMQ for M batch rows. `m` must be ≥ the dispatch floor for
 /// the dtype (e.g. 128 for Q4_K/Q6_K/Q8_0 4-warp).
-pub fn mmq(
-    ctx: crate::OpCtx<'_>,
+pub fn mmq<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     buf: crate::MmvqBuffers,
     shape: crate::MatmulShape,
     dtype_weight: QDtype,
 ) -> Result<()> {
-    let crate::OpCtx { reg, stream } = ctx;
     let crate::MmvqBuffers {
         weights,
         act_q8_1,
@@ -1542,7 +1542,7 @@ pub fn mmq(
         k,
         n,
     };
-    let desc = dispatch_qmatmul(&cfg).ok_or_else(|| {
+    let desc = B::dispatch_qmatmul(&cfg).ok_or_else(|| {
         anyhow!(
             "no MMQ impl for dtype={} m={m} k={k} n={n}",
             dtype_weight.name()
@@ -1551,7 +1551,7 @@ pub fn mmq(
     let recipe = Recipe::from_impl_id(desc.impl_id)?;
     let nb_per_row = k / block_elems(dtype_weight);
     mmq_launch(
-        crate::OpCtx { reg, stream },
+        reg, stream,
         recipe,
         crate::MmvqBuffers { weights, act_q8_1, dst },
         n,
@@ -2347,59 +2347,59 @@ impl Recipe {
     }
 }
 
-fn mmvq_launch(
-    ctx: crate::OpCtx<'_>,
+fn mmvq_launch<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     recipe: Recipe,
     bufs: crate::MmvqBuffers,
     n_rows: usize,
     n_units: usize,
 ) -> Result<()> {
-    let crate::OpCtx { reg, stream } = ctx;
     let crate::MmvqBuffers { weights, act_q8_1, dst } = bufs;
     let module = reg.expect_module(recipe.stem)?;
-    let kernel = module.kernel(recipe.entry)?;
+    let kernel = B::kernel(module, recipe.entry)?;
     let n_rows_i = n_rows as i32;
     let n_units_i = n_units as i32;
     let w_ptr: u64 = weights.as_usize() as u64;
     let a_ptr: u64 = act_q8_1.as_usize() as u64;
     let d_ptr: u64 = dst.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&w_ptr);
-    args.push(&a_ptr);
-    args.push(&d_ptr);
-    args.push(&n_rows_i);
-    args.push(&n_units_i);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&w_ptr);
+    args.push_arg(&a_ptr);
+    args.push_arg(&d_ptr);
+    args.push_arg(&n_rows_i);
+    args.push_arg(&n_units_i);
     let grid = (n_rows as u32).div_ceil(recipe.rows_per_block);
     let cfg = LaunchCfg::one_d(grid, recipe.threads);
-    unsafe { kernel.launch(stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 
-fn mmq_launch(
-    ctx: crate::OpCtx<'_>,
+fn mmq_launch<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     recipe: Recipe,
     bufs: crate::MmvqBuffers,
     n_rows: usize,
     n_batches: usize,
     n_blocks_per_row: usize,
 ) -> Result<()> {
-    let crate::OpCtx { reg, stream } = ctx;
     let crate::MmvqBuffers { weights, act_q8_1, dst } = bufs;
     let module = reg.expect_module(recipe.stem)?;
-    let kernel = module.kernel(recipe.entry)?;
+    let kernel = B::kernel(module, recipe.entry)?;
     let n_rows_i = n_rows as i32;
     let n_batches_i = n_batches as i32;
     let n_bpr_i = n_blocks_per_row as i32;
     let w_ptr: u64 = weights.as_usize() as u64;
     let a_ptr: u64 = act_q8_1.as_usize() as u64;
     let d_ptr: u64 = dst.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&w_ptr);
-    args.push(&a_ptr);
-    args.push(&d_ptr);
-    args.push(&n_rows_i);
-    args.push(&n_batches_i);
-    args.push(&n_bpr_i);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&w_ptr);
+    args.push_arg(&a_ptr);
+    args.push_arg(&d_ptr);
+    args.push_arg(&n_rows_i);
+    args.push_arg(&n_batches_i);
+    args.push_arg(&n_bpr_i);
     let (rows_per_tile, batches_per_tile) = recipe.mmq_tile;
     let grid_x = (n_rows as u32).div_ceil(rows_per_tile);
     let grid_y = (n_batches as u32).div_ceil(batches_per_tile);
@@ -2408,7 +2408,7 @@ fn mmq_launch(
         block: (recipe.threads, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 
@@ -2418,18 +2418,18 @@ fn mmq_launch(
 /// act_q8_1 : flambeau_block_q8_1_mmq * [n_big_blocks_k, n_batches] (NOTE: MMQ layout)
 /// dst : f32 * [n_batches, n_rows] (col-major in our naming)
 /// where `n_big_blocks_k = n_blocks_per_row * QK4_1 / (4 * QK8_1) = n_blocks_per_row / 4`.
-fn mmq_lds_x64_launch(
-    ctx: crate::OpCtx<'_>,
+fn mmq_lds_x64_launch<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     recipe: Recipe,
     bufs: crate::MmvqBuffers,
     n_rows: usize,
     n_batches: usize,
     n_blocks_per_row: usize,
 ) -> Result<()> {
-    let crate::OpCtx { reg, stream } = ctx;
     let crate::MmvqBuffers { weights, act_q8_1: act_q8_1_mmq, dst } = bufs;
     let module = reg.expect_module(recipe.stem)?;
-    let kernel = module.kernel(recipe.entry)?;
+    let kernel = B::kernel(module, recipe.entry)?;
 
     // Kernel expects (ncols_x, nrows_x, ncols_y, stride_col_y, stride_row_x, nrows_dst).
     // ncols_x = K (elements)
@@ -2449,16 +2449,16 @@ fn mmq_lds_x64_launch(
     let w_ptr: u64 = weights.as_usize() as u64;
     let a_ptr: u64 = act_q8_1_mmq.as_usize() as u64;
     let d_ptr: u64 = dst.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&w_ptr);
-    args.push(&a_ptr);
-    args.push(&d_ptr);
-    args.push(&ncols_x);
-    args.push(&nrows_x);
-    args.push(&ncols_y);
-    args.push(&stride_col_y);
-    args.push(&stride_row_x);
-    args.push(&nrows_dst);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&w_ptr);
+    args.push_arg(&a_ptr);
+    args.push_arg(&d_ptr);
+    args.push_arg(&ncols_x);
+    args.push_arg(&nrows_x);
+    args.push_arg(&ncols_y);
+    args.push_arg(&stride_col_y);
+    args.push_arg(&stride_row_x);
+    args.push_arg(&nrows_dst);
 
     // Dynamic LDS byte budget — sourced from `mmq_lds_x64_params`. Must match
     // each kernel's exact `extern __shared__` budget; see that function's
@@ -2472,7 +2472,7 @@ fn mmq_lds_x64_launch(
         block: (64, 4, 1),
         shared_bytes,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 
@@ -2480,18 +2480,18 @@ fn mmq_lds_x64_launch(
 /// weights : flambeau_block_q5_K * [n_rows, K/QK_K]
 /// act_q8_1 : flambeau_block_q8_1 * [n_batches, K/QK8_1] (standard layout)
 /// dst : f32 * [n_batches, n_rows] (col-major; `dst[col*nrows_dst+row]`)
-fn mmq_wave64_launch(
-    ctx: crate::OpCtx<'_>,
+fn mmq_wave64_launch<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     recipe: Recipe,
     bufs: crate::MmvqBuffers,
     n_rows: usize,
     n_batches: usize,
     k: usize,
 ) -> Result<()> {
-    let crate::OpCtx { reg, stream } = ctx;
     let crate::MmvqBuffers { weights, act_q8_1, dst } = bufs;
     let module = reg.expect_module(recipe.stem)?;
-    let kernel = module.kernel(recipe.entry)?;
+    let kernel = B::kernel(module, recipe.entry)?;
     let ncols_x = k as i32;
     let nrows_x = n_rows as i32;
     let ncols_y = n_batches as i32;
@@ -2500,15 +2500,15 @@ fn mmq_wave64_launch(
     let w_ptr: u64 = weights.as_usize() as u64;
     let a_ptr: u64 = act_q8_1.as_usize() as u64;
     let d_ptr: u64 = dst.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&w_ptr);
-    args.push(&a_ptr);
-    args.push(&d_ptr);
-    args.push(&ncols_x);
-    args.push(&nrows_x);
-    args.push(&ncols_y);
-    args.push(&nrows_y);
-    args.push(&nrows_dst);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&w_ptr);
+    args.push_arg(&a_ptr);
+    args.push_arg(&d_ptr);
+    args.push_arg(&ncols_x);
+    args.push_arg(&nrows_x);
+    args.push_arg(&ncols_y);
+    args.push_arg(&nrows_y);
+    args.push_arg(&nrows_dst);
     let (rows_per_tile, batches_per_tile) = recipe.mmq_tile;
     let grid_x = (n_rows as u32).div_ceil(rows_per_tile);
     let grid_y = (n_batches as u32).div_ceil(batches_per_tile);
@@ -2517,7 +2517,7 @@ fn mmq_wave64_launch(
         block: (recipe.threads, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 

@@ -406,7 +406,7 @@ pub const INDEXED_MOE_MMQ_GFX906: &[KernelDescriptor] = &[
 /// matching the same concrete shape = build-time error"), so first-match
 /// wins. Panics in debug if the invariant is violated.
 pub fn dispatch_qmatmul(cfg: &QMatMulCfg) -> Option<&'static KernelDescriptor> {
-    first_match(
+    flambeau_core::first_match(
         QMATMUL_GFX906,
         cfg.dtype_weight,
         cfg.dtype_activation,
@@ -428,36 +428,14 @@ pub fn dispatch_rmsnorm(
     dtype_out: flambeau_core::QDtype,
     m: usize,
 ) -> Option<&'static KernelDescriptor> {
-    first_match(RMSNORM_GFX906, dtype_in, dtype_out, m)
+    flambeau_core::first_match(RMSNORM_GFX906, dtype_in, dtype_out, m)
 }
 
 pub fn dispatch_swiglu(
     dtype: flambeau_core::QDtype,
     m: usize,
 ) -> Option<&'static KernelDescriptor> {
-    first_match(SWIGLU_GFX906, dtype, dtype, m)
-}
-
-fn first_match(
-    table: &'static [KernelDescriptor],
-    dtype_w: flambeau_core::QDtype,
-    dtype_a: flambeau_core::QDtype,
-    m: usize,
-) -> Option<&'static KernelDescriptor> {
-    let mut hit: Option<&'static KernelDescriptor> = None;
-    for d in table {
-        if d.matches(dtype_w, dtype_a, m) {
-            if let Some(prev) = hit {
-                debug_assert!(
-                    false,
-                    "overlapping dispatch predicates in table for m={m}: {} and {}",
-                    prev.impl_id, d.impl_id
-                );
-            }
-            hit = Some(d);
-        }
-    }
-    hit
+    flambeau_core::first_match(SWIGLU_GFX906, dtype, dtype, m)
 }
 
 #[cfg(test)]

@@ -2,7 +2,7 @@
 //! `CudaModule` / `CudaKernel` / `KernelArgs` so the op-launch layer and the
 //! sweep harness drive CUDA through the portable trait.
 
-use flambeau_core::{Device, DeviceResult, KernelBackend, LaunchArgs, LaunchCfg};
+use flambeau_core::{Device, DeviceResult, KernelBackend, KernelDescriptor, LaunchArgs, LaunchCfg, QMatMulCfg};
 
 use crate::device::CudaStream;
 use crate::module::{CudaKernel, CudaModule, KernelArgs};
@@ -25,6 +25,10 @@ impl KernelBackend for CudaKernels {
 
     fn bind(dev: &CudaDevice) -> DeviceResult<()> {
         dev.bind()
+    }
+
+    fn dispatch_qmatmul(cfg: &QMatMulCfg) -> Option<&'static KernelDescriptor> {
+        crate::impls::dispatch_qmatmul(cfg)
     }
 
     fn image(stem: &str) -> Option<&'static [u8]> {

@@ -46,7 +46,7 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::MatmulShape,
         dtype_weight: QDtype,
     ) -> Result<()> {
-        super::qmatmul::qmatmul(self.ctx(), buf, shape, dtype_weight)
+        super::qmatmul::qmatmul(self.reg, self.stream, buf, shape, dtype_weight)
     }
 
     fn mmvq_q4_0_t128(
@@ -66,10 +66,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::MmvqGateUpShape,
     ) -> Result<()> {
         super::qmatmul::mmvq_q4_0_gate_up_t128(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -81,10 +79,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::MmvqGateUpBatchShape,
     ) -> Result<()> {
         super::qmatmul::mmvq_q4_0_gate_up_row_tile_batched(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -96,10 +92,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::MmvqBatchShape,
     ) -> Result<()> {
         super::qmatmul::mmvq_q4_0_row_tile_batched(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -111,10 +105,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::MmvqBatchShape,
     ) -> Result<()> {
         super::qmatmul::mmvq_q8_0_row_tile_batched(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -137,7 +129,7 @@ impl<'a> Ops for HipOps<'a> {
         n_rows_kv: usize,
         k: usize,
     ) -> Result<()> {
-        super::qmatmul::mmvq_q4_0_kv_f16dst(self.ctx(), buf, n_rows_kv, k)
+        super::qmatmul::mmvq_q4_0_kv_f16dst(self.reg, self.stream, buf, n_rows_kv, k)
     }
 
     fn mmvq_q4_0_gate_up(
@@ -146,10 +138,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::MmvqGateUpShape,
     ) -> Result<()> {
         super::qmatmul::mmvq_q4_0_gate_up(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -161,10 +151,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::MmvqGateUpShape,
     ) -> Result<()> {
         super::qmatmul::mmvq_q4_1_gate_up(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -176,10 +164,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::MmvqGateUpShape,
     ) -> Result<()> {
         super::qmatmul::mmvq_q8_0_gate_up(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -191,10 +177,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::MmvqGateUpShape,
     ) -> Result<()> {
         super::qmatmul::mmvq_q5_k_gate_up(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -206,7 +190,7 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::MmvqShape,
         dtype_weight: QDtype,
     ) -> Result<()> {
-        super::qmatmul::mmvq(self.ctx(), buf, shape, dtype_weight)
+        super::qmatmul::mmvq(self.reg, self.stream, buf, shape, dtype_weight)
     }
 
     fn mmvq_q4_k_r4(
@@ -216,7 +200,8 @@ impl<'a> Ops for HipOps<'a> {
         n_superblocks: usize,
     ) -> Result<()> {
         super::qmatmul::mmvq_simple_launch(
-            self.ctx(),
+            self.reg,
+            self.stream,
             super::qmatmul::KernelEntry {
                 stem: "mmvq_q4_k_r4",
                 entry: "flambeau_mmvq_q4_k_r4_q8_1",
@@ -237,7 +222,7 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::MmvqShape,
         dtype_weight: QDtype,
     ) -> Result<()> {
-        super::qmatmul::mmvq_f16_direct(self.ctx(), buf, shape, dtype_weight)
+        super::qmatmul::mmvq_f16_direct(self.reg, self.stream, buf, shape, dtype_weight)
     }
 
     fn mmq(
@@ -246,7 +231,7 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::MatmulShape,
         dtype_weight: QDtype,
     ) -> Result<()> {
-        super::qmatmul::mmq(self.ctx(), buf, shape, dtype_weight)
+        super::qmatmul::mmq(self.reg, self.stream, buf, shape, dtype_weight)
     }
 
     // -- attention --

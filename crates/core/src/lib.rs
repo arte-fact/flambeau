@@ -18,7 +18,7 @@ pub use kernel_limits::{MOE_SORT_MAX_EXPERTS, TOPK_MAX_EXPERTS};
 pub use launch::LaunchCfg;
 pub use slot::{MemcpySlot, ScalarSlot};
 pub use op::{
-    DirectCallKernel, KernelDescriptor, KernelImpl, Op, OpContract, QDtype, QMatMul, QMatMulCfg,
-    QMatMulInput, QMatMulOutput, RmsNorm, RmsNormCfg, RmsNormInput, RmsNormOutput, SwiGLU,
-    SwiGLUCfg, SwiGLUInput, SwiGLUOutput, Tolerance,
+    first_match, DirectCallKernel, KernelDescriptor, KernelImpl, Op, OpContract, QDtype, QMatMul,
+    QMatMulCfg, QMatMulInput, QMatMulOutput, RmsNorm, RmsNormCfg, RmsNormInput, RmsNormOutput,
+    SwiGLU, SwiGLUCfg, SwiGLUInput, SwiGLUOutput, Tolerance,
 };

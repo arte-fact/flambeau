@@ -280,6 +280,33 @@ impl KernelDescriptor {
     }
 }
 
+/// First descriptor in `table` whose predicate matches `(dtype_w, dtype_a, m)`.
+/// Predicates are non-overlapping by construction (architectural rule: "two
+/// rows matching the same concrete shape = build-time error"), so first-match
+/// is the unique match; a debug build asserts the invariant. Backend dispatch
+/// tables (`QMATMUL_GFX906`, `QMATMUL_SM86`, …) feed this.
+pub fn first_match(
+    table: &'static [KernelDescriptor],
+    dtype_w: QDtype,
+    dtype_a: QDtype,
+    m: usize,
+) -> Option<&'static KernelDescriptor> {
+    let mut hit: Option<&'static KernelDescriptor> = None;
+    for d in table {
+        if d.matches(dtype_w, dtype_a, m) {
+            if let Some(prev) = hit {
+                debug_assert!(
+                    false,
+                    "overlapping dispatch predicates for m={m}: {} and {}",
+                    prev.impl_id, d.impl_id
+                );
+            }
+            hit = Some(d);
+        }
+    }
+    hit
+}
+
 /// Registry entry for a kernel that is invoked directly by a call site
 /// (`reg.expect_module("stem")`) rather than through shape-based dispatch.
 /// Use this for ops where the implementation choice is fixed per dtype / GGUF

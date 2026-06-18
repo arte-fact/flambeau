@@ -4,7 +4,7 @@
 //! no concrete `HipModule` / `CudaModule`. One impl per backend (`HipKernels`,
 //! `CudaKernels`) wraps the existing concrete types.
 
-use crate::{Device, DeviceResult, LaunchCfg};
+use crate::{Device, DeviceResult, KernelDescriptor, LaunchCfg, QMatMulCfg};
 
 /// Push kernel arguments by reference without naming a backend's concrete args
 /// type. Implemented for each backend's `KernelArgs` — a local trait on a
@@ -28,6 +28,12 @@ pub trait KernelBackend: 'static {
     /// # Errors
     /// Propagates the backend context-bind failure.
     fn bind(dev: &Self::Device) -> DeviceResult<()>;
+
+    /// Pick the `QMatMul` kernel variant for `cfg` from this backend's
+    /// committed dispatch table (`first_match` over `QMATMUL_GFX906` /
+    /// `QMATMUL_SM86`). The arch-specific variant choice lives here, not in the
+    /// op body — so the generic `qmatmul` op names no per-arch table.
+    fn dispatch_qmatmul(cfg: &QMatMulCfg) -> Option<&'static KernelDescriptor>;
 
     /// Compiled kernel image (`.hsaco` / `.cubin`) for catalogue `stem`, if the
     /// kernel was compiled into this build.

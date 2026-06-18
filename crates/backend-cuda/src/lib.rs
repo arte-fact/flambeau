@@ -10,6 +10,7 @@
 pub mod cluster;
 pub mod device;
 pub mod graph;
+pub mod impls;
 pub mod kernel_backend;
 pub mod module;
 #[cfg(feature = "nccl")]

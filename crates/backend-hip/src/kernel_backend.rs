@@ -2,7 +2,7 @@
 //! the existing `HipModule` / `HipKernel` / `KernelArgs` so the op-launch layer
 //! and the sweep harness drive HIP through the portable trait.
 
-use flambeau_core::{Device, DeviceResult, KernelBackend, LaunchArgs, LaunchCfg};
+use flambeau_core::{Device, DeviceResult, KernelBackend, KernelDescriptor, LaunchArgs, LaunchCfg, QMatMulCfg};
 
 use crate::{HipDevice, HipKernel, HipModule, HipStream, KernelArgs};
 
@@ -23,6 +23,10 @@ impl KernelBackend for HipKernels {
 
     fn bind(dev: &HipDevice) -> DeviceResult<()> {
         dev.bind()
+    }
+
+    fn dispatch_qmatmul(cfg: &QMatMulCfg) -> Option<&'static KernelDescriptor> {
+        crate::impls::dispatch_qmatmul(cfg)
     }
 
     fn image(stem: &str) -> Option<&'static [u8]> {
