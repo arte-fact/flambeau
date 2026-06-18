@@ -959,4 +959,25 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
         impl_id: "rmsnorm_rope_neox_partial_f16",
         cert_rel_path: "certs/hip/gfx906/rmsnorm_rope_neox_partial_f16.json",
     },
+    // P3 Wave 4 — GDN (qwen3-coder-next) F32 kernels.
+    DirectCallKernel {
+        impl_id: "gdn_alpha_beta_f32",
+        cert_rel_path: "certs/hip/gfx906/gdn_alpha_beta_f32.json",
+    },
+    DirectCallKernel {
+        impl_id: "gdn_split_qkv_f32",
+        cert_rel_path: "certs/hip/gfx906/gdn_split_qkv_f32.json",
+    },
+    DirectCallKernel {
+        impl_id: "gdn_assemble_conv_input_f32",
+        cert_rel_path: "certs/hip/gfx906/gdn_assemble_conv_input_f32.json",
+    },
+    DirectCallKernel {
+        impl_id: "causal_conv1d_f32",
+        cert_rel_path: "certs/hip/gfx906/causal_conv1d_f32.json",
+    },
+    DirectCallKernel {
+        impl_id: "gdn_conv_trio_decode_f32_batched_slots",
+        cert_rel_path: "certs/hip/gfx906/gdn_conv_trio_decode_f32_batched_slots.json",
+    },
 ];

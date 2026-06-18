@@ -86,6 +86,11 @@ pub fn run_pointwise_sweep<B: BenchBackend>(
         "v_unit_norm_per_head_f16" => run_v_unit_norm_sweep::<B>(repo_root, arch),
         "kv_append_v_unit_norm_f16" => run_kv_append_v_unit_norm_sweep::<B>(repo_root, arch),
         "rmsnorm_rope_neox_partial_f16" => run_rmsnorm_rope_sweep::<B>(repo_root, arch),
+        "gdn_alpha_beta_f32" => run_gdn_alpha_beta_sweep::<B>(repo_root, arch),
+        "gdn_split_qkv_f32" => run_gdn_split_qkv_sweep::<B>(repo_root, arch),
+        "gdn_assemble_conv_input_f32" => run_gdn_assemble_conv_input_sweep::<B>(repo_root, arch),
+        "causal_conv1d_f32" => run_causal_conv1d_sweep::<B>(repo_root, arch),
+        "gdn_conv_trio_decode_f32_batched_slots" => run_gdn_conv_trio_sweep::<B>(repo_root, arch),
         _ => return None,
     };
     Some(cert)
@@ -986,6 +991,365 @@ pub fn run_rope_f16_sweep<B: BenchBackend>(repo_root: &Path, arch: &str, neox: b
     }
     finish_cert(&dev, repo_root, arch, impl_id, impl_id, "F16", "F16",
         "|err| <= 5e-3 * max(|ref|, 1e-2) vs F64 angle oracle", results, pmc)
+}
+
+/// `gdn_alpha_beta_f32` — GDN gate = softplus(alpha+dt_bias)*ssm_a, beta =
+/// sigmoid(beta_in). Pointwise; F64 oracle, 1e-4.
+pub fn run_gdn_alpha_beta_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) -> Result<Cert> {
+    let dev = B::new_device(0)?;
+    let image = B::image("gdn_alpha_beta_f32").ok_or_else(|| anyhow!("gdn_alpha_beta_f32 not compiled"))?;
+    let module = B::load(&dev, image)?;
+    let kernel = B::kernel(&module, "flambeau_gdn_alpha_beta_f32")?;
+    let pmc = B::attributes(&kernel)?;
+
+    let shapes = [(1usize, 32usize), (8, 32), (4, 64)];
+    let mut results = Vec::new();
+    for (n_tokens, nvh) in shapes {
+        let seed = 0xC0FFEE ^ ((n_tokens as u64) * 41 + (nvh as u64) * 19);
+        let alpha = seeded_f32_range(seed, n_tokens * nvh, -2.0, 2.0);
+        let beta_in = seeded_f32_range(seed ^ 0xB2, n_tokens * nvh, -2.0, 2.0);
+        let dt_bias = seeded_f32_range(seed ^ 0xD3, nvh, -0.5, 0.5);
+        let ssm_a: Vec<f32> = (0..nvh).map(|i| -(0.05 + 0.01 * i as f32)).collect();
+        let mut ref_g = vec![0.0f32; n_tokens * nvh];
+        let mut ref_b = vec![0.0f32; n_tokens * nvh];
+        for t in 0..n_tokens {
+            for i in 0..nvh {
+                let a = (alpha[t * nvh + i] + dt_bias[i]) as f64;
+                let sp = a.max(0.0) + (1.0 + (-a.abs()).exp()).ln();
+                ref_g[t * nvh + i] = (sp * ssm_a[i] as f64) as f32;
+                let b = beta_in[t * nvh + i] as f64;
+                ref_b[t * nvh + i] = (1.0 / (1.0 + (-b).exp())) as f32;
+            }
+        }
+
+        let d_a = alloc_and_upload(&dev, &alpha);
+        let d_b = alloc_and_upload(&dev, &beta_in);
+        let d_dt = alloc_and_upload(&dev, &dt_bias);
+        let d_sa = alloc_and_upload(&dev, &ssm_a);
+        let d_g = dev.alloc(n_tokens * nvh * 4)?;
+        let d_bo = dev.alloc(n_tokens * nvh * 4)?;
+        {
+            let stream = dev.default_stream();
+            let nv = nvh as i32;
+            let nt = n_tokens as i32;
+            let ap: u64 = d_a.as_usize() as u64;
+            let bp: u64 = d_b.as_usize() as u64;
+            let dtp: u64 = d_dt.as_usize() as u64;
+            let sap: u64 = d_sa.as_usize() as u64;
+            let gp: u64 = d_g.as_usize() as u64;
+            let bop: u64 = d_bo.as_usize() as u64;
+            let mut args = <B::Args<'_>>::default();
+            args.push_arg(&ap);
+            args.push_arg(&bp);
+            args.push_arg(&dtp);
+            args.push_arg(&sap);
+            args.push_arg(&gp);
+            args.push_arg(&bop);
+            args.push_arg(&nv);
+            args.push_arg(&nt);
+            let cfg = LaunchCfg { grid: (n_tokens as u32, 1, 1), block: (nvh as u32, 1, 1), shared_bytes: 0 };
+            B::launch(&kernel, stream, cfg, args)?;
+            stream.synchronize()?;
+        }
+        let mut got_g = vec![0.0f32; n_tokens * nvh];
+        let mut got_b = vec![0.0f32; n_tokens * nvh];
+        unsafe {
+            dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost,
+                DevicePtr(got_g.as_mut_ptr() as usize), d_g, n_tokens * nvh * 4)?;
+            dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost,
+                DevicePtr(got_b.as_mut_ptr() as usize), d_bo, n_tokens * nvh * 4)?;
+        }
+        dev.default_stream().synchronize()?;
+        unsafe {
+            dev.dealloc(d_a, n_tokens * nvh * 4)?; dev.dealloc(d_b, n_tokens * nvh * 4)?;
+            dev.dealloc(d_dt, nvh * 4)?; dev.dealloc(d_sa, nvh * 4)?;
+            dev.dealloc(d_g, n_tokens * nvh * 4)?; dev.dealloc(d_bo, n_tokens * nvh * 4)?;
+        }
+        let err = max_rel_err_with_floor(&got_g, &ref_g, 1.0).max(max_rel_err_with_floor(&got_b, &ref_b, 1.0));
+        results.push(ShapeResult { m: n_tokens, k: nvh, n: 1, seed, max_rel_err: err, tolerance: 1e-4, pass: err <= 1e-4 });
+    }
+    finish_cert(&dev, repo_root, arch, "gdn_alpha_beta_f32", "gdn_alpha_beta_f32", "F32", "F32",
+        "|err| <= 1e-4 * max(|ref|, 1) on gate + beta", results, pmc)
+}
+
+/// `gdn_split_qkv_f32` / `gdn_assemble_conv_input_f32` — pure F32 copy/split
+/// kernels; bit-exact. `assemble=false` runs the qkv split, `true` the conv
+/// assemble.
+fn run_gdn_copy_sweep<B: BenchBackend>(repo_root: &Path, arch: &str, assemble: bool) -> Result<Cert> {
+    let (stem, entry) = if assemble {
+        ("gdn_assemble_conv_input_f32", "flambeau_gdn_assemble_conv_input_f32")
+    } else {
+        ("gdn_split_qkv_f32", "flambeau_gdn_split_qkv_f32")
+    };
+    let dev = B::new_device(0)?;
+    let image = B::image(stem).ok_or_else(|| anyhow!("{stem} not compiled"))?;
+    let module = B::load(&dev, image)?;
+    let kernel = B::kernel(&module, entry)?;
+    let pmc = B::attributes(&kernel)?;
+
+    let mut results = Vec::new();
+    if assemble {
+        let cases = [(512usize, 4usize), (2048, 4), (1536, 3)];
+        for (conv_channels, conv_kernel) in cases {
+            let seed = 0xC0FFEE ^ ((conv_channels as u64) * 13 + (conv_kernel as u64) * 7);
+            let hist_elems = conv_channels * (conv_kernel - 1);
+            let history = seeded_f32_range(seed, hist_elems, -1.0, 1.0);
+            let current = seeded_f32_range(seed ^ 0xCC, conv_channels, -1.0, 1.0);
+            let n = conv_channels * conv_kernel;
+            let mut reference = vec![0.0f32; n];
+            reference[..hist_elems].copy_from_slice(&history);
+            reference[hist_elems..].copy_from_slice(&current);
+
+            let d_h = alloc_and_upload(&dev, &history);
+            let d_c = alloc_and_upload(&dev, &current);
+            let d_out = dev.alloc(n * 4)?;
+            {
+                let stream = dev.default_stream();
+                let cc = conv_channels as i32;
+                let ck = conv_kernel as i32;
+                let hp: u64 = d_h.as_usize() as u64;
+                let cp: u64 = d_c.as_usize() as u64;
+                let op: u64 = d_out.as_usize() as u64;
+                let mut args = <B::Args<'_>>::default();
+                args.push_arg(&hp);
+                args.push_arg(&cp);
+                args.push_arg(&op);
+                args.push_arg(&cc);
+                args.push_arg(&ck);
+                B::launch(&kernel, stream, LaunchCfg::one_d((n as u32).div_ceil(256), 256), args)?;
+                stream.synchronize()?;
+            }
+            let mut got = vec![0.0f32; n];
+            unsafe {
+                dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost,
+                    DevicePtr(got.as_mut_ptr() as usize), d_out, n * 4)?;
+            }
+            dev.default_stream().synchronize()?;
+            unsafe { dev.dealloc(d_h, hist_elems * 4)?; dev.dealloc(d_c, conv_channels * 4)?; dev.dealloc(d_out, n * 4)?; }
+            let (err, tol, pass) = bits_mismatch_f32(&got, &reference);
+            results.push(ShapeResult { m: conv_channels, k: conv_kernel, n: 1, seed, max_rel_err: err, tolerance: tol, pass });
+        }
+    } else {
+        let cases = [(4usize, 256usize, 128usize), (16, 512, 256)];
+        for (n_tokens, qk_size, v_size) in cases {
+            let seed = 0xC0FFEE ^ ((n_tokens as u64) * 13 + (qk_size as u64) * 7);
+            let conv_channels = 2 * qk_size + v_size;
+            let silu = seeded_f32_range(seed, n_tokens * conv_channels, -1.0, 1.0);
+            let mut ref_q = vec![0.0f32; n_tokens * qk_size];
+            let mut ref_k = vec![0.0f32; n_tokens * qk_size];
+            let mut ref_v = vec![0.0f32; n_tokens * v_size];
+            for t in 0..n_tokens {
+                for c in 0..conv_channels {
+                    let val = silu[t * conv_channels + c];
+                    if c < qk_size { ref_q[t * qk_size + c] = val; }
+                    else if c < 2 * qk_size { ref_k[t * qk_size + (c - qk_size)] = val; }
+                    else { ref_v[t * v_size + (c - 2 * qk_size)] = val; }
+                }
+            }
+            let d_s = alloc_and_upload(&dev, &silu);
+            let d_q = dev.alloc(n_tokens * qk_size * 4)?;
+            let d_k = dev.alloc(n_tokens * qk_size * 4)?;
+            let d_v = dev.alloc(n_tokens * v_size * 4)?;
+            {
+                let stream = dev.default_stream();
+                let nt = n_tokens as i32;
+                let qk = qk_size as i32;
+                let vs = v_size as i32;
+                let sp: u64 = d_s.as_usize() as u64;
+                let qp: u64 = d_q.as_usize() as u64;
+                let kp: u64 = d_k.as_usize() as u64;
+                let vp: u64 = d_v.as_usize() as u64;
+                let mut args = <B::Args<'_>>::default();
+                args.push_arg(&sp); args.push_arg(&qp); args.push_arg(&kp); args.push_arg(&vp);
+                args.push_arg(&nt); args.push_arg(&qk); args.push_arg(&vs);
+                let total = n_tokens * conv_channels;
+                B::launch(&kernel, stream, LaunchCfg::one_d((total as u32).div_ceil(256), 256), args)?;
+                stream.synchronize()?;
+            }
+            let mut gq = vec![0.0f32; n_tokens * qk_size];
+            let mut gk = vec![0.0f32; n_tokens * qk_size];
+            let mut gv = vec![0.0f32; n_tokens * v_size];
+            unsafe {
+                dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost, DevicePtr(gq.as_mut_ptr() as usize), d_q, n_tokens * qk_size * 4)?;
+                dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost, DevicePtr(gk.as_mut_ptr() as usize), d_k, n_tokens * qk_size * 4)?;
+                dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost, DevicePtr(gv.as_mut_ptr() as usize), d_v, n_tokens * v_size * 4)?;
+            }
+            dev.default_stream().synchronize()?;
+            unsafe { dev.dealloc(d_s, n_tokens * conv_channels * 4)?; dev.dealloc(d_q, n_tokens * qk_size * 4)?; dev.dealloc(d_k, n_tokens * qk_size * 4)?; dev.dealloc(d_v, n_tokens * v_size * 4)?; }
+            let bad = bits_mismatch_f32(&gq, &ref_q).0 + bits_mismatch_f32(&gk, &ref_k).0 + bits_mismatch_f32(&gv, &ref_v).0;
+            results.push(ShapeResult { m: n_tokens, k: qk_size, n: v_size, seed, max_rel_err: bad, tolerance: 0.0, pass: bad == 0.0 });
+        }
+    }
+    finish_cert(&dev, repo_root, arch, stem, stem, "F32", "F32", "exact (copy/split)", results, pmc)
+}
+
+pub fn run_gdn_split_qkv_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) -> Result<Cert> {
+    run_gdn_copy_sweep::<B>(repo_root, arch, false)
+}
+pub fn run_gdn_assemble_conv_input_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) -> Result<Cert> {
+    run_gdn_copy_sweep::<B>(repo_root, arch, true)
+}
+
+/// `causal_conv1d_f32` — depthwise causal 1D conv. F64 oracle, 1e-4.
+pub fn run_causal_conv1d_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) -> Result<Cert> {
+    let dev = B::new_device(0)?;
+    let image = B::image("causal_conv1d_f32").ok_or_else(|| anyhow!("causal_conv1d_f32 not compiled"))?;
+    let module = B::load(&dev, image)?;
+    let kernel = B::kernel(&module, "flambeau_causal_conv1d_f32")?;
+    let pmc = B::attributes(&kernel)?;
+
+    let cases = [(1usize, 512usize, 4usize), (8, 2048, 4), (4, 1536, 3)];
+    let mut results = Vec::new();
+    for (n_new, conv_channels, conv_kernel) in cases {
+        let seed = 0xC0FFEE ^ ((n_new as u64) * 13 + (conv_channels as u64) * 7);
+        let n_total = (conv_kernel - 1) + n_new;
+        let conv_input = seeded_f32_range(seed, n_total * conv_channels, -1.0, 1.0);
+        let weight = seeded_f32_range(seed ^ 0xAB, conv_channels * conv_kernel, -0.5, 0.5);
+        let mut reference = vec![0.0f32; n_new * conv_channels];
+        for t in 0..n_new {
+            for c in 0..conv_channels {
+                let acc: f64 = (0..conv_kernel)
+                    .map(|k| conv_input[(t + k) * conv_channels + c] as f64 * weight[c * conv_kernel + k] as f64)
+                    .sum();
+                reference[t * conv_channels + c] = acc as f32;
+            }
+        }
+
+        let d_ci = alloc_and_upload(&dev, &conv_input);
+        let d_w = alloc_and_upload(&dev, &weight);
+        let d_y = dev.alloc(n_new * conv_channels * 4)?;
+        {
+            let stream = dev.default_stream();
+            let nn = n_new as i32;
+            let cc = conv_channels as i32;
+            let ck = conv_kernel as i32;
+            let cip: u64 = d_ci.as_usize() as u64;
+            let wp: u64 = d_w.as_usize() as u64;
+            let yp: u64 = d_y.as_usize() as u64;
+            let mut args = <B::Args<'_>>::default();
+            args.push_arg(&cip);
+            args.push_arg(&wp);
+            args.push_arg(&yp);
+            args.push_arg(&nn);
+            args.push_arg(&cc);
+            args.push_arg(&ck);
+            let cfg = LaunchCfg { grid: ((conv_channels as u32).div_ceil(256), n_new as u32, 1), block: (256, 1, 1), shared_bytes: 0 };
+            B::launch(&kernel, stream, cfg, args)?;
+            stream.synchronize()?;
+        }
+        let mut got = vec![0.0f32; n_new * conv_channels];
+        unsafe {
+            dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost,
+                DevicePtr(got.as_mut_ptr() as usize), d_y, n_new * conv_channels * 4)?;
+        }
+        dev.default_stream().synchronize()?;
+        unsafe { dev.dealloc(d_ci, n_total * conv_channels * 4)?; dev.dealloc(d_w, conv_channels * conv_kernel * 4)?; dev.dealloc(d_y, n_new * conv_channels * 4)?; }
+        let err = max_rel_err_with_floor(&got, &reference, 1.0);
+        results.push(ShapeResult { m: n_new, k: conv_channels, n: conv_kernel, seed, max_rel_err: err, tolerance: 1e-4, pass: err <= 1e-4 });
+    }
+    finish_cert(&dev, repo_root, arch, "causal_conv1d_f32", "causal_conv1d_f32", "F32", "F32",
+        "|err| <= 1e-4 * max(|ref|, 1) vs F64 oracle", results, pmc)
+}
+
+/// `gdn_conv_trio_decode_f32_batched_slots` — fused per-slot conv + history
+/// shift across N decode slots (per-slot history pointers). Checks conv_out +
+/// the shifted history. F64 oracle, 1e-4.
+pub fn run_gdn_conv_trio_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) -> Result<Cert> {
+    let dev = B::new_device(0)?;
+    let image = B::image("gdn_conv_trio_decode_f32_batched_slots").ok_or_else(|| anyhow!("gdn_conv_trio not compiled"))?;
+    let module = B::load(&dev, image)?;
+    let kernel = B::kernel(&module, "flambeau_gdn_conv_trio_decode_f32_batched_slots")?;
+    let pmc = B::attributes(&kernel)?;
+
+    let cases = [(1usize, 512usize, 4usize), (4, 2048, 4), (8, 1024, 3)];
+    let mut results = Vec::new();
+    for (n_slots, conv_channels, conv_kernel) in cases {
+        let seed = 0xC0FFEE ^ ((n_slots as u64) * 13 + (conv_channels as u64) * 7);
+        let hist_rows = conv_kernel - 1;
+        let qkv = seeded_f32_range(seed, n_slots * conv_channels, -1.0, 1.0);
+        let weight = seeded_f32_range(seed ^ 0xAB, conv_channels * conv_kernel, -0.5, 0.5);
+        let hist0: Vec<Vec<f32>> = (0..n_slots)
+            .map(|s| seeded_f32_range(seed ^ (0x100 + s as u64), hist_rows * conv_channels, -1.0, 1.0))
+            .collect();
+        // Oracle: conv_out + shifted history per slot.
+        let mut ref_out = vec![0.0f32; n_slots * conv_channels];
+        let mut ref_hist: Vec<Vec<f32>> = hist0.clone();
+        for s in 0..n_slots {
+            for c in 0..conv_channels {
+                let nv = qkv[s * conv_channels + c] as f64;
+                let mut acc = 0.0f64;
+                for k in 0..hist_rows {
+                    acc += hist0[s][k * conv_channels + c] as f64 * weight[c * conv_kernel + k] as f64;
+                }
+                acc += nv * weight[c * conv_kernel + hist_rows] as f64;
+                ref_out[s * conv_channels + c] = acc as f32;
+                for k in 0..hist_rows {
+                    let v = if k + 1 < hist_rows { hist0[s][(k + 1) * conv_channels + c] } else { qkv[s * conv_channels + c] };
+                    ref_hist[s][k * conv_channels + c] = v;
+                }
+            }
+        }
+
+        let d_qkv = alloc_and_upload(&dev, &qkv);
+        let d_w = alloc_and_upload(&dev, &weight);
+        let d_out = dev.alloc(n_slots * conv_channels * 4)?;
+        let hbytes = hist_rows * conv_channels * 4;
+        let mut hist_bufs = Vec::with_capacity(n_slots);
+        let mut hptrs = vec![0u64; n_slots];
+        for s in 0..n_slots {
+            let hb = alloc_and_upload(&dev, &hist0[s]);
+            hptrs[s] = hb.as_usize() as u64;
+            hist_bufs.push(hb);
+        }
+        let d_hptrs = alloc_and_upload(&dev, &hptrs);
+        {
+            let stream = dev.default_stream();
+            let ns = n_slots as i32;
+            let cc = conv_channels as i32;
+            let ck = conv_kernel as i32;
+            let hpp: u64 = d_hptrs.as_usize() as u64;
+            let qp: u64 = d_qkv.as_usize() as u64;
+            let wp: u64 = d_w.as_usize() as u64;
+            let op: u64 = d_out.as_usize() as u64;
+            let mut args = <B::Args<'_>>::default();
+            args.push_arg(&hpp);
+            args.push_arg(&qp);
+            args.push_arg(&wp);
+            args.push_arg(&op);
+            args.push_arg(&ns);
+            args.push_arg(&cc);
+            args.push_arg(&ck);
+            let cfg = LaunchCfg { grid: ((conv_channels as u32).div_ceil(256), n_slots as u32, 1), block: (256, 1, 1), shared_bytes: 0 };
+            B::launch(&kernel, stream, cfg, args)?;
+            stream.synchronize()?;
+        }
+        let mut got_out = vec![0.0f32; n_slots * conv_channels];
+        unsafe {
+            dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost,
+                DevicePtr(got_out.as_mut_ptr() as usize), d_out, n_slots * conv_channels * 4)?;
+        }
+        dev.default_stream().synchronize()?;
+        let mut out_err = max_rel_err_with_floor(&got_out, &ref_out, 1.0);
+        for s in 0..n_slots {
+            let mut gh = vec![0.0f32; hist_rows * conv_channels];
+            unsafe {
+                dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost,
+                    DevicePtr(gh.as_mut_ptr() as usize), hist_bufs[s], hbytes)?;
+            }
+            dev.default_stream().synchronize()?;
+            out_err = out_err.max(max_rel_err_with_floor(&gh, &ref_hist[s], 1.0));
+        }
+        unsafe {
+            dev.dealloc(d_qkv, n_slots * conv_channels * 4)?;
+            dev.dealloc(d_w, conv_channels * conv_kernel * 4)?;
+            dev.dealloc(d_out, n_slots * conv_channels * 4)?;
+            dev.dealloc(d_hptrs, n_slots * 8)?;
+            for s in 0..n_slots { dev.dealloc(hist_bufs[s], hbytes)?; }
+        }
+        results.push(ShapeResult { m: n_slots, k: conv_channels, n: conv_kernel, seed, max_rel_err: out_err, tolerance: 1e-4, pass: out_err <= 1e-4 });
+    }
+    finish_cert(&dev, repo_root, arch, "gdn_conv_trio_decode_f32_batched_slots", "gdn_conv_trio_decode_f32_batched_slots",
+        "F32", "F32", "conv_out + shifted history |err| <= 1e-4 vs F64 oracle", results, pmc)
 }
 
 /// `rmsnorm_rope_neox_partial_f16` — fused per-head RMSNorm + partial NeoX RoPE,
