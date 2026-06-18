@@ -42,6 +42,7 @@ pub fn run_pointwise_sweep<B: BenchBackend>(
         "swiglu_f32_to_q8_1" => run_swiglu_f32_to_q8_1_sweep::<B>(repo_root, arch),
         "split_q_gate_f16" => run_split_q_gate_f16_sweep::<B>(repo_root, arch),
         "rmsnorm_f32" => run_rmsnorm_f32_sweep::<B>(repo_root, arch),
+        "rmsnorm_f16" => run_rmsnorm_f16_sweep::<B>(repo_root, arch),
         "l2_norm_f32" => run_l2_norm_f32_sweep::<B>(repo_root, arch),
         _ => return None,
     };
@@ -676,6 +677,95 @@ pub fn run_rmsnorm_f32_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) -> R
         dtype_weight: "F32".to_string(),
         dtype_activation: "F32".to_string(),
         tolerance_formula: "|err| <= 1e-5 * max(|ref|, 1) vs F64 oracle".to_string(),
+        results,
+        pass,
+        emitted_at: now_utc_iso8601(),
+        rig: rig_for(arch),
+        pmc: Some(pmc),
+    };
+    cert.write_to_disk(repo_root)?;
+    Ok(cert)
+}
+
+/// `rmsnorm_f16` — per-row RMSNorm, F16 I/O (every-layer decode norm). Same
+/// neutral block-reduce seam as `rmsnorm_f32`; F32 accumulation, F16 output
+/// compared in F32 with the `sqrt(k)` noise floor.
+pub fn run_rmsnorm_f16_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) -> Result<Cert> {
+    let dev = B::new_device(0)?;
+    let image = B::image("rmsnorm_f16").ok_or_else(|| anyhow!("rmsnorm_f16 not compiled"))?;
+    let module = B::load(&dev, image)?;
+    let kernel = B::kernel(&module, "flambeau_rmsnorm_f16")?;
+    let pmc = B::attributes(&kernel)?;
+
+    let shapes = [(1usize, 2048usize), (8, 2048), (1, 5120)];
+    let eps = 1e-6f32;
+    let mut results = Vec::new();
+    for (m, k) in shapes {
+        let seed = 0xC0FFEE ^ ((m as u64) * 1049 + (k as u64) * 11);
+        let x = f16_input(seed, m * k);
+        let w = f16_input(seed ^ 0xEE, k);
+        let mut reference = vec![0.0f32; m * k];
+        for r in 0..m {
+            let sum_sq: f64 = (0..k).map(|i| (x[r * k + i].to_f32() as f64).powi(2)).sum();
+            let rsqrt = 1.0 / ((sum_sq / (k as f64)) + eps as f64).sqrt();
+            for i in 0..k {
+                let v = x[r * k + i].to_f32() as f64 * w[i].to_f32() as f64 * rsqrt;
+                reference[r * k + i] = f16::from_f32(v as f32).to_f32();
+            }
+        }
+
+        let d_x = alloc_and_upload(&dev, &x);
+        let d_w = alloc_and_upload(&dev, &w);
+        let d_y = dev.alloc(m * k * 2)?;
+        {
+            let stream = dev.default_stream();
+            let m_i = m as i32;
+            let k_i = k as i32;
+            let x_ptr: u64 = d_x.as_usize() as u64;
+            let w_ptr: u64 = d_w.as_usize() as u64;
+            let y_ptr: u64 = d_y.as_usize() as u64;
+            let mut args = <B::Args<'_>>::default();
+            args.push_arg(&x_ptr);
+            args.push_arg(&w_ptr);
+            args.push_arg(&y_ptr);
+            args.push_arg(&m_i);
+            args.push_arg(&k_i);
+            args.push_arg(&eps);
+            B::launch(&kernel, stream, LaunchCfg::one_d(m as u32, 256), args)?;
+            stream.synchronize()?;
+        }
+        let mut got_f16 = vec![f16::from_f32(0.0); m * k];
+        unsafe {
+            dev.memcpy_async(
+                dev.default_stream(),
+                CopyDirection::DeviceToHost,
+                DevicePtr(got_f16.as_mut_ptr() as usize),
+                d_y,
+                m * k * 2,
+            )?;
+        }
+        dev.default_stream().synchronize()?;
+        unsafe {
+            dev.dealloc(d_x, m * k * 2)?;
+            dev.dealloc(d_w, k * 2)?;
+            dev.dealloc(d_y, m * k * 2)?;
+        }
+
+        let got: Vec<f32> = got_f16.iter().map(|v| v.to_f32()).collect();
+        let err = max_rel_err_with_floor(&got, &reference, (k as f32).sqrt() * 0.01);
+        results.push(ShapeResult { m, k, n: 1, seed, max_rel_err: err, tolerance: 1e-2, pass: err <= 1e-2 });
+    }
+
+    let pass = results.iter().all(|r| r.pass);
+    let cert = Cert {
+        schema_version: SCHEMA_VERSION,
+        impl_id: "rmsnorm_f16".to_string(),
+        backend: dev.backend().to_string(),
+        arch: arch.to_string(),
+        op: "rmsnorm_f16".to_string(),
+        dtype_weight: "F16".to_string(),
+        dtype_activation: "F16".to_string(),
+        tolerance_formula: "|err| <= 1e-2 * max(|ref|, sqrt(k))".to_string(),
         results,
         pass,
         emitted_at: now_utc_iso8601(),

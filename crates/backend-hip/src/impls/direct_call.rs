@@ -818,4 +818,8 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
         impl_id: "l2_norm_f32",
         cert_rel_path: "certs/hip/gfx906/l2_norm_f32.json",
     },
+    DirectCallKernel {
+        impl_id: "rmsnorm_f16",
+        cert_rel_path: "certs/hip/gfx906/rmsnorm_f16.json",
+    },
 ];

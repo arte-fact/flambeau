@@ -97,7 +97,7 @@ mirrors are auto-globbed by `kernels-cuda/build.rs`. **Next: 1b Tier-B norms /
 rope / activation-quant** (block-reduce + index math).
 
 **1b — Tier-B norms / rope / activation-quant** (block-reduce + index math):
-- [ ] rmsnorm_f16
+- [x] rmsnorm_f16  *(every-layer decode norm; block_reduce_sum seam; 1e-2/sqrt(k))*
 - [x] rmsnorm_f32  *(neutralized to shared `.cuh`; block_reduce_sum seam)*
 - [ ] rmsnorm_f32_to_f16
 - [ ] rmsnorm_f16_add_residual

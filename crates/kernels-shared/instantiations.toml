@@ -2913,3 +2913,18 @@ params = """
     const int k,
     const float eps"""
 body = "l2_norm_f32_row<256>(x, y, n_rows, k, eps);"
+
+[[kernel]]
+stem = "rmsnorm_f16"
+includes = ["block_quant.cuh", "block_reduce.cuh", "rmsnorm_f16.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_rmsnorm_f16"
+params = """
+    const fb_fp16_t* __restrict__ x,
+    const fb_fp16_t* __restrict__ weight,
+    fb_fp16_t* __restrict__ y,
+    const int n_rows,
+    const int k,
+    const float eps"""
+body = "rmsnorm_f16_row<256>(x, weight, y, n_rows, k, eps);"
