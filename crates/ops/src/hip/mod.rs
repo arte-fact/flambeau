@@ -16,22 +16,12 @@
 use flambeau_backend_hip::HipKernels;
 pub use flambeau_backend_hip::{HipDevice, HipStream};
 
-pub mod attention;
-pub mod cast;
-pub mod conv;
-pub mod mlp;
-pub mod moe;
-pub mod norm;
-mod ops_impl;
-pub mod pe;
-pub mod qmatmul;
-pub mod recurrent;
-pub mod router;
-pub mod sampling;
-pub mod softcap;
-pub mod softmax;
-
-pub use ops_impl::HipOps;
+// The op-launch bodies are backend-generic now (`crate::launch`); re-export them
+// under the historical `hip::` paths so existing callers keep resolving.
+pub use crate::launch::{
+    attention, cast, conv, mlp, moe, norm, pe, qmatmul, recurrent, router, sampling, softcap,
+    softmax,
+};
 
 // The kernel-stem catalogue + the registry are backend-generic now; re-export
 // them under the historical `hip::` names.
@@ -40,3 +30,8 @@ pub use crate::registry::{Registry, RegistryError as OpsRegistryError, KERNEL_ST
 /// HIP single-session op registry — [`Registry`] specialised to the HIP launch
 /// backend. Op bodies hold `&OpsRegistry`.
 pub type OpsRegistry = Registry<HipKernels>;
+
+/// `Ops` for the HIP backend — the generic [`OpsImpl`](crate::OpsImpl) bound to
+/// the HIP launch plane. `HipOps::new(reg, stream)` and every existing call site
+/// keep working unchanged (the alias carries `OpsImpl`'s inherent `new`).
+pub type HipOps<'a> = crate::ops_impl::OpsImpl<'a, HipKernels>;

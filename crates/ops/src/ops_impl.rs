@@ -1,43 +1,48 @@
-//! `HipOps` — HIP backend implementation of `Ops`.
+//! `OpsImpl<B>` — the one [`Ops`] implementation, generic over the
+//! [`KernelBackend`] launch seam.
 //!
-//! Holds a `(registry, stream)` pair and forwards each trait method to
-//! the matching free function in `flambeau_ops::hip::*`. Constructed
-//! per-rank, per-stream; cheap (two references). Free function API is
-//! unchanged; consumers can migrate to the trait incrementally.
+//! Holds a `(registry, stream)` pair and forwards each trait method to the
+//! matching generic free function in [`crate::launch`]. Constructed per-rank,
+//! per-stream; cheap (two references). `HipOps` / `CudaOps` are the per-backend
+//! type aliases (`OpsImpl<HipKernels>` / `OpsImpl<CudaKernels>`) — one body
+//! serves both, so a new kernel or arch never re-copies the launch layer
+//! (CLAUDE.md rule 14).
 
 use anyhow::Result;
-use flambeau_core::device::DevicePtr;
+use flambeau_core::device::{Device, DevicePtr};
 use flambeau_core::op::QDtype;
+use flambeau_core::KernelBackend;
 
-use super::{HipStream, OpsRegistry};
 use crate::ops_trait::Ops;
+use crate::registry::Registry;
 use crate::MoeShape;
 
-/// `Ops` implementor for the HIP backend.
+/// `Ops` implementor for backend `B`.
 ///
-/// `&self` carries the `(OpsRegistry, HipStream)` pair every kernel
-/// launch needs. New stream → new `HipOps`.
-#[derive(Copy, Clone)]
-pub struct HipOps<'a> {
-    pub reg: &'a OpsRegistry,
-    pub stream: &'a HipStream,
+/// `&self` carries the `(Registry<B>, stream)` pair every kernel launch needs.
+/// New stream → new `OpsImpl`.
+pub struct OpsImpl<'a, B: KernelBackend> {
+    pub reg: &'a Registry<B>,
+    pub stream: &'a <B::Device as Device>::Stream,
 }
 
-impl<'a> HipOps<'a> {
-    pub fn new(reg: &'a OpsRegistry, stream: &'a HipStream) -> Self {
+// Hand-rolled so the bound is `B: KernelBackend`, not `B: Copy` (the derive
+// would add the wrong bound — `B` is an uninhabited launch-plane marker, never
+// `Copy`; the two fields are shared references, which are).
+impl<B: KernelBackend> Clone for OpsImpl<'_, B> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<B: KernelBackend> Copy for OpsImpl<'_, B> {}
+
+impl<'a, B: KernelBackend> OpsImpl<'a, B> {
+    pub fn new(reg: &'a Registry<B>, stream: &'a <B::Device as Device>::Stream) -> Self {
         Self { reg, stream }
     }
-
-    #[inline]
-    pub fn ctx(&self) -> crate::OpCtx<'a> {
-        crate::OpCtx {
-            reg: self.reg,
-            stream: self.stream,
-        }
-    }
 }
 
-impl<'a> Ops for HipOps<'a> {
+impl<B: KernelBackend> Ops for OpsImpl<'_, B> {
     // -- qmatmul --
 
     fn qmatmul(
@@ -46,7 +51,7 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::MatmulShape,
         dtype_weight: QDtype,
     ) -> Result<()> {
-        super::qmatmul::qmatmul(self.reg, self.stream, buf, shape, dtype_weight)
+        crate::launch::qmatmul::qmatmul(self.reg, self.stream, buf, shape, dtype_weight)
     }
 
     fn mmvq_q4_0_t128(
@@ -57,7 +62,7 @@ impl<'a> Ops for HipOps<'a> {
         n_rows: usize,
         k: usize,
     ) -> Result<()> {
-        super::qmatmul::mmvq_q4_0_t128(self.reg, self.stream, weights, y_q8_1, dst, n_rows, k)
+        crate::launch::qmatmul::mmvq_q4_0_t128(self.reg, self.stream, weights, y_q8_1, dst, n_rows, k)
     }
 
     fn mmvq_q4_0_gate_up_t128(
@@ -65,7 +70,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MmvqGateUpBuffers,
         shape: crate::MmvqGateUpShape,
     ) -> Result<()> {
-        super::qmatmul::mmvq_q4_0_gate_up_t128(
+        crate::launch::qmatmul::mmvq_q4_0_gate_up_t128(
             self.reg,
             self.stream,
             buffers,
@@ -78,7 +83,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MmvqGateUpBuffers,
         shape: crate::MmvqGateUpBatchShape,
     ) -> Result<()> {
-        super::qmatmul::mmvq_q4_0_gate_up_row_tile_batched(
+        crate::launch::qmatmul::mmvq_q4_0_gate_up_row_tile_batched(
             self.reg,
             self.stream,
             buffers,
@@ -91,7 +96,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MmvqBuffers,
         shape: crate::MmvqBatchShape,
     ) -> Result<()> {
-        super::qmatmul::mmvq_q4_0_row_tile_batched(
+        crate::launch::qmatmul::mmvq_q4_0_row_tile_batched(
             self.reg,
             self.stream,
             buffers,
@@ -104,7 +109,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MmvqBuffers,
         shape: crate::MmvqBatchShape,
     ) -> Result<()> {
-        super::qmatmul::mmvq_q8_0_row_tile_batched(
+        crate::launch::qmatmul::mmvq_q8_0_row_tile_batched(
             self.reg,
             self.stream,
             buffers,
@@ -120,7 +125,7 @@ impl<'a> Ops for HipOps<'a> {
         n_rows: usize,
         k: usize,
     ) -> Result<()> {
-        super::qmatmul::mmvq_q4_0_warpcoop64(self.reg, self.stream, weights, y_q8_1, dst, n_rows, k)
+        crate::launch::qmatmul::mmvq_q4_0_warpcoop64(self.reg, self.stream, weights, y_q8_1, dst, n_rows, k)
     }
 
     fn mmvq_q4_0_kv_f16dst(
@@ -129,7 +134,7 @@ impl<'a> Ops for HipOps<'a> {
         n_rows_kv: usize,
         k: usize,
     ) -> Result<()> {
-        super::qmatmul::mmvq_q4_0_kv_f16dst(self.reg, self.stream, buf, n_rows_kv, k)
+        crate::launch::qmatmul::mmvq_q4_0_kv_f16dst(self.reg, self.stream, buf, n_rows_kv, k)
     }
 
     fn mmvq_q4_0_gate_up(
@@ -137,7 +142,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MmvqGateUpBuffers,
         shape: crate::MmvqGateUpShape,
     ) -> Result<()> {
-        super::qmatmul::mmvq_q4_0_gate_up(
+        crate::launch::qmatmul::mmvq_q4_0_gate_up(
             self.reg,
             self.stream,
             buffers,
@@ -150,7 +155,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MmvqGateUpBuffers,
         shape: crate::MmvqGateUpShape,
     ) -> Result<()> {
-        super::qmatmul::mmvq_q4_1_gate_up(
+        crate::launch::qmatmul::mmvq_q4_1_gate_up(
             self.reg,
             self.stream,
             buffers,
@@ -163,7 +168,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MmvqGateUpBuffers,
         shape: crate::MmvqGateUpShape,
     ) -> Result<()> {
-        super::qmatmul::mmvq_q8_0_gate_up(
+        crate::launch::qmatmul::mmvq_q8_0_gate_up(
             self.reg,
             self.stream,
             buffers,
@@ -176,7 +181,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MmvqGateUpBuffers,
         shape: crate::MmvqGateUpShape,
     ) -> Result<()> {
-        super::qmatmul::mmvq_q5_k_gate_up(
+        crate::launch::qmatmul::mmvq_q5_k_gate_up(
             self.reg,
             self.stream,
             buffers,
@@ -190,7 +195,7 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::MmvqShape,
         dtype_weight: QDtype,
     ) -> Result<()> {
-        super::qmatmul::mmvq(self.reg, self.stream, buf, shape, dtype_weight)
+        crate::launch::qmatmul::mmvq(self.reg, self.stream, buf, shape, dtype_weight)
     }
 
     fn mmvq_q4_k_r4(
@@ -199,17 +204,17 @@ impl<'a> Ops for HipOps<'a> {
         n_rows: usize,
         n_superblocks: usize,
     ) -> Result<()> {
-        super::qmatmul::mmvq_simple_launch(
+        crate::launch::qmatmul::mmvq_simple_launch(
             self.reg,
             self.stream,
-            super::qmatmul::KernelEntry {
+            crate::launch::qmatmul::KernelEntry {
                 stem: "mmvq_q4_k_r4",
                 entry: "flambeau_mmvq_q4_k_r4_q8_1",
             },
             buf,
             n_rows,
             n_superblocks,
-            super::qmatmul::MmvqLaunchTune {
+            crate::launch::qmatmul::MmvqLaunchTune {
                 threads: 64,
                 rows_per_block: 4,
             },
@@ -222,7 +227,7 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::MmvqShape,
         dtype_weight: QDtype,
     ) -> Result<()> {
-        super::qmatmul::mmvq_f16_direct(self.reg, self.stream, buf, shape, dtype_weight)
+        crate::launch::qmatmul::mmvq_f16_direct(self.reg, self.stream, buf, shape, dtype_weight)
     }
 
     fn mmq(
@@ -231,7 +236,7 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::MatmulShape,
         dtype_weight: QDtype,
     ) -> Result<()> {
-        super::qmatmul::mmq(self.reg, self.stream, buf, shape, dtype_weight)
+        crate::launch::qmatmul::mmq(self.reg, self.stream, buf, shape, dtype_weight)
     }
 
     // -- attention --
@@ -242,7 +247,7 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::AttnDecodeShape,
         knobs: crate::AttnKnobs,
     ) -> Result<()> {
-        super::attention::attention_decode_f16(
+        crate::launch::attention::attention_decode_f16(
             self.reg,
             self.stream,
             buffers,
@@ -258,7 +263,7 @@ impl<'a> Ops for HipOps<'a> {
         knobs: crate::AttnKnobs,
         slots: Option<crate::AttnDecodeSlots>,
     ) -> Result<()> {
-        super::attention::attention_decode_f16_slots(
+        crate::launch::attention::attention_decode_f16_slots(
             self.reg,
             self.stream,
             buffers,
@@ -274,7 +279,7 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::AttnDecodeBatchedShape,
         knobs: crate::AttnKnobs,
     ) -> Result<()> {
-        super::attention::attention_decode_f16_batched(
+        crate::launch::attention::attention_decode_f16_batched(
             self.reg,
             self.stream,
             buffers,
@@ -288,7 +293,7 @@ impl<'a> Ops for HipOps<'a> {
         buf: crate::KvAppendBatchedSlotsBuffers,
         shape: crate::KvAppendBatchedSlotsShape,
     ) -> Result<()> {
-        super::attention::kv_append_f16_batched_slots(self.reg, self.stream, buf, shape)
+        crate::launch::attention::kv_append_f16_batched_slots(self.reg, self.stream, buf, shape)
     }
 
     fn attention_prefill_f16_paged(
@@ -297,7 +302,7 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::AttnPrefillPagedShape,
         knobs: crate::AttnKnobs,
     ) -> Result<()> {
-        super::attention::attention_prefill_f16_paged(
+        crate::launch::attention::attention_prefill_f16_paged(
             self.reg,
             self.stream,
             buffers,
@@ -311,7 +316,7 @@ impl<'a> Ops for HipOps<'a> {
         buf: crate::KvAppendPagedPrefillBuffers,
         shape: crate::KvAppendPagedPrefillShape,
     ) -> Result<()> {
-        super::attention::kv_append_f16_paged_prefill(self.reg, self.stream, buf, shape)
+        crate::launch::attention::kv_append_f16_paged_prefill(self.reg, self.stream, buf, shape)
     }
 
     fn kv_append_f16_paged_slots(
@@ -319,7 +324,7 @@ impl<'a> Ops for HipOps<'a> {
         buf: crate::KvAppendPagedSlotsBuffers,
         shape: crate::KvAppendPagedSlotsShape,
     ) -> Result<()> {
-        super::attention::kv_append_f16_paged_slots(self.reg, self.stream, buf, shape)
+        crate::launch::attention::kv_append_f16_paged_slots(self.reg, self.stream, buf, shape)
     }
 
     fn attention_decode_f16_paged(
@@ -328,7 +333,7 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::AttnDecodePagedShape,
         scale: f32,
     ) -> Result<()> {
-        super::attention::attention_decode_f16_paged(
+        crate::launch::attention::attention_decode_f16_paged(
             self.reg,
             self.stream,
             buffers,
@@ -344,7 +349,7 @@ impl<'a> Ops for HipOps<'a> {
         write_pos: usize,
         eps: f32,
     ) -> Result<()> {
-        super::attention::kv_append_v_unit_norm_f16(self.reg, self.stream, buf, shape, write_pos, eps)
+        crate::launch::attention::kv_append_v_unit_norm_f16(self.reg, self.stream, buf, shape, write_pos, eps)
     }
 
     fn attention_decode_f16_splitk(
@@ -354,7 +359,7 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::AttnSplitkShape,
         knobs: crate::AttnKnobs,
     ) -> Result<()> {
-        super::attention::attention_decode_f16_splitk(
+        crate::launch::attention::attention_decode_f16_splitk(
             self.reg,
             self.stream,
             buffers,
@@ -371,7 +376,7 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::AttnSplitkShape,
         knobs: crate::AttnKnobs,
     ) -> Result<()> {
-        super::attention::attention_decode_f16_splitk_h2(
+        crate::launch::attention::attention_decode_f16_splitk_h2(
             self.reg,
             self.stream,
             buffers,
@@ -387,7 +392,7 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::AttnDecodeShape,
         knobs: crate::AttnKnobs,
     ) -> Result<()> {
-        super::attention::attention_decode_q8_kv(
+        crate::launch::attention::attention_decode_q8_kv(
             self.reg,
             self.stream,
             buffers,
@@ -403,7 +408,7 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::AttnSplitkShape,
         knobs: crate::AttnKnobs,
     ) -> Result<()> {
-        super::attention::attention_decode_q8_kv_splitk(
+        crate::launch::attention::attention_decode_q8_kv_splitk(
             self.reg,
             self.stream,
             buffers,
@@ -419,7 +424,7 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::AttnPrefillShape,
         knobs: crate::AttnKnobs,
     ) -> Result<()> {
-        super::attention::attention_prefill_q8_kv(
+        crate::launch::attention::attention_prefill_q8_kv(
             self.reg,
             self.stream,
             buffers,
@@ -434,7 +439,7 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::AttnPrefillShape,
         knobs: crate::AttnKnobs,
     ) -> Result<()> {
-        super::attention::attention_prefill_f16(
+        crate::launch::attention::attention_prefill_f16(
             self.reg,
             self.stream,
             buffers,
@@ -450,7 +455,7 @@ impl<'a> Ops for HipOps<'a> {
         knobs: crate::AttnKnobs,
         slots: Option<crate::AttnPrefillSlots>,
     ) -> Result<()> {
-        super::attention::attention_prefill_f16_slots(
+        crate::launch::attention::attention_prefill_f16_slots(
             self.reg,
             self.stream,
             buffers,
@@ -469,7 +474,7 @@ impl<'a> Ops for HipOps<'a> {
         n_heads: usize,
         head_dim: usize,
     ) -> Result<()> {
-        super::attention::split_q_gate_f16(
+        crate::launch::attention::split_q_gate_f16(
             self.reg,
             self.stream,
             crate::SplitQGateBuffers { fused_qg, q_out, gate_out },
@@ -485,7 +490,7 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::NormShape,
         eps: f32,
     ) -> Result<()> {
-        super::norm::rmsnorm_f16(self.reg, self.stream, buf, shape, eps)
+        crate::launch::norm::rmsnorm_f16(self.reg, self.stream, buf, shape, eps)
     }
 
     fn rmsnorm_f16_add_residual(
@@ -494,7 +499,7 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::NormShape,
         eps: f32,
     ) -> Result<()> {
-        super::norm::rmsnorm_f16_add_residual(self.reg, self.stream, buf, shape, eps)
+        crate::launch::norm::rmsnorm_f16_add_residual(self.reg, self.stream, buf, shape, eps)
     }
 
     fn v_unit_norm_per_head_f16(
@@ -505,7 +510,7 @@ impl<'a> Ops for HipOps<'a> {
         head_dim: usize,
         eps: f32,
     ) -> Result<()> {
-        super::norm::v_unit_norm_per_head_f16(
+        crate::launch::norm::v_unit_norm_per_head_f16(
             self.reg,
             self.stream,
             v,
@@ -522,7 +527,7 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::NormShape,
         eps: f32,
     ) -> Result<()> {
-        super::norm::rmsnorm_quant_q8_1(self.reg, self.stream, buf, shape, eps)
+        crate::launch::norm::rmsnorm_quant_q8_1(self.reg, self.stream, buf, shape, eps)
     }
 
     fn rmsnorm_f32(
@@ -531,7 +536,7 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::NormShape,
         eps: f32,
     ) -> Result<()> {
-        super::norm::rmsnorm_f32(self.reg, self.stream, buf, shape, eps)
+        crate::launch::norm::rmsnorm_f32(self.reg, self.stream, buf, shape, eps)
     }
 
     fn rmsnorm_f32_to_f16(
@@ -540,7 +545,7 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::NormShape,
         eps: f32,
     ) -> Result<()> {
-        super::norm::rmsnorm_f32_to_f16(self.reg, self.stream, buf, shape, eps)
+        crate::launch::norm::rmsnorm_f32_to_f16(self.reg, self.stream, buf, shape, eps)
     }
 
     fn rmsnorm_f32_to_f16_add_residual(
@@ -549,7 +554,7 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::NormShape,
         eps: f32,
     ) -> Result<()> {
-        super::norm::rmsnorm_f32_to_f16_add_residual(self.reg, self.stream, buf, shape, eps)
+        crate::launch::norm::rmsnorm_f32_to_f16_add_residual(self.reg, self.stream, buf, shape, eps)
     }
 
     fn rmsnorm_f16_to_f16_add_residual(
@@ -558,7 +563,7 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::NormShape,
         eps: f32,
     ) -> Result<()> {
-        super::norm::rmsnorm_f16_to_f16_add_residual(self.reg, self.stream, buf, shape, eps)
+        crate::launch::norm::rmsnorm_f16_to_f16_add_residual(self.reg, self.stream, buf, shape, eps)
     }
 
     fn l2_norm_f32(
@@ -569,11 +574,11 @@ impl<'a> Ops for HipOps<'a> {
         k: usize,
         eps: f32,
     ) -> Result<()> {
-        super::norm::l2_norm_f32(self.reg, self.stream, x, y, n_rows, k, eps)
+        crate::launch::norm::l2_norm_f32(self.reg, self.stream, x, y, n_rows, k, eps)
     }
 
     fn quantize_q8_1(&self, x_f32: DevicePtr, y_q8_1: DevicePtr, n_elems: usize) -> Result<()> {
-        super::norm::quantize_q8_1(self.reg, self.stream, x_f32, y_q8_1, n_elems)
+        crate::launch::norm::quantize_q8_1(self.reg, self.stream, x_f32, y_q8_1, n_elems)
     }
 
     fn quantize_q8_1_mmq(
@@ -583,7 +588,7 @@ impl<'a> Ops for HipOps<'a> {
         ncols: usize,
         total_b: usize,
     ) -> Result<()> {
-        super::norm::quantize_q8_1_mmq(self.reg, self.stream, x_f32, y_q8_1_mmq, ncols, total_b)
+        crate::launch::norm::quantize_q8_1_mmq(self.reg, self.stream, x_f32, y_q8_1_mmq, ncols, total_b)
     }
 
     fn quantize_f16_q8_1_mmq(
@@ -593,29 +598,29 @@ impl<'a> Ops for HipOps<'a> {
         ncols: usize,
         total_b: usize,
     ) -> Result<()> {
-        super::norm::quantize_f16_q8_1_mmq(self.reg, self.stream, x_f16, y_q8_1_mmq, ncols, total_b)
+        crate::launch::norm::quantize_f16_q8_1_mmq(self.reg, self.stream, x_f16, y_q8_1_mmq, ncols, total_b)
     }
 
     fn quantize_f16_q8_1(&self, x_f16: DevicePtr, y_q8_1: DevicePtr, n_elems: usize) -> Result<()> {
-        super::norm::quantize_f16_q8_1(self.reg, self.stream, x_f16, y_q8_1, n_elems)
+        crate::launch::norm::quantize_f16_q8_1(self.reg, self.stream, x_f16, y_q8_1, n_elems)
     }
 
     fn quantize_f16_q8_0(&self, x_f16: DevicePtr, y_q8_0: DevicePtr, n_elems: usize) -> Result<()> {
-        super::norm::quantize_f16_q8_0(self.reg, self.stream, x_f16, y_q8_0, n_elems)
+        crate::launch::norm::quantize_f16_q8_0(self.reg, self.stream, x_f16, y_q8_0, n_elems)
     }
 
     // -- mlp --
 
     fn silu_f32(&self, x: DevicePtr, y: DevicePtr, n: usize) -> Result<()> {
-        super::mlp::silu_f32(self.reg, self.stream, x, y, n)
+        crate::launch::mlp::silu_f32(self.reg, self.stream, x, y, n)
     }
 
     fn swiglu_f32(&self, a: DevicePtr, b: DevicePtr, y: DevicePtr, n: usize) -> Result<()> {
-        super::mlp::swiglu_f32(self.reg, self.stream, a, b, y, n)
+        crate::launch::mlp::swiglu_f32(self.reg, self.stream, a, b, y, n)
     }
 
     fn swiglu_f32_to_f16(&self, a: DevicePtr, b: DevicePtr, y: DevicePtr, n: usize) -> Result<()> {
-        super::mlp::swiglu_f32_to_f16(self.reg, self.stream, a, b, y, n)
+        crate::launch::mlp::swiglu_f32_to_f16(self.reg, self.stream, a, b, y, n)
     }
 
     fn swiglu_f32_to_q8_1(
@@ -625,31 +630,31 @@ impl<'a> Ops for HipOps<'a> {
         y_q8_1: DevicePtr,
         n: usize,
     ) -> Result<()> {
-        super::mlp::swiglu_f32_to_q8_1(self.reg, self.stream, a, b, y_q8_1, n)
+        crate::launch::mlp::swiglu_f32_to_q8_1(self.reg, self.stream, a, b, y_q8_1, n)
     }
 
     fn scale_f32(&self, x: DevicePtr, y: DevicePtr, n: usize, scale: f32) -> Result<()> {
-        super::mlp::scale_f32(self.reg, self.stream, x, y, n, scale)
+        crate::launch::mlp::scale_f32(self.reg, self.stream, x, y, n, scale)
     }
 
     fn scale_f16(&self, x: DevicePtr, y: DevicePtr, n: usize, scale: f32) -> Result<()> {
-        super::mlp::scale_f16(self.reg, self.stream, x, y, n, scale)
+        crate::launch::mlp::scale_f16(self.reg, self.stream, x, y, n, scale)
     }
 
     fn add_f16(&self, a: DevicePtr, b: DevicePtr, y: DevicePtr, n: usize) -> Result<()> {
-        super::mlp::add_f16(self.reg, self.stream, a, b, y, n)
+        crate::launch::mlp::add_f16(self.reg, self.stream, a, b, y, n)
     }
 
     fn add_f32(&self, a: DevicePtr, b: DevicePtr, y: DevicePtr, n: usize) -> Result<()> {
-        super::mlp::add_f32(self.reg, self.stream, a, b, y, n)
+        crate::launch::mlp::add_f32(self.reg, self.stream, a, b, y, n)
     }
 
     fn swiglu_f16(&self, gate: DevicePtr, up: DevicePtr, y: DevicePtr, n: usize) -> Result<()> {
-        super::mlp::swiglu_f16(self.reg, self.stream, gate, up, y, n)
+        crate::launch::mlp::swiglu_f16(self.reg, self.stream, gate, up, y, n)
     }
 
     fn sigmoid_mul_f16(&self, gate: DevicePtr, x: DevicePtr, y: DevicePtr, n: usize) -> Result<()> {
-        super::mlp::sigmoid_mul_f16(self.reg, self.stream, gate, x, y, n)
+        crate::launch::mlp::sigmoid_mul_f16(self.reg, self.stream, gate, x, y, n)
     }
 
     // -- pe --
@@ -660,7 +665,7 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::RopeShape,
         theta_base: f32,
     ) -> Result<()> {
-        super::pe::rope_f16(self.reg, self.stream, buf, shape, theta_base)
+        crate::launch::pe::rope_f16(self.reg, self.stream, buf, shape, theta_base)
     }
 
     fn rope_neox_partial_f16(
@@ -669,7 +674,7 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::RopePartialShape,
         theta_base: f32,
     ) -> Result<()> {
-        super::pe::rope_neox_partial_f16(self.reg, self.stream, buf, shape, theta_base)
+        crate::launch::pe::rope_neox_partial_f16(self.reg, self.stream, buf, shape, theta_base)
     }
 
     fn rmsnorm_rope_neox_partial_f16(
@@ -679,17 +684,17 @@ impl<'a> Ops for HipOps<'a> {
         theta_base: f32,
         eps: f32,
     ) -> Result<()> {
-        super::pe::rmsnorm_rope_neox_partial_f16(self.reg, self.stream, buf, shape, theta_base, eps)
+        crate::launch::pe::rmsnorm_rope_neox_partial_f16(self.reg, self.stream, buf, shape, theta_base, eps)
     }
 
     // -- cast --
 
     fn cast_f32_to_f16(&self, x_f32: DevicePtr, y_f16: DevicePtr, n: usize) -> Result<()> {
-        super::cast::cast_f32_to_f16(self.reg, self.stream, x_f32, y_f16, n)
+        crate::launch::cast::cast_f32_to_f16(self.reg, self.stream, x_f32, y_f16, n)
     }
 
     fn cast_f16_to_f32(&self, x_f16: DevicePtr, y_f32: DevicePtr, n: usize) -> Result<()> {
-        super::cast::cast_f16_to_f32(self.reg, self.stream, x_f16, y_f32, n)
+        crate::launch::cast::cast_f16_to_f32(self.reg, self.stream, x_f16, y_f32, n)
     }
 
     // -- sampling --
@@ -701,7 +706,7 @@ impl<'a> Ops for HipOps<'a> {
         vocab: usize,
         knobs: crate::PenaltyKnobs,
     ) -> Result<()> {
-        super::sampling::apply_penalties_f32(self.reg, self.stream, bufs, n_pairs, vocab, knobs)
+        crate::launch::sampling::apply_penalties_f32(self.reg, self.stream, bufs, n_pairs, vocab, knobs)
     }
 
     fn topk_softmax_f32(
@@ -713,7 +718,7 @@ impl<'a> Ops for HipOps<'a> {
         k: usize,
         inv_temp: f32,
     ) -> Result<()> {
-        super::sampling::topk_softmax_f32(
+        crate::launch::sampling::topk_softmax_f32(
             self.reg,
             self.stream,
             crate::SamplerTopkSoftmaxBuffers { logits, out_ids, out_probs },
@@ -728,7 +733,7 @@ impl<'a> Ops for HipOps<'a> {
         bufs: crate::GdnStepBuffers,
         shape: crate::GdnStepShape,
     ) -> Result<()> {
-        super::recurrent::gdn_state_step_f32_s128(self.reg, self.stream, bufs, shape)
+        crate::launch::recurrent::gdn_state_step_f32_s128(self.reg, self.stream, bufs, shape)
     }
 
     fn gdn_alpha_beta_f32(
@@ -736,7 +741,7 @@ impl<'a> Ops for HipOps<'a> {
         bufs: crate::GdnAlphaBetaBuffers,
         shape: crate::GdnAlphaBetaShape,
     ) -> Result<()> {
-        super::recurrent::gdn_alpha_beta_f32(self.reg, self.stream, bufs, shape)
+        crate::launch::recurrent::gdn_alpha_beta_f32(self.reg, self.stream, bufs, shape)
     }
 
     fn gdn_state_step_alphabeta_f32_s128(
@@ -744,7 +749,7 @@ impl<'a> Ops for HipOps<'a> {
         bufs: crate::GdnStepAlphaBetaBuffers,
         shape: crate::GdnStepShape,
     ) -> Result<()> {
-        super::recurrent::gdn_state_step_alphabeta_f32_s128(self.reg, self.stream, bufs, shape)
+        crate::launch::recurrent::gdn_state_step_alphabeta_f32_s128(self.reg, self.stream, bufs, shape)
     }
 
     fn gdn_assemble_conv_input_f32(
@@ -755,7 +760,7 @@ impl<'a> Ops for HipOps<'a> {
         conv_channels: usize,
         conv_kernel: usize,
     ) -> Result<()> {
-        super::recurrent::gdn_assemble_conv_input_f32(
+        crate::launch::recurrent::gdn_assemble_conv_input_f32(
             self.reg,
             self.stream,
             history,
@@ -771,7 +776,7 @@ impl<'a> Ops for HipOps<'a> {
         bufs: crate::GdnStepAlphaBetaBatchedSlotsBuffers,
         shape: crate::GdnStepShape,
     ) -> Result<()> {
-        super::recurrent::gdn_state_step_alphabeta_f32_s128_batched_slots(
+        crate::launch::recurrent::gdn_state_step_alphabeta_f32_s128_batched_slots(
             self.reg,
             self.stream,
             bufs,
@@ -784,7 +789,7 @@ impl<'a> Ops for HipOps<'a> {
         bufs: crate::GdnConvTrioBatchedSlotsBuffers,
         shape: crate::GdnConvTrioShape,
     ) -> Result<()> {
-        super::recurrent::gdn_conv_trio_decode_f32_batched_slots(self.reg, self.stream, bufs, shape)
+        crate::launch::recurrent::gdn_conv_trio_decode_f32_batched_slots(self.reg, self.stream, bufs, shape)
     }
 
     fn gdn_split_qkv_f32(
@@ -792,7 +797,7 @@ impl<'a> Ops for HipOps<'a> {
         bufs: crate::GdnSplitQkvBuffers,
         shape: crate::GdnSplitQkvShape,
     ) -> Result<()> {
-        super::recurrent::gdn_split_qkv_f32(self.reg, self.stream, bufs, shape)
+        crate::launch::recurrent::gdn_split_qkv_f32(self.reg, self.stream, bufs, shape)
     }
 
     // -- router --
@@ -805,7 +810,7 @@ impl<'a> Ops for HipOps<'a> {
         n_rows: usize,
         k: usize,
     ) -> Result<()> {
-        super::router::dense_gemv_f32_f16(self.reg, self.stream, w, x, y, n_rows, k)
+        crate::launch::router::dense_gemv_f32_f16(self.reg, self.stream, w, x, y, n_rows, k)
     }
 
     fn dense_gemv_f16_f16(
@@ -816,7 +821,7 @@ impl<'a> Ops for HipOps<'a> {
         n_rows: usize,
         k: usize,
     ) -> Result<()> {
-        super::router::dense_gemv_f16_f16(self.reg, self.stream, w, x, y, n_rows, k)
+        crate::launch::router::dense_gemv_f16_f16(self.reg, self.stream, w, x, y, n_rows, k)
     }
 
     fn dense_gemv_f16_f16_batched(
@@ -828,7 +833,7 @@ impl<'a> Ops for HipOps<'a> {
         k: usize,
         n_tokens: usize,
     ) -> Result<()> {
-        super::router::dense_gemv_f16_f16_batched(
+        crate::launch::router::dense_gemv_f16_f16_batched(
             self.reg,
             self.stream,
             crate::DenseGemvBatchedBuffers { w, x, y },
@@ -845,7 +850,7 @@ impl<'a> Ops for HipOps<'a> {
         k: usize,
         n_tokens: usize,
     ) -> Result<()> {
-        super::router::dense_gemv_f32_f16_batched(
+        crate::launch::router::dense_gemv_f32_f16_batched(
             self.reg,
             self.stream,
             crate::DenseGemvBatchedBuffers { w, x, y },
@@ -864,7 +869,7 @@ impl<'a> Ops for HipOps<'a> {
         k: usize,
         scale: f32,
     ) -> Result<()> {
-        super::softmax::softmax_masked_f16(
+        crate::launch::softmax::softmax_masked_f16(
             self.reg,
             self.stream,
             crate::SoftmaxMaskedBuffers { scores, mask, out },
@@ -883,7 +888,7 @@ impl<'a> Ops for HipOps<'a> {
         conv_channels: usize,
         conv_kernel: usize,
     ) -> Result<()> {
-        super::conv::causal_conv1d_f32(
+        crate::launch::conv::causal_conv1d_f32(
             self.reg,
             self.stream,
             crate::ConvCausal1dBuffers { conv_input, weight, y },
@@ -902,7 +907,7 @@ impl<'a> Ops for HipOps<'a> {
         n_experts: usize,
         k: usize,
     ) -> Result<()> {
-        super::moe::topk_f32(
+        crate::launch::moe::topk_f32(
             self.reg,
             self.stream,
             crate::TopkBuffers { logits, idx, weights },
@@ -918,7 +923,7 @@ impl<'a> Ops for HipOps<'a> {
         n_tokens: usize,
         top_k: usize,
     ) -> Result<()> {
-        super::moe::apply_per_expert_scale_f32(
+        crate::launch::moe::apply_per_expert_scale_f32(
             self.reg,
             self.stream,
             expert_weights,
@@ -934,7 +939,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmvqBuffers,
         shape: crate::MoeMmvqShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmvq_q4_k_r2(
+        crate::launch::moe::indexed_moe_mmvq_q4_k_r2(
             self.reg,
             self.stream,
             buffers,
@@ -947,7 +952,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmvqBuffers,
         shape: crate::MoeMmvqShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmvq_q6_k(
+        crate::launch::moe::indexed_moe_mmvq_q6_k(
             self.reg,
             self.stream,
             buffers,
@@ -960,7 +965,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmvqBuffers,
         shape: crate::MoeMmvqShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmvq_q5_k(
+        crate::launch::moe::indexed_moe_mmvq_q5_k(
             self.reg,
             self.stream,
             buffers,
@@ -973,7 +978,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmvqBuffers,
         shape: crate::MoeMmvqShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmvq_q3_k(
+        crate::launch::moe::indexed_moe_mmvq_q3_k(
             self.reg,
             self.stream,
             buffers,
@@ -986,7 +991,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmvqBuffers,
         shape: crate::MoeMmvqShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmvq_iq4_xs(
+        crate::launch::moe::indexed_moe_mmvq_iq4_xs(
             self.reg,
             self.stream,
             buffers,
@@ -999,7 +1004,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmvqBuffers,
         shape: crate::MoeMmvqShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmvq_iq4_nl(
+        crate::launch::moe::indexed_moe_mmvq_iq4_nl(
             self.reg,
             self.stream,
             buffers,
@@ -1012,7 +1017,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmvqBuffers,
         shape: crate::MoeMmvqShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmvq_iq3_xxs(
+        crate::launch::moe::indexed_moe_mmvq_iq3_xxs(
             self.reg,
             self.stream,
             buffers,
@@ -1025,7 +1030,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmvqBuffers,
         shape: crate::MoeMmvqShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmvq_iq3_s(
+        crate::launch::moe::indexed_moe_mmvq_iq3_s(
             self.reg,
             self.stream,
             buffers,
@@ -1038,7 +1043,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmvqBuffers,
         shape: crate::MoeMmvqShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmvq_iq2_xxs(
+        crate::launch::moe::indexed_moe_mmvq_iq2_xxs(
             self.reg,
             self.stream,
             buffers,
@@ -1051,7 +1056,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmvqBuffers,
         shape: crate::MoeMmvqShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmvq_iq2_xs(
+        crate::launch::moe::indexed_moe_mmvq_iq2_xs(
             self.reg,
             self.stream,
             buffers,
@@ -1064,7 +1069,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmvqBuffers,
         shape: crate::MoeMmvqShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmvq_iq2_s(
+        crate::launch::moe::indexed_moe_mmvq_iq2_s(
             self.reg,
             self.stream,
             buffers,
@@ -1077,7 +1082,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmvqBuffers,
         shape: crate::MoeMmvqShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmvq_iq1_s(
+        crate::launch::moe::indexed_moe_mmvq_iq1_s(
             self.reg,
             self.stream,
             buffers,
@@ -1090,7 +1095,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmvqBuffers,
         shape: crate::MoeMmvqShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmvq_iq1_m(
+        crate::launch::moe::indexed_moe_mmvq_iq1_m(
             self.reg,
             self.stream,
             buffers,
@@ -1103,7 +1108,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmvqBuffers,
         shape: crate::MoeMmvqShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmvq_q4_0(
+        crate::launch::moe::indexed_moe_mmvq_q4_0(
             self.reg,
             self.stream,
             buffers,
@@ -1116,7 +1121,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmvqBuffers,
         shape: crate::MoeMmvqShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmvq_q4_1(
+        crate::launch::moe::indexed_moe_mmvq_q4_1(
             self.reg,
             self.stream,
             buffers,
@@ -1129,7 +1134,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmvqGateUpBuffers,
         shape: crate::MoeMmvqShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmvq_q4_0_gate_up(
+        crate::launch::moe::indexed_moe_mmvq_q4_0_gate_up(
             self.reg,
             self.stream,
             buffers,
@@ -1141,7 +1146,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmvqBuffers,
         shape: crate::MoeMmvqShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmvq_q8_0(
+        crate::launch::moe::indexed_moe_mmvq_q8_0(
             self.reg,
             self.stream,
             buffers,
@@ -1154,7 +1159,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmvqGateUpBuffers,
         shape: crate::MoeMmvqShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmvq_q8_0_gate_up(
+        crate::launch::moe::indexed_moe_mmvq_q8_0_gate_up(
             self.reg,
             self.stream,
             buffers,
@@ -1166,7 +1171,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmvqSortedBuffers,
         shape: crate::MoeMmvqShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmvq_q4_k_r2_sorted(
+        crate::launch::moe::indexed_moe_mmvq_q4_k_r2_sorted(
             self.reg,
             self.stream,
             buffers,
@@ -1179,7 +1184,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmqTile8GateUpBuffers,
         shape: MoeShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmq_q4_k_gate_up_tile8(
+        crate::launch::moe::indexed_moe_mmq_q4_k_gate_up_tile8(
             self.reg,
             self.stream,
             buffers,
@@ -1192,7 +1197,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmqTile8DownBuffers,
         shape: MoeShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmq_q4_k_down_tile8(
+        crate::launch::moe::indexed_moe_mmq_q4_k_down_tile8(
             self.reg,
             self.stream,
             buffers,
@@ -1205,7 +1210,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmqTile8GateUpBuffers,
         shape: MoeShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmq_q3_k_gate_up_tile8(
+        crate::launch::moe::indexed_moe_mmq_q3_k_gate_up_tile8(
             self.reg,
             self.stream,
             buffers,
@@ -1218,7 +1223,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmqTile8DownBuffers,
         shape: MoeShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmq_q3_k_down_tile8(
+        crate::launch::moe::indexed_moe_mmq_q3_k_down_tile8(
             self.reg,
             self.stream,
             buffers,
@@ -1231,7 +1236,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmqTile8GateUpBuffers,
         shape: MoeShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmq_q5_k_gate_up_tile8(
+        crate::launch::moe::indexed_moe_mmq_q5_k_gate_up_tile8(
             self.reg,
             self.stream,
             buffers,
@@ -1244,7 +1249,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmqTile8GateUpBuffers,
         shape: MoeShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmq_q6_k_gate_up_tile8(
+        crate::launch::moe::indexed_moe_mmq_q6_k_gate_up_tile8(
             self.reg,
             self.stream,
             buffers,
@@ -1257,7 +1262,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmqTile8GateUpBuffers,
         shape: MoeShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmq_q4_0_gate_up_tile8(
+        crate::launch::moe::indexed_moe_mmq_q4_0_gate_up_tile8(
             self.reg,
             self.stream,
             buffers,
@@ -1270,7 +1275,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmqTile8DownBuffers,
         shape: MoeShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmq_q4_0_down_tile8(
+        crate::launch::moe::indexed_moe_mmq_q4_0_down_tile8(
             self.reg,
             self.stream,
             buffers,
@@ -1283,7 +1288,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmqTile8DownBuffers,
         shape: MoeShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmq_q4_1_down_tile8(
+        crate::launch::moe::indexed_moe_mmq_q4_1_down_tile8(
             self.reg,
             self.stream,
             buffers,
@@ -1296,7 +1301,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmqTile8GateUpBuffers,
         shape: MoeShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmq_q8_0_gate_up_tile8(
+        crate::launch::moe::indexed_moe_mmq_q8_0_gate_up_tile8(
             self.reg,
             self.stream,
             buffers,
@@ -1309,7 +1314,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmqTile8DownBuffers,
         shape: MoeShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmq_q8_0_down_tile8(
+        crate::launch::moe::indexed_moe_mmq_q8_0_down_tile8(
             self.reg,
             self.stream,
             buffers,
@@ -1318,14 +1323,14 @@ impl<'a> Ops for HipOps<'a> {
     }
 
     // ---- IQ tile8 impls. All follow the same shape: dispatch to the
-    // matching free function in `super::moe`.
+    // matching free function in `crate::launch::moe`.
 
     fn indexed_moe_mmq_iq4_xs_gate_up_tile8(
         &self,
         buffers: crate::MoeMmqTile8GateUpBuffers,
         shape: MoeShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmq_iq4_xs_gate_up_tile8(
+        crate::launch::moe::indexed_moe_mmq_iq4_xs_gate_up_tile8(
             self.reg,
             self.stream,
             buffers,
@@ -1337,7 +1342,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmqTile8DownBuffers,
         shape: MoeShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmq_iq4_xs_down_tile8(
+        crate::launch::moe::indexed_moe_mmq_iq4_xs_down_tile8(
             self.reg,
             self.stream,
             buffers,
@@ -1350,7 +1355,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmqTile8GateUpBuffers,
         shape: MoeShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmq_iq4_nl_gate_up_tile8(
+        crate::launch::moe::indexed_moe_mmq_iq4_nl_gate_up_tile8(
             self.reg,
             self.stream,
             buffers,
@@ -1362,7 +1367,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmqTile8DownBuffers,
         shape: MoeShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmq_iq4_nl_down_tile8(
+        crate::launch::moe::indexed_moe_mmq_iq4_nl_down_tile8(
             self.reg,
             self.stream,
             buffers,
@@ -1375,7 +1380,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmqTile8GateUpBuffers,
         shape: MoeShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmq_iq3_xxs_gate_up_tile8(
+        crate::launch::moe::indexed_moe_mmq_iq3_xxs_gate_up_tile8(
             self.reg,
             self.stream,
             buffers,
@@ -1387,7 +1392,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmqTile8DownBuffers,
         shape: MoeShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmq_iq3_xxs_down_tile8(
+        crate::launch::moe::indexed_moe_mmq_iq3_xxs_down_tile8(
             self.reg,
             self.stream,
             buffers,
@@ -1400,7 +1405,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmqTile8GateUpBuffers,
         shape: MoeShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmq_iq3_s_gate_up_tile8(
+        crate::launch::moe::indexed_moe_mmq_iq3_s_gate_up_tile8(
             self.reg,
             self.stream,
             buffers,
@@ -1412,7 +1417,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmqTile8DownBuffers,
         shape: MoeShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmq_iq3_s_down_tile8(
+        crate::launch::moe::indexed_moe_mmq_iq3_s_down_tile8(
             self.reg,
             self.stream,
             buffers,
@@ -1425,7 +1430,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmqTile8GateUpBuffers,
         shape: MoeShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmq_iq2_xxs_gate_up_tile8(
+        crate::launch::moe::indexed_moe_mmq_iq2_xxs_gate_up_tile8(
             self.reg,
             self.stream,
             buffers,
@@ -1437,7 +1442,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmqTile8DownBuffers,
         shape: MoeShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmq_iq2_xxs_down_tile8(
+        crate::launch::moe::indexed_moe_mmq_iq2_xxs_down_tile8(
             self.reg,
             self.stream,
             buffers,
@@ -1450,7 +1455,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmqTile8GateUpBuffers,
         shape: MoeShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmq_iq2_xs_gate_up_tile8(
+        crate::launch::moe::indexed_moe_mmq_iq2_xs_gate_up_tile8(
             self.reg,
             self.stream,
             buffers,
@@ -1462,7 +1467,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmqTile8DownBuffers,
         shape: MoeShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmq_iq2_xs_down_tile8(
+        crate::launch::moe::indexed_moe_mmq_iq2_xs_down_tile8(
             self.reg,
             self.stream,
             buffers,
@@ -1475,7 +1480,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmqTile8GateUpBuffers,
         shape: MoeShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmq_iq2_s_gate_up_tile8(
+        crate::launch::moe::indexed_moe_mmq_iq2_s_gate_up_tile8(
             self.reg,
             self.stream,
             buffers,
@@ -1487,7 +1492,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmqTile8DownBuffers,
         shape: MoeShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmq_iq2_s_down_tile8(
+        crate::launch::moe::indexed_moe_mmq_iq2_s_down_tile8(
             self.reg,
             self.stream,
             buffers,
@@ -1500,7 +1505,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmqTile8GateUpBuffers,
         shape: MoeShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmq_iq1_s_gate_up_tile8(
+        crate::launch::moe::indexed_moe_mmq_iq1_s_gate_up_tile8(
             self.reg,
             self.stream,
             buffers,
@@ -1512,7 +1517,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmqTile8DownBuffers,
         shape: MoeShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmq_iq1_s_down_tile8(
+        crate::launch::moe::indexed_moe_mmq_iq1_s_down_tile8(
             self.reg,
             self.stream,
             buffers,
@@ -1525,7 +1530,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmqTile8GateUpBuffers,
         shape: MoeShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmq_iq1_m_gate_up_tile8(
+        crate::launch::moe::indexed_moe_mmq_iq1_m_gate_up_tile8(
             self.reg,
             self.stream,
             buffers,
@@ -1537,7 +1542,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmqTile8DownBuffers,
         shape: MoeShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmq_iq1_m_down_tile8(
+        crate::launch::moe::indexed_moe_mmq_iq1_m_down_tile8(
             self.reg,
             self.stream,
             buffers,
@@ -1550,7 +1555,7 @@ impl<'a> Ops for HipOps<'a> {
         bufs: crate::MoeMmqQ4KGateUpLdsTiledBuffers,
         shape: MoeShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmq_q4_k_gate_up_lds_tiled(self.reg, self.stream, bufs, shape)
+        crate::launch::moe::indexed_moe_mmq_q4_k_gate_up_lds_tiled(self.reg, self.stream, bufs, shape)
     }
 
     fn indexed_moe_mmq_q4_k_down_lds_tiled(
@@ -1558,7 +1563,7 @@ impl<'a> Ops for HipOps<'a> {
         bufs: crate::MoeMmqQ4KDownLdsTiledBuffers,
         shape: MoeShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmq_q4_k_down_lds_tiled(self.reg, self.stream, bufs, shape)
+        crate::launch::moe::indexed_moe_mmq_q4_k_down_lds_tiled(self.reg, self.stream, bufs, shape)
     }
 
     fn indexed_moe_mmq_q5_k_down_tile8(
@@ -1566,7 +1571,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmqTile8DownBuffers,
         shape: MoeShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmq_q5_k_down_tile8(
+        crate::launch::moe::indexed_moe_mmq_q5_k_down_tile8(
             self.reg,
             self.stream,
             buffers,
@@ -1579,7 +1584,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmqTile8DownBuffers,
         shape: MoeShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmq_q6_k_down_tile8(
+        crate::launch::moe::indexed_moe_mmq_q6_k_down_tile8(
             self.reg,
             self.stream,
             buffers,
@@ -1592,7 +1597,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmvqGateUpSortedBuffers,
         shape: crate::MoeMmvqShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmvq_q4_k_gate_up_sorted(
+        crate::launch::moe::indexed_moe_mmvq_q4_k_gate_up_sorted(
             self.reg,
             self.stream,
             buffers,
@@ -1605,7 +1610,7 @@ impl<'a> Ops for HipOps<'a> {
         buffers: crate::MoeMmvqGateUpBuffers,
         shape: crate::MoeMmvqShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmvq_q4_k_gate_up(
+        crate::launch::moe::indexed_moe_mmvq_q4_k_gate_up(
             self.reg,
             self.stream,
             buffers,
@@ -1618,7 +1623,7 @@ impl<'a> Ops for HipOps<'a> {
         bufs: crate::MoeMmqQ4KBuffers,
         shape: crate::MoeMmqQ4KShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmq_q4_k(self.reg, self.stream, bufs, shape)
+        crate::launch::moe::indexed_moe_mmq_q4_k(self.reg, self.stream, bufs, shape)
     }
 
     fn shared_expert_scale_f32(
@@ -1629,7 +1634,7 @@ impl<'a> Ops for HipOps<'a> {
         n_tokens: usize,
         hidden: usize,
     ) -> Result<()> {
-        super::moe::shared_expert_scale_f32(
+        crate::launch::moe::shared_expert_scale_f32(
             self.reg,
             self.stream,
             shared_out,
@@ -1645,7 +1650,7 @@ impl<'a> Ops for HipOps<'a> {
         buf: crate::MoeCombineBuffers,
         shape: crate::MoeCombineShape,
     ) -> Result<()> {
-        super::moe::moe_combine_f16(self.reg, self.stream, buf, shape)
+        crate::launch::moe::moe_combine_f16(self.reg, self.stream, buf, shape)
     }
 
     fn moe_combine_no_residual_f16(
@@ -1653,7 +1658,7 @@ impl<'a> Ops for HipOps<'a> {
         buf: crate::MoeCombineNoResidualBuffers,
         shape: crate::MoeCombineShape,
     ) -> Result<()> {
-        super::moe::moe_combine_no_residual_f16(self.reg, self.stream, buf, shape)
+        crate::launch::moe::moe_combine_no_residual_f16(self.reg, self.stream, buf, shape)
     }
 
     fn moe_combine_no_residual_f32(
@@ -1661,7 +1666,7 @@ impl<'a> Ops for HipOps<'a> {
         buf: crate::MoeCombineNoResidualBuffers,
         shape: crate::MoeCombineShape,
     ) -> Result<()> {
-        super::moe::moe_combine_no_residual_f32(self.reg, self.stream, buf, shape)
+        crate::launch::moe::moe_combine_no_residual_f32(self.reg, self.stream, buf, shape)
     }
 
     fn moe_combine_two_residuals_f16(
@@ -1669,7 +1674,7 @@ impl<'a> Ops for HipOps<'a> {
         buf: crate::MoeCombineTwoResidualsBuffers,
         shape: crate::MoeCombineShape,
     ) -> Result<()> {
-        super::moe::moe_combine_two_residuals_f16(self.reg, self.stream, buf, shape)
+        crate::launch::moe::moe_combine_two_residuals_f16(self.reg, self.stream, buf, shape)
     }
 
     fn moe_sort_by_expert(
@@ -1677,7 +1682,7 @@ impl<'a> Ops for HipOps<'a> {
         buf: crate::MoeSortBuffers,
         shape: crate::MoeSortShape,
     ) -> Result<()> {
-        super::moe::moe_sort_by_expert(self.reg, self.stream, buf, shape)
+        crate::launch::moe::moe_sort_by_expert(self.reg, self.stream, buf, shape)
     }
 
     fn moe_sort_by_expert_padded_16(
@@ -1685,7 +1690,7 @@ impl<'a> Ops for HipOps<'a> {
         buf: crate::MoeSortPaddedBuffers,
         shape: crate::MoeSortPaddedShape,
     ) -> Result<()> {
-        super::moe::moe_sort_by_expert_padded_16(self.reg, self.stream, buf, shape)
+        crate::launch::moe::moe_sort_by_expert_padded_16(self.reg, self.stream, buf, shape)
     }
 
     fn moe_sort_by_expert_padded(
@@ -1693,18 +1698,18 @@ impl<'a> Ops for HipOps<'a> {
         buf: crate::MoeSortPaddedBuffers,
         shape: crate::MoeSortPaddedShape,
     ) -> Result<()> {
-        super::moe::moe_sort_by_expert_padded(self.reg, self.stream, buf, shape)
+        crate::launch::moe::moe_sort_by_expert_padded(self.reg, self.stream, buf, shape)
     }
 
     fn apply_softcap_f32(&self, x: DevicePtr, y: DevicePtr, n: usize, cap: f32) -> Result<()> {
-        super::softcap::apply_softcap_f32(self.reg, self.stream, x, y, n, cap)
+        crate::launch::softcap::apply_softcap_f32(self.reg, self.stream, x, y, n, cap)
     }
 
     fn gelu_f32_to_f16(&self, a: DevicePtr, b: DevicePtr, y: DevicePtr, n: usize) -> Result<()> {
-        super::mlp::gelu_f32_to_f16(self.reg, self.stream, a, b, y, n)
+        crate::launch::mlp::gelu_f32_to_f16(self.reg, self.stream, a, b, y, n)
     }
 
     fn gelu_mul_f32(&self, a: DevicePtr, b: DevicePtr, y: DevicePtr, n: usize) -> Result<()> {
-        super::mlp::gelu_mul_f32(self.reg, self.stream, a, b, y, n)
+        crate::launch::mlp::gelu_mul_f32(self.reg, self.stream, a, b, y, n)
     }
 }

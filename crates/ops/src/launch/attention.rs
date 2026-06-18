@@ -1135,7 +1135,7 @@ pub fn attention_prefill_f16<B: flambeau_core::KernelBackend>(
 ///   indices; the slot recorder captures whichever path n_q_tokens
 ///   selected. Capturing at a particular n_q and replaying at a different
 ///   n_q is unsupported (different path → different node layout).
-///   [`ScalarSlot`]: flambeau_backend_hip::ScalarSlot
+///   [`ScalarSlot`]: flambeau_core::ScalarSlot
 pub fn attention_prefill_f16_slots<B: flambeau_core::KernelBackend>(
     reg: &crate::Registry<B>,
     stream: &<B::Device as flambeau_core::Device>::Stream,
@@ -1301,7 +1301,7 @@ pub fn kv_append_v_unit_norm_f16<B: flambeau_core::KernelBackend>(
     args.push_arg(&write_pos_i);
     args.push_arg(&eps);
     args.push_arg(&ring_depth_i);
-    let cfg = flambeau_backend_hip::LaunchCfg {
+    let cfg = LaunchCfg {
         grid: (shape.n_tokens as u32, shape.n_kv_heads as u32, 1),
         block: (shape.head_dim as u32, 1, 1),
         shared_bytes: 0,

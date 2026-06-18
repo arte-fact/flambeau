@@ -25,6 +25,14 @@
 #[cfg(feature = "hip")]
 pub mod hip;
 
+#[cfg(feature = "cuda")]
+pub mod cuda;
+
+// Backend-generic op-launch bodies (one `fn op<B: KernelBackend>(…)` per op).
+// Always compiled — HIP and CUDA share the same bodies; the `hip` / `cuda`
+// modules only add the per-backend `Registry` / `Ops` type aliases.
+pub mod launch;
+
 // Backend-generic kernel-module registry over the `core::KernelBackend` seam.
 // Always compiled so a CUDA `Ops` impl shares it; `hip::OpsRegistry` is the
 // `Registry<HipKernels>` alias.
@@ -71,14 +79,21 @@ pub use sig::{
 #[cfg(feature = "hip")]
 pub use sig::OpCtx;
 
-#[cfg(feature = "hip")]
-pub use hip::{attention, conv, mlp, moe, norm, pe, qmatmul, softmax};
+// The op-launch bodies are backend-generic; re-export them at the historical
+// crate-root paths so callers say `flambeau_ops::qmatmul::…` for either backend.
+pub use launch::{attention, conv, mlp, moe, norm, pe, qmatmul, softmax};
 
 // The portable op contract. Backend-neutral: every method takes `sig` POD +
-// `core` types only (the `Ops` impls — `HipOps`, future `CudaOps` — hold the
-// backend `(registry, stream)` pair internally). Always compiled.
+// `core` types only (the `Ops` impl — `OpsImpl<B>`, aliased per backend as
+// `HipOps` / `CudaOps` — holds the backend `(registry, stream)` pair
+// internally). Always compiled.
+mod ops_impl;
 mod ops_trait;
+pub use ops_impl::OpsImpl;
 pub use ops_trait::Ops;
 
 #[cfg(feature = "hip")]
 pub use hip::HipOps;
+
+#[cfg(feature = "cuda")]
+pub use cuda::{CudaOps, CudaOpsRegistry};

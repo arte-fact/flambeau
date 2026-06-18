@@ -46,3 +46,8 @@ pub trait Backend: Send + Sync + 'static {
 mod hip;
 #[cfg(feature = "hip")]
 pub use hip::HipBackend;
+
+#[cfg(feature = "cuda")]
+mod cuda;
+#[cfg(feature = "cuda")]
+pub use cuda::CudaBackend;
