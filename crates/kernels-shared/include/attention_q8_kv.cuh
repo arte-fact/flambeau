@@ -109,6 +109,67 @@ static __device__ void attention_decode_q8_kv_body(
     out[ob + 3] = (fb_fp16_t) (v_out[3] * norm);
 }
 
+// Split-K chunk pass: per (q_head, chunk) Q8 attention over the chunk's tokens →
+// partial (m, s, o). Combine pass reuses attention_decode_f16_splitk_combine.
+static __device__ void attention_decode_q8_kv_splitk_chunk_body(
+    const fb_fp16_t* __restrict__ q,
+    const flambeau_block_q8_0* __restrict__ k_cache,
+    const flambeau_block_q8_0* __restrict__ v_cache,
+    float* __restrict__ partials_m,
+    float* __restrict__ partials_s,
+    float* __restrict__ partials_o,
+    int n_heads_q, int n_heads_kv, int head_dim, int n_tokens,
+    int n_chunks, int chunk_size, float scale, int window_size, int ring_depth, int chunk_base)
+{
+    const int q_head = blockIdx.x;
+    const int chunk = blockIdx.y;
+    if (q_head >= n_heads_q) return;
+    const int kv_head = q_head / (n_heads_q / n_heads_kv);
+    const int tid = threadIdx.x;
+    const int elem_base = tid * 4;
+    const int n_blocks_per_row = head_dim / 32;
+    const int q8_block_idx = elem_base / 32;
+    const int quad_in_block = (elem_base % 32) / 4;
+
+    int t_start = chunk_base + chunk * chunk_size;
+    int t_end = t_start + chunk_size;
+    if (t_end > n_tokens) t_end = n_tokens;
+    if (window_size > 0) {
+        int window_start = (n_tokens - 1) - window_size + 1;
+        if (window_start < 0) window_start = 0;
+        if (t_start < window_start) t_start = window_start;
+        if (t_start > t_end) t_start = t_end;
+    }
+    const int part_idx = q_head * n_chunks + chunk;
+    if (t_start >= t_end) {
+        if (tid == 0) { partials_m[part_idx] = -ATTN_Q8_INF; partials_s[part_idx] = 0.0f; }
+        partials_o[(size_t) part_idx * head_dim + elem_base + 0] = 0.0f;
+        partials_o[(size_t) part_idx * head_dim + elem_base + 1] = 0.0f;
+        partials_o[(size_t) part_idx * head_dim + elem_base + 2] = 0.0f;
+        partials_o[(size_t) part_idx * head_dim + elem_base + 3] = 0.0f;
+        return;
+    }
+
+    __shared__ int8_t q_qs[ATTN_Q8_MAX_HEAD_DIM];
+    __shared__ float q_d_block[ATTN_Q8_MAX_HEAD_DIM / 32];
+    __shared__ float red[ATTN_Q8_MAX_HEAD_DIM / 4];
+    attn_q8_quantize_q(q, (size_t) q_head * head_dim, elem_base, quad_in_block, q8_block_idx, q_qs, q_d_block);
+    __syncthreads();
+    const int q_packed = ((const int*) q_qs)[tid];
+
+    float running_max = -ATTN_Q8_INF, running_sum = 0.0f, v_out[4] = {0, 0, 0, 0};
+    for (int t = t_start; t < t_end; ++t) {
+        const int t_phys = (ring_depth > 0) ? (t % ring_depth) : t;
+        const size_t kv_row_blocks = ((size_t) t_phys * n_heads_kv + kv_head) * n_blocks_per_row;
+        attn_q8_step(k_cache, v_cache, kv_row_blocks, q8_block_idx, quad_in_block, q_packed, q_d_block, scale, red, running_max, running_sum, v_out);
+    }
+    if (tid == 0) { partials_m[part_idx] = running_max; partials_s[part_idx] = running_sum; }
+    partials_o[(size_t) part_idx * head_dim + elem_base + 0] = v_out[0];
+    partials_o[(size_t) part_idx * head_dim + elem_base + 1] = v_out[1];
+    partials_o[(size_t) part_idx * head_dim + elem_base + 2] = v_out[2];
+    partials_o[(size_t) part_idx * head_dim + elem_base + 3] = v_out[3];
+}
+
 static __device__ void attention_prefill_q8_kv_body(
     const fb_fp16_t* __restrict__ q,
     const flambeau_block_q8_0* __restrict__ k_cache,

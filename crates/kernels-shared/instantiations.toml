@@ -3536,3 +3536,29 @@ params = """
     const int n_q_tokens, const int n_heads_q, const int n_heads_kv, const int head_dim,
     const int n_k_tokens, const int q_offset, const float scale, const int window_size, const int ring_depth"""
 body = "attention_prefill_q8_kv_body(q, k_cache, v_cache, out, n_q_tokens, n_heads_q, n_heads_kv, head_dim, n_k_tokens, q_offset, scale, window_size, ring_depth);"
+
+[[kernel]]
+stem = "attention_decode_q8_kv_splitk"
+includes = ["block_quant.cuh", "quant_traits.cuh", "block_reduce.cuh", "attention_q8_kv.cuh", "attention_decode_splitk.cuh"]
+[[kernel.entry]]
+name = "flambeau_attention_decode_q8_kv_splitk_chunk"
+params = """
+    const fb_fp16_t* __restrict__ q,
+    const flambeau_block_q8_0* __restrict__ k_cache,
+    const flambeau_block_q8_0* __restrict__ v_cache,
+    float* __restrict__ partials_m,
+    float* __restrict__ partials_s,
+    float* __restrict__ partials_o,
+    const int n_heads_q, const int n_heads_kv, const int head_dim, const int n_tokens,
+    const int n_chunks, const int chunk_size, const float scale,
+    const int window_size, const int ring_depth, const int chunk_base"""
+body = "attention_decode_q8_kv_splitk_chunk_body(q, k_cache, v_cache, partials_m, partials_s, partials_o, n_heads_q, n_heads_kv, head_dim, n_tokens, n_chunks, chunk_size, scale, window_size, ring_depth, chunk_base);"
+[[kernel.entry]]
+name = "flambeau_attention_decode_q8_kv_splitk_combine"
+params = """
+    const float* __restrict__ partials_m,
+    const float* __restrict__ partials_s,
+    const float* __restrict__ partials_o,
+    fb_fp16_t* __restrict__ out,
+    const int n_heads_q, const int n_chunks, const int head_dim"""
+body = "attention_decode_f16_splitk_combine_body(partials_m, partials_s, partials_o, out, n_heads_q, n_chunks, head_dim);"

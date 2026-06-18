@@ -103,6 +103,7 @@ pub fn run_pointwise_sweep<B: BenchBackend>(
         "attention_prefill_flash_tile_f16" => run_attention_flash_tile_sweep::<B>(repo_root, arch),
         "attention_decode_q8_kv" => run_attention_q8_kv_sweep::<B>(repo_root, arch, false),
         "attention_prefill_q8_kv" => run_attention_q8_kv_sweep::<B>(repo_root, arch, true),
+        "attention_decode_q8_kv_splitk" => run_attention_q8_kv_splitk_sweep::<B>(repo_root, arch),
         _ => return None,
     };
     Some(cert)
@@ -1022,6 +1023,98 @@ fn quantize_q8_0_blocks(data: &[f32]) -> Vec<u8> {
         }
     }
     out
+}
+
+/// `attention_decode_q8_kv_splitk` — split-K decode over a Q8_0 KV cache. Two
+/// pass (chunk → partials → combine). F64 dequant oracle, 3e-2 Q8 envelope.
+pub fn run_attention_q8_kv_splitk_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) -> Result<Cert> {
+    let dev = B::new_device(0)?;
+    let image = B::image("attention_decode_q8_kv_splitk").ok_or_else(|| anyhow!("attention_decode_q8_kv_splitk not compiled"))?;
+    let module = B::load(&dev, image)?;
+    let chunk_k = B::kernel(&module, "flambeau_attention_decode_q8_kv_splitk_chunk")?;
+    let combine_k = B::kernel(&module, "flambeau_attention_decode_q8_kv_splitk_combine")?;
+    let pmc = B::attributes(&chunk_k)?;
+
+    let shapes = [(8usize, 2usize, 128usize, 64usize, 8usize), (16, 4, 64, 96, 8)];
+    let mut results = Vec::new();
+    for (n_heads_q, n_heads_kv, head_dim, n_tokens, n_chunks) in shapes {
+        let seed = 0xC0FFEE ^ ((n_heads_q as u64) * 1049 + (head_dim as u64) * 11);
+        let scale = 1.0f32 / (head_dim as f32).sqrt();
+        let group = n_heads_q / n_heads_kv;
+        let chunk_size = n_tokens.div_ceil(n_chunks);
+        let q = f16_input(seed, n_heads_q * head_dim);
+        let k_f32 = seeded_f32_range(seed ^ 0xAA, n_tokens * n_heads_kv * head_dim, -0.5, 0.5);
+        let v_f32 = seeded_f32_range(seed ^ 0xBB, n_tokens * n_heads_kv * head_dim, -0.5, 0.5);
+        let rows = n_tokens * n_heads_kv;
+        let mut k_bytes = Vec::new();
+        let mut v_bytes = Vec::new();
+        let mut k_deq = vec![0.0f32; n_tokens * n_heads_kv * head_dim];
+        let mut v_deq = vec![0.0f32; n_tokens * n_heads_kv * head_dim];
+        for r in 0..rows {
+            let kb = quantize_q8_0_blocks(&k_f32[r * head_dim..(r + 1) * head_dim]);
+            let vb = quantize_q8_0_blocks(&v_f32[r * head_dim..(r + 1) * head_dim]);
+            for blk in 0..head_dim / 32 {
+                let kd = f16::from_bits(u16::from_le_bytes([kb[blk * 34], kb[blk * 34 + 1]])).to_f32();
+                let vd = f16::from_bits(u16::from_le_bytes([vb[blk * 34], vb[blk * 34 + 1]])).to_f32();
+                for i in 0..32 {
+                    k_deq[r * head_dim + blk * 32 + i] = kd * (kb[blk * 34 + 2 + i] as i8) as f32;
+                    v_deq[r * head_dim + blk * 32 + i] = vd * (vb[blk * 34 + 2 + i] as i8) as f32;
+                }
+            }
+            k_bytes.extend_from_slice(&kb);
+            v_bytes.extend_from_slice(&vb);
+        }
+        let mut reference = vec![0.0f32; n_heads_q * head_dim];
+        for h in 0..n_heads_q {
+            let kvh = h / group;
+            let qr: Vec<f32> = (0..head_dim).map(|d| q[h * head_dim + d].to_f32()).collect();
+            let ctx: Vec<(Vec<f32>, Vec<f32>)> = (0..n_tokens).map(|t| {
+                let base = (t * n_heads_kv + kvh) * head_dim;
+                (k_deq[base..base + head_dim].to_vec(), v_deq[base..base + head_dim].to_vec())
+            }).collect();
+            let o = attn_oracle_row(&qr, &ctx, scale as f64, head_dim);
+            for d in 0..head_dim { reference[h * head_dim + d] = f16::from_f32(o[d]).to_f32(); }
+        }
+
+        let d_q = alloc_and_upload(&dev, &q);
+        let d_k = alloc_and_upload(&dev, &k_bytes);
+        let d_v = alloc_and_upload(&dev, &v_bytes);
+        let d_pm = dev.alloc(n_heads_q * n_chunks * 4)?;
+        let d_ps = dev.alloc(n_heads_q * n_chunks * 4)?;
+        let d_po = dev.alloc(n_heads_q * n_chunks * head_dim * 4)?;
+        let d_o = dev.alloc(n_heads_q * head_dim * 2)?;
+        {
+            let stream = dev.default_stream();
+            let (nhq, nhkv, hd, nt, nc, cs) = (n_heads_q as i32, n_heads_kv as i32, head_dim as i32, n_tokens as i32, n_chunks as i32, chunk_size as i32);
+            let (ws, rd, cb) = (0i32, 0i32, 0i32);
+            let qp: u64 = d_q.as_usize() as u64; let kp: u64 = d_k.as_usize() as u64; let vp: u64 = d_v.as_usize() as u64;
+            let pm: u64 = d_pm.as_usize() as u64; let ps: u64 = d_ps.as_usize() as u64; let po: u64 = d_po.as_usize() as u64;
+            let mut a = <B::Args<'_>>::default();
+            a.push_arg(&qp); a.push_arg(&kp); a.push_arg(&vp); a.push_arg(&pm); a.push_arg(&ps); a.push_arg(&po);
+            a.push_arg(&nhq); a.push_arg(&nhkv); a.push_arg(&hd); a.push_arg(&nt); a.push_arg(&nc); a.push_arg(&cs);
+            a.push_arg(&scale); a.push_arg(&ws); a.push_arg(&rd); a.push_arg(&cb);
+            B::launch(&chunk_k, stream, LaunchCfg { grid: (n_heads_q as u32, n_chunks as u32, 1), block: ((head_dim / 4) as u32, 1, 1), shared_bytes: 0 }, a)?;
+            stream.synchronize()?;
+            let op: u64 = d_o.as_usize() as u64;
+            let mut c = <B::Args<'_>>::default();
+            c.push_arg(&pm); c.push_arg(&ps); c.push_arg(&po); c.push_arg(&op); c.push_arg(&nhq); c.push_arg(&nc); c.push_arg(&hd);
+            B::launch(&combine_k, stream, LaunchCfg { grid: (n_heads_q as u32, 1, 1), block: (head_dim as u32, 1, 1), shared_bytes: 0 }, c)?;
+            stream.synchronize()?;
+        }
+        let mut got_f16 = vec![f16::from_f32(0.0); n_heads_q * head_dim];
+        unsafe { dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost, DevicePtr(got_f16.as_mut_ptr() as usize), d_o, n_heads_q * head_dim * 2)?; }
+        dev.default_stream().synchronize()?;
+        unsafe {
+            dev.dealloc(d_q, n_heads_q * head_dim * 2)?; dev.dealloc(d_k, k_bytes.len())?; dev.dealloc(d_v, v_bytes.len())?;
+            dev.dealloc(d_pm, n_heads_q * n_chunks * 4)?; dev.dealloc(d_ps, n_heads_q * n_chunks * 4)?;
+            dev.dealloc(d_po, n_heads_q * n_chunks * head_dim * 4)?; dev.dealloc(d_o, n_heads_q * head_dim * 2)?;
+        }
+        let got: Vec<f32> = got_f16.iter().map(|v| v.to_f32()).collect();
+        let err = max_rel_err_with_floor(&got, &reference, 1.0);
+        results.push(ShapeResult { m: n_heads_q, k: head_dim, n: n_tokens, seed, max_rel_err: err, tolerance: 3e-2, pass: err <= 3e-2 });
+    }
+    finish_cert(&dev, repo_root, arch, "attention_decode_q8_kv_splitk", "attention_decode_q8_kv_splitk", "F16", "Q8_0",
+        "|err| <= 3e-2 * max(|ref|, 1) vs F64 dequant oracle (Q8 envelope)", results, pmc)
 }
 
 /// `attention_{decode,prefill}_q8_kv` — attention over a Q8_0 KV cache. Compared
