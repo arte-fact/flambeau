@@ -2461,6 +2461,7 @@ pub enum MoeGateUpDtype {
     Q8_0,
     Q4_0,
     Q4K,
+    Q4KR4,
     Q4KR4Sorted,
 }
 
@@ -2469,16 +2470,14 @@ impl MoeGateUpDtype {
         match self {
             MoeGateUpDtype::Q8_0 => "Q8_0",
             MoeGateUpDtype::Q4_0 => "Q4_0",
-            MoeGateUpDtype::Q4K => "Q4_K",
-            MoeGateUpDtype::Q4KR4Sorted => "Q4_K",
+            MoeGateUpDtype::Q4K | MoeGateUpDtype::Q4KR4 | MoeGateUpDtype::Q4KR4Sorted => "Q4_K",
         }
     }
     fn weight_dtype(self) -> Dtype {
         match self {
             MoeGateUpDtype::Q8_0 => Dtype::Q8_0Dp4a,
             MoeGateUpDtype::Q4_0 => Dtype::Q4_0,
-            MoeGateUpDtype::Q4K => Dtype::Q4K,
-            MoeGateUpDtype::Q4KR4Sorted => Dtype::Q4K,
+            MoeGateUpDtype::Q4K | MoeGateUpDtype::Q4KR4 | MoeGateUpDtype::Q4KR4Sorted => Dtype::Q4K,
         }
     }
     fn impl_id(self) -> &'static str {
@@ -2486,6 +2485,7 @@ impl MoeGateUpDtype {
             MoeGateUpDtype::Q8_0 => "indexed_moe_mmvq_q8_0_gate_up",
             MoeGateUpDtype::Q4_0 => "indexed_moe_mmvq_q4_0_gate_up",
             MoeGateUpDtype::Q4K => "indexed_moe_mmvq_q4_k_gate_up",
+            MoeGateUpDtype::Q4KR4 => "indexed_moe_mmvq_q4_k_gate_up_r4",
             MoeGateUpDtype::Q4KR4Sorted => "indexed_moe_mmvq_q4_k_gate_up_r4_sorted",
         }
     }
@@ -2494,6 +2494,7 @@ impl MoeGateUpDtype {
             MoeGateUpDtype::Q8_0 => "indexed_moe_mmvq_q8_0_gate_up_dp4a",
             MoeGateUpDtype::Q4_0 => "indexed_moe_mmvq_q4_0_gate_up_dp4a",
             MoeGateUpDtype::Q4K => "indexed_moe_mmvq_q4_k_gate_up",
+            MoeGateUpDtype::Q4KR4 => "indexed_moe_mmvq_q4_k_gate_up_r4_dp4a",
             MoeGateUpDtype::Q4KR4Sorted => "indexed_moe_mmvq_q4_k_gate_up_r4_sorted_dp4a",
         }
     }
@@ -2502,22 +2503,23 @@ impl MoeGateUpDtype {
             MoeGateUpDtype::Q8_0 => "flambeau_indexed_moe_mmvq_q8_0_gate_up_dp4a_q8_1",
             MoeGateUpDtype::Q4_0 => "flambeau_indexed_moe_mmvq_q4_0_gate_up_dp4a_q8_1",
             MoeGateUpDtype::Q4K => "flambeau_indexed_moe_mmvq_q4_k_gate_up_q8_1",
+            MoeGateUpDtype::Q4KR4 => "flambeau_indexed_moe_mmvq_q4_k_gate_up_r4_dp4a_q8_1",
             MoeGateUpDtype::Q4KR4Sorted => "flambeau_indexed_moe_mmvq_q4_k_gate_up_r4_sorted_dp4a_q8_1",
         }
     }
     /// Block thread count. The dp4a variants are 256t (4 lanes/block); the Q4_K
-    /// scalar + r4-sorted kernels are one wave64 (64t).
+    /// scalar + r4 kernels are one wave64 (64t).
     fn launch_threads(self) -> u32 {
         match self {
             MoeGateUpDtype::Q8_0 | MoeGateUpDtype::Q4_0 => 256,
-            MoeGateUpDtype::Q4K | MoeGateUpDtype::Q4KR4Sorted => 64,
+            MoeGateUpDtype::Q4K | MoeGateUpDtype::Q4KR4 | MoeGateUpDtype::Q4KR4Sorted => 64,
         }
     }
     /// Output rows computed per block (grid.x = ceil(n_rows / this)). The r4
-    /// sorted kernel does 4 rows/block; the rest one.
+    /// kernels do 4 rows/block; the rest one.
     fn rows_per_block(self) -> u32 {
         match self {
-            MoeGateUpDtype::Q4KR4Sorted => 4,
+            MoeGateUpDtype::Q4KR4 | MoeGateUpDtype::Q4KR4Sorted => 4,
             _ => 1,
         }
     }
