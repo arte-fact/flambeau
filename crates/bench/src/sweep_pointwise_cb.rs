@@ -105,6 +105,7 @@ pub fn run_pointwise_sweep<B: BenchBackend>(
         "attention_prefill_q8_kv" => run_attention_q8_kv_sweep::<B>(repo_root, arch, true),
         "attention_decode_q8_kv_splitk" => run_attention_q8_kv_splitk_sweep::<B>(repo_root, arch),
         "attention_prefill_flash_tile_q8_kv" => run_attention_flash_tile_q8_sweep::<B>(repo_root, arch),
+        "quantize_f16_q8_1_mmq" => run_quantize_f16_q8_1_mmq_sweep::<B>(repo_root, arch),
         _ => return None,
     };
     Some(cert)
@@ -1005,6 +1006,73 @@ pub fn run_rope_f16_sweep<B: BenchBackend>(repo_root: &Path, arch: &str, neox: b
     }
     finish_cert(&dev, repo_root, arch, impl_id, impl_id, "F16", "F16",
         "|err| <= 5e-3 * max(|ref|, 1e-2) vs F64 angle oracle", results, pmc)
+}
+
+/// `quantize_f16_q8_1_mmq` — F16 activation → BlockQ8_1Mmq (DS4, 144 B: 4
+/// (d,ssum) half2 headers + 128 int8). One block per (big-block, row), 128
+/// threads. Scored by dequantizing (d·q) vs the F16 input (5e-3).
+pub fn run_quantize_f16_q8_1_mmq_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) -> Result<Cert> {
+    let dev = B::new_device(0)?;
+    let image = B::image("quantize_f16_q8_1_mmq").ok_or_else(|| anyhow!("quantize_f16_q8_1_mmq not compiled"))?;
+    let module = B::load(&dev, image)?;
+    let kernel = B::kernel(&module, "flambeau_quantize_f16_q8_1_mmq")?;
+    let pmc = B::attributes(&kernel)?;
+
+    let shapes = [(1usize, 128usize), (4, 256), (2, 384)];
+    let mut results = Vec::new();
+    for (total_b, ncols) in shapes {
+        let seed = 0xC0FFEE ^ ((total_b as u64) * 71 + (ncols as u64) * 13);
+        let x = f16_input(seed, total_b * ncols);
+        let n_big = ncols / 128;
+        let out_bytes = n_big * total_b * 144;
+
+        let d_x = alloc_and_upload(&dev, &x);
+        let d_y = dev.alloc(out_bytes)?;
+        {
+            let stream = dev.default_stream();
+            let nc = ncols as i32;
+            let tb = total_b as i32;
+            let x_ptr: u64 = d_x.as_usize() as u64;
+            let y_ptr: u64 = d_y.as_usize() as u64;
+            let mut args = <B::Args<'_>>::default();
+            args.push_arg(&x_ptr);
+            args.push_arg(&y_ptr);
+            args.push_arg(&nc);
+            args.push_arg(&tb);
+            let cfg = LaunchCfg { grid: (n_big as u32, total_b as u32, 1), block: (128, 1, 1), shared_bytes: 0 };
+            B::launch(&kernel, stream, cfg, args)?;
+            stream.synchronize()?;
+        }
+        let mut got = vec![0u8; out_bytes];
+        unsafe {
+            dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost,
+                DevicePtr(got.as_mut_ptr() as usize), d_y, out_bytes)?;
+        }
+        dev.default_stream().synchronize()?;
+        unsafe { dev.dealloc(d_x, total_b * ncols * 2)?; dev.dealloc(d_y, out_bytes)?; }
+
+        // Dequant: block (b, c) at byte (b*total_b + c)*144; d_sub = fp16@(sub*4),
+        // q_ki = i8@(16 + ki). Compare to x[c*ncols + b*128 + ki].
+        let mut dequant = vec![0.0f32; total_b * ncols];
+        let mut xi = vec![0.0f32; total_b * ncols];
+        for c in 0..total_b {
+            for b in 0..n_big {
+                let base = (b * total_b + c) * 144;
+                for ki in 0..128 {
+                    let sub = ki / 32;
+                    let d = f16::from_bits(u16::from_le_bytes([got[base + sub * 4], got[base + sub * 4 + 1]])).to_f32();
+                    let q = got[base + 16 + ki] as i8;
+                    let col = b * 128 + ki;
+                    dequant[c * ncols + col] = d * q as f32;
+                    xi[c * ncols + col] = x[c * ncols + col].to_f32();
+                }
+            }
+        }
+        let err = max_rel_err_with_floor(&dequant, &xi, 1.0);
+        results.push(ShapeResult { m: total_b, k: ncols, n: 1, seed, max_rel_err: err, tolerance: 5e-3, pass: err <= 5e-3 });
+    }
+    finish_cert(&dev, repo_root, arch, "quantize_f16_q8_1_mmq", "quantize_f16_q8_1_mmq", "F16", "Q8_1",
+        "|dequant - input| <= 5e-3 * max(|input|, 1) (DS4 Q8_1 step)", results, pmc)
 }
 
 /// `attention_prefill_flash_tile_q8_kv` — LDS-tiled flash-attn-v2 prefill over a
