@@ -68,6 +68,7 @@ pub fn run_pointwise_sweep<B: BenchBackend>(
         "shared_expert_scale_f32" => run_shared_expert_scale_sweep::<B>(repo_root, arch),
         "topk_f32" => run_topk_f32_sweep::<B>(repo_root, arch),
         "sampler_apply_penalties_f32" => run_sampler_apply_penalties_sweep::<B>(repo_root, arch),
+        "softmax_masked_f16" => run_softmax_masked_f16_sweep::<B>(repo_root, arch),
         _ => return None,
     };
     Some(cert)
@@ -968,6 +969,82 @@ pub fn run_rope_f16_sweep<B: BenchBackend>(repo_root: &Path, arch: &str, neox: b
     }
     finish_cert(&dev, repo_root, arch, impl_id, impl_id, "F16", "F16",
         "|err| <= 5e-3 * max(|ref|, 1e-2) vs F64 angle oracle", results, pmc)
+}
+
+/// `softmax_masked_f16` — per-row masked attention softmax. Two-pass online
+/// softmax; the (max, sum) reduce rides `block_reduce_softmax` over the
+/// WARP_SIZE seam. Tested with a causal-style F16 mask (0 / large-negative).
+pub fn run_softmax_masked_f16_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) -> Result<Cert> {
+    let dev = B::new_device(0)?;
+    let image = B::image("softmax_masked_f16").ok_or_else(|| anyhow!("softmax_masked_f16 not compiled"))?;
+    let module = B::load(&dev, image)?;
+    let kernel = B::kernel(&module, "flambeau_softmax_masked_f16")?;
+    let pmc = B::attributes(&kernel)?;
+
+    let scale = 0.125f32;
+    let shapes = [(1usize, 128usize), (8, 512), (32, 1024)];
+    let mut results = Vec::new();
+    for (n_rows, k) in shapes {
+        let seed = 0xC0FFEE ^ ((n_rows as u64) * 1049 + (k as u64) * 11);
+        let scores = f16_input(seed, n_rows * k);
+        // Causal-style mask: position i in a row is masked above a per-row
+        // cutoff (mask = -65504), else 0.
+        let mut mask = vec![f16::from_f32(0.0); n_rows * k];
+        for r in 0..n_rows {
+            let cutoff = (k * (r + 1) / (n_rows + 1)).max(1);
+            for i in cutoff..k {
+                mask[r * k + i] = f16::from_f32(-65504.0);
+            }
+        }
+        let mut reference = vec![0.0f32; n_rows * k];
+        for r in 0..n_rows {
+            let v: Vec<f64> = (0..k)
+                .map(|i| scale as f64 * scores[r * k + i].to_f32() as f64 + mask[r * k + i].to_f32() as f64)
+                .collect();
+            let m = v.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let sum: f64 = v.iter().map(|&x| (x - m).exp()).sum();
+            for i in 0..k {
+                reference[r * k + i] = f16::from_f32(((v[i] - m).exp() / sum) as f32).to_f32();
+            }
+        }
+
+        let d_s = alloc_and_upload(&dev, &scores);
+        let d_m = alloc_and_upload(&dev, &mask);
+        let d_o = dev.alloc(n_rows * k * 2)?;
+        {
+            let stream = dev.default_stream();
+            let nr = n_rows as i32;
+            let kk = k as i32;
+            let s_ptr: u64 = d_s.as_usize() as u64;
+            let m_ptr: u64 = d_m.as_usize() as u64;
+            let o_ptr: u64 = d_o.as_usize() as u64;
+            let mut args = <B::Args<'_>>::default();
+            args.push_arg(&s_ptr);
+            args.push_arg(&m_ptr);
+            args.push_arg(&o_ptr);
+            args.push_arg(&nr);
+            args.push_arg(&kk);
+            args.push_arg(&scale);
+            B::launch(&kernel, stream, LaunchCfg::one_d(n_rows as u32, 256), args)?;
+            stream.synchronize()?;
+        }
+        let mut got_f16 = vec![f16::from_f32(0.0); n_rows * k];
+        unsafe {
+            dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost,
+                DevicePtr(got_f16.as_mut_ptr() as usize), d_o, n_rows * k * 2)?;
+        }
+        dev.default_stream().synchronize()?;
+        unsafe {
+            dev.dealloc(d_s, n_rows * k * 2)?;
+            dev.dealloc(d_m, n_rows * k * 2)?;
+            dev.dealloc(d_o, n_rows * k * 2)?;
+        }
+        let got: Vec<f32> = got_f16.iter().map(|v| v.to_f32()).collect();
+        let err = max_rel_err_with_floor(&got, &reference, 1.0);
+        results.push(ShapeResult { m: n_rows, k, n: 1, seed, max_rel_err: err, tolerance: 5e-3, pass: err <= 5e-3 });
+    }
+    finish_cert(&dev, repo_root, arch, "softmax_masked_f16", "softmax_masked_f16", "F16", "F16",
+        "|err| <= 5e-3 * max(|ref|, 1) vs F64 online-softmax oracle", results, pmc)
 }
 
 /// `sampler_apply_penalties_f32` — repetition/presence/frequency penalties on

@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "impl_id": "softmax_masked_f16",
+  "backend": "hip",
+  "arch": "gfx906",
+  "op": "softmax_masked_f16",
+  "dtype_weight": "F16",
+  "dtype_activation": "F16",
+  "tolerance_formula": "|err| <= 5e-3 * max(|ref|, 1) vs F64 online-softmax oracle",
+  "results": [
+    {
+      "m": 1,
+      "k": 128,
+      "n": 1,
+      "seed": 12646007,
+      "max_rel_err": 0.0,
+      "tolerance": 0.005,
+      "pass": true
+    },
+    {
+      "m": 8,
+      "k": 512,
+      "n": 1,
+      "seed": 12634406,
+      "max_rel_err": 0.0000019073486,
+      "tolerance": 0.005,
+      "pass": true
+    },
+    {
+      "m": 32,
+      "k": 1024,
+      "n": 1,
+      "seed": 12603598,
+      "max_rel_err": 9.536743e-7,
+      "tolerance": 0.005,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-06-18T12:11:29Z",
+  "rig": "threadreaper-gfx906",
+  "pmc": {
+    "vgpr_count": 17,
+    "sgpr_count": null,
+    "waves_per_simd": 10,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

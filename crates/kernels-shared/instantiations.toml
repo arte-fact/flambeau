@@ -3035,3 +3035,20 @@ params = """
     const int n_experts,
     const int k"""
 body = "topk_softmax_f32_row(logits, out_indices, out_weights, n_tokens, n_experts, k);"
+
+# Online-softmax — shared block_reduce_softmax (max,sum) seam.
+
+[[kernel]]
+stem = "softmax_masked_f16"
+includes = ["backend_compat.cuh", "block_reduce_softmax.cuh", "softmax_masked.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_softmax_masked_f16"
+params = """
+    const fb_fp16_t* __restrict__ scores,
+    const fb_fp16_t* __restrict__ mask,
+    fb_fp16_t* __restrict__ out,
+    const int n_rows,
+    const int k,
+    const float scale"""
+body = "softmax_masked_f16_row<256>(scores, mask, out, n_rows, k, scale);"
