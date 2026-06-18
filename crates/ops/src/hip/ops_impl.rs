@@ -941,7 +941,8 @@ impl<'a> Ops for HipOps<'a> {
         k: usize,
     ) -> Result<()> {
         super::moe::topk_f32(
-            self.ctx(),
+            self.reg,
+            self.stream,
             crate::TopkBuffers { logits, idx, weights },
             crate::TopkShape { n_tokens, n_experts, k },
         )
@@ -972,10 +973,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::MoeMmvqShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmvq_q4_k_r2(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -987,10 +986,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::MoeMmvqShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmvq_q6_k(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1002,10 +999,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::MoeMmvqShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmvq_q5_k(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1017,10 +1012,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::MoeMmvqShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmvq_q3_k(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1032,10 +1025,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::MoeMmvqShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmvq_iq4_xs(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1047,10 +1038,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::MoeMmvqShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmvq_iq4_nl(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1062,10 +1051,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::MoeMmvqShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmvq_iq3_xxs(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1077,10 +1064,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::MoeMmvqShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmvq_iq3_s(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1092,10 +1077,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::MoeMmvqShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmvq_iq2_xxs(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1107,10 +1090,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::MoeMmvqShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmvq_iq2_xs(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1122,10 +1103,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::MoeMmvqShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmvq_iq2_s(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1137,10 +1116,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::MoeMmvqShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmvq_iq1_s(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1152,10 +1129,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::MoeMmvqShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmvq_iq1_m(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1167,10 +1142,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::MoeMmvqShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmvq_q4_0(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1182,10 +1155,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::MoeMmvqShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmvq_q4_1(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1197,10 +1168,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::MoeMmvqShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmvq_q4_0_gate_up(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1211,10 +1180,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::MoeMmvqShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmvq_q8_0(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1226,10 +1193,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::MoeMmvqShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmvq_q8_0_gate_up(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1240,10 +1205,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::MoeMmvqShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmvq_q4_k_r2_sorted(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1255,10 +1218,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_q4_k_gate_up_tile8(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1270,10 +1231,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_q4_k_down_tile8(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1285,10 +1244,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_q3_k_gate_up_tile8(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1300,10 +1257,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_q3_k_down_tile8(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1315,10 +1270,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_q5_k_gate_up_tile8(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1330,10 +1283,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_q6_k_gate_up_tile8(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1345,10 +1296,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_q4_0_gate_up_tile8(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1360,10 +1309,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_q4_0_down_tile8(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1375,10 +1322,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_q4_1_down_tile8(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1390,10 +1335,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_q8_0_gate_up_tile8(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1405,10 +1348,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_q8_0_down_tile8(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1423,10 +1364,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_iq4_xs_gate_up_tile8(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1437,10 +1376,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_iq4_xs_down_tile8(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1452,10 +1389,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_iq4_nl_gate_up_tile8(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1466,10 +1401,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_iq4_nl_down_tile8(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1481,10 +1414,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_iq3_xxs_gate_up_tile8(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1495,10 +1426,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_iq3_xxs_down_tile8(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1510,10 +1439,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_iq3_s_gate_up_tile8(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1524,10 +1451,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_iq3_s_down_tile8(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1539,10 +1464,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_iq2_xxs_gate_up_tile8(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1553,10 +1476,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_iq2_xxs_down_tile8(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1568,10 +1489,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_iq2_xs_gate_up_tile8(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1582,10 +1501,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_iq2_xs_down_tile8(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1597,10 +1514,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_iq2_s_gate_up_tile8(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1611,10 +1526,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_iq2_s_down_tile8(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1626,10 +1539,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_iq1_s_gate_up_tile8(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1640,10 +1551,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_iq1_s_down_tile8(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1655,10 +1564,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_iq1_m_gate_up_tile8(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1669,10 +1576,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_iq1_m_down_tile8(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1683,7 +1588,7 @@ impl<'a> Ops for HipOps<'a> {
         bufs: crate::MoeMmqQ4KGateUpLdsTiledBuffers,
         shape: MoeShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmq_q4_k_gate_up_lds_tiled(self.ctx(), bufs, shape)
+        super::moe::indexed_moe_mmq_q4_k_gate_up_lds_tiled(self.reg, self.stream, bufs, shape)
     }
 
     fn indexed_moe_mmq_q4_k_down_lds_tiled(
@@ -1691,7 +1596,7 @@ impl<'a> Ops for HipOps<'a> {
         bufs: crate::MoeMmqQ4KDownLdsTiledBuffers,
         shape: MoeShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmq_q4_k_down_lds_tiled(self.ctx(), bufs, shape)
+        super::moe::indexed_moe_mmq_q4_k_down_lds_tiled(self.reg, self.stream, bufs, shape)
     }
 
     fn indexed_moe_mmq_q5_k_down_tile8(
@@ -1700,10 +1605,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_q5_k_down_tile8(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1715,10 +1618,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_q6_k_down_tile8(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1730,10 +1631,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::MoeMmvqShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmvq_q4_k_gate_up_sorted(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1745,10 +1644,8 @@ impl<'a> Ops for HipOps<'a> {
         shape: crate::MoeMmvqShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmvq_q4_k_gate_up(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
         )
@@ -1759,7 +1656,7 @@ impl<'a> Ops for HipOps<'a> {
         bufs: crate::MoeMmqQ4KBuffers,
         shape: crate::MoeMmqQ4KShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmq_q4_k(self.ctx(), bufs, shape)
+        super::moe::indexed_moe_mmq_q4_k(self.reg, self.stream, bufs, shape)
     }
 
     fn shared_expert_scale_f32(
@@ -1786,7 +1683,7 @@ impl<'a> Ops for HipOps<'a> {
         buf: crate::MoeCombineBuffers,
         shape: crate::MoeCombineShape,
     ) -> Result<()> {
-        super::moe::moe_combine_f16(self.ctx(), buf, shape)
+        super::moe::moe_combine_f16(self.reg, self.stream, buf, shape)
     }
 
     fn moe_combine_no_residual_f16(
@@ -1794,7 +1691,7 @@ impl<'a> Ops for HipOps<'a> {
         buf: crate::MoeCombineNoResidualBuffers,
         shape: crate::MoeCombineShape,
     ) -> Result<()> {
-        super::moe::moe_combine_no_residual_f16(self.ctx(), buf, shape)
+        super::moe::moe_combine_no_residual_f16(self.reg, self.stream, buf, shape)
     }
 
     fn moe_combine_no_residual_f32(
@@ -1802,7 +1699,7 @@ impl<'a> Ops for HipOps<'a> {
         buf: crate::MoeCombineNoResidualBuffers,
         shape: crate::MoeCombineShape,
     ) -> Result<()> {
-        super::moe::moe_combine_no_residual_f32(self.ctx(), buf, shape)
+        super::moe::moe_combine_no_residual_f32(self.reg, self.stream, buf, shape)
     }
 
     fn moe_combine_two_residuals_f16(
@@ -1810,7 +1707,7 @@ impl<'a> Ops for HipOps<'a> {
         buf: crate::MoeCombineTwoResidualsBuffers,
         shape: crate::MoeCombineShape,
     ) -> Result<()> {
-        super::moe::moe_combine_two_residuals_f16(self.ctx(), buf, shape)
+        super::moe::moe_combine_two_residuals_f16(self.reg, self.stream, buf, shape)
     }
 
     fn moe_sort_by_expert(
@@ -1818,7 +1715,7 @@ impl<'a> Ops for HipOps<'a> {
         buf: crate::MoeSortBuffers,
         shape: crate::MoeSortShape,
     ) -> Result<()> {
-        super::moe::moe_sort_by_expert(self.ctx(), buf, shape)
+        super::moe::moe_sort_by_expert(self.reg, self.stream, buf, shape)
     }
 
     fn moe_sort_by_expert_padded_16(
@@ -1826,7 +1723,7 @@ impl<'a> Ops for HipOps<'a> {
         buf: crate::MoeSortPaddedBuffers,
         shape: crate::MoeSortPaddedShape,
     ) -> Result<()> {
-        super::moe::moe_sort_by_expert_padded_16(self.ctx(), buf, shape)
+        super::moe::moe_sort_by_expert_padded_16(self.reg, self.stream, buf, shape)
     }
 
     fn moe_sort_by_expert_padded(
@@ -1834,7 +1731,7 @@ impl<'a> Ops for HipOps<'a> {
         buf: crate::MoeSortPaddedBuffers,
         shape: crate::MoeSortPaddedShape,
     ) -> Result<()> {
-        super::moe::moe_sort_by_expert_padded(self.ctx(), buf, shape)
+        super::moe::moe_sort_by_expert_padded(self.reg, self.stream, buf, shape)
     }
 
     fn apply_softcap_f32(&self, x: DevicePtr, y: DevicePtr, n: usize, cap: f32) -> Result<()> {
