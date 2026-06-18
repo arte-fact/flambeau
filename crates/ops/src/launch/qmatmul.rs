@@ -1621,8 +1621,12 @@ impl Recipe {
             "qmatmul_q8_0_mmvq_single_row_gfx906" => "qmatmul_q8_0_mmvq_t128_vdr2",
             "qmatmul_q8_0_mmvq_dp4a_vdr2" => "qmatmul_q8_0_mmvq_t128_vdr2",
             // CUDA sm_86 dispatch emits the un-suffixed cert impl_id; the recipe
-            // (stem + entry) is arch-neutral, so map it to the shared key.
+            // (stem + entry) is arch-neutral, so map it to the shared key. The
+            // K-quants + IQ already carry a matching un-suffixed `_mmvq_dp4a`
+            // arm; these are the dtypes whose un-suffixed name had only a
+            // `_gfx906` arm (Q8_0, Q4_1) — Q4_0/Q5_0/Q5_1 get their own arms.
             "qmatmul_q8_0_mmvq_dp4a" => "qmatmul_q8_0_mmvq_dp4a_gfx906",
+            "qmatmul_q4_1_mmvq_dp4a" => "qmatmul_q4_1_mmvq_dp4a_gfx906",
             other => other,
         };
         Ok(match impl_id {
@@ -2068,6 +2072,34 @@ impl Recipe {
                 rows_per_block: 1,
                 mmq_tile: (0, 0),
             },
+            // CUDA sm_86 dispatches Q4_0/Q5_0/Q5_1 decode to the single-row base
+            // mmvq (the autotuned `_mmvq_dp4a` row); HIP routes these through MMQ,
+            // so there was no shared mmvq arm. The base kernel is the sweep
+            // oracle (256t, 1 row/block) and is present in the sm_86 catalogue.
+            "qmatmul_q4_0_mmvq_dp4a" => Self {
+                kind: RecipeKind::Mmvq,
+                stem: "mmvq_q4_0",
+                entry: "flambeau_mmvq_q4_0_q8_1",
+                threads: 256,
+                rows_per_block: 1,
+                mmq_tile: (0, 0),
+            },
+            "qmatmul_q5_0_mmvq_dp4a" => Self {
+                kind: RecipeKind::Mmvq,
+                stem: "mmvq_q5_0",
+                entry: "flambeau_mmvq_q5_0_q8_1",
+                threads: 256,
+                rows_per_block: 1,
+                mmq_tile: (0, 0),
+            },
+            "qmatmul_q5_1_mmvq_dp4a" => Self {
+                kind: RecipeKind::Mmvq,
+                stem: "mmvq_q5_1",
+                entry: "flambeau_mmvq_q5_1_q8_1",
+                threads: 256,
+                rows_per_block: 1,
+                mmq_tile: (0, 0),
+            },
             "qmatmul_q4_1_mmvq_nw1_r2_gfx906" => Self {
                 kind: RecipeKind::Mmvq,
                 stem: "mmvq_q4_1_r2",
@@ -2348,6 +2380,16 @@ impl Recipe {
             other => bail!("no launch recipe registered for impl_id {other}"),
         })
     }
+}
+
+/// Resolve a dispatch `impl_id` to its kernel stem (the `.hsaco` / `.cubin`
+/// catalogue name). Test/diagnostic hook: lets a cross-backend check assert that
+/// every dispatched impl_id maps to a stem present in the registry.
+/// # Errors
+/// Propagates `Recipe::from_impl_id` when no recipe is registered.
+#[doc(hidden)]
+pub fn recipe_stem_for(impl_id: &str) -> Result<&'static str> {
+    Ok(Recipe::from_impl_id(impl_id)?.stem)
 }
 
 fn mmvq_launch<B: flambeau_core::KernelBackend>(

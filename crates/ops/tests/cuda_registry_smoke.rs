@@ -20,18 +20,37 @@ fn cuda_registry_loads_present_skips_unported() {
         reg.skipped(),
     );
 
-    // Dense Q4_K decode dispatches the dp4a MMVQ variant (committed in
-    // dispatch/cuda/sm_86.toml as `qmatmul_q4_k_mmvq_dp4a`); attention / norm /
-    // activation are the rest of the decode spine. All must be loaded.
-    for stem in [
-        "mmvq_q4_k_r2_dp4a",
-        "attention_decode_f16",
-        "rmsnorm_f16",
-        "swiglu_f32_to_f16",
-    ] {
+    // Attention / norm / activation decode spine.
+    for stem in ["attention_decode_f16", "rmsnorm_f16", "swiglu_f32_to_f16"] {
         assert!(
             reg.module(stem).is_some(),
             "decode-path stem `{stem}` not loaded (expected in the sm_86 catalogue)"
+        );
+    }
+
+    // Every in-scope quant dtype's committed sm_86 decode dispatch impl_id must
+    // resolve through the launch recipe to a stem present in the catalogue —
+    // otherwise a real model of that quant dies at the first qmatmul with
+    // "no launch recipe registered" (Q8_0) or "stem not loaded" (Q4_0/Q5_x).
+    let decode_impls = [
+        "qmatmul_q2_k_mmvq_dp4a",
+        "qmatmul_q3_k_mmvq_dp4a",
+        "qmatmul_q4_k_mmvq_dp4a",
+        "qmatmul_q5_k_mmvq_dp4a",
+        "qmatmul_q6_k_mmvq_dp4a",
+        "qmatmul_q8_k_mmvq_single_row",
+        "qmatmul_q8_0_mmvq_dp4a",
+        "qmatmul_q4_0_mmvq_dp4a",
+        "qmatmul_q4_1_mmvq_dp4a",
+        "qmatmul_q5_0_mmvq_dp4a",
+        "qmatmul_q5_1_mmvq_dp4a",
+    ];
+    for impl_id in decode_impls {
+        let stem = flambeau_ops::qmatmul::recipe_stem_for(impl_id)
+            .unwrap_or_else(|e| panic!("impl_id `{impl_id}` has no launch recipe: {e}"));
+        assert!(
+            reg.module(stem).is_some(),
+            "dispatch impl_id `{impl_id}` resolves to stem `{stem}`, not loaded on sm_86"
         );
     }
 }
