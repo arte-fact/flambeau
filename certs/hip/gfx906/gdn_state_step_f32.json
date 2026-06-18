@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "impl_id": "gdn_state_step_f32",
+  "backend": "hip",
+  "arch": "gfx906",
+  "op": "gdn_state_step_f32",
+  "dtype_weight": "F32",
+  "dtype_activation": "F32",
+  "tolerance_formula": "attn_out + state_out |err| <= 1e-3 * max(|ref|, 1) vs F64 recurrence",
+  "results": [
+    {
+      "m": 1,
+      "k": 2,
+      "n": 1,
+      "seed": 12648331,
+      "max_rel_err": 2.9802322e-8,
+      "tolerance": 0.001,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 2,
+      "n": 4,
+      "seed": 12648304,
+      "max_rel_err": 2.9802322e-8,
+      "tolerance": 0.001,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-06-18T13:17:02Z",
+  "rig": "threadreaper-gfx906",
+  "pmc": {
+    "vgpr_count": 23,
+    "sgpr_count": null,
+    "waves_per_simd": 10,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

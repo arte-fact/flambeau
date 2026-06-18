@@ -91,6 +91,9 @@ pub fn run_pointwise_sweep<B: BenchBackend>(
         "gdn_assemble_conv_input_f32" => run_gdn_assemble_conv_input_sweep::<B>(repo_root, arch),
         "causal_conv1d_f32" => run_causal_conv1d_sweep::<B>(repo_root, arch),
         "gdn_conv_trio_decode_f32_batched_slots" => run_gdn_conv_trio_sweep::<B>(repo_root, arch),
+        "gdn_state_step_f32" => run_gdn_state_step_sweep::<B>(repo_root, arch),
+        "gdn_state_step_alphabeta_f32" => run_gdn_alphabeta_sweep::<B>(repo_root, arch, false),
+        "gdn_state_step_alphabeta_f32_batched_slots" => run_gdn_alphabeta_sweep::<B>(repo_root, arch, true),
         _ => return None,
     };
     Some(cert)
@@ -991,6 +994,282 @@ pub fn run_rope_f16_sweep<B: BenchBackend>(repo_root: &Path, arch: &str, neox: b
     }
     finish_cert(&dev, repo_root, arch, impl_id, impl_id, "F16", "F16",
         "|err| <= 5e-3 * max(|ref|, 1e-2) vs F64 angle oracle", results, pmc)
+}
+
+/// `gdn_state_step_alphabeta_f32[_batched_slots]` — GDN recurrent step with
+/// inline alpha/beta. `batched` selects per-slot state pointer arrays. F64
+/// recurrence oracle (n_rep=1), 1e-3.
+pub fn run_gdn_alphabeta_sweep<B: BenchBackend>(repo_root: &Path, arch: &str, batched: bool) -> Result<Cert> {
+    let (stem, entry) = if batched {
+        ("gdn_state_step_alphabeta_f32_batched_slots", "flambeau_gdn_state_step_alphabeta_f32_s128_batched_slots")
+    } else {
+        ("gdn_state_step_alphabeta_f32", "flambeau_gdn_state_step_alphabeta_f32_s128")
+    };
+    let dev = B::new_device(0)?;
+    let image = B::image(stem).ok_or_else(|| anyhow!("{stem} not compiled"))?;
+    let module = B::load(&dev, image)?;
+    let kernel = B::kernel(&module, entry)?;
+    let pmc = B::attributes(&kernel)?;
+
+    let warp_size: u32 = if arch == "sm_86" { 32 } else { 64 };
+    let warps_per_block: u32 = 4;
+    const S_V: usize = 128;
+    let cases = [(1usize, 2usize, 1usize), (2, 2, 2)];
+    let mut results = Vec::new();
+    for (b_n, h_n, l_n) in cases {
+        let seed = 0xC0FFEE ^ ((h_n as u64) * 41 + (l_n as u64) * 19 + if batched { 1 } else { 0 });
+        let q = seeded_f32_range(seed, b_n * l_n * h_n * S_V, -0.3, 0.3);
+        let k = seeded_f32_range(seed ^ 0x11, b_n * l_n * h_n * S_V, -0.3, 0.3);
+        let v = seeded_f32_range(seed ^ 0x22, b_n * l_n * h_n * S_V, -0.3, 0.3);
+        let alpha = seeded_f32_range(seed ^ 0x33, b_n * l_n * h_n, -1.0, 1.0);
+        let beta_in = seeded_f32_range(seed ^ 0x44, b_n * l_n * h_n, -1.0, 1.0);
+        let dt_bias = seeded_f32_range(seed ^ 0x55, h_n, -0.3, 0.3);
+        let ssm_a: Vec<f32> = (0..h_n).map(|i| -(0.05 + 0.01 * i as f32)).collect();
+        let state_in = seeded_f32_range(seed ^ 0x66, b_n * h_n * S_V * S_V, -0.1, 0.1);
+
+        let mut attn_ref = vec![0.0f32; b_n * l_n * h_n * S_V];
+        let mut state_ref = vec![0.0f32; b_n * h_n * S_V * S_V];
+        for b in 0..b_n {
+            for h in 0..h_n {
+                let bh = b * h_n + h;
+                let mut st = vec![0.0f64; S_V * S_V];
+                for x in 0..S_V * S_V { st[x] = state_in[bh * S_V * S_V + x] as f64; }
+                for t in 0..l_n {
+                    let a_raw = (alpha[(b * l_n + t) * h_n + h] + dt_bias[h]) as f64;
+                    let sp = a_raw.max(0.0) + (1.0 + (-a_raw.abs()).exp()).ln();
+                    let g = (sp * ssm_a[h] as f64).exp();
+                    let br = beta_in[(b * l_n + t) * h_n + h] as f64;
+                    let bv = 1.0 / (1.0 + (-br).exp());
+                    let qb = ((b * l_n + t) * h_n + h) * S_V;
+                    for col in 0..S_V {
+                        let sk: f64 = (0..S_V).map(|i| st[col * S_V + i] * k[qb + i] as f64).sum();
+                        let delta = (v[qb + col] as f64 - g * sk) * bv;
+                        let mut attn = 0.0f64;
+                        for i in 0..S_V {
+                            st[col * S_V + i] = g * st[col * S_V + i] + k[qb + i] as f64 * delta;
+                            attn += st[col * S_V + i] * q[qb + i] as f64;
+                        }
+                        attn_ref[(((b * l_n + t) * h_n) + h) * S_V + col] = attn as f32;
+                    }
+                }
+                for x in 0..S_V * S_V { state_ref[bh * S_V * S_V + x] = st[x] as f32; }
+            }
+        }
+
+        let d_q = alloc_and_upload(&dev, &q);
+        let d_k = alloc_and_upload(&dev, &k);
+        let d_v = alloc_and_upload(&dev, &v);
+        let d_al = alloc_and_upload(&dev, &alpha);
+        let d_be = alloc_and_upload(&dev, &beta_in);
+        let d_dt = alloc_and_upload(&dev, &dt_bias);
+        let d_sa = alloc_and_upload(&dev, &ssm_a);
+        let d_ao = dev.alloc(b_n * l_n * h_n * S_V * 4)?;
+        // State: contiguous or per-slot buffers.
+        let per_batch = h_n * S_V * S_V;
+        let (d_si, d_so, d_sip, d_sop, mut slot_in, mut slot_out) =
+            if batched {
+                let mut si = Vec::with_capacity(b_n);
+                let mut so = Vec::with_capacity(b_n);
+                let mut sip = vec![0u64; b_n];
+                let mut sop = vec![0u64; b_n];
+                for b in 0..b_n {
+                    let sb = alloc_and_upload(&dev, &state_in[b * per_batch..(b + 1) * per_batch]);
+                    let ob = dev.alloc(per_batch * 4)?;
+                    sip[b] = sb.as_usize() as u64;
+                    sop[b] = ob.as_usize() as u64;
+                    si.push(sb);
+                    so.push(ob);
+                }
+                let d_sip = alloc_and_upload(&dev, &sip);
+                let d_sop = alloc_and_upload(&dev, &sop);
+                (None, None, Some(d_sip), Some(d_sop), si, so)
+            } else {
+                let si = alloc_and_upload(&dev, &state_in);
+                let so = dev.alloc(b_n * per_batch * 4)?;
+                (Some(si), Some(so), None, None, Vec::new(), Vec::new())
+            };
+        {
+            let stream = dev.default_stream();
+            let (bb, hh, ll, nr, ril) = (b_n as i32, h_n as i32, l_n as i32, 1i32, 0i32);
+            let qp: u64 = d_q.as_usize() as u64;
+            let kp: u64 = d_k.as_usize() as u64;
+            let vp: u64 = d_v.as_usize() as u64;
+            let alp: u64 = d_al.as_usize() as u64;
+            let bep: u64 = d_be.as_usize() as u64;
+            let dtp: u64 = d_dt.as_usize() as u64;
+            let sap: u64 = d_sa.as_usize() as u64;
+            let aop: u64 = d_ao.as_usize() as u64;
+            let s1: u64 = if batched { d_sip.as_ref().unwrap().as_usize() as u64 } else { d_si.as_ref().unwrap().as_usize() as u64 };
+            let s2: u64 = if batched { d_sop.as_ref().unwrap().as_usize() as u64 } else { d_so.as_ref().unwrap().as_usize() as u64 };
+            let mut args = <B::Args<'_>>::default();
+            args.push_arg(&qp); args.push_arg(&kp); args.push_arg(&vp);
+            args.push_arg(&alp); args.push_arg(&bep); args.push_arg(&dtp); args.push_arg(&sap);
+            args.push_arg(&s1); args.push_arg(&s2); args.push_arg(&aop);
+            args.push_arg(&bb); args.push_arg(&hh); args.push_arg(&ll); args.push_arg(&nr); args.push_arg(&ril);
+            let grid_z = S_V as u32 / warps_per_block;
+            let cfg = LaunchCfg { grid: (h_n as u32, b_n as u32, grid_z), block: (warp_size, warps_per_block, 1), shared_bytes: 0 };
+            B::launch(&kernel, stream, cfg, args)?;
+            stream.synchronize()?;
+        }
+        let mut got_a = vec![0.0f32; b_n * l_n * h_n * S_V];
+        unsafe {
+            dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost,
+                DevicePtr(got_a.as_mut_ptr() as usize), d_ao, b_n * l_n * h_n * S_V * 4)?;
+        }
+        dev.default_stream().synchronize()?;
+        let mut got_s = vec![0.0f32; b_n * per_batch];
+        if batched {
+            for b in 0..b_n {
+                let mut sb = vec![0.0f32; per_batch];
+                unsafe {
+                    dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost,
+                        DevicePtr(sb.as_mut_ptr() as usize), slot_out[b], per_batch * 4)?;
+                }
+                dev.default_stream().synchronize()?;
+                got_s[b * per_batch..(b + 1) * per_batch].copy_from_slice(&sb);
+            }
+        } else {
+            unsafe {
+                dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost,
+                    DevicePtr(got_s.as_mut_ptr() as usize), d_so.as_ref().unwrap().clone(), b_n * per_batch * 4)?;
+            }
+            dev.default_stream().synchronize()?;
+        }
+        unsafe {
+            dev.dealloc(d_q, b_n * l_n * h_n * S_V * 4)?; dev.dealloc(d_k, b_n * l_n * h_n * S_V * 4)?;
+            dev.dealloc(d_v, b_n * l_n * h_n * S_V * 4)?; dev.dealloc(d_al, b_n * l_n * h_n * 4)?;
+            dev.dealloc(d_be, b_n * l_n * h_n * 4)?; dev.dealloc(d_dt, h_n * 4)?; dev.dealloc(d_sa, h_n * 4)?;
+            dev.dealloc(d_ao, b_n * l_n * h_n * S_V * 4)?;
+            if batched {
+                dev.dealloc(d_sip.unwrap(), b_n * 8)?; dev.dealloc(d_sop.unwrap(), b_n * 8)?;
+                for b in 0..b_n { dev.dealloc(slot_in[b], per_batch * 4)?; dev.dealloc(slot_out[b], per_batch * 4)?; }
+            } else {
+                dev.dealloc(d_si.unwrap(), b_n * per_batch * 4)?; dev.dealloc(d_so.unwrap(), b_n * per_batch * 4)?;
+            }
+        }
+        slot_in.clear();
+        slot_out.clear();
+        let err = max_rel_err_with_floor(&got_a, &attn_ref, 1.0).max(max_rel_err_with_floor(&got_s, &state_ref, 1.0));
+        results.push(ShapeResult { m: b_n, k: h_n, n: l_n, seed, max_rel_err: err, tolerance: 1e-3, pass: err <= 1e-3 });
+    }
+    finish_cert(&dev, repo_root, arch, stem, stem, "F32", "F32",
+        "attn_out + state_out |err| <= 1e-3 vs F64 recurrence", results, pmc)
+}
+
+/// `gdn_state_step_f32` — GDN recurrent step (S_v=128). Each warp owns a state
+/// column (register-sharded); block = (WARP_SIZE, GDN_WARPS_PER_BLOCK), so the
+/// sweep launches 64- or 32-wide per backend. F64 recurrence oracle (n_rep=1),
+/// compares attn_out + state_out at 1e-3 (cross-backend reduce partition).
+pub fn run_gdn_state_step_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) -> Result<Cert> {
+    let dev = B::new_device(0)?;
+    let image = B::image("gdn_state_step_f32").ok_or_else(|| anyhow!("gdn_state_step_f32 not compiled"))?;
+    let module = B::load(&dev, image)?;
+    let kernel = B::kernel(&module, "flambeau_gdn_state_step_f32_s128")?;
+    let pmc = B::attributes(&kernel)?;
+
+    let warp_size: u32 = if arch == "sm_86" { 32 } else { 64 };
+    let warps_per_block: u32 = 4;
+    const S_V: usize = 128;
+    let cases = [(1usize, 2usize, 1usize), (1, 2, 4)]; // (B, H, L), n_rep=1
+    let mut results = Vec::new();
+    for (b_n, h_n, l_n) in cases {
+        let n_rep = 1usize;
+        let seed = 0xC0FFEE ^ ((h_n as u64) * 41 + (l_n as u64) * 19);
+        let q = seeded_f32_range(seed, b_n * l_n * h_n * S_V, -0.3, 0.3);
+        let k = seeded_f32_range(seed ^ 0x11, b_n * l_n * h_n * S_V, -0.3, 0.3);
+        let v = seeded_f32_range(seed ^ 0x22, b_n * l_n * h_n * S_V, -0.3, 0.3);
+        let gate = seeded_f32_range(seed ^ 0x33, b_n * l_n * h_n, -1.0, 0.0);
+        let beta = seeded_f32_range(seed ^ 0x44, b_n * l_n * h_n, 0.0, 1.0);
+        let state_in = seeded_f32_range(seed ^ 0x55, b_n * h_n * S_V * S_V, -0.1, 0.1);
+
+        // F64 recurrence oracle.
+        let mut attn_ref = vec![0.0f32; b_n * l_n * h_n * S_V];
+        let mut state_ref = vec![0.0f32; b_n * h_n * S_V * S_V];
+        for b in 0..b_n {
+            for h in 0..h_n {
+                let bh = b * h_n + h;
+                // state[col][i], col-outer.
+                let mut st = vec![0.0f64; S_V * S_V];
+                for x in 0..S_V * S_V {
+                    st[x] = state_in[bh * S_V * S_V + x] as f64;
+                }
+                for t in 0..l_n {
+                    let g = (gate[(b * l_n + t) * h_n + h] as f64).exp();
+                    let bv = beta[(b * l_n + t) * h_n + h] as f64;
+                    let qb = ((b * l_n + t) * h_n + h) * S_V;
+                    let kb = qb;
+                    let vb = qb;
+                    for col in 0..S_V {
+                        for i in 0..S_V {
+                            st[col * S_V + i] *= g;
+                        }
+                        let sk: f64 = (0..S_V).map(|i| st[col * S_V + i] * k[kb + i] as f64).sum();
+                        let delta = (v[vb + col] as f64 - sk) * bv;
+                        let mut attn = 0.0f64;
+                        for i in 0..S_V {
+                            st[col * S_V + i] += k[kb + i] as f64 * delta;
+                            attn += st[col * S_V + i] * q[qb + i] as f64;
+                        }
+                        attn_ref[(((b * l_n + t) * h_n) + h) * S_V + col] = attn as f32;
+                    }
+                }
+                for x in 0..S_V * S_V {
+                    state_ref[bh * S_V * S_V + x] = st[x] as f32;
+                }
+                let _ = n_rep;
+            }
+        }
+
+        let d_q = alloc_and_upload(&dev, &q);
+        let d_k = alloc_and_upload(&dev, &k);
+        let d_v = alloc_and_upload(&dev, &v);
+        let d_g = alloc_and_upload(&dev, &gate);
+        let d_b = alloc_and_upload(&dev, &beta);
+        let d_si = alloc_and_upload(&dev, &state_in);
+        let d_so = dev.alloc(b_n * h_n * S_V * S_V * 4)?;
+        let d_ao = dev.alloc(b_n * l_n * h_n * S_V * 4)?;
+        {
+            let stream = dev.default_stream();
+            let (bb, hh, ll, nr, ril) = (b_n as i32, h_n as i32, l_n as i32, n_rep as i32, 0i32);
+            let qp: u64 = d_q.as_usize() as u64;
+            let kp: u64 = d_k.as_usize() as u64;
+            let vp: u64 = d_v.as_usize() as u64;
+            let gp: u64 = d_g.as_usize() as u64;
+            let bp: u64 = d_b.as_usize() as u64;
+            let sip: u64 = d_si.as_usize() as u64;
+            let sop: u64 = d_so.as_usize() as u64;
+            let aop: u64 = d_ao.as_usize() as u64;
+            let mut args = <B::Args<'_>>::default();
+            args.push_arg(&qp); args.push_arg(&kp); args.push_arg(&vp);
+            args.push_arg(&gp); args.push_arg(&bp); args.push_arg(&sip);
+            args.push_arg(&sop); args.push_arg(&aop);
+            args.push_arg(&bb); args.push_arg(&hh); args.push_arg(&ll);
+            args.push_arg(&nr); args.push_arg(&ril);
+            let grid_z = S_V as u32 / warps_per_block;
+            let cfg = LaunchCfg { grid: (h_n as u32, b_n as u32, grid_z), block: (warp_size, warps_per_block, 1), shared_bytes: 0 };
+            B::launch(&kernel, stream, cfg, args)?;
+            stream.synchronize()?;
+        }
+        let mut got_a = vec![0.0f32; b_n * l_n * h_n * S_V];
+        let mut got_s = vec![0.0f32; b_n * h_n * S_V * S_V];
+        unsafe {
+            dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost,
+                DevicePtr(got_a.as_mut_ptr() as usize), d_ao, b_n * l_n * h_n * S_V * 4)?;
+            dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost,
+                DevicePtr(got_s.as_mut_ptr() as usize), d_so, b_n * h_n * S_V * S_V * 4)?;
+        }
+        dev.default_stream().synchronize()?;
+        unsafe {
+            dev.dealloc(d_q, b_n * l_n * h_n * S_V * 4)?; dev.dealloc(d_k, b_n * l_n * h_n * S_V * 4)?;
+            dev.dealloc(d_v, b_n * l_n * h_n * S_V * 4)?; dev.dealloc(d_g, b_n * l_n * h_n * 4)?;
+            dev.dealloc(d_b, b_n * l_n * h_n * 4)?; dev.dealloc(d_si, b_n * h_n * S_V * S_V * 4)?;
+            dev.dealloc(d_so, b_n * h_n * S_V * S_V * 4)?; dev.dealloc(d_ao, b_n * l_n * h_n * S_V * 4)?;
+        }
+        let err = max_rel_err_with_floor(&got_a, &attn_ref, 1.0).max(max_rel_err_with_floor(&got_s, &state_ref, 1.0));
+        results.push(ShapeResult { m: b_n, k: h_n, n: l_n, seed, max_rel_err: err, tolerance: 1e-3, pass: err <= 1e-3 });
+    }
+    finish_cert(&dev, repo_root, arch, "gdn_state_step_f32", "gdn_state_step_f32", "F32", "F32",
+        "attn_out + state_out |err| <= 1e-3 * max(|ref|, 1) vs F64 recurrence", results, pmc)
 }
 
 /// `gdn_alpha_beta_f32` — GDN gate = softplus(alpha+dt_bias)*ssm_a, beta =

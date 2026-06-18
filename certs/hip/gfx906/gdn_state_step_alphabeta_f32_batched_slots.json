@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "impl_id": "gdn_state_step_alphabeta_f32_batched_slots",
+  "backend": "hip",
+  "arch": "gfx906",
+  "op": "gdn_state_step_alphabeta_f32_batched_slots",
+  "dtype_weight": "F32",
+  "dtype_activation": "F32",
+  "tolerance_formula": "attn_out + state_out |err| <= 1e-3 vs F64 recurrence",
+  "results": [
+    {
+      "m": 1,
+      "k": 2,
+      "n": 1,
+      "seed": 12648328,
+      "max_rel_err": 2.9802322e-8,
+      "tolerance": 0.001,
+      "pass": true
+    },
+    {
+      "m": 2,
+      "k": 2,
+      "n": 2,
+      "seed": 12648343,
+      "max_rel_err": 3.1664968e-8,
+      "tolerance": 0.001,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-06-18T13:22:18Z",
+  "rig": "threadreaper-gfx906",
+  "pmc": {
+    "vgpr_count": 29,
+    "sgpr_count": null,
+    "waves_per_simd": 8,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

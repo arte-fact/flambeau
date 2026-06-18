@@ -980,4 +980,16 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
         impl_id: "gdn_conv_trio_decode_f32_batched_slots",
         cert_rel_path: "certs/hip/gfx906/gdn_conv_trio_decode_f32_batched_slots.json",
     },
+    DirectCallKernel {
+        impl_id: "gdn_state_step_f32",
+        cert_rel_path: "certs/hip/gfx906/gdn_state_step_f32.json",
+    },
+    DirectCallKernel {
+        impl_id: "gdn_state_step_alphabeta_f32",
+        cert_rel_path: "certs/hip/gfx906/gdn_state_step_alphabeta_f32.json",
+    },
+    DirectCallKernel {
+        impl_id: "gdn_state_step_alphabeta_f32_batched_slots",
+        cert_rel_path: "certs/hip/gfx906/gdn_state_step_alphabeta_f32_batched_slots.json",
+    },
 ];
