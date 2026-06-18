@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "impl_id": "v_unit_norm_per_head_f16",
+  "backend": "cuda",
+  "arch": "sm_86",
+  "op": "v_unit_norm_per_head_f16",
+  "dtype_weight": "F16",
+  "dtype_activation": "F16",
+  "tolerance_formula": "|err| <= 1e-2 * max(|ref|, sqrt(head_dim))",
+  "results": [
+    {
+      "m": 1,
+      "k": 2,
+      "n": 128,
+      "seed": 12646007,
+      "max_rel_err": 0.0,
+      "tolerance": 0.01,
+      "pass": true
+    },
+    {
+      "m": 8,
+      "k": 2,
+      "n": 256,
+      "seed": 12637222,
+      "max_rel_err": 0.0,
+      "tolerance": 0.01,
+      "pass": true
+    },
+    {
+      "m": 4,
+      "k": 8,
+      "n": 64,
+      "seed": 12643530,
+      "max_rel_err": 0.0,
+      "tolerance": 0.01,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-06-18T13:02:41Z",
+  "rig": "threadreaper-sm_86",
+  "pmc": {
+    "vgpr_count": 18,
+    "sgpr_count": null,
+    "waves_per_simd": null,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

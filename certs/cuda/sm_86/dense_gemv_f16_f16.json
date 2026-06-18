@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "impl_id": "dense_gemv_f16_f16",
+  "backend": "cuda",
+  "arch": "sm_86",
+  "op": "dense_gemv_f16_f16",
+  "dtype_weight": "F16",
+  "dtype_activation": "F16",
+  "tolerance_formula": "|err| <= 1e-3 * max(|ref|, 1) vs F64 oracle",
+  "results": [
+    {
+      "m": 4,
+      "k": 256,
+      "n": 1,
+      "seed": 12641413,
+      "max_rel_err": 1.0199082e-7,
+      "tolerance": 0.001,
+      "pass": true
+    },
+    {
+      "m": 16,
+      "k": 1024,
+      "n": 1,
+      "seed": 12620409,
+      "max_rel_err": 4.00403e-7,
+      "tolerance": 0.001,
+      "pass": true
+    },
+    {
+      "m": 128,
+      "k": 2048,
+      "n": 1,
+      "seed": 12753769,
+      "max_rel_err": 6.556511e-7,
+      "tolerance": 0.001,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-06-18T12:54:00Z",
+  "rig": "threadreaper-sm_86",
+  "pmc": {
+    "vgpr_count": 38,
+    "sgpr_count": null,
+    "waves_per_simd": null,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

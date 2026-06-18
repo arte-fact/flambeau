@@ -931,4 +931,28 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
         impl_id: "moe_combine_no_residual_f32",
         cert_rel_path: "certs/hip/gfx906/moe_combine_no_residual_f32.json",
     },
+    DirectCallKernel {
+        impl_id: "dense_gemv_f32_f16",
+        cert_rel_path: "certs/hip/gfx906/dense_gemv_f32_f16.json",
+    },
+    DirectCallKernel {
+        impl_id: "dense_gemv_f16_f16",
+        cert_rel_path: "certs/hip/gfx906/dense_gemv_f16_f16.json",
+    },
+    DirectCallKernel {
+        impl_id: "dense_gemv_f32_f16_batched",
+        cert_rel_path: "certs/hip/gfx906/dense_gemv_f32_f16_batched.json",
+    },
+    DirectCallKernel {
+        impl_id: "dense_gemv_f16_f16_batched",
+        cert_rel_path: "certs/hip/gfx906/dense_gemv_f16_f16_batched.json",
+    },
+    DirectCallKernel {
+        impl_id: "v_unit_norm_per_head_f16",
+        cert_rel_path: "certs/hip/gfx906/v_unit_norm_per_head_f16.json",
+    },
+    DirectCallKernel {
+        impl_id: "kv_append_v_unit_norm_f16",
+        cert_rel_path: "certs/hip/gfx906/kv_append_v_unit_norm_f16.json",
+    },
 ];

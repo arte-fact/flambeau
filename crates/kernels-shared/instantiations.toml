@@ -3129,3 +3129,129 @@ params = """
     const int n_chunks,
     const int head_dim"""
 body = "attention_decode_f16_splitk_combine_body(partials_m, partials_s, partials_o, out, n_heads_q, n_chunks, head_dim);"
+
+# Dense GEMV (router / dense projections) — block_reduce_sum dot.
+
+[[kernel]]
+stem = "dense_gemv_f32_f16"
+includes = ["block_quant.cuh", "block_reduce.cuh", "dense_gemv.cuh"]
+[[kernel.entry]]
+name = "flambeau_dense_gemv_f32_f16"
+params = """
+    const float* __restrict__ w,
+    const fb_fp16_t* __restrict__ x,
+    float* __restrict__ y,
+    const int n_rows,
+    const int k"""
+body = "dense_gemv_row<float>(w, x, y, n_rows, k);"
+
+[[kernel]]
+stem = "dense_gemv_f16_f16"
+includes = ["block_quant.cuh", "block_reduce.cuh", "dense_gemv.cuh"]
+[[kernel.entry]]
+name = "flambeau_dense_gemv_f16_f16"
+params = """
+    const fb_fp16_t* __restrict__ w,
+    const fb_fp16_t* __restrict__ x,
+    float* __restrict__ y,
+    const int n_rows,
+    const int k"""
+body = "dense_gemv_row<fb_fp16_t>(w, x, y, n_rows, k);"
+
+[[kernel]]
+stem = "dense_gemv_f32_f16_batched"
+includes = ["block_quant.cuh", "block_reduce.cuh", "dense_gemv.cuh"]
+[[kernel.entry]]
+name = "flambeau_dense_gemv_f32_f16_batched"
+params = """
+    const float* __restrict__ w,
+    const fb_fp16_t* __restrict__ x,
+    float* __restrict__ y,
+    const int n_rows,
+    const int k,
+    const int n_tokens"""
+body = "dense_gemv_row_batched<float>(w, x, y, n_rows, k, n_tokens);"
+
+[[kernel]]
+stem = "dense_gemv_f16_f16_batched"
+includes = ["block_quant.cuh", "block_reduce.cuh", "dense_gemv.cuh"]
+[[kernel.entry]]
+name = "flambeau_dense_gemv_f16_f16_batched"
+params = """
+    const fb_fp16_t* __restrict__ w,
+    const fb_fp16_t* __restrict__ x,
+    float* __restrict__ y,
+    const int n_rows,
+    const int k,
+    const int n_tokens"""
+body = "dense_gemv_row_batched<fb_fp16_t>(w, x, y, n_rows, k, n_tokens);"
+
+# Per-head V RMSNorm (gemma4 attn_v_unit_norm) + fused KV append.
+
+[[kernel]]
+stem = "v_unit_norm_per_head_f16"
+includes = ["block_quant.cuh", "block_reduce.cuh", "v_unit_norm.cuh"]
+[[kernel.entry]]
+name = "flambeau_v_unit_norm_per_head_f16"
+params = """
+    fb_fp16_t* __restrict__ v,
+    const int n_kv_heads,
+    const int head_dim,
+    const float eps"""
+body = "v_unit_norm_per_head_f16_body(v, n_kv_heads, head_dim, eps);"
+
+[[kernel]]
+stem = "kv_append_v_unit_norm_f16"
+includes = ["block_quant.cuh", "block_reduce.cuh", "kv_append_v_unit_norm.cuh"]
+[[kernel.entry]]
+name = "flambeau_kv_append_v_unit_norm_f16_d64"
+launch_bounds = "64, 16"
+params = """
+    const fb_fp16_t* __restrict__ k_src,
+    const fb_fp16_t* __restrict__ v_src,
+    fb_fp16_t* __restrict__ k_cache,
+    fb_fp16_t* __restrict__ v_cache,
+    const int n_kv_heads,
+    const int write_pos,
+    const float eps,
+    const int ring_depth"""
+body = "kv_append_v_unit_norm_f16_body<64>(k_src, v_src, k_cache, v_cache, n_kv_heads, write_pos, eps, ring_depth);"
+[[kernel.entry]]
+name = "flambeau_kv_append_v_unit_norm_f16_d128"
+launch_bounds = "128, 8"
+params = """
+    const fb_fp16_t* __restrict__ k_src,
+    const fb_fp16_t* __restrict__ v_src,
+    fb_fp16_t* __restrict__ k_cache,
+    fb_fp16_t* __restrict__ v_cache,
+    const int n_kv_heads,
+    const int write_pos,
+    const float eps,
+    const int ring_depth"""
+body = "kv_append_v_unit_norm_f16_body<128>(k_src, v_src, k_cache, v_cache, n_kv_heads, write_pos, eps, ring_depth);"
+[[kernel.entry]]
+name = "flambeau_kv_append_v_unit_norm_f16_d256"
+launch_bounds = "256, 4"
+params = """
+    const fb_fp16_t* __restrict__ k_src,
+    const fb_fp16_t* __restrict__ v_src,
+    fb_fp16_t* __restrict__ k_cache,
+    fb_fp16_t* __restrict__ v_cache,
+    const int n_kv_heads,
+    const int write_pos,
+    const float eps,
+    const int ring_depth"""
+body = "kv_append_v_unit_norm_f16_body<256>(k_src, v_src, k_cache, v_cache, n_kv_heads, write_pos, eps, ring_depth);"
+[[kernel.entry]]
+name = "flambeau_kv_append_v_unit_norm_f16_d512"
+launch_bounds = "512, 2"
+params = """
+    const fb_fp16_t* __restrict__ k_src,
+    const fb_fp16_t* __restrict__ v_src,
+    fb_fp16_t* __restrict__ k_cache,
+    fb_fp16_t* __restrict__ v_cache,
+    const int n_kv_heads,
+    const int write_pos,
+    const float eps,
+    const int ring_depth"""
+body = "kv_append_v_unit_norm_f16_body<512>(k_src, v_src, k_cache, v_cache, n_kv_heads, write_pos, eps, ring_depth);"

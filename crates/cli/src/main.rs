@@ -712,10 +712,6 @@ const SIMPLE_SWEEPS: &[(&str, SweepFn)] = &[
         flambeau_bench::sweep_f32_pointwise::run_gdn_alpha_beta_sweep,
     ),
     (
-        "dense_gemv_f32_f16",
-        flambeau_bench::sweep_f32_pointwise::run_dense_gemv_sweep,
-    ),
-    (
         "peer_copy_via_host",
         flambeau_bench::sweep_peer_copy::run_sweep,
     ),

@@ -28,6 +28,10 @@ struct EntrySpec {
     name: String,
     params: String,
     body: String,
+    /// Optional `__launch_bounds__` argument list (e.g. `"256, 4"`) emitted
+    /// between `__global__` and the return type. Perf hint; arch-neutral.
+    #[serde(default)]
+    launch_bounds: Option<String>,
 }
 
 /// Generate one wrapper `.cu` per manifest cell into `gen_dir`.
@@ -64,7 +68,12 @@ pub fn generate_instantiations(manifest: &Path, gen_dir: &Path, arch_header: &st
             writeln!(src, "#include \"{inc}\"").expect("write to String is infallible");
         }
         for ent in &cell.entry {
-            writeln!(src, "\nextern \"C\" __global__ void {}(", ent.name)
+            let lb = ent
+                .launch_bounds
+                .as_ref()
+                .map(|b| format!("__launch_bounds__({b}) "))
+                .unwrap_or_default();
+            writeln!(src, "\nextern \"C\" __global__ {lb}void {}(", ent.name)
                 .expect("write to String is infallible");
             writeln!(src, "{}\n) {{", ent.params).expect("write to String is infallible");
             writeln!(src, "    {}", ent.body).expect("write to String is infallible");
