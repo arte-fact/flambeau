@@ -3562,3 +3562,60 @@ params = """
     fb_fp16_t* __restrict__ out,
     const int n_heads_q, const int n_chunks, const int head_dim"""
 body = "attention_decode_f16_splitk_combine_body(partials_m, partials_s, partials_o, out, n_heads_q, n_chunks, head_dim);"
+
+# Flash-attn-v2 prefill with Q8_0 KV (LDS-tiled) — WARP_SIZE-parameterized.
+[[kernel]]
+stem = "attention_prefill_flash_tile_q8_kv"
+includes = ["block_quant.cuh", "attention_flash_tile_q8.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_attention_prefill_flash_tile_d64_q8_kv"
+launch_bounds = "256, 2"
+params = """
+    const fb_fp16_t* __restrict__ q,
+    const flambeau_block_q8_0* __restrict__ k_cache,
+    const flambeau_block_q8_0* __restrict__ v_cache,
+    fb_fp16_t* __restrict__ out,
+    const int n_q_tokens, const int n_heads_q, const int n_heads_kv,
+    const int n_k_tokens, const int q_offset, const float scale,
+    const int window_size, const int ring_depth"""
+body = "flash_attn_prefill_v2_q8_impl<64, 4, 64>(q, k_cache, v_cache, out, n_q_tokens, n_heads_q, n_heads_kv, n_k_tokens, q_offset, scale, window_size, ring_depth);"
+
+[[kernel.entry]]
+name = "flambeau_attention_prefill_flash_tile_d128_q8_kv"
+launch_bounds = "256, 2"
+params = """
+    const fb_fp16_t* __restrict__ q,
+    const flambeau_block_q8_0* __restrict__ k_cache,
+    const flambeau_block_q8_0* __restrict__ v_cache,
+    fb_fp16_t* __restrict__ out,
+    const int n_q_tokens, const int n_heads_q, const int n_heads_kv,
+    const int n_k_tokens, const int q_offset, const float scale,
+    const int window_size, const int ring_depth"""
+body = "flash_attn_prefill_v2_q8_impl<128, 4, 32>(q, k_cache, v_cache, out, n_q_tokens, n_heads_q, n_heads_kv, n_k_tokens, q_offset, scale, window_size, ring_depth);"
+
+[[kernel.entry]]
+name = "flambeau_attention_prefill_flash_tile_d256_q8_kv"
+launch_bounds = "256, 2"
+params = """
+    const fb_fp16_t* __restrict__ q,
+    const flambeau_block_q8_0* __restrict__ k_cache,
+    const flambeau_block_q8_0* __restrict__ v_cache,
+    fb_fp16_t* __restrict__ out,
+    const int n_q_tokens, const int n_heads_q, const int n_heads_kv,
+    const int n_k_tokens, const int q_offset, const float scale,
+    const int window_size, const int ring_depth"""
+body = "flash_attn_prefill_v2_q8_impl<256, 4, 16>(q, k_cache, v_cache, out, n_q_tokens, n_heads_q, n_heads_kv, n_k_tokens, q_offset, scale, window_size, ring_depth);"
+
+[[kernel.entry]]
+name = "flambeau_attention_prefill_flash_tile_d256_br8_q8_kv"
+launch_bounds = "512, 1"
+params = """
+    const fb_fp16_t* __restrict__ q,
+    const flambeau_block_q8_0* __restrict__ k_cache,
+    const flambeau_block_q8_0* __restrict__ v_cache,
+    fb_fp16_t* __restrict__ out,
+    const int n_q_tokens, const int n_heads_q, const int n_heads_kv,
+    const int n_k_tokens, const int q_offset, const float scale,
+    const int window_size, const int ring_depth"""
+body = "flash_attn_prefill_v2_q8_impl<256, 8, 16>(q, k_cache, v_cache, out, n_q_tokens, n_heads_q, n_heads_kv, n_k_tokens, q_offset, scale, window_size, ring_depth);"

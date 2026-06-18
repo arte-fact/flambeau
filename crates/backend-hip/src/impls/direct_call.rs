@@ -1033,4 +1033,8 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
         impl_id: "attention_decode_q8_kv_splitk",
         cert_rel_path: "certs/hip/gfx906/attention_decode_q8_kv_splitk.json",
     },
+    DirectCallKernel {
+        impl_id: "attention_prefill_flash_tile_q8_kv",
+        cert_rel_path: "certs/hip/gfx906/attention_prefill_flash_tile_q8_kv.json",
+    },
 ];
