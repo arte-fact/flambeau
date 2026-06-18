@@ -209,21 +209,30 @@ already backend-generic — `model-ops` takes `&impl Ops`, the GGUF loader takes
   with Q4_K experts through `ForwardEngine` on both backends: CUDA matches HIP
   **exactly** (max_abs=0.0, logit-cosine=1.0000000 — K-quant dp4a is
   integer-exact). Drives the kernel certified this cycle end-to-end.
-- ✅ **Real model — gemma-4-12B Q4_K end-to-end on CUDA** (`f0287d7c`). 6.7 GB
-  Q4_K GGUF via the generic loader, 7-token prefill through
-  `ForwardEngine<CudaBackend>` on the RTX 3090 → 262144-vocab logits, finite,
-  healthy range, non-degenerate. Exercises the real gemma-4 op set + KV at scale.
-  The exact HIP cross-check is best-effort (auto-runs when the gfx906 cards are
-  free; they're currently held by another process) — and cross-backend
-  *exactness* is already proven on the synthetic dense (~1e-6) + MoE (bit-identical)
-  tests above.
+- 🔴 **Real model — gemma-4-12B Q4_K: cross-check FAILED, found a CUDA bug**
+  (`f0287d7c` loaded + ran it; the HIP↔CUDA cross-check then exposed the defect).
+  The 6.7 GB Q4_K GGUF loads and a 7-token prefill runs through
+  `ForwardEngine<CudaBackend>` producing finite, healthy-*looking* logits — but
+  they are **wrong and non-deterministic**: logit-cosine vs the gfx906 reference
+  is **0.68** at full depth (not ≥0.9999), the CUDA argmax changes run-to-run, and
+  even after layer 0 the cosine wobbles (0.989 / 0.980 across runs). Single-token
+  output is degenerate. **Diagnosis: the CUDA gemma *prefill* path reads
+  uninitialized device memory** — a kernel on `alloc` (not `alloc_zeros`) that
+  doesn't write every output lane (CLAUDE.md rule 8), so leftover garbage feeds
+  downstream. The synthetic tests passed because they exercise single-token
+  *decode* with SwiGLU/no-softcap/no-SWA — never prefill or gemma's
+  GELU/softcap/SWA/side-channel ops. Reproducer:
+  `gemma4-v2/tests/real_gguf_cuda_parity.rs` (`#[ignore]`d, un-ignore on fix).
 
-**Status: P5.4 core complete — the CUDA decode path runs real models correctly.**
-Remaining for the *literal* doc gate (logit-cosine vs llama.cpp over 64 tokens):
-the real-model HIP/llama.cpp cross-check (blocked only by gfx906 availability,
-test auto-runs it) and multi-token decode loop. attention's CUDA graph-slot
-rebind stays deferred (P4.4 `CudaGraphExec` slot-map) — not needed for decode
-parity.
+**Status: P5.4 NOT complete.** Synthetic decode parity is solid (dense ~1e-6, MoE
+Q4_K bit-identical) and the per-dtype dispatch resolves — but the first real model
+exposed a CUDA prefill correctness bug. **Next: localize the uninitialized-memory
+read in the CUDA prefill/layer-0 path** (prime suspects: prefill attention
+writing only valid positions and leaving padding unwritten, the per-layer
+side-channel table, or a GELU/norm scratch), fix it (zero-init or full-lane
+write), then the cross-check goes green and the literal logit-cosine-vs-llama.cpp
+gate (+ multi-token loop) follows. attention's CUDA graph-slot rebind stays
+deferred (P4.4) — not needed here.
 
 ## Validation posture
 
