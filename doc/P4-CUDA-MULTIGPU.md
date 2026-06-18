@@ -91,7 +91,12 @@ kernel authoring, just composition.
 
 1. **Rig** — get a 2nd NVIDIA GPU, or accept 1-GPU partial validation (API +
    math, not topology) for P4.0-P4.4 and defer P4.2's real 2-GPU gate + P4.5 to
-   when hardware lands. (Decision needed from the user.)
+   when hardware lands. (Decision needed from the user.) **2nd-card arch floor:
+   sm_75 (Turing).** CUDA 13.3 dropped Maxwell/Pascal/Volta (min sm_75), and
+   every quantized kernel needs `dp4a` (sm_61+) — so a Maxwell card (e.g. Quadro
+   M5000, sm_52) will NOT work. Best fit is a 2nd **sm_86** card (matches the
+   3090 → identical cert grid, real PCIe-P2P pair); any sm_75/sm_89/sm_80 works
+   with its own cert grid (B8 machinery).
 2. **NCCL version pin** + bindings: `nccl_sys` crate vs hand FFI (the project hand-
    writes FFI elsewhere — `cu*`/`hip*` — so hand FFI is consistent; `nccl_sys`
    saves typing). NVLink-pair vs PCIe-only topology determines the AllReduce
