@@ -243,10 +243,8 @@ impl<'a> Ops for HipOps<'a> {
         knobs: crate::AttnKnobs,
     ) -> Result<()> {
         super::attention::attention_decode_f16(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
             knobs,
@@ -261,10 +259,8 @@ impl<'a> Ops for HipOps<'a> {
         slots: Option<crate::AttnDecodeSlots>,
     ) -> Result<()> {
         super::attention::attention_decode_f16_slots(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
             knobs,
@@ -279,10 +275,8 @@ impl<'a> Ops for HipOps<'a> {
         knobs: crate::AttnKnobs,
     ) -> Result<()> {
         super::attention::attention_decode_f16_batched(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
             knobs,
@@ -294,7 +288,7 @@ impl<'a> Ops for HipOps<'a> {
         buf: crate::KvAppendBatchedSlotsBuffers,
         shape: crate::KvAppendBatchedSlotsShape,
     ) -> Result<()> {
-        super::attention::kv_append_f16_batched_slots(self.ctx(), buf, shape)
+        super::attention::kv_append_f16_batched_slots(self.reg, self.stream, buf, shape)
     }
 
     fn attention_prefill_f16_paged(
@@ -304,10 +298,8 @@ impl<'a> Ops for HipOps<'a> {
         knobs: crate::AttnKnobs,
     ) -> Result<()> {
         super::attention::attention_prefill_f16_paged(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
             knobs,
@@ -319,7 +311,7 @@ impl<'a> Ops for HipOps<'a> {
         buf: crate::KvAppendPagedPrefillBuffers,
         shape: crate::KvAppendPagedPrefillShape,
     ) -> Result<()> {
-        super::attention::kv_append_f16_paged_prefill(self.ctx(), buf, shape)
+        super::attention::kv_append_f16_paged_prefill(self.reg, self.stream, buf, shape)
     }
 
     fn kv_append_f16_paged_slots(
@@ -327,7 +319,7 @@ impl<'a> Ops for HipOps<'a> {
         buf: crate::KvAppendPagedSlotsBuffers,
         shape: crate::KvAppendPagedSlotsShape,
     ) -> Result<()> {
-        super::attention::kv_append_f16_paged_slots(self.ctx(), buf, shape)
+        super::attention::kv_append_f16_paged_slots(self.reg, self.stream, buf, shape)
     }
 
     fn attention_decode_f16_paged(
@@ -337,10 +329,8 @@ impl<'a> Ops for HipOps<'a> {
         scale: f32,
     ) -> Result<()> {
         super::attention::attention_decode_f16_paged(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
             scale,
@@ -354,7 +344,7 @@ impl<'a> Ops for HipOps<'a> {
         write_pos: usize,
         eps: f32,
     ) -> Result<()> {
-        super::attention::kv_append_v_unit_norm_f16(self.ctx(), buf, shape, write_pos, eps)
+        super::attention::kv_append_v_unit_norm_f16(self.reg, self.stream, buf, shape, write_pos, eps)
     }
 
     fn attention_decode_f16_splitk(
@@ -365,10 +355,8 @@ impl<'a> Ops for HipOps<'a> {
         knobs: crate::AttnKnobs,
     ) -> Result<()> {
         super::attention::attention_decode_f16_splitk(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             partials,
             shape,
@@ -384,10 +372,8 @@ impl<'a> Ops for HipOps<'a> {
         knobs: crate::AttnKnobs,
     ) -> Result<()> {
         super::attention::attention_decode_f16_splitk_h2(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             partials,
             shape,
@@ -402,10 +388,8 @@ impl<'a> Ops for HipOps<'a> {
         knobs: crate::AttnKnobs,
     ) -> Result<()> {
         super::attention::attention_decode_q8_kv(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
             knobs,
@@ -420,10 +404,8 @@ impl<'a> Ops for HipOps<'a> {
         knobs: crate::AttnKnobs,
     ) -> Result<()> {
         super::attention::attention_decode_q8_kv_splitk(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             partials,
             shape,
@@ -438,10 +420,8 @@ impl<'a> Ops for HipOps<'a> {
         knobs: crate::AttnKnobs,
     ) -> Result<()> {
         super::attention::attention_prefill_q8_kv(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
             knobs,
@@ -455,10 +435,8 @@ impl<'a> Ops for HipOps<'a> {
         knobs: crate::AttnKnobs,
     ) -> Result<()> {
         super::attention::attention_prefill_f16(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
             knobs,
@@ -473,10 +451,8 @@ impl<'a> Ops for HipOps<'a> {
         slots: Option<crate::AttnPrefillSlots>,
     ) -> Result<()> {
         super::attention::attention_prefill_f16_slots(
-            crate::OpCtx {
-                reg: self.reg,
-                stream: self.stream,
-            },
+            self.reg,
+            self.stream,
             buffers,
             shape,
             knobs,
@@ -494,7 +470,8 @@ impl<'a> Ops for HipOps<'a> {
         head_dim: usize,
     ) -> Result<()> {
         super::attention::split_q_gate_f16(
-            self.ctx(),
+            self.reg,
+            self.stream,
             crate::SplitQGateBuffers { fused_qg, q_out, gate_out },
             crate::SplitQGateShape { n_tokens, n_heads, head_dim },
         )

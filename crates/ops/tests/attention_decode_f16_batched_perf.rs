@@ -142,10 +142,7 @@ fn ab_perf_qwen36_27b_tp2_local() -> Result<()> {
                 let q_row = DevicePtr(d_q.as_usize() + q_off);
                 let out_row = DevicePtr(d_out.as_usize() + q_off);
                 attention_decode_f16_slots(
-                    flambeau_ops::OpCtx {
-                        reg: &reg,
-                        stream,
-                    },
+                    &reg, stream,
                     flambeau_ops::AttnBuffers {
                         q: q_row,
                         k: d_k_per_slot[s],
@@ -172,10 +169,7 @@ fn ab_perf_qwen36_27b_tp2_local() -> Result<()> {
         // Batched: single launch per "iteration".
         let batched_us = time_us(&dev, iters, || {
             attention_decode_f16_batched(
-                flambeau_ops::OpCtx {
-                    reg: &reg,
-                    stream,
-                },
+                &reg, stream,
                 flambeau_ops::AttnBatchedBuffers {
                     q_batched: d_q,
                     k_cache_ptrs: d_k_ptrs,

@@ -92,10 +92,7 @@ fn moe_sort_by_expert_groups_pairs() -> Result<()> {
     dev.default_stream().synchronize()?;
 
     moe::moe_sort_by_expert(
-        flambeau_ops::OpCtx {
-            reg: &reg,
-            stream: dev.default_stream(),
-        },
+        &reg, dev.default_stream(),
         flambeau_ops::MoeSortBuffers {
             expert_ids: d_ids,
             counts: d_counts,
@@ -195,10 +192,7 @@ fn moe_sort_by_expert_qwen3_6_scale() -> Result<()> {
     dev.default_stream().synchronize()?;
 
     moe::moe_sort_by_expert(
-        flambeau_ops::OpCtx {
-            reg: &reg,
-            stream: dev.default_stream(),
-        },
+        &reg, dev.default_stream(),
         flambeau_ops::MoeSortBuffers {
             expert_ids: d_ids,
             counts: d_counts,
@@ -269,10 +263,7 @@ fn moe_sort_by_expert_padded_groups_in_multiples_of_8() -> Result<()> {
     let d_sorted_padded = dev.alloc(padded_cap * 4)?;
 
     moe::moe_sort_by_expert_padded(
-        flambeau_ops::OpCtx {
-            reg: &reg,
-            stream: dev.default_stream(),
-        },
+        &reg, dev.default_stream(),
         flambeau_ops::MoeSortPaddedBuffers {
             expert_ids: d_ids,
             counts: d_counts,

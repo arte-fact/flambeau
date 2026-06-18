@@ -2,16 +2,8 @@
 //! GQA is handled via the `n_heads_kv` argument; the kernel broadcasts one
 //! KV head across `n_heads_q / n_heads_kv` Q heads.
 
-#![expect(
-    clippy::undocumented_unsafe_blocks,
-    reason = "op wrapper — every unsafe block is a kernel.launch or memcpy_async over \
-              DevicePtrs validated by the caller; the kernel stem + entry are resolved \
-              through the validated registry and the ABI matches the kernels extern-C \
-              signature."
-)]
-
 use anyhow::Result;
-use flambeau_backend_hip::{KernelArgs, LaunchCfg};
+use flambeau_core::{LaunchArgs, LaunchCfg};
 
 
 /// Decode attention, F16 KV. One Q row per call (`n_tokens_q = 1` by
@@ -25,13 +17,14 @@ use flambeau_backend_hip::{KernelArgs, LaunchCfg};
 ///   Launch: one block per Q head, `head_dim` threads/block (one thread per
 ///   output lane). Kernel supports `head_dim ∈ {128, 256}` — both
 ///   Qwen3.5 (GQA-32/4, head_dim=128) and Qwen3.6 (GQA-16/2, head_dim=256).
-pub fn attention_decode_f16(
-    ctx: crate::OpCtx<'_>,
+pub fn attention_decode_f16<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     buffers: crate::AttnBuffers,
     shape: crate::AttnDecodeShape,
     knobs: crate::AttnKnobs,
 ) -> Result<()> {
-    attention_decode_f16_slots(ctx, buffers, shape, knobs, None)
+    attention_decode_f16_slots(reg, stream, buffers, shape, knobs, None)
 }
 
 /// Graph-captureable variant of [`attention_decode_f16`].
@@ -40,8 +33,9 @@ pub fn attention_decode_f16(
 /// `KernelArgs::push_slot` so the graph recorder can bind the slot.
 /// Caller then updates the slot per replay via `HipGraphExec::set_slot`
 /// to track the growing KV cache tail.
-pub fn attention_decode_f16_slots(
-    ctx: crate::OpCtx<'_>,
+pub fn attention_decode_f16_slots<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     buffers: crate::AttnBuffers,
     shape: crate::AttnDecodeShape,
     knobs: crate::AttnKnobs,
@@ -59,8 +53,8 @@ pub fn attention_decode_f16_slots(
         head_dim == 64 || head_dim == 128 || head_dim == 256 || head_dim == 512,
         "attention_decode_f16: head_dim {head_dim} not supported (expected 64, 128, 256, or 512)"
     );
-    let module = ctx.reg.expect_module("attention_decode_f16")?;
-    let kernel = module.kernel("flambeau_attention_decode_f16")?;
+    let module = reg.expect_module("attention_decode_f16")?;
+    let kernel = B::kernel(module, "flambeau_attention_decode_f16")?;
 
     let n_heads_q_i = n_heads_q as i32;
     let n_heads_kv_i = n_heads_kv as i32;
@@ -70,23 +64,23 @@ pub fn attention_decode_f16_slots(
     let k_ptr: u64 = k.as_usize() as u64;
     let v_ptr: u64 = v.as_usize() as u64;
     let o_ptr: u64 = out.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&q_ptr);
-    args.push(&k_ptr);
-    args.push(&v_ptr);
-    args.push(&o_ptr);
-    args.push(&n_heads_q_i);
-    args.push(&n_heads_kv_i);
-    args.push(&head_dim_i);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&q_ptr);
+    args.push_arg(&k_ptr);
+    args.push_arg(&v_ptr);
+    args.push_arg(&o_ptr);
+    args.push_arg(&n_heads_q_i);
+    args.push_arg(&n_heads_kv_i);
+    args.push_arg(&head_dim_i);
     match slots {
         Some(s) => args.push_slot(&n_tokens_i, s.n_tokens_kv),
-        None => args.push(&n_tokens_i),
+        None => args.push_arg(&n_tokens_i),
     }
-    args.push(&scale);
-    args.push(&window_size);
-    args.push(&ring_depth);
+    args.push_arg(&scale);
+    args.push_arg(&window_size);
+    args.push_arg(&ring_depth);
     let cfg = LaunchCfg::one_d(n_heads_q as u32, head_dim as u32);
-    unsafe { kernel.launch(ctx.stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 
@@ -117,8 +111,9 @@ pub fn attention_decode_f16_slots(
 /// `k_cache_ptrs[s]` and `v_cache_ptrs[s]` must point at ≥ `n_tokens_kv[s] *
 /// n_heads_kv * head_dim` F16 elements. `q` / `out` must each point at
 /// ≥ `n_slots * n_heads_q * head_dim` F16 elements.
-pub fn attention_decode_f16_batched(
-    ctx: crate::OpCtx<'_>,
+pub fn attention_decode_f16_batched<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     buffers: crate::AttnBatchedBuffers,
     shape: crate::AttnDecodeBatchedShape,
     knobs: crate::AttnKnobs,
@@ -145,8 +140,8 @@ pub fn attention_decode_f16_batched(
         (1..=32).contains(&n_slots),
         "attention_decode_f16_batched: n_slots {n_slots} out of supported range [1, 32]"
     );
-    let module = ctx.reg.expect_module("attention_decode_f16_batched")?;
-    let kernel = module.kernel("flambeau_attention_decode_f16_batched")?;
+    let module = reg.expect_module("attention_decode_f16_batched")?;
+    let kernel = B::kernel(module, "flambeau_attention_decode_f16_batched")?;
 
     let n_heads_q_i = n_heads_q as i32;
     let n_heads_kv_i = n_heads_kv as i32;
@@ -157,25 +152,25 @@ pub fn attention_decode_f16_batched(
     let v_ptrs_ptr: u64 = v_cache_ptrs.as_usize() as u64;
     let o_ptr: u64 = out_batched.as_usize() as u64;
     let n_kv_ptr: u64 = n_tokens_kv.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&q_ptr);
-    args.push(&k_ptrs_ptr);
-    args.push(&v_ptrs_ptr);
-    args.push(&o_ptr);
-    args.push(&n_kv_ptr);
-    args.push(&n_heads_q_i);
-    args.push(&n_heads_kv_i);
-    args.push(&head_dim_i);
-    args.push(&n_slots_i);
-    args.push(&scale);
-    args.push(&window_size);
-    args.push(&ring_depth);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&q_ptr);
+    args.push_arg(&k_ptrs_ptr);
+    args.push_arg(&v_ptrs_ptr);
+    args.push_arg(&o_ptr);
+    args.push_arg(&n_kv_ptr);
+    args.push_arg(&n_heads_q_i);
+    args.push_arg(&n_heads_kv_i);
+    args.push_arg(&head_dim_i);
+    args.push_arg(&n_slots_i);
+    args.push_arg(&scale);
+    args.push_arg(&window_size);
+    args.push_arg(&ring_depth);
     let cfg = LaunchCfg {
         grid: (n_heads_q as u32, n_slots as u32, 1),
         block: (head_dim as u32, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(ctx.stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 
@@ -207,8 +202,9 @@ pub fn attention_decode_f16_batched(
 /// `(n_tokens_kv[s] - 1) / page_size < max_pages_per_slot`. `q_batched`
 /// and `out_batched` must each point at ≥ `n_slots * n_heads_q *
 /// head_dim` F16 elements.
-pub fn attention_decode_f16_paged(
-    ctx: crate::OpCtx<'_>,
+pub fn attention_decode_f16_paged<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     buffers: crate::AttnPagedDecodeBuffers,
     shape: crate::AttnDecodePagedShape,
     scale: f32,
@@ -245,8 +241,8 @@ pub fn attention_decode_f16_paged(
         max_pages_per_slot >= 1,
         "attention_decode_f16_paged: max_pages_per_slot must be >= 1"
     );
-    let module = ctx.reg.expect_module("attention_decode_f16_paged")?;
-    let kernel = module.kernel("flambeau_attention_decode_f16_paged")?;
+    let module = reg.expect_module("attention_decode_f16_paged")?;
+    let kernel = B::kernel(module, "flambeau_attention_decode_f16_paged")?;
 
     let n_heads_q_i = n_heads_q as i32;
     let n_heads_kv_i = n_heads_kv as i32;
@@ -260,26 +256,26 @@ pub fn attention_decode_f16_paged(
     let bt_ptr: u64 = block_tables.as_usize() as u64;
     let o_ptr: u64 = out_batched.as_usize() as u64;
     let n_kv_ptr: u64 = n_tokens_kv.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&q_ptr);
-    args.push(&k_pool_ptr);
-    args.push(&v_pool_ptr);
-    args.push(&bt_ptr);
-    args.push(&o_ptr);
-    args.push(&n_kv_ptr);
-    args.push(&n_heads_q_i);
-    args.push(&n_heads_kv_i);
-    args.push(&head_dim_i);
-    args.push(&n_slots_i);
-    args.push(&page_size_i);
-    args.push(&max_pps_i);
-    args.push(&scale);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&q_ptr);
+    args.push_arg(&k_pool_ptr);
+    args.push_arg(&v_pool_ptr);
+    args.push_arg(&bt_ptr);
+    args.push_arg(&o_ptr);
+    args.push_arg(&n_kv_ptr);
+    args.push_arg(&n_heads_q_i);
+    args.push_arg(&n_heads_kv_i);
+    args.push_arg(&head_dim_i);
+    args.push_arg(&n_slots_i);
+    args.push_arg(&page_size_i);
+    args.push_arg(&max_pps_i);
+    args.push_arg(&scale);
     let cfg = LaunchCfg {
         grid: (n_heads_q as u32, n_slots as u32, 1),
         block: (head_dim as u32, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(ctx.stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 
@@ -298,8 +294,9 @@ pub fn attention_decode_f16_paged(
 /// `v_src` must point at ≥ `n_slots * kv_width` F16 elements.
 /// `slot_write_pos` must point at ≥ `n_slots` i32 elements with each
 /// `(slot_write_pos[s] / page_size) < max_pages_per_slot`.
-pub fn kv_append_f16_paged_slots(
-    ctx: crate::OpCtx<'_>,
+pub fn kv_append_f16_paged_slots<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     buf: crate::KvAppendPagedSlotsBuffers,
     shape: crate::KvAppendPagedSlotsShape,
 ) -> Result<()> {
@@ -312,8 +309,8 @@ pub fn kv_append_f16_paged_slots(
         shape.max_pages_per_slot >= 1,
         "kv_append_f16_paged_slots: max_pages_per_slot must be >= 1"
     );
-    let module = ctx.reg.expect_module("kv_append_f16_paged_slots")?;
-    let kernel = module.kernel("flambeau_kv_append_f16_paged_slots")?;
+    let module = reg.expect_module("kv_append_f16_paged_slots")?;
+    let kernel = B::kernel(module, "flambeau_kv_append_f16_paged_slots")?;
 
     let n_slots_i = shape.n_slots as i32;
     let kv_width_i = shape.kv_width as i32;
@@ -325,24 +322,24 @@ pub fn kv_append_f16_paged_slots(
     let v_pool_ptr: u64 = buf.v_pool.as_usize() as u64;
     let bt_ptr: u64 = buf.block_tables.as_usize() as u64;
     let wpos_ptr: u64 = buf.slot_write_pos.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&k_src_ptr);
-    args.push(&v_src_ptr);
-    args.push(&k_pool_ptr);
-    args.push(&v_pool_ptr);
-    args.push(&bt_ptr);
-    args.push(&wpos_ptr);
-    args.push(&n_slots_i);
-    args.push(&kv_width_i);
-    args.push(&page_size_i);
-    args.push(&max_pps_i);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&k_src_ptr);
+    args.push_arg(&v_src_ptr);
+    args.push_arg(&k_pool_ptr);
+    args.push_arg(&v_pool_ptr);
+    args.push_arg(&bt_ptr);
+    args.push_arg(&wpos_ptr);
+    args.push_arg(&n_slots_i);
+    args.push_arg(&kv_width_i);
+    args.push_arg(&page_size_i);
+    args.push_arg(&max_pps_i);
     let block_threads: u32 = shape.kv_width.min(128) as u32;
     let cfg = LaunchCfg {
         grid: (shape.n_slots as u32, 1, 1),
         block: (block_threads.max(1), 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(ctx.stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 
@@ -361,8 +358,9 @@ pub fn kv_append_f16_paged_slots(
 /// # Safety
 /// Mirrors `attention_decode_f16_paged`'s safety contract for K/V
 /// pool sizes and block-table extent.
-pub fn attention_prefill_f16_paged(
-    ctx: crate::OpCtx<'_>,
+pub fn attention_prefill_f16_paged<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     buffers: crate::AttnPagedPrefillBuffers,
     shape: crate::AttnPrefillPagedShape,
     knobs: crate::AttnKnobs,
@@ -392,8 +390,8 @@ pub fn attention_prefill_f16_paged(
         page_size > 0 && page_size.is_power_of_two(),
         "attention_prefill_f16_paged: page_size {page_size} must be a positive power of two"
     );
-    let module = ctx.reg.expect_module("attention_prefill_f16_paged")?;
-    let kernel = module.kernel("flambeau_attention_prefill_f16_paged")?;
+    let module = reg.expect_module("attention_prefill_f16_paged")?;
+    let kernel = B::kernel(module, "flambeau_attention_prefill_f16_paged")?;
 
     let n_q_i = n_q_tokens as i32;
     let n_heads_q_i = n_heads_q as i32;
@@ -407,28 +405,28 @@ pub fn attention_prefill_f16_paged(
     let v_ptr: u64 = v_pool.as_usize() as u64;
     let bt_ptr: u64 = block_table.as_usize() as u64;
     let o_ptr: u64 = out.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&q_ptr);
-    args.push(&k_ptr);
-    args.push(&v_ptr);
-    args.push(&bt_ptr);
-    args.push(&o_ptr);
-    args.push(&n_q_i);
-    args.push(&n_heads_q_i);
-    args.push(&n_heads_kv_i);
-    args.push(&head_dim_i);
-    args.push(&n_k_i);
-    args.push(&q_off_i);
-    args.push(&page_size_i);
-    args.push(&scale);
-    args.push(&window_size);
-    args.push(&ring_depth);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&q_ptr);
+    args.push_arg(&k_ptr);
+    args.push_arg(&v_ptr);
+    args.push_arg(&bt_ptr);
+    args.push_arg(&o_ptr);
+    args.push_arg(&n_q_i);
+    args.push_arg(&n_heads_q_i);
+    args.push_arg(&n_heads_kv_i);
+    args.push_arg(&head_dim_i);
+    args.push_arg(&n_k_i);
+    args.push_arg(&q_off_i);
+    args.push_arg(&page_size_i);
+    args.push_arg(&scale);
+    args.push_arg(&window_size);
+    args.push_arg(&ring_depth);
     let cfg = LaunchCfg {
         grid: (n_q_tokens as u32, n_heads_q as u32, 1),
         block: (head_dim as u32, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(ctx.stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 
@@ -452,8 +450,9 @@ pub fn attention_prefill_f16_paged(
 /// must point at ≥ `(start_pos + n_tokens) / page_size + 1` u32
 /// elements. `k_src` / `v_src` must each point at ≥ `n_tokens *
 /// kv_width` F16 elements.
-pub fn kv_append_f16_paged_prefill(
-    ctx: crate::OpCtx<'_>,
+pub fn kv_append_f16_paged_prefill<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     buf: crate::KvAppendPagedPrefillBuffers,
     shape: crate::KvAppendPagedPrefillShape,
 ) -> Result<()> {
@@ -462,8 +461,8 @@ pub fn kv_append_f16_paged_prefill(
         "kv_append_f16_paged_prefill: page_size {} must be a positive power of two",
         shape.page_size
     );
-    let module = ctx.reg.expect_module("kv_append_f16_paged_prefill")?;
-    let kernel = module.kernel("flambeau_kv_append_f16_paged_prefill")?;
+    let module = reg.expect_module("kv_append_f16_paged_prefill")?;
+    let kernel = B::kernel(module, "flambeau_kv_append_f16_paged_prefill")?;
 
     let n_tokens_i = shape.n_tokens as i32;
     let kv_width_i = shape.kv_width as i32;
@@ -474,23 +473,23 @@ pub fn kv_append_f16_paged_prefill(
     let k_pool_ptr: u64 = buf.k_pool.as_usize() as u64;
     let v_pool_ptr: u64 = buf.v_pool.as_usize() as u64;
     let bt_ptr: u64 = buf.block_table.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&k_src_ptr);
-    args.push(&v_src_ptr);
-    args.push(&k_pool_ptr);
-    args.push(&v_pool_ptr);
-    args.push(&bt_ptr);
-    args.push(&n_tokens_i);
-    args.push(&kv_width_i);
-    args.push(&start_pos_i);
-    args.push(&page_size_i);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&k_src_ptr);
+    args.push_arg(&v_src_ptr);
+    args.push_arg(&k_pool_ptr);
+    args.push_arg(&v_pool_ptr);
+    args.push_arg(&bt_ptr);
+    args.push_arg(&n_tokens_i);
+    args.push_arg(&kv_width_i);
+    args.push_arg(&start_pos_i);
+    args.push_arg(&page_size_i);
     let block_threads: u32 = shape.kv_width.min(128) as u32;
     let cfg = LaunchCfg {
         grid: (shape.n_tokens as u32, 1, 1),
         block: (block_threads.max(1), 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(ctx.stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 
@@ -506,13 +505,14 @@ pub fn kv_append_f16_paged_prefill(
 /// writes one row of `kv_width = n_kv_heads * head_dim` F16 values
 /// per slot from `k_src` / `v_src` (both `[N, kv_width]` slot-major)
 /// at `dst + write_pos * kv_width`.
-pub fn kv_append_f16_batched_slots(
-    ctx: crate::OpCtx<'_>,
+pub fn kv_append_f16_batched_slots<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     buf: crate::KvAppendBatchedSlotsBuffers,
     shape: crate::KvAppendBatchedSlotsShape,
 ) -> Result<()> {
-    let module = ctx.reg.expect_module("kv_append_f16_batched_slots")?;
-    let kernel = module.kernel("flambeau_kv_append_f16_batched_slots")?;
+    let module = reg.expect_module("kv_append_f16_batched_slots")?;
+    let kernel = B::kernel(module, "flambeau_kv_append_f16_batched_slots")?;
 
     let n_slots_i = shape.n_slots as i32;
     let kv_width_i = shape.kv_width as i32;
@@ -522,22 +522,22 @@ pub fn kv_append_f16_batched_slots(
     let k_dst_arr: u64 = buf.slot_k_dst_ptrs.as_usize() as u64;
     let v_dst_arr: u64 = buf.slot_v_dst_ptrs.as_usize() as u64;
     let wpos_ptr: u64 = buf.slot_write_pos.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&k_src_ptr);
-    args.push(&v_src_ptr);
-    args.push(&k_dst_arr);
-    args.push(&v_dst_arr);
-    args.push(&wpos_ptr);
-    args.push(&n_slots_i);
-    args.push(&kv_width_i);
-    args.push(&ring_depth_i);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&k_src_ptr);
+    args.push_arg(&v_src_ptr);
+    args.push_arg(&k_dst_arr);
+    args.push_arg(&v_dst_arr);
+    args.push_arg(&wpos_ptr);
+    args.push_arg(&n_slots_i);
+    args.push_arg(&kv_width_i);
+    args.push_arg(&ring_depth_i);
     let block_threads: u32 = shape.kv_width.min(128) as u32;
     let cfg = LaunchCfg {
         grid: (shape.n_slots as u32, 1, 1),
         block: (block_threads.max(1), 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(ctx.stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 
@@ -560,8 +560,9 @@ pub fn kv_append_f16_batched_slots(
 /// Measured (Qwen3.6 shape, head_dim=256, 16/2, MI50):
 /// * n_tokens=2048: single-pass 2647 µs → split-K 340 µs = **7.78×**
 /// * n_tokens=4096: single-pass 5210 µs → split-K 662 µs = **7.87×**
-pub fn attention_decode_f16_splitk(
-    ctx: crate::OpCtx<'_>,
+pub fn attention_decode_f16_splitk<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     buffers: crate::AttnBuffers,
     partials: crate::AttnSplitkPartials,
     shape: crate::AttnSplitkShape,
@@ -589,9 +590,9 @@ pub fn attention_decode_f16_splitk(
     assert!(chunk_size > 0);
     assert!(chunk_base <= n_tokens_kv);
 
-    let module = ctx.reg.expect_module("attention_decode_f16_splitk")?;
-    let k_chunk = module.kernel("flambeau_attention_decode_f16_splitk_chunk")?;
-    let k_combine = module.kernel("flambeau_attention_decode_f16_splitk_combine")?;
+    let module = reg.expect_module("attention_decode_f16_splitk")?;
+    let k_chunk = B::kernel(module, "flambeau_attention_decode_f16_splitk_chunk")?;
+    let k_combine = B::kernel(module, "flambeau_attention_decode_f16_splitk_combine")?;
 
     let n_chunks = (n_tokens_kv - chunk_base).div_ceil(chunk_size);
     let n_heads_q_i = n_heads_q as i32;
@@ -608,44 +609,44 @@ pub fn attention_decode_f16_splitk(
     let m_ptr: u64 = partials_m.as_usize() as u64;
     let s_ptr: u64 = partials_s.as_usize() as u64;
     let po_ptr: u64 = partials_o.as_usize() as u64;
-    let mut a1 = KernelArgs::new();
-    a1.push(&q_ptr);
-    a1.push(&k_ptr);
-    a1.push(&v_ptr);
-    a1.push(&m_ptr);
-    a1.push(&s_ptr);
-    a1.push(&po_ptr);
-    a1.push(&n_heads_q_i);
-    a1.push(&n_heads_kv_i);
-    a1.push(&head_dim_i);
-    a1.push(&n_tokens_i);
-    a1.push(&n_chunks_i);
-    a1.push(&chunk_size_i);
-    a1.push(&scale);
-    a1.push(&window_size);
-    a1.push(&ring_depth);
-    a1.push(&chunk_base_i);
+    let mut a1 = <B::Args<'_>>::default();
+    a1.push_arg(&q_ptr);
+    a1.push_arg(&k_ptr);
+    a1.push_arg(&v_ptr);
+    a1.push_arg(&m_ptr);
+    a1.push_arg(&s_ptr);
+    a1.push_arg(&po_ptr);
+    a1.push_arg(&n_heads_q_i);
+    a1.push_arg(&n_heads_kv_i);
+    a1.push_arg(&head_dim_i);
+    a1.push_arg(&n_tokens_i);
+    a1.push_arg(&n_chunks_i);
+    a1.push_arg(&chunk_size_i);
+    a1.push_arg(&scale);
+    a1.push_arg(&window_size);
+    a1.push_arg(&ring_depth);
+    a1.push_arg(&chunk_base_i);
     let cfg1 = LaunchCfg {
         grid: (n_heads_q as u32, n_chunks as u32, 1),
         block: (head_dim as u32, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { k_chunk.launch(ctx.stream, cfg1, a1)? };
+    B::launch(&k_chunk, stream, cfg1, a1)?;
 
-    let mut a2 = KernelArgs::new();
-    a2.push(&m_ptr);
-    a2.push(&s_ptr);
-    a2.push(&po_ptr);
-    a2.push(&o_ptr);
-    a2.push(&n_heads_q_i);
-    a2.push(&n_chunks_i);
-    a2.push(&head_dim_i);
+    let mut a2 = <B::Args<'_>>::default();
+    a2.push_arg(&m_ptr);
+    a2.push_arg(&s_ptr);
+    a2.push_arg(&po_ptr);
+    a2.push_arg(&o_ptr);
+    a2.push_arg(&n_heads_q_i);
+    a2.push_arg(&n_chunks_i);
+    a2.push_arg(&head_dim_i);
     let cfg2 = LaunchCfg {
         grid: (n_heads_q as u32, 1, 1),
         block: (head_dim as u32, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { k_combine.launch(ctx.stream, cfg2, a2)? };
+    B::launch(&k_combine, stream, cfg2, a2)?;
 
     Ok(())
 }
@@ -660,8 +661,9 @@ pub fn attention_decode_f16_splitk(
 /// Same partials sizing as `attention_decode_f16_splitk`. Phase 2
 /// (`flambeau_attention_decode_f16_splitk_combine`) is shared and
 /// unmodified.
-pub fn attention_decode_f16_splitk_h2(
-    ctx: crate::OpCtx<'_>,
+pub fn attention_decode_f16_splitk_h2<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     buffers: crate::AttnBuffers,
     partials: crate::AttnSplitkPartials,
     shape: crate::AttnSplitkShape,
@@ -691,10 +693,10 @@ pub fn attention_decode_f16_splitk_h2(
     assert!(chunk_size > 0);
     assert!(head_dim % 2 == 0);
 
-    let module = ctx.reg.expect_module("attention_decode_f16_splitk_h2")?;
-    let k_chunk = module.kernel("flambeau_attention_decode_f16_splitk_h2_chunk")?;
-    let combine_module = ctx.reg.expect_module("attention_decode_f16_splitk")?;
-    let k_combine = combine_module.kernel("flambeau_attention_decode_f16_splitk_combine")?;
+    let module = reg.expect_module("attention_decode_f16_splitk_h2")?;
+    let k_chunk = B::kernel(module, "flambeau_attention_decode_f16_splitk_h2_chunk")?;
+    let combine_module = reg.expect_module("attention_decode_f16_splitk")?;
+    let k_combine = B::kernel(combine_module, "flambeau_attention_decode_f16_splitk_combine")?;
 
     let n_chunks = n_tokens_kv.div_ceil(chunk_size);
     let n_heads_q_i = n_heads_q as i32;
@@ -711,43 +713,43 @@ pub fn attention_decode_f16_splitk_h2(
     let s_ptr: u64 = partials_s.as_usize() as u64;
     let po_ptr: u64 = partials_o.as_usize() as u64;
 
-    let mut a1 = KernelArgs::new();
-    a1.push(&q_ptr);
-    a1.push(&k_ptr);
-    a1.push(&v_ptr);
-    a1.push(&m_ptr);
-    a1.push(&s_ptr);
-    a1.push(&po_ptr);
-    a1.push(&n_heads_q_i);
-    a1.push(&n_heads_kv_i);
-    a1.push(&head_dim_i);
-    a1.push(&n_tokens_i);
-    a1.push(&n_chunks_i);
-    a1.push(&chunk_size_i);
-    a1.push(&scale);
-    a1.push(&window_size);
-    a1.push(&ring_depth);
+    let mut a1 = <B::Args<'_>>::default();
+    a1.push_arg(&q_ptr);
+    a1.push_arg(&k_ptr);
+    a1.push_arg(&v_ptr);
+    a1.push_arg(&m_ptr);
+    a1.push_arg(&s_ptr);
+    a1.push_arg(&po_ptr);
+    a1.push_arg(&n_heads_q_i);
+    a1.push_arg(&n_heads_kv_i);
+    a1.push_arg(&head_dim_i);
+    a1.push_arg(&n_tokens_i);
+    a1.push_arg(&n_chunks_i);
+    a1.push_arg(&chunk_size_i);
+    a1.push_arg(&scale);
+    a1.push_arg(&window_size);
+    a1.push_arg(&ring_depth);
     let cfg1 = LaunchCfg {
         grid: (n_heads_q as u32, n_chunks as u32, 1),
         block: ((head_dim / 2) as u32, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { k_chunk.launch(ctx.stream, cfg1, a1)? };
+    B::launch(&k_chunk, stream, cfg1, a1)?;
 
-    let mut a2 = KernelArgs::new();
-    a2.push(&m_ptr);
-    a2.push(&s_ptr);
-    a2.push(&po_ptr);
-    a2.push(&o_ptr);
-    a2.push(&n_heads_q_i);
-    a2.push(&n_chunks_i);
-    a2.push(&head_dim_i);
+    let mut a2 = <B::Args<'_>>::default();
+    a2.push_arg(&m_ptr);
+    a2.push_arg(&s_ptr);
+    a2.push_arg(&po_ptr);
+    a2.push_arg(&o_ptr);
+    a2.push_arg(&n_heads_q_i);
+    a2.push_arg(&n_chunks_i);
+    a2.push_arg(&head_dim_i);
     let cfg2 = LaunchCfg {
         grid: (n_heads_q as u32, 1, 1),
         block: (head_dim as u32, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { k_combine.launch(ctx.stream, cfg2, a2)? };
+    B::launch(&k_combine, stream, cfg2, a2)?;
 
     Ok(())
 }
@@ -786,8 +788,9 @@ pub fn splitk_chunk_size(n_tokens_kv: usize, max_chunks: usize) -> usize {
 /// Decode attention with Q8_0-quantised KV. Same args as the F16 variant;
 /// `k_cache` / `v_cache` hold `flambeau_block_q8_0` blocks laid out as
 /// `[n_tokens_kv, n_heads_kv, head_dim/32]` row-major.
-pub fn attention_decode_q8_kv(
-    ctx: crate::OpCtx<'_>,
+pub fn attention_decode_q8_kv<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     buffers: crate::AttnBuffers,
     shape: crate::AttnDecodeShape,
     knobs: crate::AttnKnobs,
@@ -809,8 +812,8 @@ pub fn attention_decode_q8_kv(
         matches!(head_dim, 64 | 128 | 256 | 512),
         "attention_decode_q8_kv: head_dim {head_dim} not supported (expected 64, 128, 256, or 512)"
     );
-    let module = ctx.reg.expect_module("attention_decode_q8_kv")?;
-    let kernel = module.kernel("flambeau_attention_decode_q8_kv")?;
+    let module = reg.expect_module("attention_decode_q8_kv")?;
+    let kernel = B::kernel(module, "flambeau_attention_decode_q8_kv")?;
 
     let n_heads_q_i = n_heads_q as i32;
     let n_heads_kv_i = n_heads_kv as i32;
@@ -820,22 +823,22 @@ pub fn attention_decode_q8_kv(
     let k_ptr: u64 = k.as_usize() as u64;
     let v_ptr: u64 = v.as_usize() as u64;
     let o_ptr: u64 = out.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&q_ptr);
-    args.push(&k_ptr);
-    args.push(&v_ptr);
-    args.push(&o_ptr);
-    args.push(&n_heads_q_i);
-    args.push(&n_heads_kv_i);
-    args.push(&head_dim_i);
-    args.push(&n_tokens_i);
-    args.push(&scale);
-    args.push(&window_size);
-    args.push(&ring_depth);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&q_ptr);
+    args.push_arg(&k_ptr);
+    args.push_arg(&v_ptr);
+    args.push_arg(&o_ptr);
+    args.push_arg(&n_heads_q_i);
+    args.push_arg(&n_heads_kv_i);
+    args.push_arg(&head_dim_i);
+    args.push_arg(&n_tokens_i);
+    args.push_arg(&scale);
+    args.push_arg(&window_size);
+    args.push_arg(&ring_depth);
     // block.x = head_dim/4 (one thread per int32-
     // packed quad). For head_dim=256 that's 64 threads = 1 wavefront.
     let cfg = LaunchCfg::one_d(n_heads_q as u32, (head_dim / 4) as u32);
-    unsafe { kernel.launch(ctx.stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 
@@ -845,8 +848,9 @@ pub fn attention_decode_q8_kv(
 /// Closes the long-context Q8↔F16 gap (single-pass `attention_decode_q8_kv`
 /// is the same shape as the single-pass F16 kernel and pays the same 7.78×
 /// occupancy penalty past 256 KV tokens).
-pub fn attention_decode_q8_kv_splitk(
-    ctx: crate::OpCtx<'_>,
+pub fn attention_decode_q8_kv_splitk<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     buffers: crate::AttnBuffers,
     partials: crate::AttnSplitkPartials,
     shape: crate::AttnSplitkShape,
@@ -877,9 +881,9 @@ pub fn attention_decode_q8_kv_splitk(
     assert!(chunk_size > 0);
     assert!(chunk_base <= n_tokens_kv);
 
-    let module = ctx.reg.expect_module("attention_decode_q8_kv_splitk")?;
-    let k_chunk = module.kernel("flambeau_attention_decode_q8_kv_splitk_chunk")?;
-    let k_combine = module.kernel("flambeau_attention_decode_q8_kv_splitk_combine")?;
+    let module = reg.expect_module("attention_decode_q8_kv_splitk")?;
+    let k_chunk = B::kernel(module, "flambeau_attention_decode_q8_kv_splitk_chunk")?;
+    let k_combine = B::kernel(module, "flambeau_attention_decode_q8_kv_splitk_combine")?;
 
     let n_chunks = (n_tokens_kv - chunk_base).div_ceil(chunk_size);
     let n_heads_q_i = n_heads_q as i32;
@@ -897,23 +901,23 @@ pub fn attention_decode_q8_kv_splitk(
     let s_ptr: u64 = partials_s.as_usize() as u64;
     let po_ptr: u64 = partials_o.as_usize() as u64;
 
-    let mut a1 = KernelArgs::new();
-    a1.push(&q_ptr);
-    a1.push(&k_ptr);
-    a1.push(&v_ptr);
-    a1.push(&m_ptr);
-    a1.push(&s_ptr);
-    a1.push(&po_ptr);
-    a1.push(&n_heads_q_i);
-    a1.push(&n_heads_kv_i);
-    a1.push(&head_dim_i);
-    a1.push(&n_tokens_i);
-    a1.push(&n_chunks_i);
-    a1.push(&chunk_size_i);
-    a1.push(&scale);
-    a1.push(&window_size);
-    a1.push(&ring_depth);
-    a1.push(&chunk_base_i);
+    let mut a1 = <B::Args<'_>>::default();
+    a1.push_arg(&q_ptr);
+    a1.push_arg(&k_ptr);
+    a1.push_arg(&v_ptr);
+    a1.push_arg(&m_ptr);
+    a1.push_arg(&s_ptr);
+    a1.push_arg(&po_ptr);
+    a1.push_arg(&n_heads_q_i);
+    a1.push_arg(&n_heads_kv_i);
+    a1.push_arg(&head_dim_i);
+    a1.push_arg(&n_tokens_i);
+    a1.push_arg(&n_chunks_i);
+    a1.push_arg(&chunk_size_i);
+    a1.push_arg(&scale);
+    a1.push_arg(&window_size);
+    a1.push_arg(&ring_depth);
+    a1.push_arg(&chunk_base_i);
     // chunk pass uses block = head_dim/4 (one
     // thread per int32-packed quad). Combine pass still needs
     // head_dim threads (one per output element).
@@ -922,22 +926,22 @@ pub fn attention_decode_q8_kv_splitk(
         block: ((head_dim / 4) as u32, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { k_chunk.launch(ctx.stream, cfg1, a1)? };
+    B::launch(&k_chunk, stream, cfg1, a1)?;
 
-    let mut a2 = KernelArgs::new();
-    a2.push(&m_ptr);
-    a2.push(&s_ptr);
-    a2.push(&po_ptr);
-    a2.push(&o_ptr);
-    a2.push(&n_heads_q_i);
-    a2.push(&n_chunks_i);
-    a2.push(&head_dim_i);
+    let mut a2 = <B::Args<'_>>::default();
+    a2.push_arg(&m_ptr);
+    a2.push_arg(&s_ptr);
+    a2.push_arg(&po_ptr);
+    a2.push_arg(&o_ptr);
+    a2.push_arg(&n_heads_q_i);
+    a2.push_arg(&n_chunks_i);
+    a2.push_arg(&head_dim_i);
     let cfg2 = LaunchCfg {
         grid: (n_heads_q as u32, 1, 1),
         block: (head_dim as u32, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { k_combine.launch(ctx.stream, cfg2, a2)? };
+    B::launch(&k_combine, stream, cfg2, a2)?;
 
     Ok(())
 }
@@ -952,8 +956,9 @@ pub fn attention_decode_q8_kv_splitk(
 ///   was stuck on the oracle path (~0.90× F16). Used by the batched-Q8-
 ///   prefill driver — replaces the per-token Q8 prefill fallback with
 ///   one launch per layer per ubatch chunk.
-pub fn attention_prefill_q8_kv(
-    ctx: crate::OpCtx<'_>,
+pub fn attention_prefill_q8_kv<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     buffers: crate::AttnBuffers,
     shape: crate::AttnPrefillShape,
     knobs: crate::AttnKnobs,
@@ -993,27 +998,27 @@ pub fn attention_prefill_q8_kv(
         // would push LDS tile size to 32 KB at BC=16); falls back to
         // the oracle single-pass kernel below, which now handles
         // d=512 via cross-wave LDS reduction.
-        let module = ctx.reg.expect_module("attention_prefill_flash_tile_q8_kv")?;
+        let module = reg.expect_module("attention_prefill_flash_tile_q8_kv")?;
         let entry = match head_dim {
             64 => "flambeau_attention_prefill_flash_tile_d64_q8_kv",
             128 => "flambeau_attention_prefill_flash_tile_d128_q8_kv",
             256 => "flambeau_attention_prefill_flash_tile_d256_br8_q8_kv",
             _ => unreachable!(),
         };
-        let kernel = module.kernel(entry)?;
-        let mut args = KernelArgs::new();
-        args.push(&q_ptr);
-        args.push(&k_ptr);
-        args.push(&v_ptr);
-        args.push(&o_ptr);
-        args.push(&n_q_i);
-        args.push(&n_heads_q_i);
-        args.push(&n_heads_kv_i);
-        args.push(&n_k_i);
-        args.push(&q_off_i);
-        args.push(&scale);
-        args.push(&window_size);
-        args.push(&ring_depth);
+        let kernel = B::kernel(module, entry)?;
+        let mut args = <B::Args<'_>>::default();
+        args.push_arg(&q_ptr);
+        args.push_arg(&k_ptr);
+        args.push_arg(&v_ptr);
+        args.push_arg(&o_ptr);
+        args.push_arg(&n_q_i);
+        args.push_arg(&n_heads_q_i);
+        args.push_arg(&n_heads_kv_i);
+        args.push_arg(&n_k_i);
+        args.push_arg(&q_off_i);
+        args.push_arg(&scale);
+        args.push_arg(&window_size);
+        args.push_arg(&ring_depth);
         let br: u32 = if head_dim == 256 { 8 } else { 4 };
         const WARP: u32 = 64;
         let cfg = LaunchCfg {
@@ -1021,34 +1026,34 @@ pub fn attention_prefill_q8_kv(
             block: (WARP, br, 1),
             shared_bytes: 0,
         };
-        unsafe { kernel.launch(ctx.stream, cfg, args)? };
+        B::launch(&kernel, stream, cfg, args)?;
         return Ok(());
     }
 
     // Oracle path for n_q < 4 (very short prompts / edge shapes).
-    let module = ctx.reg.expect_module("attention_prefill_q8_kv")?;
-    let kernel = module.kernel("flambeau_attention_prefill_q8_kv")?;
+    let module = reg.expect_module("attention_prefill_q8_kv")?;
+    let kernel = B::kernel(module, "flambeau_attention_prefill_q8_kv")?;
     let head_dim_i = head_dim as i32;
-    let mut args = KernelArgs::new();
-    args.push(&q_ptr);
-    args.push(&k_ptr);
-    args.push(&v_ptr);
-    args.push(&o_ptr);
-    args.push(&n_q_i);
-    args.push(&n_heads_q_i);
-    args.push(&n_heads_kv_i);
-    args.push(&head_dim_i);
-    args.push(&n_k_i);
-    args.push(&q_off_i);
-    args.push(&scale);
-    args.push(&window_size);
-    args.push(&ring_depth);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&q_ptr);
+    args.push_arg(&k_ptr);
+    args.push_arg(&v_ptr);
+    args.push_arg(&o_ptr);
+    args.push_arg(&n_q_i);
+    args.push_arg(&n_heads_q_i);
+    args.push_arg(&n_heads_kv_i);
+    args.push_arg(&head_dim_i);
+    args.push_arg(&n_k_i);
+    args.push_arg(&q_off_i);
+    args.push_arg(&scale);
+    args.push_arg(&window_size);
+    args.push_arg(&ring_depth);
     let cfg = LaunchCfg {
         grid: (n_q_tokens as u32, n_heads_q as u32, 1),
         block: ((head_dim / 4) as u32, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(ctx.stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 
@@ -1058,16 +1063,16 @@ pub fn attention_prefill_q8_kv(
 /// first half is Q, second half is the output gate. Q goes into the
 /// attention kernel; gate is held for a silu-multiply after attention.
 /// Launch: `(n_tokens, n_heads, ceil(head_dim/128))` × 128 threads.
-pub fn split_q_gate_f16(
-    ctx: crate::OpCtx<'_>,
+pub fn split_q_gate_f16<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     bufs: crate::SplitQGateBuffers,
     shape: crate::SplitQGateShape,
 ) -> Result<()> {
-    let crate::OpCtx { reg, stream } = ctx;
     let crate::SplitQGateBuffers { fused_qg, q_out, gate_out } = bufs;
     let crate::SplitQGateShape { n_tokens, n_heads, head_dim } = shape;
     let module = reg.expect_module("split_q_gate_f16")?;
-    let kernel = module.kernel("flambeau_split_q_gate_f16")?;
+    let kernel = B::kernel(module, "flambeau_split_q_gate_f16")?;
 
     let n_tokens_i = n_tokens as i32;
     let n_heads_i = n_heads as i32;
@@ -1075,13 +1080,13 @@ pub fn split_q_gate_f16(
     let f_ptr: u64 = fused_qg.as_usize() as u64;
     let q_ptr: u64 = q_out.as_usize() as u64;
     let g_ptr: u64 = gate_out.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&f_ptr);
-    args.push(&q_ptr);
-    args.push(&g_ptr);
-    args.push(&n_tokens_i);
-    args.push(&n_heads_i);
-    args.push(&head_dim_i);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&f_ptr);
+    args.push_arg(&q_ptr);
+    args.push_arg(&g_ptr);
+    args.push_arg(&n_tokens_i);
+    args.push_arg(&n_heads_i);
+    args.push_arg(&head_dim_i);
     let threads = 128u32;
     let grid_z = (head_dim as u32).div_ceil(threads);
     let cfg = LaunchCfg {
@@ -1089,7 +1094,7 @@ pub fn split_q_gate_f16(
         block: (threads, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 
@@ -1105,13 +1110,14 @@ pub fn split_q_gate_f16(
 /// - The per-(q_token, q_head) oracle kernel (`attention_prefill_f16`)
 ///   otherwise. Shape grid covers the n_q < 4 edge that flash-tile's
 ///   BR=4 coop-load pattern under-utilises.
-pub fn attention_prefill_f16(
-    ctx: crate::OpCtx<'_>,
+pub fn attention_prefill_f16<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     buffers: crate::AttnBuffers,
     shape: crate::AttnPrefillShape,
     knobs: crate::AttnKnobs,
 ) -> Result<()> {
-    attention_prefill_f16_slots(ctx, buffers, shape, knobs, None)
+    attention_prefill_f16_slots(reg, stream, buffers, shape, knobs, None)
 }
 
 /// Graph-captureable variant of [`attention_prefill_f16`].
@@ -1130,8 +1136,9 @@ pub fn attention_prefill_f16(
 ///   selected. Capturing at a particular n_q and replaying at a different
 ///   n_q is unsupported (different path → different node layout).
 ///   [`ScalarSlot`]: flambeau_backend_hip::ScalarSlot
-pub fn attention_prefill_f16_slots(
-    ctx: crate::OpCtx<'_>,
+pub fn attention_prefill_f16_slots<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     buffers: crate::AttnBuffers,
     shape: crate::AttnPrefillShape,
     knobs: crate::AttnKnobs,
@@ -1173,7 +1180,7 @@ pub fn attention_prefill_f16_slots(
 
     if use_flash_tile {
         // BR=4 LDS-tiled kernel.
-        let module = ctx.reg.expect_module("attention_prefill_flash_tile_f16")?;
+        let module = reg.expect_module("attention_prefill_flash_tile_f16")?;
         let entry = match head_dim {
             64 => "flambeau_attention_prefill_flash_tile_d64_f16",
             128 => "flambeau_attention_prefill_flash_tile_d128_f16",
@@ -1181,20 +1188,20 @@ pub fn attention_prefill_f16_slots(
             512 => "flambeau_attention_prefill_flash_tile_d512_f16",
             _ => unreachable!(),
         };
-        let kernel = module.kernel(entry)?;
-        let mut args = KernelArgs::new();
-        args.push(&q_ptr);
-        args.push(&k_ptr);
-        args.push(&v_ptr);
-        args.push(&o_ptr);
-        args.push(&n_q_i);
-        args.push(&n_heads_q_i);
-        args.push(&n_heads_kv_i);
+        let kernel = B::kernel(module, entry)?;
+        let mut args = <B::Args<'_>>::default();
+        args.push_arg(&q_ptr);
+        args.push_arg(&k_ptr);
+        args.push_arg(&v_ptr);
+        args.push_arg(&o_ptr);
+        args.push_arg(&n_q_i);
+        args.push_arg(&n_heads_q_i);
+        args.push_arg(&n_heads_kv_i);
         push_scalar_maybe_slot(&mut args, &n_k_i, n_k_slot);
         push_scalar_maybe_slot(&mut args, &q_off_i, q_off_slot);
-        args.push(&scale);
-        args.push(&window_size);
-        args.push(&ring_depth);
+        args.push_arg(&scale);
+        args.push_arg(&window_size);
+        args.push_arg(&ring_depth);
         // BR depends on which variant we dispatch to.
         // d256_br8 uses BR=8 (more Q rows per block, fewer blocks);
         // other head_dims still use BR=4.
@@ -1205,47 +1212,47 @@ pub fn attention_prefill_f16_slots(
             block: (WARP, br, 1),
             shared_bytes: 0,
         };
-        unsafe { kernel.launch(ctx.stream, cfg, args)? };
+        B::launch(&kernel, stream, cfg, args)?;
         return Ok(());
     }
 
     // Oracle path for n_q < 4 (very short prompts / edge shapes) or
     // any SWA call (flash_tile is not SWA-aware yet).
-    let module = ctx.reg.expect_module("attention_prefill_f16")?;
-    let kernel = module.kernel("flambeau_attention_prefill_f16")?;
+    let module = reg.expect_module("attention_prefill_f16")?;
+    let kernel = B::kernel(module, "flambeau_attention_prefill_f16")?;
     let head_dim_i = head_dim as i32;
-    let mut args = KernelArgs::new();
-    args.push(&q_ptr);
-    args.push(&k_ptr);
-    args.push(&v_ptr);
-    args.push(&o_ptr);
-    args.push(&n_q_i);
-    args.push(&n_heads_q_i);
-    args.push(&n_heads_kv_i);
-    args.push(&head_dim_i);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&q_ptr);
+    args.push_arg(&k_ptr);
+    args.push_arg(&v_ptr);
+    args.push_arg(&o_ptr);
+    args.push_arg(&n_q_i);
+    args.push_arg(&n_heads_q_i);
+    args.push_arg(&n_heads_kv_i);
+    args.push_arg(&head_dim_i);
     push_scalar_maybe_slot(&mut args, &n_k_i, n_k_slot);
     push_scalar_maybe_slot(&mut args, &q_off_i, q_off_slot);
-    args.push(&scale);
-    args.push(&window_size);
-    args.push(&ring_depth);
+    args.push_arg(&scale);
+    args.push_arg(&window_size);
+    args.push_arg(&ring_depth);
     let cfg = LaunchCfg {
         grid: (n_q_tokens as u32, n_heads_q as u32, 1),
         block: (head_dim as u32, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(ctx.stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
 
 #[inline]
-fn push_scalar_maybe_slot<'a, T: 'a>(
-    args: &mut KernelArgs<'a>,
+fn push_scalar_maybe_slot<'a, A: LaunchArgs<'a>, T: 'a>(
+    args: &mut A,
     v: &'a T,
-    slot: Option<flambeau_backend_hip::ScalarSlot>,
+    slot: Option<flambeau_core::ScalarSlot>,
 ) {
     match slot {
         Some(s) => args.push_slot(v, s),
-        None => args.push(v),
+        None => args.push_arg(v),
     }
 }
 
@@ -1258,8 +1265,9 @@ fn push_scalar_maybe_slot<'a, T: 'a>(
 /// `k_cache` / `v_cache`: F16 [max_seq, n_kv_heads, head_dim] slot.
 /// `write_pos`: starting row offset within the slot.
 /// `head_dim` ∈ {64, 128, 256, 512}.
-pub fn kv_append_v_unit_norm_f16(
-    ctx: crate::OpCtx<'_>,
+pub fn kv_append_v_unit_norm_f16<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
     buf: crate::KvAppendBuffers,
     shape: crate::KvAppendVUnitShape,
     write_pos: usize,
@@ -1274,8 +1282,8 @@ pub fn kv_append_v_unit_norm_f16(
             "kv_append_v_unit_norm_f16: head_dim {other} not in {{64, 128, 256, 512}}"
         ),
     };
-    let module = ctx.reg.expect_module("kv_append_v_unit_norm_f16")?;
-    let kernel = module.kernel(entry)?;
+    let module = reg.expect_module("kv_append_v_unit_norm_f16")?;
+    let kernel = B::kernel(module, entry)?;
 
     let n_kv_heads_i = shape.n_kv_heads as i32;
     let write_pos_i = write_pos as i32;
@@ -1284,20 +1292,20 @@ pub fn kv_append_v_unit_norm_f16(
     let v_src_p: u64 = buf.v_src.as_usize() as u64;
     let k_dst_p: u64 = buf.k_dst.as_usize() as u64;
     let v_dst_p: u64 = buf.v_dst.as_usize() as u64;
-    let mut args = flambeau_backend_hip::KernelArgs::new();
-    args.push(&k_src_p);
-    args.push(&v_src_p);
-    args.push(&k_dst_p);
-    args.push(&v_dst_p);
-    args.push(&n_kv_heads_i);
-    args.push(&write_pos_i);
-    args.push(&eps);
-    args.push(&ring_depth_i);
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&k_src_p);
+    args.push_arg(&v_src_p);
+    args.push_arg(&k_dst_p);
+    args.push_arg(&v_dst_p);
+    args.push_arg(&n_kv_heads_i);
+    args.push_arg(&write_pos_i);
+    args.push_arg(&eps);
+    args.push_arg(&ring_depth_i);
     let cfg = flambeau_backend_hip::LaunchCfg {
         grid: (shape.n_tokens as u32, shape.n_kv_heads as u32, 1),
         block: (shape.head_dim as u32, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(ctx.stream, cfg, args)? };
+    B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }

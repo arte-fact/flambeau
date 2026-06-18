@@ -4,7 +4,7 @@
 //! no concrete `HipModule` / `CudaModule`. One impl per backend (`HipKernels`,
 //! `CudaKernels`) wraps the existing concrete types.
 
-use crate::{Device, DeviceResult, KernelDescriptor, LaunchCfg, QMatMulCfg};
+use crate::{Device, DeviceResult, KernelDescriptor, LaunchCfg, QMatMulCfg, ScalarSlot};
 
 /// Push kernel arguments by reference without naming a backend's concrete args
 /// type. Implemented for each backend's `KernelArgs` — a local trait on a
@@ -12,6 +12,14 @@ use crate::{Device, DeviceResult, KernelDescriptor, LaunchCfg, QMatMulCfg};
 pub trait LaunchArgs<'a>: Default {
     /// Push an argument by reference; the referent must outlive the launch.
     fn push_arg<T>(&mut self, v: &'a T);
+
+    /// Push an argument and tag it with a graph-capture [`ScalarSlot`] for
+    /// per-replay rebind. The default ignores the slot (plain push) — correct
+    /// for backends without a graph slot-map; HIP overrides it to record the
+    /// tag so `HipGraphExec` can rebind the arg between replays.
+    fn push_slot<T>(&mut self, v: &'a T, _slot: ScalarSlot) {
+        self.push_arg(v);
+    }
 }
 
 /// A GPU backend's launch plane: load a module, resolve an entry, launch it.

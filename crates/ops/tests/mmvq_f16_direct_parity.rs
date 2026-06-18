@@ -625,7 +625,7 @@ fn run_parity(dev: &HipDevice, dtype: QDtype, n_rows: usize, k: usize) -> Result
     let dst_f16_direct = dev.alloc(n_rows * 2).unwrap();
 
     mmvq(
-        flambeau_ops::OpCtx { reg: &reg, stream },
+        &reg, stream,
         flambeau_ops::MmvqBuffers {
             weights: w_dev,
             act_q8_1: act_dev,
@@ -636,7 +636,7 @@ fn run_parity(dev: &HipDevice, dtype: QDtype, n_rows: usize, k: usize) -> Result
     )?;
     cast_f32_to_f16(&reg, stream, dst_f32, dst_f16_via_cast, n_rows)?;
     mmvq_f16_direct(
-        flambeau_ops::OpCtx { reg: &reg, stream },
+        &reg, stream,
         flambeau_ops::MmvqBuffers {
             weights: w_dev,
             act_q8_1: act_dev,

@@ -3192,7 +3192,7 @@ pub fn moe_combine_two_residuals_f16<B: flambeau_core::KernelBackend>(
 /// showed up in `forward_*_prefill` profiles; for Qwen3.6 with 256 experts
 /// that's a ~256-entry dense Vec — trivially cheaper than the HashMap
 /// round-trip.
-pub fn build_expert_buckets<B: flambeau_core::KernelBackend>(
+pub fn build_expert_buckets(
     expert_ids: &[i32],
     n_tokens: usize,
     top_k: usize,

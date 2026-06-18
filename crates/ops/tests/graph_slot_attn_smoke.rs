@@ -121,7 +121,7 @@ fn attention_prefill_slot_update_parity() -> Result<()> {
 
     // === 1. Reference: uncaptured attn at (N_K_FINAL, Q_OFF_FINAL). ===
     attention_prefill_f16(
-        flambeau_ops::OpCtx { reg: &reg, stream: &stream },
+        &reg, &stream,
         flambeau_ops::AttnBuffers { q: q_dev, k: k_dev, v: v_dev, out: out_ref_dev },
         flambeau_ops::AttnPrefillShape { n_q_tokens: N_Q, n_heads_q: N_HEADS_Q, n_heads_kv: N_HEADS_KV, head_dim: HEAD_DIM, n_k_tokens: N_K_FINAL, q_offset: Q_OFF_FINAL },
         flambeau_ops::AttnKnobs { scale, window_size: 0, ring_depth: 0 },
@@ -135,7 +135,7 @@ fn attention_prefill_slot_update_parity() -> Result<()> {
     let cap_stream = HipStream::new_non_blocking(0).unwrap();
     let exec = HipGraphExec::capture(&cap_stream, |s| {
         attention_prefill_f16_slots(
-            flambeau_ops::OpCtx { reg: &reg, stream: s },
+            &reg, s,
             flambeau_ops::AttnBuffers { q: q_dev, k: k_dev, v: v_dev, out: out_capt_dev },
             flambeau_ops::AttnPrefillShape { n_q_tokens: N_Q, n_heads_q: N_HEADS_Q, n_heads_kv: N_HEADS_KV, head_dim: HEAD_DIM, n_k_tokens: N_K_INIT, q_offset: Q_OFF_INIT },
             flambeau_ops::AttnKnobs { scale, window_size: 0, ring_depth: 0 },
@@ -177,7 +177,7 @@ fn attention_prefill_slot_update_parity() -> Result<()> {
 
     let out_init_ref_dev = dev.alloc(out_bytes).unwrap();
     attention_prefill_f16(
-        flambeau_ops::OpCtx { reg: &reg, stream: &stream },
+        &reg, &stream,
         flambeau_ops::AttnBuffers { q: q_dev, k: k_dev, v: v_dev, out: out_init_ref_dev },
         flambeau_ops::AttnPrefillShape { n_q_tokens: N_Q, n_heads_q: N_HEADS_Q, n_heads_kv: N_HEADS_KV, head_dim: HEAD_DIM, n_k_tokens: N_K_INIT, q_offset: Q_OFF_INIT },
         flambeau_ops::AttnKnobs { scale, window_size: 0, ring_depth: 0 },

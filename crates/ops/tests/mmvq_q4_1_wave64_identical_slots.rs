@@ -177,7 +177,7 @@ fn mmvq_q4_1_wave64_identical_slots() -> Result<()> {
     let dst_bytes = n_slots * n_rows * 4;
     let d_dst = alloc_zeroed(&dev, dst_bytes);
     qmatmul(
-        flambeau_ops::OpCtx { reg: &reg, stream },
+        &reg, stream,
         flambeau_ops::QmatmulBuffers {
             weights: d_w,
             act_q8_1: d_act_q8_1,

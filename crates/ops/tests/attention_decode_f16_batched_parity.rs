@@ -175,10 +175,7 @@ fn run_parity(
         let q_row = DevicePtr(d_q_batched.as_usize() + q_off);
         let out_row = DevicePtr(d_out_serial.as_usize() + q_off);
         attention_decode_f16_slots(
-            flambeau_ops::OpCtx {
-                reg: &reg,
-                stream,
-            },
+            &reg, stream,
             flambeau_ops::AttnBuffers {
                 q: q_row,
                 k: d_k_per_slot[s],
@@ -203,10 +200,7 @@ fn run_parity(
 
     // 6. Batched: single launch.
     attention_decode_f16_batched(
-        flambeau_ops::OpCtx {
-            reg: &reg,
-            stream,
-        },
+        &reg, stream,
         flambeau_ops::AttnBatchedBuffers {
             q_batched: d_q_batched,
             k_cache_ptrs: d_k_ptrs,
