@@ -2269,7 +2269,7 @@ impl Recipe {
             // 4warp_lds structure with bias-correction in the dot. Closes
             // the 2.5× dense-prefill gap (27B-Q4_0 73 → ~190 tok/s pp4).
             // MUST match mmq_q4_0_4warp_lds.cu's MMQ_Y=128, MMQ_X=64.
-            "qmatmul_q4_0_mmq_4warp_lds_gfx906" => Self {
+            "qmatmul_q4_0_mmq_4warp_lds_gfx906" | "qmatmul_q4_0_mmq_4warp_lds" => Self {
                 kind: RecipeKind::MmqLdsX64,
                 stem: "mmq_q4_0_4warp_lds",
                 entry: "flambeau_mmq_q4_0_4warp_lds_q8_1",
