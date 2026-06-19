@@ -5,10 +5,12 @@
 // d·(d_y·Σq·q8 − 8·y_s). The hand kernel's "wave64" is a LOGICAL 64-wide tile
 // (LANES), not a hardware warp: all cross-thread comms are LDS + __syncthreads,
 // there are NO __shfl/warp-reduce ops, so launching block (LANES, NWARPS)=(64,4)
-// is correct on both wave64 and wave32. Backend-neutral: `dp4a` + the neutral
-// `mmq_prefetch_*` seam from the arch headers; weight int loads via `load_int_b2`
-// (Q4_0 qs at block-offset 2); the (d, m) / (d_y, y_s) pairs are read as two
-// `fb_fp16_t` (the byte layout the DS4 quantizer writes). `OutT` is the dest dtype.
+// is correct on both wave64 and wave32. Backend-neutral: `dp4a`; weight int loads
+// via `load_int_b2` (Q4_0 qs at block-offset 2); the (d, m) / (d_y, y_s) pairs are
+// read as two `fb_fp16_t` (the byte layout the DS4 quantizer writes). `OutT` is the
+// dest dtype. No L2 prefetch: the gfx906 `mmq_prefetch_*` intrinsics miscompile
+// (IMA) under the >64-VGPR allocation this kernel needs to stay spill-free, and
+// dropping them is a net prefill win on gfx906 (spill-elimination > prefetch).
 #include "quant_traits.cuh"
 #include "mmvq_store.cuh"
 
@@ -61,26 +63,12 @@ static __device__ __forceinline__ void mmq_q4_0_4warp_lds_row(
     const int n_blocks_x = ncols_x / QK4_0;
     const int kb0_stop = (n_blocks_x + blocks_per_iter - 1) / blocks_per_iter * blocks_per_iter;
     const int i_max = nrows_x - it * MMQ_Y - 1;
-    constexpr int q4_0_block_bytes = 18;
 
     const bool need_check = (it + 1) * MMQ_Y > nrows_x;
 
     for (int kb0 = 0; kb0 < kb0_stop; kb0 += blocks_per_iter) {
         const int kb_remaining =
             (n_blocks_x - kb0 < blocks_per_iter) ? (n_blocks_x - kb0) : blocks_per_iter;
-
-        // -- L2 prefetch of next iter's X/Y tiles (gfx906 real, CUDA no-op).
-        const int kb0_next = kb0 + blocks_per_iter;
-        if (kb0_next < kb0_stop) {
-            const int* by_next0 = y_base + (size_t) stride_col_y * (kb0_next / 4) * MMQ_INTS;
-            const int yp = mmq_prefetch_y_next(by_next0);
-            const long long off_x_next =
-                ((long long) it * MMQ_Y * stride_row_x + kb0_next) * q4_0_block_bytes;
-            const int xp = mmq_prefetch_x_next((const char*) vx, (int) off_x_next,
-                                               stride_row_x * q4_0_block_bytes);
-            mmq_prefetch_consume(yp);
-            mmq_prefetch_consume(xp);
-        }
 
         // -- Load X tile (quants + (d, m=0) pairs) into LDS.
         {
