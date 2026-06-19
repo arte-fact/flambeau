@@ -276,8 +276,12 @@ the certs are green. The remaining 18 single-row / r2 reference oracles were the
 swapping the wave64 reduce for the warp-size-agnostic `mmvq_reduce_store<64>` /
 `mmvq_reduce_store_group<32>`; the registry now skips **zero** IQ stems. **All 63 IQ
 stems build + are certified on sm_86** (9 IQ types × base/r2/dp4a green at 15 shapes
-each). A real end-to-end IQ *model* run additionally needs the Qwen3.6 model crate
-(the only on-disk IQ GGUFs are Qwen3.6) — separate model-breadth work.
+each). The on-disk IQ GGUFs are "Qwen3.6", but that's a release label — they
+declare `general.architecture` = `qwen35` (the 27B dense) / `qwen35moe` (the
+35B-A3B), which the existing `qwen35-v2` / `qwen35moe-v2` crates already handle
+(the server `match`es on the arch string). So an end-to-end IQ model run needs no
+new crate — just a direct `ForwardEngine<CudaBackend>` harness (the `serve` path is
+HIP-concrete), e.g. `Qwen3.6-27B-IQ4_NL` (16 GB, fits the RTX) via `qwen35-v2`.
 The same wave64 launch hard-code in `launch/recurrent.rs` (GDN/qwen3-next state
 step) was fixed alongside (`12548bbe`, `block:(B::WARP_SIZE, …)`); the GDN kernel
 was already warp-width-neutral, so it's a pure launch fix (HIP unchanged, the
