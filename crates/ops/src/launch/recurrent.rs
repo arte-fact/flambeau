@@ -20,8 +20,9 @@ use flambeau_core::DevicePtr;
 ///   `n_rep = H_v / H_kv` drives implicit GQA broadcast for Q/K (no caller-side
 ///   expand). `n_rep = 1` reduces to the no-GQA path.
 ///   Launch: grid `(H, B, ceil(S_v / warps_per_block))`, block
-///   `(WARP_SIZE=64, 4, 1)` — 4 warps per block, each warp owns one output
-///   column. `warps_per_block = 4` ⇒ grid_z = `S_v / 4 = 32` at S_v=128.
+///   `(B::WARP_SIZE, 4, 1)` — 4 warps per block, each warp owns one output
+///   column (`S_v / WARP_SIZE` rows per lane: 2 on gfx906, 4 on sm_8x).
+///   `warps_per_block = 4` ⇒ grid_z = `S_v / 4 = 32` at S_v=128.
 pub fn gdn_state_step_f32_s128<B: flambeau_core::KernelBackend>(
     reg: &crate::Registry<B>,
     stream: &<B::Device as flambeau_core::Device>::Stream,
@@ -31,7 +32,6 @@ pub fn gdn_state_step_f32_s128<B: flambeau_core::KernelBackend>(
     let crate::GdnStepBuffers { q, k, v, gate, beta, state_in, state_out, attn_out } = bufs;
     let crate::GdnStepShape { b, h_v, l, n_rep, rep_inner_layout } = shape;
     const S_V: u32 = 128;
-    const WARP_SIZE: u32 = 64;
     const WARPS_PER_BLOCK: u32 = 4;
 
     let module = reg.expect_module("gdn_state_step_f32")?;
@@ -68,7 +68,7 @@ pub fn gdn_state_step_f32_s128<B: flambeau_core::KernelBackend>(
     let grid_z = S_V / WARPS_PER_BLOCK;
     let cfg = LaunchCfg {
         grid: (h_v as u32, b as u32, grid_z),
-        block: (WARP_SIZE, WARPS_PER_BLOCK, 1),
+        block: (B::WARP_SIZE, WARPS_PER_BLOCK, 1),
         shared_bytes: 0,
     };
     B::launch(&kernel, stream, cfg, args)?;
@@ -164,7 +164,6 @@ pub fn gdn_state_step_alphabeta_f32_s128<B: flambeau_core::KernelBackend>(
     } = bufs;
     let crate::GdnStepShape { b, h_v, l, n_rep, rep_inner_layout } = shape;
     const S_V: u32 = 128;
-    const WARP_SIZE: u32 = 64;
     const WARPS_PER_BLOCK: u32 = 4;
 
     let module = reg.expect_module("gdn_state_step_alphabeta_f32")?;
@@ -205,7 +204,7 @@ pub fn gdn_state_step_alphabeta_f32_s128<B: flambeau_core::KernelBackend>(
     let grid_z = S_V / WARPS_PER_BLOCK;
     let cfg = LaunchCfg {
         grid: (h_v as u32, b as u32, grid_z),
-        block: (WARP_SIZE, WARPS_PER_BLOCK, 1),
+        block: (B::WARP_SIZE, WARPS_PER_BLOCK, 1),
         shared_bytes: 0,
     };
     B::launch(&kernel, stream, cfg, args)?;
@@ -244,7 +243,6 @@ pub fn gdn_state_step_alphabeta_f32_s128_batched_slots<B: flambeau_core::KernelB
     } = bufs;
     let crate::GdnStepShape { b, h_v, l, n_rep, rep_inner_layout } = shape;
     const S_V: u32 = 128;
-    const WARP_SIZE: u32 = 64;
     const WARPS_PER_BLOCK: u32 = 4;
 
     let module = reg.expect_module("gdn_state_step_alphabeta_f32_batched_slots")?;
@@ -285,7 +283,7 @@ pub fn gdn_state_step_alphabeta_f32_s128_batched_slots<B: flambeau_core::KernelB
     let grid_z = S_V / WARPS_PER_BLOCK;
     let cfg = LaunchCfg {
         grid: (h_v as u32, b as u32, grid_z),
-        block: (WARP_SIZE, WARPS_PER_BLOCK, 1),
+        block: (B::WARP_SIZE, WARPS_PER_BLOCK, 1),
         shared_bytes: 0,
     };
     B::launch(&kernel, stream, cfg, args)?;
