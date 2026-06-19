@@ -1,9 +1,16 @@
 //! Real-model cross-backend parity for an **i-quant** model: load
 //! `Qwen3.6-27B-IQ2_XXS` (arch `qwen35`) on HIP gfx906 and CUDA sm_86, prefill a
-//! chat prompt then greedily generate, and check CUDA reproduces llama.cpp's
-//! greedy continuation exactly. Exercises the ported IQ2_XXS decode kernels end
-//! to end. ("Qwen3.6" is a release label — the GGUF arch is `qwen35`, handled by
-//! this crate.) Skips when the model is absent.
+//! chat prompt then greedily generate. CUDA reproduces HIP's greedy continuation
+//! token-for-token (the correctness proof for the ported IQ decode kernels).
+//! ("Qwen3.6" is a release label — the GGUF arch is `qwen35`.) Skips when absent.
+//!
+//! 2-bit IQ2_XXS is the default because it fits the 16 GB MI50 for the HIP
+//! cross-check; its flat logits mean greedy splits from llama.cpp at near-ties.
+//! The sharper 4-bit **IQ4_NL matches llama.cpp exactly** (10/10), like Q4_K —
+//! reproduce with (HIP OOMs at 16 GB, so it's a CUDA-vs-llama.cpp check):
+//!   FLAMBEAU_TEST_QWEN_IQ=…/Qwen3.6-27B-IQ4_NL.gguf \
+//!   FLAMBEAU_TEST_LLAMACPP_REF=248068,271,248069,271,760,6511,314,9338,369,2972 \
+//!   cargo test -p flambeau-qwen35-v2 --features hip,cuda --test real_gguf_cuda_parity
 
 #![cfg(all(feature = "hip", feature = "cuda"))]
 

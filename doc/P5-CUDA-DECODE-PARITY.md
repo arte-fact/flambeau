@@ -279,12 +279,18 @@ stems build + are certified on sm_86** (9 IQ types × base/r2/dp4a green at 15 s
 each). The on-disk IQ GGUFs are "Qwen3.6", but that's a release label — they
 declare `general.architecture` = `qwen35` (the 27B dense) / `qwen35moe` (the
 35B-A3B), handled by the existing `qwen35-v2` / `qwen35moe-v2` crates (no new crate
-needed). **Validated end-to-end** (`d84426c8`): `Qwen3.6-27B-IQ2_XXS` (9.4 GB,
-2-bit) loaded via `qwen35-v2` through a direct `ForwardEngine<CudaBackend>` harness
-(the `serve` path is HIP-concrete) — CUDA reproduces HIP's greedy continuation
-**token-for-token** (10/10, cosine 0.998), both starting the correct qwen
-thinking-mode output. (llama.cpp greedy splits after 2 tokens — at 2-bit every step
-is a near-tie; the HIP↔CUDA exact match is the proof.)
+needed). **Validated end-to-end** (`d84426c8`) via `qwen35-v2` through a direct
+`ForwardEngine<CudaBackend>` harness (the `serve` path is HIP-concrete):
+- `Qwen3.6-27B-IQ2_XXS` (9.4 GB, 2-bit): CUDA reproduces HIP's greedy continuation
+  **token-for-token** (10/10, cosine 0.998) — the cross-backend correctness proof.
+  llama.cpp greedy splits after 2 tokens (at 2-bit every step is a near-tie).
+- `Qwen3.6-27B-IQ4_NL` (16 GB, 4-bit): CUDA matches **llama.cpp exactly** (10/10 —
+  "`<think></think>\n\nThe capital of France is **Paris**`"), like the gemma Q4_K
+  oracle match. (HIP OOMs at 16 GB on the MI50, so this leg is CUDA-vs-llama.cpp.)
+
+Together these pin the IQ CUDA path against both oracles: it matches HIP exactly
+(2-bit) and llama.cpp exactly (4-bit) — the 2-bit/llama.cpp split is purely
+near-tie sensitivity, not a defect.
 The same wave64 launch hard-code in `launch/recurrent.rs` (GDN/qwen3-next state
 step) was fixed alongside (`12548bbe`, `block:(B::WARP_SIZE, …)`); the GDN kernel
 was already warp-width-neutral, so it's a pure launch fix (HIP unchanged, the
