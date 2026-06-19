@@ -35,6 +35,7 @@ pub fn run_one(kernel_stem: &str, m: usize, k: usize, n: usize) -> Result<String
         "mmq_q8_0_4warp" => ("flambeau_mmq_q8_0_4warp_q8_1", 256),
         // candle port: 2D block (64, 4, 1), DS4 Q8_1 activation, 9 args, 30336 B LDS.
         "mmq_q4_1_4warp_lds" => ("flambeau_mmq_q4_1_4warp_lds_q8_1", 0),
+        "mmq_q4_0_4warp_lds" => ("flambeau_mmq_q4_0_4warp_lds_q8_1", 0),
         // / K-quant wave64 MMQ ports. All three share the same
         // 8-arg signature and launch shape; only weight block size differs.
         "mmq_q4_K_wave64" => ("flambeau_mmq_q4_K_wave64_q8_1", 64),
@@ -57,6 +58,7 @@ pub fn run_one(kernel_stem: &str, m: usize, k: usize, n: usize) -> Result<String
     // launch geometry; one `if is_mmq` enum isn't enough anymore.
     match kernel_stem {
         "mmq_q4_1_4warp_lds" => run_mmq_q4_1_4warp_lds(&dev, &kernel, m, k, n)?,
+        "mmq_q4_0_4warp_lds" => run_mmq_q4_0_4warp_lds(&dev, &kernel, m, k, n)?,
         "mmq_q4_K_wave64" | "mmq_q5_K_wave64" | "mmq_q6_K_wave64" => {
             run_mmq_k_wave64(&dev, &kernel, kernel_stem, m, k, n)?
         }
@@ -225,6 +227,95 @@ fn run_mmq_q4_1_4warp_lds(
     const MMQ_Y: u32 = 128;
     const MMQ_X: u32 = 64;
     const SHARED_BYTES: u32 = 7584 * 4; // matches ops/src/hip/qmatmul.rs
+    let grid_x = (n as u32).div_ceil(MMQ_Y);
+    let grid_y = (m as u32).div_ceil(MMQ_X);
+    let cfg = LaunchCfg {
+        grid: (grid_x, grid_y, 1),
+        block: (64, 4, 1),
+        shared_bytes: SHARED_BYTES,
+    };
+    unsafe { kernel.launch(dev.default_stream(), cfg, args)? };
+    dev.default_stream().synchronize()?;
+    unsafe {
+        dev.dealloc(d_x, w_bytes)?;
+        dev.dealloc(d_y, y_bytes)?;
+        dev.dealloc(d_dst, m * n * 4)?;
+    }
+    Ok(())
+}
+
+/// Q4_0 4warp-LDS prefill MMQ probe. Identical launch shape to the Q4_1
+/// sibling (MMQ_Y=128, MMQ_X=64, block (64,4,1), 30336 B LDS, 9 args); only the
+/// weight block type differs (Q4_0 = 18 B, no min).
+fn run_mmq_q4_0_4warp_lds(
+    dev: &HipDevice,
+    kernel: &HipKernel<'_>,
+    m: usize,
+    k: usize,
+    n: usize,
+) -> Result<()> {
+    use flambeau_quant::BlockQ4_0;
+    const QK4_0: usize = 32;
+    assert!(k % QK8_1_MMQ == 0, "k={k} must be multiple of {QK8_1_MMQ}");
+    let n_blocks_per_row = k / QK4_0;
+    let n_big_blocks_k = k / QK8_1_MMQ;
+
+    let w_blocks = n * n_blocks_per_row;
+    let w_bytes = w_blocks * std::mem::size_of::<BlockQ4_0>();
+    let w_raw = vec![0u8; w_bytes];
+    let d_x = dev.alloc(w_bytes)?;
+    unsafe {
+        dev.memcpy_async(
+            dev.default_stream(),
+            CopyDirection::HostToDevice,
+            d_x,
+            DevicePtr(w_raw.as_ptr() as usize),
+            w_bytes,
+        )?;
+    }
+    dev.default_stream().synchronize()?;
+
+    let y_blocks = n_big_blocks_k * m;
+    let y_bytes = y_blocks * std::mem::size_of::<BlockQ8_1Mmq>();
+    let d_y = dev.alloc(y_bytes)?;
+    let zero_y = vec![0u8; y_bytes];
+    unsafe {
+        dev.memcpy_async(
+            dev.default_stream(),
+            CopyDirection::HostToDevice,
+            d_y,
+            DevicePtr(zero_y.as_ptr() as usize),
+            y_bytes,
+        )?;
+    }
+    dev.default_stream().synchronize()?;
+
+    let d_dst = dev.alloc(m * n * 4)?;
+
+    let ncols_x = k as i32;
+    let nrows_x = n as i32;
+    let ncols_y = m as i32;
+    let stride_col_y = m as i32;
+    let stride_row_x = n_blocks_per_row as i32;
+    let nrows_dst = n as i32;
+
+    let d_x_ptr: u64 = d_x.as_usize() as u64;
+    let d_y_ptr: u64 = d_y.as_usize() as u64;
+    let d_dst_ptr: u64 = d_dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&d_x_ptr);
+    args.push(&d_y_ptr);
+    args.push(&d_dst_ptr);
+    args.push(&ncols_x);
+    args.push(&nrows_x);
+    args.push(&ncols_y);
+    args.push(&stride_col_y);
+    args.push(&stride_row_x);
+    args.push(&nrows_dst);
+
+    const MMQ_Y: u32 = 128;
+    const MMQ_X: u32 = 64;
+    const SHARED_BYTES: u32 = 7584 * 4;
     let grid_x = (n as u32).div_ceil(MMQ_Y);
     let grid_y = (m as u32).div_ceil(MMQ_X);
     let cfg = LaunchCfg {
