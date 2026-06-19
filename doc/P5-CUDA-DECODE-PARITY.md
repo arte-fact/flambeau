@@ -120,10 +120,11 @@ behaviour-preserving.
 The CUDA toolchain + RTX 3090 are reachable (`/usr/local/cuda-13.3/bin/nvcc`,
 driver 610.43.02). A full `flambeau-kernels-cuda` build compiles **203 / 254**
 `KERNEL_STEMS`. The **53** unbuilt stems split:
-- **18 IQ-quant** (`mmvq_iq*`, `indexed_moe_mmvq_iq*`, `mmq_iq*`) — **out of
-  CLAUDE.md quant scope** (no IQ quants). HIP-inherited cruft in `KERNEL_STEMS`;
-  the cleanup is to **prune them from `KERNEL_STEMS`** (helps HIP too — it stops
-  loading dead modules), not to port them.
+- **18 IQ-quant** (`mmvq_iq*`, `mmvq_iq*_r2`) — the **single-row / r2 reference
+  oracles**, non-dispatched (CUDA dispatches the dp4a variant), so skipped on
+  CUDA exactly like the K-quant base oracles. **The dispatched IQ path — `mmvq_iq*_dp4a`
+  + `mmq_iq*_wave64` + `indexed_moe_mmvq_iq*` (45 stems) — builds and is certified
+  on sm_86.** (i-quants were later declared in scope; see below.)
 - **35 non-IQ** — static `.cu` kernels present in `kernels-hip/src/kernels/` but
   never ported to `kernels-cuda/src/kernels/`. These are **not** manifest-driven
   (the `instantiations.toml` variants, e.g. `mmvq_q4_k_batched`, already build on
@@ -159,7 +160,8 @@ path dispatches** (traced through `dispatch/cuda/sm_86.toml` + `moe_experts.rs`)
   manifest entry so both backends generate it, then a green
   `certs/cuda/sm_86/<impl>.json` (rule 2). The other ~33 missing non-IQ stems
   (legacy single-row oracles, non-dispatched variants) are **not** on the decode
-  path; the 18 IQ stems are out of scope (prune from `KERNEL_STEMS`).
+  path; the 18 IQ stems are the analogous IQ single-row/r2 oracles (the dispatched
+  IQ dp4a path is built + certed on sm_86 — see the i-quant note below).
 
 Tracing the dispatch narrowed the decode-blocking set to **one** kernel: the down
 launch fn picks `indexed_moe_mmvq_q4_k_r2_dp4a` / `_r4_dp4a` by token count (both
@@ -261,6 +263,20 @@ All ported decode kernels are certified (rule 2): `indexed_moe_mmvq_q4_k_gate_up
 Q4_0 decode kernels were new, closing a pre-existing HIP gap too). The whole
 qwen35moe-v2 / gemma-4 Q4_K decode path now builds, runs, matches llama.cpp, and
 is certified on both backends.
+
+### i-quants on CUDA (in scope)
+
+i-quants (IQ1_S/M, IQ2_XXS/XS/S, IQ3_XXS/S, IQ4_NL/XS) were declared in scope and
+turn out to already be supported on CUDA: the dispatched decode path
+(`mmvq_iq*_dp4a`), prefill (`mmq_iq*_wave64`), and indexed-MoE (`indexed_moe_mmvq_iq*`,
+`indexed_moe_mmq_iq*_tile8`) — **45 of the 63 IQ stems** — build on sm_86 from the
+shared manifest, the dispatch impl_ids resolve (`cuda_registry_smoke` asserts all 9
+`qmatmul_iq*_mmvq_dp4a`), and the certs are green (`certs/cuda/sm_86/qmatmul_iq*_mmvq_dp4a.json`
++ the MoE IQ certs; re-validated IQ4_NL / IQ2_XXS / IQ1_S at 15 shapes each). The
+remaining 18 are the single-row / r2 reference oracles — non-dispatched, skipped by
+the load-present registry, same as the K-quant base oracles. A real end-to-end IQ
+*model* run additionally needs the Qwen3.6 model crate (the only on-disk IQ GGUFs
+are Qwen3.6), which is separate model-breadth work.
 The same wave64 launch hard-code in `launch/recurrent.rs` (GDN/qwen3-next state
 step) was fixed alongside (`12548bbe`, `block:(B::WARP_SIZE, …)`); the GDN kernel
 was already warp-width-neutral, so it's a pure launch fix (HIP unchanged, the

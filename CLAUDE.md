@@ -27,7 +27,11 @@ one only with a measured reason.
   - CUDA dev arch: **sm_86 (RTX 3090)**. Baseline sm_80 (A100);
     sm_89/sm_90 forward-compatible.
 - **Quant:** GGUF only. Full coverage: Q2_K, Q3_K, Q4_K, Q5_K, Q6_K,
-  Q8_K, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, F16, BF16, F32.
+  Q8_K, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, F16, BF16, F32. **i-quants in
+  scope** (IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ4_NL,
+  IQ4_XS) — decode (MMVQ dp4a) + prefill (MMQ) + indexed-MoE, certified
+  on gfx906 + sm_86. The non-dispatched single-row / r2 reference oracles
+  stay HIP-only (CUDA dispatch is dp4a, same as the K-quants).
 - **KV cache:** F16 (baseline), Q8 (quantX, candle shape), turbo-quant
   (Q4/Q5 llamacpp-turbo scheme). Static typing; turbo-quant requires a
   quality cert.

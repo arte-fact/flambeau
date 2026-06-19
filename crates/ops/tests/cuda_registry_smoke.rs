@@ -44,6 +44,16 @@ fn cuda_registry_loads_present_skips_unported() {
         "qmatmul_q4_1_mmvq_dp4a",
         "qmatmul_q5_0_mmvq_dp4a",
         "qmatmul_q5_1_mmvq_dp4a",
+        // IQ i-quants (decode dispatch → the dp4a variant, which is built).
+        "qmatmul_iq1_s_mmvq_dp4a",
+        "qmatmul_iq1_m_mmvq_dp4a",
+        "qmatmul_iq2_xxs_mmvq_dp4a",
+        "qmatmul_iq2_xs_mmvq_dp4a",
+        "qmatmul_iq2_s_mmvq_dp4a",
+        "qmatmul_iq3_xxs_mmvq_dp4a",
+        "qmatmul_iq3_s_mmvq_dp4a",
+        "qmatmul_iq4_nl_mmvq_dp4a",
+        "qmatmul_iq4_xs_mmvq_dp4a",
     ];
     for impl_id in decode_impls {
         let stem = flambeau_ops::qmatmul::recipe_stem_for(impl_id)
