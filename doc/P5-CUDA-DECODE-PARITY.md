@@ -255,9 +255,12 @@ token-for-token against llama.cpp.** The decode path (prefill + multi-token
 generation) is correct end to end; CUDA reproduces the reference implementation's
 greedy output exactly. Cross-backend HIP↔CUDA agrees on argmax + high-confidence
 tokens and drifts only at low-margin near-ties (wave64↔wave32 F16 rounding).
-Remaining housekeeping: formal sweep certs for the ported Q4_0 decode kernels
-(`mmvq_q4_0_kv_f16dst`, `mmvq_q4_0_gate_up_t128`) — currently validated by the
-exact llama.cpp + cross-backend match.
+All ported decode kernels are certified (rule 2): `indexed_moe_mmvq_q4_k_gate_up_r4`,
+`mmvq_q4_0_gate_up_t128_dp4a`, and `mmvq_q4_0_kv_f16dst` each have green
+`certs/{cuda/sm_86,hip/gfx906}/*.json` (`d0562a9c` — the gfx906 certs for the two
+Q4_0 decode kernels were new, closing a pre-existing HIP gap too). The whole
+qwen35moe-v2 / gemma-4 Q4_K decode path now builds, runs, matches llama.cpp, and
+is certified on both backends.
 The same wave64 launch hard-code in `launch/recurrent.rs` (GDN/qwen3-next state
 step) was fixed alongside (`12548bbe`, `block:(B::WARP_SIZE, …)`); the GDN kernel
 was already warp-width-neutral, so it's a pure launch fix (HIP unchanged, the
