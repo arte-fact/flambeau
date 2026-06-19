@@ -1391,8 +1391,11 @@ fn pmc_probe(kernel: &str, m: usize, k: usize, n: usize) -> Result<()> {
 }
 
 fn autotune(arch: &str, op: &str, dtype: &str, emit: bool, check: bool) -> Result<()> {
+    if op == "qmatmul_mmq" {
+        return autotune_mmq(arch, dtype);
+    }
     if op != "qmatmul" {
-        anyhow::bail!("autotune currently supports only --op qmatmul (mmvq)");
+        anyhow::bail!("autotune supports --op qmatmul (mmvq decode) or qmatmul_mmq (prefill)");
     }
     if emit && check {
         anyhow::bail!("autotune: --emit and --check are mutually exclusive");
@@ -1472,6 +1475,29 @@ fn autotune(arch: &str, op: &str, dtype: &str, emit: bool, check: bool) -> Resul
     #[cfg(not(any(feature = "hip_sweep", feature = "cuda_sweep")))]
     {
         let _ = (arch, dtype, emit, check);
+        anyhow::bail!("autotune requires --features hip_sweep and/or cuda_sweep")
+    }
+}
+
+fn autotune_mmq(arch: &str, dtype: &str) -> Result<()> {
+    #[cfg(any(feature = "hip_sweep", feature = "cuda_sweep"))]
+    {
+        use flambeau_bench::sweep_mmvq::autotune_mmq as run;
+        // M = n_tokens grid spanning the prefill dispatch bands (32..127 wave64,
+        // >=128 4warp_lds), at a representative projection (n_out, k).
+        let m_grid = [64usize, 128, 512];
+        let (n_out, k) = (4096usize, 4096);
+        match arch {
+            #[cfg(feature = "hip_sweep")]
+            "gfx906" => run::<flambeau_bench::backend::Hip>(arch, dtype, &m_grid, n_out, k),
+            #[cfg(feature = "cuda_sweep")]
+            "sm_86" => run::<flambeau_bench::backend::Cuda>(arch, dtype, &m_grid, n_out, k),
+            other => anyhow::bail!("autotune --op qmatmul_mmq: unsupported --arch {other:?}"),
+        }
+    }
+    #[cfg(not(any(feature = "hip_sweep", feature = "cuda_sweep")))]
+    {
+        let _ = (arch, dtype);
         anyhow::bail!("autotune requires --features hip_sweep and/or cuda_sweep")
     }
 }

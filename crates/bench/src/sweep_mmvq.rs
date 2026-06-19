@@ -4496,6 +4496,126 @@ fn time_mmvq<B: BenchBackend>(
     Ok(samples[samples.len() / 2])
 }
 
+/// Time one MMQ (prefill, matrix×matrix) kernel of the wave64 8-arg / tile
+/// family at (`m_tokens` × `n_out` × `k`). `m_tokens` is the **dispatch axis**
+/// (n_tokens) — unlike `time_mmvq`, whose `m` is n_out — so MMQ rankings map onto
+/// the real `[[qmatmul_mmq]]` m-bands. Operands are zeroed (throughput is
+/// content-independent). Median µs/launch over `iters`.
+fn time_mmq<B: BenchBackend>(
+    dev: &B::Device,
+    cand: (&'static str, &'static str, u32),
+    m_tokens: usize,
+    n_out: usize,
+    k: usize,
+    iters: usize,
+) -> Result<f64> {
+    let (stem, entry, tile_n) = cand;
+    let bytes = B::image(stem).ok_or_else(|| anyhow!("{stem} not compiled"))?;
+    let module = B::load(dev, bytes)?;
+    let kernel = B::kernel(&module, entry)?;
+
+    let w_bytes = n_out * (k / QK8) * std::mem::size_of::<BlockQ8_0>();
+    let y_bytes = m_tokens * (k / QK8) * std::mem::size_of::<BlockQ8_1>();
+    let dst_bytes = m_tokens * n_out * 4;
+    let wz = vec![0u8; w_bytes];
+    let yz = vec![0u8; y_bytes];
+    let d_x = alloc_and_upload(dev, wz.as_slice());
+    let d_y = alloc_and_upload(dev, yz.as_slice());
+    let d_dst = dev.alloc(dst_bytes)?;
+    let stream = dev.default_stream();
+
+    let ncols_x = k as i32;
+    let nrows_x = n_out as i32;
+    let ncols_y = m_tokens as i32;
+    let nrows_y = k as i32;
+    let nrows_dst = n_out as i32;
+    let d_x_ptr = d_x.as_usize() as u64;
+    let d_y_ptr = d_y.as_usize() as u64;
+    let d_dst_ptr = d_dst.as_usize() as u64;
+    let cfg = LaunchCfg {
+        grid: ((n_out as u32).div_ceil(64), (m_tokens as u32).div_ceil(tile_n), 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    let launch = || {
+        let mut args = <B::Args<'_>>::default();
+        args.push_arg(&d_x_ptr);
+        args.push_arg(&d_y_ptr);
+        args.push_arg(&d_dst_ptr);
+        args.push_arg(&ncols_x);
+        args.push_arg(&nrows_x);
+        args.push_arg(&ncols_y);
+        args.push_arg(&nrows_y);
+        args.push_arg(&nrows_dst);
+        B::launch(&kernel, stream, cfg, args)
+    };
+    for _ in 0..3 {
+        launch()?;
+    }
+    stream.synchronize()?;
+    let mut samples = Vec::with_capacity(iters);
+    for _ in 0..iters {
+        let t = Instant::now();
+        launch()?;
+        stream.synchronize()?;
+        samples.push(t.elapsed().as_secs_f64() * 1e6);
+    }
+    samples.sort_by(|a, b| a.partial_cmp(b).expect("timing has no NaN"));
+    unsafe {
+        dev.dealloc(d_x, w_bytes)?;
+        dev.dealloc(d_y, y_bytes)?;
+        dev.dealloc(d_dst, dst_bytes)?;
+    }
+    Ok(samples[samples.len() / 2])
+}
+
+/// Prefill/MMQ ranking — the compute-bound regime where multiple kernels
+/// genuinely compete (unlike bandwidth-bound decode). Times each wave64-family
+/// MMQ candidate for `dtype` across the **n_tokens** grid at a representative
+/// (n_out, k) and prints the ranking vs the committed `[[qmatmul_mmq]]` row.
+/// Measurement only (no emit) — the cross-family kernels (oracle / 4warp /
+/// 4warp_lds) have distinct launch signatures and aren't wired here yet.
+pub fn autotune_mmq<B: BenchBackend>(
+    arch: &str,
+    dtype: &str,
+    m_grid: &[usize],
+    n_out: usize,
+    k: usize,
+) -> Result<()> {
+    let dev = B::new_device(0)?;
+    let backend = dev.backend();
+    let iters = 50;
+    // (stem, entry, tile_n) — wave64 8-arg family. `tile_n` = activation rows per
+    // block (grid.y = M / tile_n).
+    let cands: &[(&str, &str, u32)] = match dtype {
+        "Q8_0" => &[
+            ("mmq_q8_0_wave64", "flambeau_mmq_q8_0_wave64_q8_1", 8),
+            ("mmq_q8_0_wave64_tile16", "flambeau_mmq_q8_0_wave64_tile16_q8_1", 16),
+        ],
+        other => bail!("autotune_mmq: --dtype {other} not wired (Q8_0 wave64 family only)"),
+    };
+    let avail: Vec<&(&str, &str, u32)> =
+        cands.iter().filter(|(s, _, _)| B::image(s).is_some()).collect();
+    if avail.is_empty() {
+        bail!("autotune_mmq {backend}/{arch} {dtype}: no candidate kernel compiled");
+    }
+    println!(
+        "autotune_mmq {backend}/{arch} {dtype}: n_out={n_out} k={k}, {} candidate(s)",
+        avail.len()
+    );
+    for &m in m_grid {
+        let mut times: Vec<(&str, f64)> = Vec::new();
+        for &&(stem, entry, tile_n) in &avail {
+            let us = time_mmq::<B>(&dev, (stem, entry, tile_n), m, n_out, k, iters)?;
+            println!("  M={m:<5} {stem:<34} {us:9.2} us");
+            times.push((stem, us));
+        }
+        let (ws, wt) = times.iter().copied().min_by(|a, b| a.1.total_cmp(&b.1)).unwrap();
+        println!("    -> winner M={m}: {ws} ({wt:.2} us)");
+    }
+    Ok(())
+}
+
 /// Time every compiled `candidate` variant across the (m, k) grid, pick the
 /// fastest per shape, print the ranking, and — when `emit` — write the winning
 /// rows to `dispatch/<backend>/<arch>.toml`. Candidates whose kernel image
