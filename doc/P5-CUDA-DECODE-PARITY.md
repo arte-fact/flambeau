@@ -229,11 +229,22 @@ already backend-generic — `model-ops` takes `&impl Ops`, the GGUF loader takes
   flash-tile at `block:(B::WARP_SIZE, br)`. The single-token decode synthetic
   tests never hit the prefill kernel, which is why this hid until a real model.
 
-**Status: P5.4 core complete — the CUDA decode path runs real models correctly**
-(deterministic, argmax-correct, ~0.997 cross-backend cosine reflecting only F16
-wave-width drift). Remaining for the *literal* doc gate: logit-cosine vs llama.cpp
-on the same backend + a multi-token decode loop (the cross-backend wave64↔wave32
-drift means HIP↔CUDA won't hit 0.9999, but same-backend-vs-llama.cpp can).
+- ✅ **Prefill + decode loop — token-for-token match with HIP** (`4e6e8834`). The
+  cross-check now prefills the prompt then greedily generates 8 tokens (engine +
+  KV cache persist across forwards). CUDA and HIP produce the **identical greedy
+  sequence**. Decode exposed two Q4_0 fused fast-path kernels prefill never hit
+  (this gemma Q4_K_XL is an unsloth *dynamic* quant — attn K/V + FFN gate/up are
+  Q4_0, so decode dispatches the fused Q4_0 K+V `mmvq_q4_0_kv_f16dst` and gate+up
+  `mmvq_q4_0_gate_up_t128`); both ported hip→cuda the rule-5 way. So the full
+  prefill+decode inference path runs correctly on CUDA.
+
+**Status: P5.4 complete — the CUDA path runs real models correctly end to end**
+(deterministic, prefill argmax + full greedy sequence match HIP, ~0.997
+cross-backend cosine reflecting only F16 wave-width drift). Remaining for the
+*literal* doc gate: logit-cosine vs **llama.cpp** on the same backend (the
+cross-backend wave64↔wave32 drift means HIP↔CUDA won't hit 0.9999, but
+same-backend-vs-llama.cpp can) + formal sweep certs for the ported Q4_0 decode
+kernels (validated for now by the exact cross-backend decode match).
 The same wave64 launch hard-code in `launch/recurrent.rs` (GDN/qwen3-next state
 step) was fixed alongside (`12548bbe`, `block:(B::WARP_SIZE, …)`); the GDN kernel
 was already warp-width-neutral, so it's a pure launch fix (HIP unchanged, the
