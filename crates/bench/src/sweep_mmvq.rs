@@ -4501,29 +4501,85 @@ fn time_mmvq<B: BenchBackend>(
 /// rows to `dispatch/<backend>/<arch>.toml`. Candidates whose kernel image
 /// isn't compiled for this backend are skipped (so CUDA ranks only the ported
 /// variants).
+/// What `autotune` does with its measurement.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AutotuneMode {
+    /// Rank + print only.
+    DryRun,
+    /// Write the winners into `dispatch/<backend>/<arch>.toml`.
+    Emit,
+    /// CI ratchet — diff the committed table against the fresh measurement and
+    /// fail (non-zero exit) on drift. Does not write.
+    Check,
+}
+
+/// A challenger must beat the committed incumbent by more than this fraction to
+/// count as drift — keeps measurement noise from churning the table (AUTOTUNE.md
+/// hysteresis).
+const AUTOTUNE_HYSTERESIS: f64 = 0.03;
+
+/// Whether `impl_id` has a green cert on disk for this arch — the eligibility
+/// filter (AUTOTUNE.md): perf only ranks among already-certified kernels, and
+/// the ratchet flags an incumbent that lost its cert.
+fn has_green_cert(repo_root: &Path, backend: &str, arch: &str, impl_id: &str) -> bool {
+    let path = repo_root.join(Cert::cert_path(backend, arch, impl_id));
+    Cert::read_from_disk(&path).map(|c| c.pass && c.impl_id == impl_id).unwrap_or(false)
+}
+
+/// Whether the row's `shape.m` predicate covers `m`. Handles the forms the
+/// dispatch tables use: `"any"`, `">=N"`, and inclusive `"lo..hi"` (both
+/// `"lo..any"` and bare `"N"` also accepted).
+fn m_range_contains(row: &crate::dispatch::DispatchRow, m: usize) -> bool {
+    let Some(s) = row.shape.get("m").and_then(|v| v.as_str()) else { return true };
+    let s = s.trim();
+    if s == "any" {
+        return true;
+    }
+    if let Some(n) = s.strip_prefix(">=") {
+        return n.trim().parse().map(|lo: usize| m >= lo).unwrap_or(false);
+    }
+    if let Some((lo, hi)) = s.split_once("..") {
+        let lo: usize = lo.trim().parse().unwrap_or(1);
+        let hi: usize =
+            if hi.trim() == "any" { usize::MAX } else { hi.trim().parse().unwrap_or(usize::MAX) };
+        return m >= lo && m <= hi;
+    }
+    s.parse().map(|n: usize| n == m).unwrap_or(false)
+}
+
 pub fn autotune<B: BenchBackend>(
     arch: &str,
     candidates: &[Dtype],
     m_grid: &[usize],
     k_grid: &[usize],
     repo_root: &Path,
-    emit: bool,
+    mode: AutotuneMode,
 ) -> Result<()> {
     let dev = B::new_device(0)?;
     let backend = dev.backend();
     let iters = 50;
 
-    let avail: Vec<Dtype> = candidates
+    // Eligibility = compiled AND certified. The cert is the gate (AUTOTUNE.md):
+    // an uncertified kernel never reaches the ranking, fast or not.
+    let compiled: Vec<Dtype> = candidates
         .iter()
         .copied()
         .filter(|d| B::image(d.kernel_stem()).is_some())
         .collect();
+    let avail: Vec<Dtype> = compiled
+        .iter()
+        .copied()
+        .filter(|d| has_green_cert(repo_root, backend, arch, d.impl_id()))
+        .collect();
+    for d in compiled.iter().filter(|d| !avail.contains(d)) {
+        println!("  (dropping {} — no green cert for {backend}/{arch})", d.impl_id());
+    }
     if avail.is_empty() {
-        bail!("autotune {backend}/{arch}: no candidate kernels compiled");
+        bail!("autotune {backend}/{arch}: no certified candidate kernels (run `sweep` first)");
     }
     let names: Vec<&str> = avail.iter().map(|d| d.impl_id()).collect();
     println!(
-        "autotune {backend}/{arch}: {} candidate(s): {}",
+        "autotune {backend}/{arch}: {} certified candidate(s): {}",
         avail.len(),
         names.join(", ")
     );
@@ -4535,6 +4591,7 @@ pub fn autotune<B: BenchBackend>(
     // total time across the whole k-grid; per-(m,k) timings still print so a
     // k-dependent split stays visible in the diagnostic output.
     let mut winners: Vec<(usize, Dtype)> = Vec::new();
+    let mut per_m: Vec<(usize, Vec<(Dtype, f64)>)> = Vec::new();
     for &m in m_grid {
         let mut totals: Vec<(Dtype, f64)> = avail.iter().map(|&d| (d, 0.0)).collect();
         for &k in k_grid {
@@ -4555,15 +4612,88 @@ pub fn autotune<B: BenchBackend>(
             wd.impl_id()
         );
         winners.push((m, wd));
+        per_m.push((m, totals));
     }
 
-    if emit {
-        let path = emit_dispatch(arch, backend, &winners, repo_root)?;
-        println!("emitted {}", path.display());
-    } else {
-        println!("(dry run — pass --emit to write dispatch/{backend}/{arch}.toml)");
+    match mode {
+        AutotuneMode::Emit => {
+            let path = emit_dispatch(arch, backend, &winners, repo_root)?;
+            println!("emitted {}", path.display());
+        }
+        AutotuneMode::Check => check_dispatch(arch, backend, repo_root, &per_m)?,
+        AutotuneMode::DryRun => println!(
+            "(dry run — pass --emit to write / --check to ratchet dispatch/{backend}/{arch}.toml)"
+        ),
     }
     Ok(())
+}
+
+/// Ratchet the committed dispatch table against a fresh measurement. For each
+/// (dtype, grid-m) the committed table routes through an incumbent impl; flag
+/// the row when (a) the incumbent lost its cert, or (b) a certified candidate
+/// beats it by more than the hysteresis margin. `Err` (non-zero CLI exit) iff
+/// any row drifted — this is the CI signal.
+fn check_dispatch(
+    arch: &str,
+    backend: &str,
+    repo_root: &Path,
+    per_m: &[(usize, Vec<(Dtype, f64)>)],
+) -> Result<()> {
+    let path = repo_root.join(format!("dispatch/{backend}/{arch}.toml"));
+    let table = crate::dispatch::DispatchTable::load(&path)?;
+    let mut issues: Vec<String> = Vec::new();
+
+    for (m, totals) in per_m {
+        let dtype_name = totals[0].0.name();
+        let Some(row) = table.qmatmul.iter().find(|r| r.dtype == dtype_name && m_range_contains(r, *m))
+        else {
+            // No committed row for this grid-m → the runtime default kernel
+            // handles it; autotune doesn't override the default, so this is not
+            // drift, just an untuned shape.
+            println!("  (note) {dtype_name} m={m}: no committed row — default path, not autotuned");
+            continue;
+        };
+        let inc_impl = row.r#impl.as_str();
+
+        if !has_green_cert(repo_root, backend, arch, inc_impl) {
+            issues.push(format!("{dtype_name} m={m}: incumbent {inc_impl} has no green cert"));
+        }
+
+        let (fastest_d, fastest_t) =
+            totals.iter().copied().min_by(|a, b| a.1.total_cmp(&b.1)).unwrap();
+        match totals.iter().find(|(d, _)| d.impl_id() == inc_impl) {
+            Some(&(_, inc_t))
+                if fastest_d.impl_id() != inc_impl
+                    && fastest_t < inc_t * (1.0 - AUTOTUNE_HYSTERESIS) =>
+            {
+                issues.push(format!(
+                    "{dtype_name} m={m}: {} is {:.2}x faster than incumbent {inc_impl} (>{:.0}% margin) — table stale",
+                    fastest_d.impl_id(),
+                    inc_t / fastest_t,
+                    AUTOTUNE_HYSTERESIS * 100.0
+                ));
+            }
+            // Incumbent absent from the candidate pool → no perf compare; the
+            // cert check above still gates it.
+            _ => {}
+        }
+    }
+
+    if issues.is_empty() {
+        println!(
+            "autotune --check {backend}/{arch}: OK — committed dispatch matches measurement (≤{:.0}% hysteresis)",
+            AUTOTUNE_HYSTERESIS * 100.0
+        );
+        Ok(())
+    } else {
+        for i in &issues {
+            println!("  DRIFT: {i}");
+        }
+        bail!(
+            "autotune --check {backend}/{arch}: {} dispatch row(s) drifted from measurement",
+            issues.len()
+        )
+    }
 }
 
 /// Hand-format the autotuned `[[qmatmul]]` rows (one per winning dtype, with an

@@ -252,6 +252,12 @@ enum Cmd {
         /// only prints the ranking.
         #[arg(long)]
         emit: bool,
+        /// CI ratchet — re-measure and fail (non-zero exit) if the committed
+        /// dispatch table disagrees (a certified candidate now wins by >3%, or
+        /// an incumbent lost its cert). Does not write. Mutually exclusive with
+        /// `--emit`.
+        #[arg(long)]
+        check: bool,
     },
     /// Validate that every dispatch row has a matching green cert (+).
     CertCheck {
@@ -368,7 +374,7 @@ fn main() -> Result<()> {
             embedding_max_tokens,
         })?,
         Cmd::Sweep { arch, op, dtype } => sweep(&arch, op.as_deref(), &dtype)?,
-        Cmd::Autotune { arch, op, dtype, emit } => autotune(&arch, &op, &dtype, emit)?,
+        Cmd::Autotune { arch, op, dtype, emit, check } => autotune(&arch, &op, &dtype, emit, check)?,
         Cmd::CertCheck { arch, backend } => cert_check(&backend, &arch)?,
         Cmd::PmcProbe { kernel, m, k, n } => pmc_probe(&kernel, m, k, n)?,
         Cmd::PmcRefresh { arch } => pmc_refresh(&arch)?,
@@ -1384,13 +1390,23 @@ fn pmc_probe(kernel: &str, m: usize, k: usize, n: usize) -> Result<()> {
     }
 }
 
-fn autotune(arch: &str, op: &str, dtype: &str, emit: bool) -> Result<()> {
+fn autotune(arch: &str, op: &str, dtype: &str, emit: bool, check: bool) -> Result<()> {
     if op != "qmatmul" {
         anyhow::bail!("autotune currently supports only --op qmatmul (mmvq)");
     }
+    if emit && check {
+        anyhow::bail!("autotune: --emit and --check are mutually exclusive");
+    }
     #[cfg(any(feature = "hip_sweep", feature = "cuda_sweep"))]
     {
-        use flambeau_bench::sweep_mmvq::{autotune as run, Dtype};
+        use flambeau_bench::sweep_mmvq::{autotune as run, AutotuneMode, Dtype};
+        let mode = if check {
+            AutotuneMode::Check
+        } else if emit {
+            AutotuneMode::Emit
+        } else {
+            AutotuneMode::DryRun
+        };
         // Config-variant fan-out is arch-aware: CUDA only has the templated
         // variants, so the candidate set for sm_86 is the ported subset.
         let cuda = arch == "sm_86";
@@ -1442,11 +1458,11 @@ fn autotune(arch: &str, op: &str, dtype: &str, emit: bool) -> Result<()> {
         match arch {
             #[cfg(feature = "hip_sweep")]
             "gfx906" => {
-                run::<flambeau_bench::backend::Hip>(arch, &candidates, &m_grid, &k_grid, &root, emit)
+                run::<flambeau_bench::backend::Hip>(arch, &candidates, &m_grid, &k_grid, &root, mode)
             }
             #[cfg(feature = "cuda_sweep")]
             "sm_86" => {
-                run::<flambeau_bench::backend::Cuda>(arch, &candidates, &m_grid, &k_grid, &root, emit)
+                run::<flambeau_bench::backend::Cuda>(arch, &candidates, &m_grid, &k_grid, &root, mode)
             }
             other => anyhow::bail!(
                 "autotune: unsupported --arch {other:?} (need gfx906 / sm_86 with the matching feature)"
@@ -1455,7 +1471,7 @@ fn autotune(arch: &str, op: &str, dtype: &str, emit: bool) -> Result<()> {
     }
     #[cfg(not(any(feature = "hip_sweep", feature = "cuda_sweep")))]
     {
-        let _ = (arch, dtype, emit);
+        let _ = (arch, dtype, emit, check);
         anyhow::bail!("autotune requires --features hip_sweep and/or cuda_sweep")
     }
 }
