@@ -41,7 +41,16 @@ fn main() {
             &out_dir.join("generated"),
             &format!("{arch}.cuh"),
         );
-        let all_cu: Vec<PathBuf> = cu_files.iter().cloned().chain(generated).collect();
+        // Static `.cu` that hard-code `#include "gfx906.cuh"` are the wave64 DPP
+        // hand-kernels — gfx906-only. For any other arch the catalogue is carried
+        // by the manifest-generated kernels (which inject this arch's header, so
+        // they're wave-width portable) plus the arch-neutral static `.cu`.
+        let static_cu: Vec<PathBuf> = cu_files
+            .iter()
+            .filter(|cu| arch == "gfx906" || !file_includes(cu, "gfx906.cuh"))
+            .cloned()
+            .collect();
+        let all_cu: Vec<PathBuf> = static_cu.into_iter().chain(generated).collect();
 
         // Fold included-header contents into the per-kernel cache key so a
         // change to a shared / arch_primitives header recompiles the kernels.
@@ -115,6 +124,12 @@ fn enumerate_cu_files(dir: &Path) -> Vec<PathBuf> {
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().is_some_and(|x| x == "cu"))
         .collect()
+}
+
+/// Whether `path`'s source `#include`s `needle` (an arch header). Used to keep
+/// arch-specific static `.cu` out of other arches' builds.
+fn file_includes(path: &Path, needle: &str) -> bool {
+    fs::read_to_string(path).map(|s| s.contains(needle)).unwrap_or(false)
 }
 
 fn find_hipcc(rocm_path: &str) -> Option<PathBuf> {
@@ -221,6 +236,9 @@ fn compile_cu(
 ) {
     let IncludeRoots { arch: arch_inc, shared: shared_inc, kernel: kernel_inc } = includes;
     let rocm_path = env::var("ROCM_PATH").unwrap_or_else(|_| "/opt/rocm".into());
+    // RDNA (gfx10xx/gfx11xx) is wave32; CDNA/GCN (gfx9xx) is wave64. The arch
+    // header's `WARP_SIZE` must agree with the hardware wavefront width.
+    let warp_size = if arch.starts_with("gfx10") || arch.starts_with("gfx11") { 32 } else { 64 };
     let output = Command::new(hipcc)
         .args([
             "--cuda-device-only",
@@ -232,7 +250,7 @@ fn compile_cu(
             "-std=c++17",
             "-O3",
             "-D__HIP_PLATFORM_AMD__",
-            "-DWARP_SIZE=64",
+            &format!("-DWARP_SIZE={warp_size}"),
             "-I",
             kernel_inc.to_str().unwrap(),
             "-I",
