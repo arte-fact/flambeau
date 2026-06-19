@@ -9,7 +9,6 @@ use std::time::Instant;
 
 use anyhow::{anyhow, bail, Context, Result};
 use axum::response::sse::{Event, KeepAlive, Sse};
-use flambeau_backend_hip::HipCluster;
 use flambeau_runtime::json_schema::JsonConstraint;
 use flambeau_runtime::Sampler;
 use serde_json::json;
@@ -543,7 +542,6 @@ fn run_completion_scheduler_pp_blocking(
             "completion request accepted (scheduler path)"
         );
 
-        let cluster: &flambeau_backend_hip::HipCluster = &state.cluster;
         let model = &state.model;
         let stop_ids = &state.tokenizer.stop_ids;
         let always_stop_ids = &state.tokenizer.always_stop_ids;
@@ -557,7 +555,6 @@ fn run_completion_scheduler_pp_blocking(
         sampler.reserve(vocab);
 
         let mut logits_buf: Vec<f32> = Vec::with_capacity(vocab);
-        let _ = cluster;
         let _ = model;
         let full_hit = chunked_prefill_pp(&state, slot_idx, &prompt_ids, &mut logits_buf)?;
         if !full_hit {
@@ -781,7 +778,6 @@ fn run_completion_blocking_ids(
         "completion request accepted after queue wait"
     );
 
-    let cluster: &HipCluster = &state.cluster;
     let model = &state.model;
 
     // Sampler holds vocab-sized scratch reused across all decode steps
@@ -812,7 +808,6 @@ fn run_completion_blocking_ids(
     // the first response token on multi-turn prompts, producing an empty
     // reply. Suppress it until at least one content token is emitted.
     let prefill_start = Instant::now();
-    let _ = cluster;
     let _ = model;
     // **Phase 5 S2** — chunked prefill releases `inflight_pool[slot_idx]`'s
     // mutex between chunks so concurrent slots' decode steps interleave
@@ -1206,7 +1201,6 @@ pub(crate) fn run_completion_blocking_streaming(
         "streaming completion accepted"
     );
 
-    let cluster: &HipCluster = &state.cluster;
     let model = &state.model;
     let stop_ids = &state.tokenizer.stop_ids;
     let always_stop_ids = &state.tokenizer.always_stop_ids;
@@ -1223,7 +1217,6 @@ pub(crate) fn run_completion_blocking_streaming(
     // non-streaming path for the rationale (multi-turn Qwen3.6 argmaxes
     // `<|im_end|>` immediately otherwise).
     let prefill_start = Instant::now();
-    let _ = cluster;
     // **Phase 5 S2** — chunked prefill on the streaming path. Same
     // mutex-release-between-chunks shape as the legacy path; decode
     // reacquires once below for the SSE-emit loop.

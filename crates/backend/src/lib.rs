@@ -40,6 +40,16 @@ pub trait Backend: Send + Sync + 'static {
     /// Build the per-launch op object for a `(registry, stream)` pair —
     /// the backend-neutral form of `HipOps::new(reg, stream)`.
     fn ops<'a>(reg: &'a Self::Registry, stream: &'a Self::Stream) -> Self::Ops<'a>;
+
+    /// Open device `id` on this backend — the backend-neutral form of
+    /// `HipDevice::new(id)` / `CudaDevice::new(id)`. `Device::new` is inherent
+    /// (not on the `Device` trait), so the bundle projects it here for generic
+    /// single-device construction.
+    fn new_device(id: i32) -> anyhow::Result<Self::Device>;
+
+    /// Load the per-device kernel-module registry — the backend-neutral form of
+    /// `OpsRegistry::new(device)` / `CudaOpsRegistry::new(device)`.
+    fn new_registry(device: &Self::Device) -> anyhow::Result<Self::Registry>;
 }
 
 #[cfg(feature = "hip")]

@@ -20,6 +20,10 @@ hip_sweep = ["flambeau-bench/hip"]
 cuda_sweep = ["flambeau-bench/cuda"]
 # Enables `flambeau serve` — loads a real model on HIP devices.
 hip_serve = ["flambeau-server/hip"]
+# Enables `flambeau serve --backend cuda` single-device serving on the RTX.
+# Built alongside hip_serve on the dual rig (the server's forward path is
+# hip-gated): `--features hip_serve,cuda_serve`.
+cuda_serve = ["flambeau-server/cuda"]
 # Enables debug FLAMBEAU_* env-var reads (probes, dumps, traces).
 # Off by default; production binaries elide all gated reads.
 dev_trace = [

@@ -5,6 +5,7 @@
 pub mod ar;
 pub mod driver;
 pub mod orchestrate;
+pub mod solo;
 pub mod workers;
 
 use anyhow::{anyhow, Result};

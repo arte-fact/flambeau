@@ -17,4 +17,12 @@ impl Backend for CudaBackend {
     fn ops<'a>(reg: &'a Self::Registry, stream: &'a Self::Stream) -> Self::Ops<'a> {
         flambeau_ops::CudaOps::new(reg, stream)
     }
+
+    fn new_device(id: i32) -> anyhow::Result<Self::Device> {
+        Ok(flambeau_backend_cuda::CudaDevice::new(id)?)
+    }
+
+    fn new_registry(device: &Self::Device) -> anyhow::Result<Self::Registry> {
+        Ok(flambeau_ops::CudaOpsRegistry::new(device)?)
+    }
 }

@@ -3,7 +3,7 @@
 //! will land here once `moe_ffn` integrates with the per-layer
 //! dispatch.
 
-#![cfg(feature = "hip")]
+#![cfg(any(feature = "hip", feature = "cuda"))]
 
 pub mod arch;
 pub mod config;

@@ -76,6 +76,10 @@ enum Cmd {
         model: String,
         #[arg(long, default_value = "hip:0")]
         devices: String,
+        /// GPU backend: `hip` (default, multi-topology) or `cuda`
+        /// (single-device only, RTX).
+        #[arg(long, default_value = "hip")]
+        backend: String,
         #[arg(long, default_value_t = 8080)]
         port: u16,
         /// / mesh topology:
@@ -319,14 +323,15 @@ fn main() -> Result<()> {
             devices,
             mesh_mode,
         } => infer_main(&model, &prompt, max_tokens, &devices, &mesh_mode)?,
-        #[cfg(not(feature = "hip_serve"))]
+        #[cfg(not(any(feature = "hip_serve", feature = "cuda_serve")))]
         Cmd::Serve { .. } => anyhow::bail!(
-            "`flambeau serve` requires building with --features hip_serve (needs ROCm + HIP devices)"
+            "`flambeau serve` requires building with --features hip_serve and/or cuda_serve"
         ),
-        #[cfg(feature = "hip_serve")]
+        #[cfg(any(feature = "hip_serve", feature = "cuda_serve"))]
         Cmd::Serve {
             model,
             devices,
+            backend,
             port,
             mesh_mode,
             tp_size,
@@ -351,6 +356,7 @@ fn main() -> Result<()> {
         } => serve_cmd(ServeArgs {
             model,
             devices,
+            backend,
             port,
             mesh_mode,
             tp_size,
@@ -383,10 +389,11 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-#[cfg(feature = "hip_serve")]
+#[cfg(any(feature = "hip_serve", feature = "cuda_serve"))]
 struct ServeArgs {
     model: String,
     devices: String,
+    backend: String,
     port: u16,
     mesh_mode: String,
     tp_size: u32,
@@ -423,7 +430,7 @@ fn infer_main(
     );
 }
 
-#[cfg(feature = "hip_serve")]
+#[cfg(any(feature = "hip_serve", feature = "cuda_serve"))]
 fn serve_cmd(args: ServeArgs) -> Result<()> {
     use std::net::SocketAddr;
     use std::path::PathBuf;
@@ -431,6 +438,7 @@ fn serve_cmd(args: ServeArgs) -> Result<()> {
     let ServeArgs {
         model,
         devices,
+        backend,
         port,
         mesh_mode,
         tp_size,
@@ -454,8 +462,17 @@ fn serve_cmd(args: ServeArgs) -> Result<()> {
         embedding_max_tokens,
     } = args;
 
-    // Parse `hip:0,1,2,3` or `0,1,2,3` → Vec<i32>.
-    let dev_str = devices.strip_prefix("hip:").unwrap_or(&devices);
+    let backend = match backend.as_str() {
+        "hip" => flambeau_server::ServeBackend::Hip,
+        "cuda" => flambeau_server::ServeBackend::Cuda,
+        other => anyhow::bail!("--backend must be `hip` or `cuda` (got `{other}`)"),
+    };
+
+    // Parse `hip:0,1,2,3` / `cuda:0` / `0,1,2,3` → Vec<i32>.
+    let dev_str = devices
+        .strip_prefix("hip:")
+        .or_else(|| devices.strip_prefix("cuda:"))
+        .unwrap_or(&devices);
     let device_ids: Vec<i32> = dev_str
         .split(',')
         .filter(|s| !s.is_empty())
@@ -527,6 +544,7 @@ fn serve_cmd(args: ServeArgs) -> Result<()> {
     let cfg = flambeau_server::ServeConfig {
         gguf_path: PathBuf::from(&model),
         device_ids,
+        backend,
         bind_addr,
         model_id: PathBuf::from(&model)
             .file_stem()

@@ -1,7 +1,7 @@
 //! qwen35moe MoE hybrid arch on the v2 stack. Covers Qwen3.5-MoE
 //! and Qwen3.6-35B-A3B (GGUF tag `qwen35moe`).
 
-#![cfg(feature = "hip")]
+#![cfg(any(feature = "hip", feature = "cuda"))]
 
 pub mod arch;
 pub mod config;

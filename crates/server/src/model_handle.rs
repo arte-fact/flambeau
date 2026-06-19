@@ -5,7 +5,7 @@
 //! callers and defines the `LoadedModel = Arc<dyn Model>` alias the
 //! server's state machine carries around.
 
-#![cfg(feature = "hip")]
+#![cfg(any(feature = "hip", feature = "cuda"))]
 
 pub use flambeau_server_core::{
     BatchSlot, Model, ReasoningMarkers, ReasoningStyle, Session, SessionContext,

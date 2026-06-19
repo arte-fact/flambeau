@@ -8,12 +8,16 @@
 //! a generic parameter. `Session<A>` for every arch satisfies it via
 //! the blanket impl below.
 
-#![cfg(feature = "hip")]
+#![cfg(any(feature = "hip", feature = "cuda"))]
 
 use std::sync::Arc;
 
 use anyhow::Result;
-use flambeau_forward::runtime::{Arch, Session};
+use flambeau_forward::runtime::Arch;
+#[cfg(feature = "hip")]
+use flambeau_forward::runtime::Session;
+#[cfg(feature = "cuda")]
+use flambeau_forward::SoloSession;
 use flambeau_runtime::ModelDriver;
 use tokio::sync::Mutex;
 
@@ -79,6 +83,7 @@ pub trait V2BatchableSession: Send {
     fn dispose_in_place(&mut self) -> Result<()>;
 }
 
+#[cfg(feature = "hip")]
 impl<A: Arch> V2BatchableSession for Session<A> {
     fn forward_one_token_into_slot(
         &mut self,
@@ -162,6 +167,96 @@ impl<A: Arch> V2BatchableSession for Session<A> {
 
     fn dispose_in_place(&mut self) -> Result<()> {
         Session::dispose_in_place(self)
+    }
+}
+
+/// Single-device (`SoloSession<B, A>`) satisfies the same arch-erased trait.
+/// Decode/mixed batching, KV snapshot/restore and paged release route to the
+/// inline executor's methods, identical in shape to the `Session<A>` impl.
+#[cfg(feature = "cuda")]
+impl<B: flambeau_backend::Backend, A: Arch> V2BatchableSession for SoloSession<B, A> {
+    fn forward_one_token_into_slot(
+        &mut self,
+        token: u32,
+        position: usize,
+        slot_id: usize,
+        out: &mut Vec<f32>,
+    ) -> Result<()> {
+        SoloSession::forward_one_token_logits_slot(self, token, position, slot_id, out)
+    }
+
+    fn forward_prefill_into_slot(
+        &mut self,
+        tokens: &[u32],
+        start_position: usize,
+        slot_id: usize,
+        out: &mut Vec<f32>,
+    ) -> Result<()> {
+        SoloSession::forward_prefill_logits_slot(self, tokens, start_position, slot_id, out)
+    }
+
+    fn forward_decode_batched(&mut self, slots: &[(u32, usize, usize)]) -> Result<()> {
+        SoloSession::forward_decode_batched(self, slots)
+    }
+
+    fn forward_mixed(
+        &mut self,
+        prefill_tokens: &[u32],
+        prefill_start_position: usize,
+        prefill_slot_id: usize,
+        decodes: &[(u32, usize, usize)],
+    ) -> Result<()> {
+        let k = prefill_tokens.len();
+        if k == 0 {
+            anyhow::bail!("V2BatchableSession::forward_mixed: empty prefill_tokens");
+        }
+        if decodes.is_empty() {
+            anyhow::bail!("V2BatchableSession::forward_mixed: empty decodes");
+        }
+        let n = k + decodes.len();
+        let mut tokens: Vec<u32> = Vec::with_capacity(n);
+        let mut positions: Vec<usize> = Vec::with_capacity(n);
+        let mut slot_ids: Vec<usize> = Vec::with_capacity(n);
+        tokens.extend_from_slice(prefill_tokens);
+        for i in 0..k {
+            positions.push(prefill_start_position + i);
+            slot_ids.push(prefill_slot_id);
+        }
+        for &(tok, pos, slot) in decodes {
+            tokens.push(tok);
+            positions.push(pos);
+            slot_ids.push(slot);
+        }
+        SoloSession::forward_mixed(self, &tokens, &positions, &slot_ids, k)
+    }
+
+    fn logits_row(&self, i: usize, vocab: usize) -> &[f32] {
+        SoloSession::logits_row(self, i, vocab)
+    }
+
+    fn reset_kv_slot(&mut self, slot_id: usize) -> Result<()> {
+        SoloSession::reset_kv_slot(self, slot_id)
+    }
+
+    fn snapshot_kv_slot(&mut self, slot_id: usize, n_tokens: usize) -> Result<Vec<Vec<u8>>> {
+        SoloSession::snapshot_kv_slot(self, slot_id, n_tokens)
+    }
+
+    fn restore_kv_slot(
+        &mut self,
+        slot_id: usize,
+        n_tokens: usize,
+        snaps: std::sync::Arc<Vec<Vec<u8>>>,
+    ) -> Result<()> {
+        SoloSession::restore_kv_slot(self, slot_id, n_tokens, snaps)
+    }
+
+    fn release_paged_slot(&mut self, slot_id: usize) -> Result<()> {
+        SoloSession::release_paged_slot(self, slot_id)
+    }
+
+    fn dispose_in_place(&mut self) -> Result<()> {
+        SoloSession::dispose_in_place(self)
     }
 }
 

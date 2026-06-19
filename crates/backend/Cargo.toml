@@ -15,6 +15,7 @@ cuda = ["dep:flambeau-backend-cuda", "flambeau-ops/cuda"]
 flambeau-core = { path = "../core" }
 flambeau-runtime = { path = "../runtime" }
 flambeau-ops = { path = "../ops" }
+anyhow.workspace = true
 flambeau-backend-hip = { path = "../backend-hip", optional = true }
 flambeau-backend-cuda = { path = "../backend-cuda", optional = true }
 

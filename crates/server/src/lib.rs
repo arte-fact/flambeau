@@ -17,19 +17,19 @@ pub mod tool_call_parser;
 
 #[cfg(feature = "hip")]
 pub mod embedding;
-#[cfg(feature = "hip")]
+#[cfg(any(feature = "hip", feature = "cuda"))]
 pub mod gpu_sampler;
-#[cfg(feature = "hip")]
+#[cfg(any(feature = "hip", feature = "cuda"))]
 pub mod model_cfg;
-#[cfg(feature = "hip")]
+#[cfg(any(feature = "hip", feature = "cuda"))]
 pub mod model_handle;
-#[cfg(feature = "hip")]
+#[cfg(any(feature = "hip", feature = "cuda"))]
 pub mod routes;
-#[cfg(feature = "hip")]
+#[cfg(any(feature = "hip", feature = "cuda"))]
 pub mod serve;
-#[cfg(feature = "hip")]
+#[cfg(any(feature = "hip", feature = "cuda"))]
 pub mod serve_common;
-#[cfg(feature = "hip")]
+#[cfg(any(feature = "hip", feature = "cuda"))]
 pub mod v2_handle;
 
 pub use api::{
@@ -40,7 +40,7 @@ pub use api::{
 };
 pub use state::{ModelDefaults, SamplingParams};
 
-#[cfg(feature = "hip")]
+#[cfg(any(feature = "hip", feature = "cuda"))]
 pub use model_handle::{Model, Session};
-#[cfg(feature = "hip")]
-pub use serve::{serve, MeshMode, ServeConfig};
+#[cfg(any(feature = "hip", feature = "cuda"))]
+pub use serve::{serve, MeshMode, ServeBackend, ServeConfig};

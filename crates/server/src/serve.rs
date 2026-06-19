@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
-use flambeau_backend_hip::{device_count, HipCluster};
 use flambeau_quant::GgufFile;
 use flambeau_runtime::Registry;
 use tokio::sync::Mutex;
@@ -38,11 +37,23 @@ pub enum MeshMode {
     Hybrid { pp_size: u32, tp_size: u32 },
 }
 
+/// GPU backend the server runs the model on. Selected by `--backend`.
+/// `Hip` is the multi-topology daily driver; `Cuda` is single-device only
+/// (RTX) — multi-GPU CUDA (PP/TP) is deferred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ServeBackend {
+    #[default]
+    Hip,
+    Cuda,
+}
+
 /// Runtime config for `flambeau serve`.
 #[derive(Debug, Clone)]
 pub struct ServeConfig {
     pub gguf_path: PathBuf,
     pub device_ids: Vec<i32>,
+    /// GPU backend (`--backend hip|cuda`). Defaults to `Hip`.
+    pub backend: ServeBackend,
     pub bind_addr: SocketAddr,
     pub model_id: String,
     /// mesh topology. Defaults to `Pp` for V1 callers that
@@ -169,10 +180,19 @@ pub(crate) async fn serve_inner_v2(
         ),
     };
 
-    let n_available = device_count().unwrap_or(0);
+    let (n_available, backend_label) = match cfg.backend {
+        #[cfg(feature = "hip")]
+        ServeBackend::Hip => (flambeau_backend_hip::device_count().unwrap_or(0), "HIP"),
+        #[cfg(not(feature = "hip"))]
+        ServeBackend::Hip => bail!("--backend hip: server built without the `hip` feature"),
+        #[cfg(feature = "cuda")]
+        ServeBackend::Cuda => (flambeau_backend_cuda::device_count().unwrap_or(0), "CUDA"),
+        #[cfg(not(feature = "cuda"))]
+        ServeBackend::Cuda => bail!("--backend cuda: server built without the `cuda` feature"),
+    };
     for d in &cfg.device_ids {
         if *d < 0 || *d >= n_available {
-            bail!("device {d} not available (have {n_available} HIP devices)");
+            bail!("device {d} not available (have {n_available} {backend_label} devices)");
         }
     }
 
@@ -238,6 +258,7 @@ pub(crate) async fn serve_inner_v2(
     let shared_gguf = GgufFile::open(&gguf_path)
         .with_context(|| "v2: re-open GGUF for shared Session".to_string())?;
     let shared_session: Box<dyn crate::v2_handle::V2BatchableSession> = create_v2_shared_session(
+        cfg.backend,
         gguf_arch,
         shared_gguf,
         topology.clone(),
@@ -263,8 +284,6 @@ pub(crate) async fn serve_inner_v2(
         inflight_pool.push(Mutex::new(conv));
     }
 
-    let cluster: Arc<HipCluster> =
-        Arc::new(HipCluster::new(&cfg.device_ids).context("v2: HipCluster::new (state side)")?);
     let topology_tag =
         crate::serve_common::topology_tag_from_mesh(cfg.mesh_mode, cfg.device_ids.len());
     let prefix_cache = crate::serve_common::build_prefix_cache(&cfg, topology_tag.mesh_kind);
@@ -286,7 +305,6 @@ pub(crate) async fn serve_inner_v2(
         model_id: cfg.model_id.clone(),
         model_cfg,
         model,
-        cluster,
         inflight_pool,
         embedding,
         embedding_rank,
@@ -404,7 +422,42 @@ fn topology_from_mesh(
     }
 }
 
+/// Build the shared session for the chosen backend. The arch `match` lives once
+/// per execution path (worker vs solo), branched on the backend — adding a
+/// backend is generic, not a per-arch duplication.
 fn create_v2_shared_session(
+    backend: ServeBackend,
+    gguf_arch: &str,
+    file: GgufFile,
+    topology: flambeau_forward::Topology,
+    params: flambeau_forward::LaunchParams,
+) -> Result<Box<dyn crate::v2_handle::V2BatchableSession>> {
+    match backend {
+        #[cfg(feature = "hip")]
+        ServeBackend::Hip => create_for_arch_worker(gguf_arch, file, topology, params),
+        #[cfg(not(feature = "hip"))]
+        ServeBackend::Hip => bail!("--backend hip: server built without the `hip` feature"),
+        #[cfg(feature = "cuda")]
+        ServeBackend::Cuda => {
+            let device_id = match &topology {
+                flambeau_forward::Topology::SingleDevice { device } => *device,
+                _ => bail!(
+                    "--backend cuda: only single-device serving is supported \
+                     (multi-GPU CUDA PP/TP is deferred); use one device id"
+                ),
+            };
+            create_for_arch_solo::<flambeau_backend::CudaBackend>(
+                gguf_arch, file, device_id, params,
+            )
+        }
+        #[cfg(not(feature = "cuda"))]
+        ServeBackend::Cuda => bail!("--backend cuda: server built without the `cuda` feature"),
+    }
+}
+
+/// HIP daily-driver path: the worker-thread `Session<A>` (any topology).
+#[cfg(feature = "hip")]
+fn create_for_arch_worker(
     gguf_arch: &str,
     file: GgufFile,
     topology: flambeau_forward::Topology,
@@ -412,17 +465,41 @@ fn create_v2_shared_session(
 ) -> Result<Box<dyn crate::v2_handle::V2BatchableSession>> {
     use flambeau_forward::Session;
     match gguf_arch {
-        "qwen35" => {
-            let s = Session::<flambeau_qwen35_v2::Qwen35V2>::new(file, topology, params)?;
-            Ok(Box::new(s))
-        }
-        "qwen35moe" => {
-            let s = Session::<flambeau_qwen35moe_v2::Qwen35MoeV2>::new(file, topology, params)?;
-            Ok(Box::new(s))
-        }
+        "qwen35" => Ok(Box::new(Session::<flambeau_qwen35_v2::Qwen35V2>::new(
+            file, topology, params,
+        )?)),
+        "qwen35moe" => Ok(Box::new(Session::<flambeau_qwen35moe_v2::Qwen35MoeV2>::new(
+            file, topology, params,
+        )?)),
         "gemma3" | "gemma4" | "gemma4-26b-a4b" | "gemma4-31b" | "gemma4-9b" | "gemma4-2b" => {
-            let s = Session::<flambeau_gemma4_v2::Gemma4V2>::new(file, topology, params)?;
-            Ok(Box::new(s))
+            Ok(Box::new(Session::<flambeau_gemma4_v2::Gemma4V2>::new(
+                file, topology, params,
+            )?))
+        }
+        other => bail!("v2 serve: unsupported GGUF arch `{other}`"),
+    }
+}
+
+/// Single-device path over backend `B`: the inline `SoloSession<B, A>`.
+#[cfg(feature = "cuda")]
+fn create_for_arch_solo<B: flambeau_backend::Backend>(
+    gguf_arch: &str,
+    file: GgufFile,
+    device_id: i32,
+    params: flambeau_forward::LaunchParams,
+) -> Result<Box<dyn crate::v2_handle::V2BatchableSession>> {
+    use flambeau_forward::SoloSession;
+    match gguf_arch {
+        "qwen35" => Ok(Box::new(SoloSession::<B, flambeau_qwen35_v2::Qwen35V2>::new(
+            file, device_id, params,
+        )?)),
+        "qwen35moe" => Ok(Box::new(
+            SoloSession::<B, flambeau_qwen35moe_v2::Qwen35MoeV2>::new(file, device_id, params)?,
+        )),
+        "gemma3" | "gemma4" | "gemma4-26b-a4b" | "gemma4-31b" | "gemma4-9b" | "gemma4-2b" => {
+            Ok(Box::new(SoloSession::<B, flambeau_gemma4_v2::Gemma4V2>::new(
+                file, device_id, params,
+            )?))
         }
         other => bail!("v2 serve: unsupported GGUF arch `{other}`"),
     }

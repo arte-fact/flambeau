@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use crate::model_cfg::ServerModelCfg;
 use anyhow::{anyhow, bail, Context};
-use flambeau_backend_hip::HipCluster;
 use flambeau_quant::{ChatTemplate, GgufTokenizer};
 use tokio::sync::Mutex;
 
@@ -57,10 +56,6 @@ pub struct ServerState {
     /// `crate::qwen3moe_handle::{prefill_logits, decode_logits}` helpers; they
     /// don't need to inspect this variant directly.
     pub model: LoadedModel,
-    /// `Arc` so the TP variant's `BarP2pAllReduce` can
-    /// hold a peer reference to the same cluster the handlers borrow
-    /// from.
-    pub cluster: Arc<HipCluster>,
     pub tokenizer: GgufTokenizer,
     pub chat_template: ChatTemplate,
     /// Multi-slot pool: N pre-allocated per-request
@@ -133,10 +128,8 @@ pub struct ServerState {
     /// tokenizer feeds wrong token ids into the embedding model's
     /// `token_embd`. `None` mirrors `embedding_model = None`.
     pub embedding_tokenizer: Option<Arc<flambeau_quant::GgufTokenizer>>,
-    /// HIP rank index for the embedding device, derived at
-    /// boot from `--embedding-device`. The endpoint uses
-    /// `cluster.device(rank)` to get a `&HipDevice` for the forward
-    /// call. `None` mirrors `embedding_model = None`.
+    /// Rank index for the embedding device, derived at boot from
+    /// `--embedding-device`. `None` mirrors `embedding_model = None`.
     pub embedding_rank: Option<usize>,
     /// Admission-control counter. Incremented at
     /// request entry, decremented at response. When this exceeds

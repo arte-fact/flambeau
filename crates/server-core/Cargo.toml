@@ -14,6 +14,7 @@ flambeau-model-ops = { path = "../model-ops" }
 [features]
 default = []
 hip = ["flambeau-model-ops/hip"]
+cuda = ["flambeau-model-ops/cuda"]
 
 [lints]
 workspace = true
