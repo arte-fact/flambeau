@@ -269,14 +269,15 @@ is certified on both backends.
 i-quants (IQ1_S/M, IQ2_XXS/XS/S, IQ3_XXS/S, IQ4_NL/XS) were declared in scope and
 turn out to already be supported on CUDA: the dispatched decode path
 (`mmvq_iq*_dp4a`), prefill (`mmq_iq*_wave64`), and indexed-MoE (`indexed_moe_mmvq_iq*`,
-`indexed_moe_mmq_iq*_tile8`) — **45 of the 63 IQ stems** — build on sm_86 from the
-shared manifest, the dispatch impl_ids resolve (`cuda_registry_smoke` asserts all 9
-`qmatmul_iq*_mmvq_dp4a`), and the certs are green (`certs/cuda/sm_86/qmatmul_iq*_mmvq_dp4a.json`
-+ the MoE IQ certs; re-validated IQ4_NL / IQ2_XXS / IQ1_S at 15 shapes each). The
-remaining 18 are the single-row / r2 reference oracles — non-dispatched, skipped by
-the load-present registry, same as the K-quant base oracles. A real end-to-end IQ
-*model* run additionally needs the Qwen3.6 model crate (the only on-disk IQ GGUFs
-are Qwen3.6), which is separate model-breadth work.
+`indexed_moe_mmq_iq*_tile8`) build on sm_86 from the shared manifest, the dispatch
+impl_ids resolve (`cuda_registry_smoke` asserts all 9 `qmatmul_iq*_mmvq_dp4a`), and
+the certs are green. The remaining 18 single-row / r2 reference oracles were then
+**also ported** (`33f6ca74`) for full IQ kernel parity with HIP — mechanical port
+swapping the wave64 reduce for the warp-size-agnostic `mmvq_reduce_store<64>` /
+`mmvq_reduce_store_group<32>`; the registry now skips **zero** IQ stems. **All 63 IQ
+stems build + are certified on sm_86** (9 IQ types × base/r2/dp4a green at 15 shapes
+each). A real end-to-end IQ *model* run additionally needs the Qwen3.6 model crate
+(the only on-disk IQ GGUFs are Qwen3.6) — separate model-breadth work.
 The same wave64 launch hard-code in `launch/recurrent.rs` (GDN/qwen3-next state
 step) was fixed alongside (`12548bbe`, `block:(B::WARP_SIZE, …)`); the GDN kernel
 was already warp-width-neutral, so it's a pure launch fix (HIP unchanged, the
