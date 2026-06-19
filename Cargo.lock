@@ -493,6 +493,7 @@ dependencies = [
  "flambeau-core",
  "flambeau-kernels-cuda",
  "flambeau-kernels-hip",
+ "flambeau-ops",
  "flambeau-quant",
  "flambeau-runtime",
  "half",
