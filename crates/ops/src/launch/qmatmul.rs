@@ -211,7 +211,7 @@ pub fn qmatmul<B: flambeau_core::KernelBackend>(
     // can resolve here. Re-dispatch as if m=1 to obtain the dtype's MMVQ
     // impl, which consumes the standard Q8_1 activation and only needs
     // k % 32; the Mmvq arm then loops it over the real m rows.
-    if matches!(recipe.kind, RecipeKind::MmqLdsX64) && k % 128 != 0 {
+    if matches!(recipe.kind, RecipeKind::MmqLdsX64 | RecipeKind::MmqMma) && k % 128 != 0 {
         let mmvq_cfg = QMatMulCfg {
             dtype_weight,
             dtype_activation: QDtype::Q8_1,
@@ -283,6 +283,25 @@ pub fn qmatmul<B: flambeau_core::KernelBackend>(
             }
             let nb_per_row = k / block_elems(dtype_weight);
             mmq_lds_x64_launch(
+                reg, stream,
+                recipe,
+                crate::MmvqBuffers { weights, act_q8_1: act_q8_1_mmq, dst },
+                n,
+                m,
+                nb_per_row,
+            )
+        }
+        RecipeKind::MmqMma => {
+            if act_q8_1_mmq.as_usize() == 0 {
+                bail!(
+                    "qmatmul dispatched to MmqMma (impl {}) but caller did not \
+                     populate act_q8_1_mmq — run ops::norm::quantize_f16_q8_1_mmq \
+                     upstream",
+                    desc.impl_id
+                );
+            }
+            let nb_per_row = k / block_elems(dtype_weight);
+            mmq_mma_launch(
                 reg, stream,
                 recipe,
                 crate::MmvqBuffers { weights, act_q8_1: act_q8_1_mmq, dst },
@@ -1575,6 +1594,11 @@ enum RecipeKind {
     /// dynamic shared-memory bytes, and the Y buffer pre-formatted as
     /// `BlockQ8_1Mmq` via `flambeau_quantize_q8_1_mmq`.
     MmqLdsX64,
+    /// Int8 tensor-core MMQ (mma.sync m16n8k32) for Q4_0 on sm_80+. Same DS4
+    /// 144-B activation and 9 scalar args as MmqLdsX64, same (128, 64) tile,
+    /// but block (32, NWARPS)=(32, 8) and static shared (dynamic bytes = 0).
+    /// CUDA-only; gfx906 has no matrix core and keeps the dp4a MmqLdsX64 path.
+    MmqMma,
     /// wave64 MMQ for Q5_K (candle port `mul_mat_q5_K_gfx906_v2`).
     /// Consumes the standard `flambeau_block_q8_1` layout (NOT DS4), so no
     /// special activation quantise is needed at call sites. Grid =
@@ -2277,6 +2301,16 @@ impl Recipe {
                 rows_per_block: 0,
                 mmq_tile: (128, 64),
             },
+            // Int8 tensor-core MMQ for Q4_0 (sm_80+). MUST match
+            // mmq_q4_0_mma.cu's mmq_q4_0_mma_row<128, 64, 4, 2>.
+            "qmatmul_q4_0_mma" => Self {
+                kind: RecipeKind::MmqMma,
+                stem: "mmq_q4_0_mma",
+                entry: "flambeau_mmq_q4_0_mma_q8_1",
+                threads: 0,
+                rows_per_block: 0,
+                mmq_tile: (128, 64),
+            },
             // wave64 MMQ for Q5_0. Same tile shape + launch as Q4_0;
             // inner loop adds the 5th-bit `16·bit·y` DP4A term
             // (mmvq_q5_0 pattern).
@@ -2516,6 +2550,55 @@ fn mmq_lds_x64_launch<B: flambeau_core::KernelBackend>(
         // 2D block: (WARP_SIZE, MMQ_NWARPS, 1) = (64, 4, 1).
         block: (64, 4, 1),
         shared_bytes,
+    };
+    B::launch(&kernel, stream, cfg, args)?;
+    Ok(())
+}
+
+/// Launch the int8 tensor-core Q4_0 MMQ (mma.sync). Same 9 args, activation,
+/// and (128, 64) tile as `mmq_lds_x64_launch`; block is (32, NWARPS)=(32, 8)
+/// and shared memory is static (dynamic bytes = 0).
+fn mmq_mma_launch<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
+    recipe: Recipe,
+    bufs: crate::MmvqBuffers,
+    n_rows: usize,
+    n_batches: usize,
+    n_blocks_per_row: usize,
+) -> Result<()> {
+    let crate::MmvqBuffers { weights, act_q8_1: act_q8_1_mmq, dst } = bufs;
+    let module = reg.expect_module(recipe.stem)?;
+    let kernel = B::kernel(module, recipe.entry)?;
+
+    let ncols_x = (n_blocks_per_row * 32) as i32; // Q4_0 block = 32 elements
+    let nrows_x = n_rows as i32;
+    let ncols_y = n_batches as i32;
+    let stride_col_y = n_batches as i32;
+    let stride_row_x = n_blocks_per_row as i32;
+    let nrows_dst = n_rows as i32;
+
+    let w_ptr: u64 = weights.as_usize() as u64;
+    let a_ptr: u64 = act_q8_1_mmq.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&w_ptr);
+    args.push_arg(&a_ptr);
+    args.push_arg(&d_ptr);
+    args.push_arg(&ncols_x);
+    args.push_arg(&nrows_x);
+    args.push_arg(&ncols_y);
+    args.push_arg(&stride_col_y);
+    args.push_arg(&stride_row_x);
+    args.push_arg(&nrows_dst);
+
+    let (rows_per_tile, batches_per_tile) = recipe.mmq_tile;
+    let grid_x = (n_rows as u32).div_ceil(rows_per_tile);
+    let grid_y = (n_batches as u32).div_ceil(batches_per_tile);
+    let cfg = LaunchCfg {
+        grid: (grid_x, grid_y, 1),
+        block: (32, 8, 1),
+        shared_bytes: 0,
     };
     B::launch(&kernel, stream, cfg, args)?;
     Ok(())

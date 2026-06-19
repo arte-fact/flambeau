@@ -172,6 +172,7 @@ pub const KERNEL_STEMS: &[&str] = &[
     "mmq_q4_1_wave64",
     "mmq_q4_0_wave64",
     "mmq_q4_0_4warp_lds",
+    "mmq_q4_0_mma",
     "mmq_q5_0_wave64",
     "mmq_q5_1_wave64",
     "mmq_q4_K_4warp",

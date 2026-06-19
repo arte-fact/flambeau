@@ -125,11 +125,11 @@ pub const QMATMUL_SM86: &[KernelDescriptor] = &[
         m_range: (1, 127),
         cert_rel_path: "certs/cuda/sm_86/qmatmul_q4_0_mmvq_dp4a.json",
     },
-    // Dense-prefill: batched 4-warp LDS-tiled MMQ (DS4 144-B Q8_1 activation) at
-    // m >= 128. Same manifest-generated kernel as gfx906; the (k%128) guard in
-    // ops::launch::qmatmul re-dispatches non-128-aligned contractions back to
-    // the MMVQ row above. Replaces the per-row MMVQ loop that ran the decode
-    // kernel ~m times per prefill matmul (611k launches on gemma-12b).
+    // Dense-prefill: batched 4-warp LDS-tiled dp4a MMQ at m >= 128. The (k%128)
+    // guard in ops::launch::qmatmul re-dispatches non-128-aligned contractions
+    // back to the MMVQ row above. The int8 tensor-core kernel (qmatmul_q4_0_mma)
+    // is certified and wired but stays undispatched: the single-buffered version
+    // is occupancy-bound and loses to this dp4a kernel until it double-buffers.
     KernelDescriptor {
         op_name: "QMatMul",
         impl_id: "qmatmul_q4_0_mmq_4warp_lds",

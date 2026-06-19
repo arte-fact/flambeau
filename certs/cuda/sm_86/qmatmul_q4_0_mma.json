@@ -1,0 +1,130 @@
+{
+  "schema_version": 1,
+  "impl_id": "qmatmul_q4_0_mma",
+  "backend": "cuda",
+  "arch": "sm_86",
+  "op": "qmatmul_mmq",
+  "dtype_weight": "Q4_0",
+  "dtype_activation": "Q8_1_MMQ",
+  "tolerance_formula": "|err| <= 3e-2 * max(|ref|, sqrt(k))",
+  "results": [
+    {
+      "m": 128,
+      "k": 2048,
+      "n": 64,
+      "seed": 11400714269433166933,
+      "max_rel_err": 0.00017592095,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 128,
+      "k": 2048,
+      "n": 128,
+      "seed": 11400714269433166997,
+      "max_rel_err": 0.00019591963,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 128,
+      "k": 4096,
+      "n": 64,
+      "seed": 11400714269298949205,
+      "max_rel_err": 0.0001912415,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 128,
+      "k": 4096,
+      "n": 128,
+      "seed": 11400714269298949269,
+      "max_rel_err": 0.00020207465,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 256,
+      "k": 2048,
+      "n": 64,
+      "seed": 11400713719677353045,
+      "max_rel_err": 0.00017996704,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 256,
+      "k": 2048,
+      "n": 128,
+      "seed": 11400713719677353109,
+      "max_rel_err": 0.00019685739,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 256,
+      "k": 4096,
+      "n": 64,
+      "seed": 11400713719543135317,
+      "max_rel_err": 0.0001912415,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 256,
+      "k": 4096,
+      "n": 128,
+      "seed": 11400713719543135381,
+      "max_rel_err": 0.00022438169,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 4096,
+      "k": 2048,
+      "n": 64,
+      "seed": 11400697227002936405,
+      "max_rel_err": 0.00022198745,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 4096,
+      "k": 2048,
+      "n": 128,
+      "seed": 11400697227002936469,
+      "max_rel_err": 0.00025754359,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 4096,
+      "k": 4096,
+      "n": 64,
+      "seed": 11400697226868718677,
+      "max_rel_err": 0.00021633506,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 4096,
+      "k": 4096,
+      "n": 128,
+      "seed": 11400697226868718741,
+      "max_rel_err": 0.00022655725,
+      "tolerance": 0.03,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-06-19T20:00:00Z",
+  "rig": "flambeau-rtx3090-sm_86",
+  "pmc": {
+    "vgpr_count": 102,
+    "sgpr_count": null,
+    "waves_per_simd": null,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}
