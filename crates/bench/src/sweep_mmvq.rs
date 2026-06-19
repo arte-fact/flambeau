@@ -640,6 +640,7 @@ pub fn run_sweep<B: BenchBackend>(spec: &SweepSpec, repo_root: &Path, arch: &str
 pub enum GateUpDtype {
     Q8_0,
     Q4_0,
+    Q4_0T128,
     Q4_1,
     Q5K,
 }
@@ -648,7 +649,7 @@ impl GateUpDtype {
     pub fn name(self) -> &'static str {
         match self {
             GateUpDtype::Q8_0 => "Q8_0",
-            GateUpDtype::Q4_0 => "Q4_0",
+            GateUpDtype::Q4_0 | GateUpDtype::Q4_0T128 => "Q4_0",
             GateUpDtype::Q4_1 => "Q4_1",
             GateUpDtype::Q5K => "Q5_K",
         }
@@ -656,7 +657,7 @@ impl GateUpDtype {
     fn ggml(self) -> GgmlDType {
         match self {
             GateUpDtype::Q8_0 => GgmlDType::Q8_0,
-            GateUpDtype::Q4_0 => GgmlDType::Q4_0,
+            GateUpDtype::Q4_0 | GateUpDtype::Q4_0T128 => GgmlDType::Q4_0,
             GateUpDtype::Q4_1 => GgmlDType::Q4_1,
             GateUpDtype::Q5K => GgmlDType::Q5K,
         }
@@ -664,7 +665,7 @@ impl GateUpDtype {
     fn weight_dtype(self) -> Dtype {
         match self {
             GateUpDtype::Q8_0 => Dtype::Q8_0Dp4a,
-            GateUpDtype::Q4_0 => Dtype::Q4_0,
+            GateUpDtype::Q4_0 | GateUpDtype::Q4_0T128 => Dtype::Q4_0,
             GateUpDtype::Q4_1 => Dtype::Q4_1Dp4a,
             GateUpDtype::Q5K => Dtype::Q5K,
         }
@@ -673,6 +674,7 @@ impl GateUpDtype {
         match self {
             GateUpDtype::Q8_0 => "qmatmul_q8_0_gate_up_t128_vdr2",
             GateUpDtype::Q4_0 => "qmatmul_q4_0_gate_up_dp4a",
+            GateUpDtype::Q4_0T128 => "qmatmul_q4_0_gate_up_t128_dp4a",
             GateUpDtype::Q4_1 => "qmatmul_q4_1_gate_up_dp4a",
             GateUpDtype::Q5K => "qmatmul_q5_k_gate_up_dp4a",
         }
@@ -681,6 +683,7 @@ impl GateUpDtype {
         match self {
             GateUpDtype::Q8_0 => "mmvq_q8_0_gate_up_t128_vdr2",
             GateUpDtype::Q4_0 => "mmvq_q4_0_gate_up_dp4a",
+            GateUpDtype::Q4_0T128 => "mmvq_q4_0_gate_up_t128_dp4a",
             GateUpDtype::Q4_1 => "mmvq_q4_1_gate_up_dp4a",
             GateUpDtype::Q5K => "mmvq_q5_k_gate_up_dp4a",
         }
@@ -689,13 +692,14 @@ impl GateUpDtype {
         match self {
             GateUpDtype::Q8_0 => "flambeau_mmvq_q8_0_gate_up_t128_vdr2_q8_1",
             GateUpDtype::Q4_0 => "flambeau_mmvq_q4_0_gate_up_dp4a_q8_1",
+            GateUpDtype::Q4_0T128 => "flambeau_mmvq_q4_0_gate_up_t128_dp4a_q8_1",
             GateUpDtype::Q4_1 => "flambeau_mmvq_q4_1_gate_up_dp4a_q8_1",
             GateUpDtype::Q5K => "flambeau_mmvq_q5_k_gate_up_dp4a_q8_1",
         }
     }
     fn launch_threads(self) -> u32 {
         match self {
-            GateUpDtype::Q8_0 => 128,
+            GateUpDtype::Q8_0 | GateUpDtype::Q4_0T128 => 128,
             GateUpDtype::Q4_0 | GateUpDtype::Q4_1 | GateUpDtype::Q5K => 256,
         }
     }
@@ -880,6 +884,177 @@ fn run_shape_gate_up<B: BenchBackend>(
     let ref_g = reference_matmul(&gate_dq, &y_rt, m, k);
     let ref_u = reference_matmul(&up_dq, &y_rt, m, k);
     Ok((got_g, got_u, ref_g, ref_u))
+}
+
+/// Fused K+V Q4_0 decode with F16 destination (`mmvq_q4_0_kv_f16dst`): K and V
+/// are both Q4_0, share the row count + the Q8_1 activation, and write F16. Same
+/// per-row dot as the dense `gate_up` (Q4_0 dp4a + bias), two outputs.
+pub fn run_kv_f16dst_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) -> Result<Cert> {
+    let dev = B::new_device(0)?;
+    let stem = "mmvq_q4_0_kv_f16dst_dp4a";
+    let entry = "flambeau_mmvq_q4_0_kv_f16dst_dp4a_q8_1";
+    let bytes = B::image(stem).ok_or_else(|| anyhow!("{stem} not compiled"))?;
+    let module = B::load(&dev, bytes)?;
+    let pmc = B::attributes(&B::kernel(&module, entry)?)?;
+
+    let m_grid = vec![1usize, 8, 16, 128, 512];
+    let k_grid = vec![2048usize, 5120, 15360];
+    let seed = 0xC0FFEE_u64;
+
+    let mut results = Vec::new();
+    for &m in &m_grid {
+        for &k in &k_grid {
+            let s = seed
+                .wrapping_add((m as u64).wrapping_mul(0x1234567))
+                .wrapping_add((k as u64).wrapping_mul(0x9E3779B97F4A7C15));
+            let (got_k, got_v, ref_k, ref_v) = run_shape_kv_f16dst::<B>(&dev, m, k, s)?;
+            let floor = (k as f32).sqrt();
+            let max_rel_err = max_rel_err_with_floor(&got_k, &ref_k, floor)
+                .max(max_rel_err_with_floor(&got_v, &ref_v, floor));
+            let tolerance = cert_tol(k);
+            results.push(ShapeResult {
+                m,
+                k,
+                n: k,
+                seed: s,
+                max_rel_err,
+                tolerance,
+                pass: max_rel_err <= tolerance,
+            });
+        }
+    }
+
+    let pass = results.iter().all(|r| r.pass);
+    let cert = Cert {
+        schema_version: SCHEMA_VERSION,
+        impl_id: "mmvq_q4_0_kv_f16dst".to_string(),
+        backend: dev.backend().to_string(),
+        arch: arch.to_string(),
+        op: "qmatmul_kv_decode_mmvq".to_string(),
+        dtype_weight: "Q4_0".to_string(),
+        dtype_activation: "Q8_1".to_string(),
+        tolerance_formula: "|err| <= 3e-2 * max(|ref|, sqrt(k))  (fused K+V Q4_0, F16 dst)"
+            .to_string(),
+        results,
+        pass,
+        emitted_at: now_utc_iso8601(),
+        rig: rig_for(arch),
+        pmc: Some(pmc),
+    };
+    cert.write_to_disk(repo_root)?;
+    Ok(cert)
+}
+
+/// One (m, k) shape for the fused K+V F16-dst kernel. Returns
+/// `(k_got, v_got, k_ref, v_ref)` with the device outputs widened from F16.
+fn run_shape_kv_f16dst<B: BenchBackend>(
+    dev: &B::Device,
+    m: usize,
+    k: usize,
+    seed: u64,
+) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>)> {
+    let q_bytes = B::image("quantize_q8_1").ok_or_else(|| anyhow!("quantize_q8_1 not compiled"))?;
+    let m_bytes = B::image("mmvq_q4_0_kv_f16dst_dp4a")
+        .ok_or_else(|| anyhow!("mmvq_q4_0_kv_f16dst_dp4a not compiled"))?;
+    let q_module = B::load(dev, q_bytes)?;
+    let m_module = B::load(dev, m_bytes)?;
+    let k_quantize = B::kernel(&q_module, "flambeau_quantize_row_q8_1")?;
+    let k_mmvq = B::kernel(&m_module, "flambeau_mmvq_q4_0_kv_f16dst_dp4a_q8_1")?;
+
+    let wd = Dtype::Q4_0;
+    let block_elems = GgmlDType::Q4_0.block_size();
+    let block_bytes = wd.block_size_bytes();
+    assert_eq!(k % block_elems, 0, "k {k} must be multiple of block size {block_elems}");
+    let weights_blocks = m * (k / block_elems);
+
+    let k_raw = tame_scales(wd, seeded_bytes(seed, weights_blocks * block_bytes));
+    let v_raw = tame_scales(wd, seeded_bytes(seed ^ 0xDEAD_BEEF, weights_blocks * block_bytes));
+    let y_f32 = seeded_f32_range(seed.wrapping_add(0xA5A5A5A5), k, -1.0, 1.0);
+
+    let mut k_dq = vec![0.0f32; m * k];
+    let mut v_dq = vec![0.0f32; m * k];
+    dequantize_into(GgmlDType::Q4_0, &k_raw, &mut k_dq)?;
+    dequantize_into(GgmlDType::Q4_0, &v_raw, &mut v_dq)?;
+
+    let d_k = alloc_and_upload(dev, k_raw.as_slice());
+    let d_v = alloc_and_upload(dev, v_raw.as_slice());
+    let d_y_f32 = alloc_and_upload(dev, y_f32.as_slice());
+
+    let y_q8_1_blocks = k / QK8;
+    let y_q8_1_bytes = y_q8_1_blocks * std::mem::size_of::<BlockQ8_1>();
+    let d_y_q8_1 = dev.alloc(y_q8_1_bytes)?;
+    {
+        let stream = dev.default_stream();
+        let n_elems = k as i32;
+        let d_y_f32_ptr: u64 = d_y_f32.as_usize() as u64;
+        let d_y_q8_1_ptr: u64 = d_y_q8_1.as_usize() as u64;
+        let mut args = <B::Args<'_>>::default();
+        args.push_arg(&d_y_f32_ptr);
+        args.push_arg(&d_y_q8_1_ptr);
+        args.push_arg(&n_elems);
+        B::launch(&k_quantize, stream, LaunchCfg::one_d(y_q8_1_blocks as u32, QK8 as u32), args)?;
+        stream.synchronize()?;
+    }
+
+    let d_k_out = dev.alloc(m * 2)?;
+    let d_v_out = dev.alloc(m * 2)?;
+    {
+        let stream = dev.default_stream();
+        let n_rows = m as i32;
+        let n_units = (k / block_elems) as i32;
+        let kw_ptr: u64 = d_k.as_usize() as u64;
+        let vw_ptr: u64 = d_v.as_usize() as u64;
+        let y_ptr: u64 = d_y_q8_1.as_usize() as u64;
+        let ko_ptr: u64 = d_k_out.as_usize() as u64;
+        let vo_ptr: u64 = d_v_out.as_usize() as u64;
+        let mut args = <B::Args<'_>>::default();
+        args.push_arg(&kw_ptr);
+        args.push_arg(&vw_ptr);
+        args.push_arg(&y_ptr);
+        args.push_arg(&ko_ptr);
+        args.push_arg(&vo_ptr);
+        args.push_arg(&n_rows);
+        args.push_arg(&n_units);
+        B::launch(&k_mmvq, stream, LaunchCfg::one_d(m as u32, 256), args)?;
+        stream.synchronize()?;
+    }
+
+    let mut k_bytes = vec![0u8; m * 2];
+    let mut v_bytes = vec![0u8; m * 2];
+    unsafe {
+        dev.memcpy_async(
+            dev.default_stream(),
+            CopyDirection::DeviceToHost,
+            DevicePtr(k_bytes.as_mut_ptr() as usize),
+            d_k_out,
+            m * 2,
+        )?;
+        dev.memcpy_async(
+            dev.default_stream(),
+            CopyDirection::DeviceToHost,
+            DevicePtr(v_bytes.as_mut_ptr() as usize),
+            d_v_out,
+            m * 2,
+        )?;
+    }
+    dev.default_stream().synchronize()?;
+
+    unsafe {
+        dev.dealloc(d_k, k_raw.len())?;
+        dev.dealloc(d_v, v_raw.len())?;
+        dev.dealloc(d_y_f32, y_f32.len() * 4)?;
+        dev.dealloc(d_y_q8_1, y_q8_1_bytes)?;
+        dev.dealloc(d_k_out, m * 2)?;
+        dev.dealloc(d_v_out, m * 2)?;
+    }
+
+    let widen = |b: &[u8]| -> Vec<f32> {
+        (0..m).map(|i| f16::from_le_bytes([b[2 * i], b[2 * i + 1]]).to_f32()).collect()
+    };
+    let y_rt = quantize_q8_1_roundtrip(&y_f32);
+    let ref_k = reference_matmul(&k_dq, &y_rt, m, k);
+    let ref_v = reference_matmul(&v_dq, &y_rt, m, k);
+    Ok((widen(&k_bytes), widen(&v_bytes), ref_k, ref_v))
 }
 
 // ---- batched (N-slot) sweep -----------------------------------------------

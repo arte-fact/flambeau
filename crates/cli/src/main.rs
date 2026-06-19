@@ -930,6 +930,18 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
         match op {
             "qmatmul" => {
                 use flambeau_bench::sweep_mmvq::{run_sweep, Dtype, SweepSpec};
+                if dtype == "Q4_0_kv_f16dst" {
+                    let cert = flambeau_bench::sweep_mmvq::run_kv_f16dst_sweep::<
+                        flambeau_bench::backend::Hip,
+                    >(&repo_root(), arch)?;
+                    println!(
+                        "sweep mmvq_q4_0_kv_f16dst: pass={} shapes={} rig={}",
+                        cert.pass,
+                        cert.results.len(),
+                        cert.rig
+                    );
+                    return Ok(());
+                }
                 if let Some(gu) = gate_up_dtype(dtype) {
                     use flambeau_bench::sweep_mmvq::run_gate_up_sweep;
                     let root = repo_root();
@@ -1455,6 +1467,7 @@ fn gate_up_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::GateUpDtype>
     match dtype {
         "Q8_0_gate_up" => Some(GateUpDtype::Q8_0),
         "Q4_0_gate_up" => Some(GateUpDtype::Q4_0),
+        "Q4_0_gate_up_t128" => Some(GateUpDtype::Q4_0T128),
         "Q4_1_gate_up" => Some(GateUpDtype::Q4_1),
         "Q5_K_gate_up" => Some(GateUpDtype::Q5K),
         _ => None,
@@ -1674,6 +1687,16 @@ fn sweep_cuda(op: &str, dtype: &str) -> Result<()> {
             "--arch sm_86: only --op qmatmul (mmvq) has CUDA kernels; \
              other ops are gfx906-only (Stream F port in progress, see P3-STREAM-F-PORT.md)"
         );
+    }
+    if dtype == "Q4_0_kv_f16dst" {
+        let cert = flambeau_bench::sweep_mmvq::run_kv_f16dst_sweep::<Cuda>(&repo_root(), "sm_86")?;
+        println!(
+            "sweep mmvq_q4_0_kv_f16dst: pass={} shapes={} rig={}",
+            cert.pass,
+            cert.results.len(),
+            cert.rig
+        );
+        return Ok(());
     }
     if let Some(gu) = gate_up_dtype(dtype) {
         use flambeau_bench::sweep_mmvq::run_gate_up_sweep;
