@@ -4661,9 +4661,19 @@ fn check_dispatch(
 
         let (fastest_d, fastest_t) =
             totals.iter().copied().min_by(|a, b| a.1.total_cmp(&b.1)).unwrap();
-        match totals.iter().find(|(d, _)| d.impl_id() == inc_impl) {
-            Some(&(_, inc_t))
-                if fastest_d.impl_id() != inc_impl
+
+        // Resolve both incumbent and challenger to the kernel that actually
+        // runs: the launch layer aliases some dispatch impl_ids (e.g. Q8_0
+        // `single_row` → `t128_vdr2`), so the literal impl_id's measured time
+        // can be a kernel that never executes. Compare live kernels, not labels.
+        let live = |id: &str| flambeau_ops::qmatmul::recipe_stem_for(id).ok();
+        let inc_live = live(inc_impl);
+        let inc_time = inc_live
+            .and_then(|s| totals.iter().find(|(d, _)| d.kernel_stem() == s).map(|&(_, t)| t))
+            .or_else(|| totals.iter().find(|(d, _)| d.impl_id() == inc_impl).map(|&(_, t)| t));
+        match inc_time {
+            Some(inc_t)
+                if live(fastest_d.impl_id()) != inc_live
                     && fastest_t < inc_t * (1.0 - AUTOTUNE_HYSTERESIS) =>
             {
                 issues.push(format!(
@@ -4673,8 +4683,8 @@ fn check_dispatch(
                     AUTOTUNE_HYSTERESIS * 100.0
                 ));
             }
-            // Incumbent absent from the candidate pool → no perf compare; the
-            // cert check above still gates it.
+            // Same live kernel (alias), within margin, or incumbent absent from
+            // the pool → no drift; the cert check above still gates the row.
             _ => {}
         }
     }
@@ -4757,36 +4767,93 @@ fn emit_dispatch(
     }
 
     let path = repo_root.join(format!("dispatch/{backend}/{arch}.toml"));
-    if let Ok(existing) = std::fs::read_to_string(&path) {
-        for raw in existing.split("\n[[qmatmul]]").skip(1) {
-            let dtype = raw.lines().find_map(|l| {
-                l.trim()
-                    .strip_prefix("dtype")?
-                    .trim_start()
-                    .strip_prefix('=')
-                    .map(|v| v.trim().trim_matches('"').to_string())
-            });
-            if let Some(dt) = dtype {
-                blocks
-                    .entry(dt)
-                    .or_insert_with(|| format!("\n[[qmatmul]]{}\n", raw.trim_end()));
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let spliced = splice_qmatmul_blocks(&existing, &blocks, backend, arch);
+    std::fs::write(&path, &spliced).with_context(|| format!("write {}", path.display()))?;
+    Ok(path)
+}
+
+/// Replace, in place, the `[[qmatmul]]` rows for each re-tuned dtype in `new`
+/// (dtype → block text) while preserving every other byte of the table: other
+/// dtypes' `[[qmatmul]]` rows, and all non-`[[qmatmul]]` sections
+/// (`[[qmatmul_mmq]]`, attention, rope, MoE, …). The legacy whole-file rewrite
+/// emitted only `[[qmatmul]]` blocks and silently dropped the rest — fatal for a
+/// hand-maintained multi-section table re-emitting a single dtype.
+fn splice_qmatmul_blocks(
+    existing: &str,
+    new: &std::collections::BTreeMap<String, String>,
+    backend: &str,
+    arch: &str,
+) -> String {
+    if existing.trim().is_empty() {
+        let mut s = format!(
+            "# Dispatch table — {backend} / {arch}. Autotuned by `flambeau autotune`.\n"
+        );
+        for b in new.values() {
+            s.push_str(b);
+        }
+        return s;
+    }
+
+    let section_dtype = |sec: &[&str]| -> Option<String> {
+        sec.iter().find_map(|l| {
+            l.trim()
+                .strip_prefix("dtype")?
+                .trim_start()
+                .strip_prefix('=')
+                .map(|v| v.trim().trim_matches('"').to_string())
+        })
+    };
+
+    let lines: Vec<&str> = existing.lines().collect();
+    let mut out: Vec<String> = Vec::new();
+    let mut spliced: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut i = 0;
+    while i < lines.len() && !lines[i].trim_start().starts_with("[[") {
+        out.push(lines[i].to_string());
+        i += 1;
+    }
+    while i < lines.len() {
+        let header = lines[i].trim().to_string();
+        let start = i;
+        i += 1;
+        while i < lines.len() && !lines[i].trim_start().starts_with("[[") {
+            i += 1;
+        }
+        let section = &lines[start..i];
+        let dtype = section_dtype(section);
+        let is_retuned = header == "[[qmatmul]]"
+            && dtype.as_deref().map(|d| new.contains_key(d)).unwrap_or(false);
+        if is_retuned {
+            let dt = dtype.unwrap();
+            // Emit the new rows on the first hit; drop subsequent rows of the
+            // same re-tuned dtype (the new block replaces all of them).
+            if spliced.insert(dt.clone()) {
+                for l in new[&dt].trim_matches('\n').lines() {
+                    out.push(l.to_string());
+                }
+                out.push(String::new());
+            }
+        } else {
+            for l in section {
+                out.push(l.to_string());
             }
         }
     }
 
-    let mut s = String::new();
-    writeln!(
-        s,
-        "# Dispatch table — {backend} / {arch}. Autotuned by `flambeau autotune`\n\
-         # (median of timed mmvq launches per shape). Regenerate; do not hand-edit."
-    )
-    .expect("write to String is infallible");
-    for block in blocks.values() {
-        s.push_str(block);
+    // A re-tuned dtype with no existing row → append its block.
+    for (dt, b) in new {
+        if !spliced.contains(dt) {
+            for l in b.trim_matches('\n').lines() {
+                out.push(l.to_string());
+            }
+            out.push(String::new());
+        }
     }
 
-    std::fs::write(&path, s).with_context(|| format!("write {}", path.display()))?;
-    Ok(path)
+    let mut s = out.join("\n");
+    s.push('\n');
+    s
 }
 
 // ---- helpers (shared with the ad-hoc tests) -------------------------------
@@ -4993,4 +5060,48 @@ fn cert_tol(_k: usize) -> f32 {
     // `max_rel_err` absorbs the sqrt(K) scaling, so the bar stays flat.
     // Tighter bounds follow once MMVQ moves to the dp4a / multi-row DPP path.
     3e-2
+}
+
+#[cfg(test)]
+mod autotune_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn splice_replaces_only_retuned_qmatmul_rows() {
+        let existing = "# header\n\n\
+            [[qmatmul]]\ndtype = \"Q8_0\"\nimpl  = \"old_single_row\"\n\n\
+            [[qmatmul]]\ndtype = \"Q4_K\"\nimpl  = \"q4k_keep\"\n\n\
+            [[qmatmul_mmq]]\ndtype = \"Q8_0\"\nimpl  = \"q8_mmq_keep\"\n\n\
+            [[rope]]\nimpl = \"rope_keep\"\n";
+        let mut new = BTreeMap::new();
+        new.insert(
+            "Q8_0".to_string(),
+            "\n[[qmatmul]]\ndtype   = \"Q8_0\"\nimpl    = \"new_dp4a\"\n".to_string(),
+        );
+        let out = splice_qmatmul_blocks(existing, &new, "hip", "gfx906");
+        assert!(out.contains("new_dp4a"));
+        assert!(!out.contains("old_single_row"), "old Q8_0 decode row replaced");
+        // Other dtype's decode row + the non-[[qmatmul]] sections survive.
+        assert!(out.contains("q4k_keep"), "Q4_K decode row preserved");
+        assert!(out.contains("[[qmatmul_mmq]]") && out.contains("q8_mmq_keep"), "mmq preserved");
+        assert!(out.contains("[[rope]]") && out.contains("rope_keep"), "rope preserved");
+    }
+
+    #[test]
+    fn m_range_contains_handles_table_forms() {
+        let row = |m: &str| crate::dispatch::DispatchRow {
+            dtype: "Q8_0".into(),
+            dtype_q: None,
+            shape: [("m".to_string(), toml::Value::String(m.into()))].into_iter().collect(),
+            r#impl: "x".into(),
+            cert: "c".into(),
+            notes: None,
+        };
+        assert!(m_range_contains(&row("any"), 4096));
+        assert!(m_range_contains(&row("1..3"), 3)); // inclusive upper
+        assert!(!m_range_contains(&row("1..3"), 4));
+        assert!(m_range_contains(&row(">=32"), 32));
+        assert!(!m_range_contains(&row(">=32"), 31));
+    }
 }

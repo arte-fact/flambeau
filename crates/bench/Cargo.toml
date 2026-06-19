@@ -17,6 +17,10 @@ cuda = ["dep:flambeau-backend-cuda", "dep:flambeau-kernels-cuda", "dep:flambeau-
 [dependencies]
 flambeau-core = { path = "../core" }
 flambeau-runtime = { path = "../runtime" }
+# For `qmatmul::recipe_stem_for` — resolves a dispatch impl_id through the
+# launch-layer aliases (e.g. Q8_0 single_row → t128_vdr2) so autotune --check
+# compares the kernel that actually runs, not the literal impl_id. Backend-free.
+flambeau-ops = { path = "../ops" }
 flambeau-backend-hip = { path = "../backend-hip", optional = true }
 flambeau-kernels-hip = { path = "../kernels-hip", optional = true }
 flambeau-backend-cuda = { path = "../backend-cuda", optional = true }
