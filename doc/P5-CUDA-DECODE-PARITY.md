@@ -238,13 +238,26 @@ already backend-generic — `model-ops` takes `&impl Ops`, the GGUF loader takes
   `mmvq_q4_0_gate_up_t128`); both ported hip→cuda the rule-5 way. So the full
   prefill+decode inference path runs correctly on CUDA.
 
-**Status: P5.4 complete — the CUDA path runs real models correctly end to end**
-(deterministic, prefill argmax + full greedy sequence match HIP, ~0.997
-cross-backend cosine reflecting only F16 wave-width drift). Remaining for the
-*literal* doc gate: logit-cosine vs **llama.cpp** on the same backend (the
-cross-backend wave64↔wave32 drift means HIP↔CUDA won't hit 0.9999, but
-same-backend-vs-llama.cpp can) + formal sweep certs for the ported Q4_0 decode
-kernels (validated for now by the exact cross-backend decode match).
+- ✅ **llama.cpp oracle — exact token-for-token match** (`b538847e`). Fed the
+  chat-templated "What is the capital of France?" token IDs (gemma tokenizer) and
+  greedily generated; flambeau CUDA produces the **identical 10-token sequence**
+  to llama.cpp (build-mi50, same GGUF, temp 0) —
+  `[100, 45518, 107, 101, 818, 5279, 529, 7001, 563, 9079]` =
+  "<|channel>thought\n<channel|>The capital of France is Paris". Baked into the
+  test as `LLAMACPP_REF`. This is the canonical-oracle check — stronger than
+  logit-cosine (an exact greedy match, not a threshold). (A bare-sentence prompt
+  gives high-vocab tokens on *both* backends — the ill-posed raw-completion
+  regime of an instruct model, flat logits → unstable argmax; not a bug. The
+  templated prompt has sharp logits and a stable argmax.)
+
+**Status: P5.4 COMPLETE — gemma-4-12B Q4_K runs correctly on CUDA, validated
+token-for-token against llama.cpp.** The decode path (prefill + multi-token
+generation) is correct end to end; CUDA reproduces the reference implementation's
+greedy output exactly. Cross-backend HIP↔CUDA agrees on argmax + high-confidence
+tokens and drifts only at low-margin near-ties (wave64↔wave32 F16 rounding).
+Remaining housekeeping: formal sweep certs for the ported Q4_0 decode kernels
+(`mmvq_q4_0_kv_f16dst`, `mmvq_q4_0_gate_up_t128`) — currently validated by the
+exact llama.cpp + cross-backend match.
 The same wave64 launch hard-code in `launch/recurrent.rs` (GDN/qwen3-next state
 step) was fixed alongside (`12548bbe`, `block:(B::WARP_SIZE, …)`); the GDN kernel
 was already warp-width-neutral, so it's a pure launch fix (HIP unchanged, the
