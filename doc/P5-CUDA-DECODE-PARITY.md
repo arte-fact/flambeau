@@ -234,9 +234,11 @@ already backend-generic — `model-ops` takes `&impl Ops`, the GGUF loader takes
 wave-width drift). Remaining for the *literal* doc gate: logit-cosine vs llama.cpp
 on the same backend + a multi-token decode loop (the cross-backend wave64↔wave32
 drift means HIP↔CUDA won't hit 0.9999, but same-backend-vs-llama.cpp can).
-Known latent twin: `launch/recurrent.rs` (GDN/qwen3-next) has the same
-`WARP_SIZE=64` hard-code — fix when a qwen3-next CUDA path is tested. attention's
-CUDA graph-slot rebind stays deferred (P4.4) — not needed here.
+The same wave64 launch hard-code in `launch/recurrent.rs` (GDN/qwen3-next state
+step) was fixed alongside (`12548bbe`, `block:(B::WARP_SIZE, …)`); the GDN kernel
+was already warp-width-neutral, so it's a pure launch fix (HIP unchanged, the
+qwen3-next CUDA *runtime* path still needs its own validation when it lands).
+attention's CUDA graph-slot rebind stays deferred (P4.4) — not needed here.
 
 ## Validation posture
 
