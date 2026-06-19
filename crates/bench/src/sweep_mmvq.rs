@@ -37,6 +37,10 @@ use crate::harness::{alloc_and_upload, max_rel_err_with_floor, rig_for, seeded_f
 
 const QK8: usize = QK8_0;
 
+/// `(weights_f32, activation_f32, gpu_result, cpu_reference)` — the four F32
+/// buffers an MMVQ/MMQ correctness oracle compares.
+type RefQuad = (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>);
+
 /// Dtype tag selecting which weight block layout the sweep drives. We only
 /// define the four dtypes here; `GgmlDType::from_wire` covers the rest.
 /// `(weight dtype, kernel variant)` — selects one impl to certify.
@@ -782,7 +786,7 @@ fn run_shape_gate_up<B: BenchBackend>(
     m: usize,
     k: usize,
     seed: u64,
-) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>)> {
+) -> Result<RefQuad> {
     let q_bytes =
         B::image("quantize_q8_1").ok_or_else(|| anyhow!("quantize_q8_1 not compiled"))?;
     let m_bytes = B::image(dtype.kernel_stem())
@@ -952,7 +956,7 @@ fn run_shape_kv_f16dst<B: BenchBackend>(
     m: usize,
     k: usize,
     seed: u64,
-) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>)> {
+) -> Result<RefQuad> {
     let q_bytes = B::image("quantize_q8_1").ok_or_else(|| anyhow!("quantize_q8_1 not compiled"))?;
     let m_bytes = B::image("mmvq_q4_0_kv_f16dst_dp4a")
         .ok_or_else(|| anyhow!("mmvq_q4_0_kv_f16dst_dp4a not compiled"))?;
@@ -2783,7 +2787,7 @@ fn run_shape_moe_gate_up<B: BenchBackend>(
     top_k: usize,
     n_tokens: usize,
     seed: u64,
-) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>)> {
+) -> Result<RefQuad> {
     let q_bytes =
         B::image("quantize_q8_1").ok_or_else(|| anyhow!("quantize_q8_1 not compiled"))?;
     let m_bytes = B::image(dtype.kernel_stem())

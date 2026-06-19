@@ -440,6 +440,7 @@ pub fn run_apply_softcap_f32_sweep<B: BenchBackend>(repo_root: &Path, arch: &str
 /// gating): two F16 input buffers, one F16 output, `ceil(n/256)×256`. `oracle`
 /// is the F64 host math `(a, b) -> result`; the result is rounded to F16 and
 /// compared in F32 with a `5e-3` rel envelope (F16 step + fast-`__expf` drift).
+#[allow(clippy::too_many_arguments)] // a sweep cell is its full (shape, op, fn, tol) spec
 fn run_binary_f16_sweep<B: BenchBackend>(
     repo_root: &Path,
     arch: &str,
@@ -945,6 +946,7 @@ pub fn run_rope_f16_sweep<B: BenchBackend>(repo_root: &Path, arch: &str, neox: b
 
         // Host oracle (F64 angles), applied to the f16-upcast input.
         let mut reference: Vec<f32> = x.iter().map(|v| v.to_f32()).collect();
+        #[allow(clippy::needless_range_loop)] // t drives base arithmetic + positions[t]
         for t in 0..n_tokens {
             for h in 0..n_heads {
                 let base = (t * n_heads + h) * head_dim;
@@ -2000,7 +2002,7 @@ pub fn run_gdn_alphabeta_sweep<B: BenchBackend>(repo_root: &Path, arch: &str, ba
         } else {
             unsafe {
                 dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost,
-                    DevicePtr(got_s.as_mut_ptr() as usize), d_so.as_ref().unwrap().clone(), b_n * per_batch * 4)?;
+                    DevicePtr(got_s.as_mut_ptr() as usize), *d_so.as_ref().unwrap(), b_n * per_batch * 4)?;
             }
             dev.default_stream().synchronize()?;
         }
@@ -2492,7 +2494,7 @@ pub fn run_gdn_conv_trio_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) ->
             dev.dealloc(d_w, conv_channels * conv_kernel * 4)?;
             dev.dealloc(d_out, n_slots * conv_channels * 4)?;
             dev.dealloc(d_hptrs, n_slots * 8)?;
-            for s in 0..n_slots { dev.dealloc(hist_bufs[s], hbytes)?; }
+            for &buf in hist_bufs.iter().take(n_slots) { dev.dealloc(buf, hbytes)?; }
         }
         results.push(ShapeResult { m: n_slots, k: conv_channels, n: conv_kernel, seed, max_rel_err: out_err, tolerance: 1e-4, pass: out_err <= 1e-4 });
     }
@@ -2526,6 +2528,7 @@ pub fn run_rmsnorm_rope_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) -> 
         let positions: Vec<i32> = (0..n_tokens).map(|t| (t as i32) * 5 + 1).collect();
 
         let mut reference: Vec<f32> = x.iter().map(|v| v.to_f32()).collect();
+        #[allow(clippy::needless_range_loop)] // t drives base arithmetic + positions[t]
         for t in 0..n_tokens {
             for h in 0..n_heads {
                 let base = (t * n_heads + h) * head_dim;

@@ -6,6 +6,7 @@
 //! * GDN attn_gate: n=6144, k=5120
 //! * GDN ssm_out: n=5120, k=6144
 //! * synthetic narrow shape for block-count coverage.
+//!
 //! Generic over `BenchBackend` so it emits HIP (gfx906) + CUDA (sm_86) certs.
 
 use std::path::Path;
