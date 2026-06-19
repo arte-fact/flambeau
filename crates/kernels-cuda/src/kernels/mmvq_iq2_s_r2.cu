@@ -1,0 +1,82 @@
+// mmvq_iq2_s_r2 — IQ2_S MMVQ, multi-row r2 (DPP half-warp reduce).
+
+#include "block_quant.cuh"
+#include "sm_80.cuh"
+#include "mmvq_reduce.cuh"
+#include "mmvq_store.cuh"
+#include "iq_grid.cuh"
+
+template<typename OutT>
+__device__ void mmvq_iq2_s_r2_q8_1_body(
+    const flambeau_block_iq2_s*  __restrict__ x,
+    const flambeau_block_q8_1*   __restrict__ y,
+    OutT* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row
+) {
+    const int row_pair = blockIdx.x;
+    const int lane     = threadIdx.x;
+    const int row_hi   = lane >> 5;
+    const int lane_lo  = lane & 31;
+    const int l        = lane_lo >> 3;
+    const int j_in_8   = lane_lo & 7;
+
+    const int row = row_pair * 2 + row_hi;
+    if (row >= n_rows) return;
+
+    const flambeau_block_iq2_s* xrow = x + (size_t) row * n_superblocks_per_row;
+
+    float acc = 0.0f;
+
+    for (int b = 0; b < n_superblocks_per_row; ++b) {
+        const flambeau_block_iq2_s* bk = xrow + b;
+        const float d = (float) bk->d;
+        const flambeau_block_q8_1* y_sb = y + (size_t) b * 8;
+
+        #pragma unroll
+        for (int ib32 = 0; ib32 < 8; ++ib32) {
+            const uint8_t sc_byte = bk->scales[ib32 >> 1];
+            const int sc_nibble = (ib32 & 1) ? (sc_byte >> 4) : (sc_byte & 0x0F);
+            const float db = d * (0.5f + (float) sc_nibble) * 0.25f;
+
+            const uint8_t qh_byte = bk->qh[ib32];
+            const int idx = (int) bk->qs[4 * ib32 + l]
+                          | (((int) qh_byte << (8 - 2 * l)) & 0x300);
+            const uint64_t g_u64 = IQ2S_GRID[idx];
+            const int lane_val = (int)((g_u64 >> (8 * j_in_8)) & 0xFF);
+
+            const uint8_t signs = bk->qs[32 + 4 * ib32 + l];
+            const float sign = (signs & KMASK_IQ2XS[j_in_8]) ? -1.0f : 1.0f;
+            const float x_val = db * (float) lane_val * sign;
+
+            const flambeau_block_q8_1* ya = y_sb + ib32;
+            const float d_y = (float) ya->d;
+            const int   qi  = (int) ya->qs[8 * l + j_in_8];
+            const float y_val = d_y * (float) qi;
+
+            acc += x_val * y_val;
+        }
+    }
+
+    mmvq_reduce_store_group<32, OutT>(acc, dst, row, lane_lo);
+}
+
+extern "C" __global__ void flambeau_mmvq_iq2_s_r2_q8_1(
+    const flambeau_block_iq2_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row
+) {
+    mmvq_iq2_s_r2_q8_1_body<float>(x, y, dst, n_rows, n_superblocks_per_row);
+}
+
+extern "C" __global__ void flambeau_mmvq_iq2_s_r2_q8_1_f16(
+    const flambeau_block_iq2_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row
+) {
+    mmvq_iq2_s_r2_q8_1_body<fb_fp16_t>(x, y, dst, n_rows, n_superblocks_per_row);
+}
