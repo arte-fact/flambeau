@@ -125,20 +125,22 @@ pub const QMATMUL_SM86: &[KernelDescriptor] = &[
         m_range: (1, 127),
         cert_rel_path: "certs/cuda/sm_86/qmatmul_q4_0_mmvq_dp4a.json",
     },
-    // Dense-prefill: batched 4-warp LDS-tiled dp4a MMQ at m >= 128. The (k%128)
-    // guard in ops::launch::qmatmul re-dispatches non-128-aligned contractions
-    // back to the MMVQ row above. The int8 tensor-core kernel (qmatmul_q4_0_mma)
-    // is certified and wired but stays undispatched: the single-buffered version
-    // is occupancy-bound and loses to this dp4a kernel until it double-buffers.
+    // Dense-prefill: int8 tensor-core MMQ (mma.sync, register-prefetched) at
+    // m >= 128. The (k%128) guard in ops::launch::qmatmul re-dispatches
+    // non-128-aligned contractions back to the MMVQ row above. CUDA-only —
+    // gfx906 has no matrix core and keeps the dp4a 4warp_lds kernel. Currently
+    // at parity with that dp4a kernel end-to-end (~1080 tok/s prefill,
+    // gemma-12b); the prefetch hides global latency but it stays shared-pipeline
+    // bound — a larger-tile / cp.async pipeline is the next lever.
     KernelDescriptor {
         op_name: "QMatMul",
-        impl_id: "qmatmul_q4_0_mmq_4warp_lds",
+        impl_id: "qmatmul_q4_0_mma",
         backend: "cuda",
         arch: "sm_86",
         dtype_weight: QDtype::Q4_0,
         dtype_activation: QDtype::Q8_1,
         m_range: (128, usize::MAX),
-        cert_rel_path: "certs/cuda/sm_86/qmatmul_q4_0_mmq_4warp_lds.json",
+        cert_rel_path: "certs/cuda/sm_86/qmatmul_q4_0_mma.json",
     },
     KernelDescriptor {
         op_name: "QMatMul",
