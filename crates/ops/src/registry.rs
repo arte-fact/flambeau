@@ -236,6 +236,7 @@ pub const KERNEL_STEMS: &[&str] = &[
     "attention_prefill_f16",
     "attention_prefill_f16_paged",
     "attention_prefill_flash_tile_f16",
+    "attention_prefill_mma",
     "attention_prefill_q8_kv",
     "attention_prefill_flash_tile_q8_kv",
     // MoE.

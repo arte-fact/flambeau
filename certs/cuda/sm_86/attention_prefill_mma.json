@@ -1,0 +1,103 @@
+{
+  "schema_version": 1,
+  "impl_id": "attention_prefill_mma",
+  "backend": "cuda",
+  "arch": "sm_86",
+  "op": "attention_prefill_mma",
+  "dtype_weight": "F16",
+  "dtype_activation": "F16",
+  "tolerance_formula": "|err| <= 5e-3 * max(|ref|, 1) vs F64 attention oracle",
+  "results": [
+    {
+      "m": 128,
+      "k": 128,
+      "n": 128,
+      "seed": 2654435761,
+      "max_rel_err": 0.00034121983,
+      "tolerance": 0.005,
+      "pass": true
+    },
+    {
+      "m": 256,
+      "k": 128,
+      "n": 256,
+      "seed": 1013904226,
+      "max_rel_err": 0.00037337598,
+      "tolerance": 0.005,
+      "pass": true
+    },
+    {
+      "m": 512,
+      "k": 128,
+      "n": 512,
+      "seed": 3668339987,
+      "max_rel_err": 0.00038939329,
+      "tolerance": 0.005,
+      "pass": true
+    },
+    {
+      "m": 128,
+      "k": 256,
+      "n": 128,
+      "seed": 2027808452,
+      "max_rel_err": 0.00037742319,
+      "tolerance": 0.005,
+      "pass": true
+    },
+    {
+      "m": 256,
+      "k": 256,
+      "n": 256,
+      "seed": 387276917,
+      "max_rel_err": 0.00034694638,
+      "tolerance": 0.005,
+      "pass": true
+    },
+    {
+      "m": 512,
+      "k": 256,
+      "n": 512,
+      "seed": 3041712678,
+      "max_rel_err": 0.00036778558,
+      "tolerance": 0.005,
+      "pass": true
+    },
+    {
+      "m": 512,
+      "k": 256,
+      "n": 512,
+      "seed": 1401181143,
+      "max_rel_err": 0.00035743105,
+      "tolerance": 0.005,
+      "pass": true
+    },
+    {
+      "m": 256,
+      "k": 256,
+      "n": 256,
+      "seed": 4055616904,
+      "max_rel_err": 0.00035732798,
+      "tolerance": 0.005,
+      "pass": true
+    },
+    {
+      "m": 128,
+      "k": 256,
+      "n": 128,
+      "seed": 2415085369,
+      "max_rel_err": 0.00035301491,
+      "tolerance": 0.005,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-06-20T00:00:00Z",
+  "rig": "flambeau-rtx3090-sm_86",
+  "pmc": {
+    "vgpr_count": 255,
+    "sgpr_count": null,
+    "waves_per_simd": null,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

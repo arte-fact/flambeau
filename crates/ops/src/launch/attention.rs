@@ -1177,6 +1177,45 @@ pub fn attention_prefill_f16_slots<B: flambeau_core::KernelBackend>(
     let n_k_i = n_k_tokens as i32;
     let q_off_i = q_offset as i32;
 
+    // Tensor-core (f16 mma) prefill — CUDA-only. Present only when the backend
+    // compiled `attention_prefill_mma` (gfx906 has no matrix core, so the module
+    // is absent there and this branch is skipped). NW=8 → BR=128 q rows/block, so
+    // it requires n_q % 128 == 0 (the register Q load has no partial-tile guard);
+    // the tail ubatch and head_dims outside {128,256} fall through to flash_tile.
+    if (head_dim == 128 || head_dim == 256)
+        && n_q_tokens >= 128
+        && n_q_tokens % 128 == 0
+    {
+        if let Some(module) = reg.module("attention_prefill_mma") {
+            let entry = match head_dim {
+                128 => "flambeau_attention_prefill_mma_d128_f16",
+                256 => "flambeau_attention_prefill_mma_d256_f16",
+                _ => unreachable!(),
+            };
+            let kernel = B::kernel(module, entry)?;
+            let mut args = <B::Args<'_>>::default();
+            args.push_arg(&q_ptr);
+            args.push_arg(&k_ptr);
+            args.push_arg(&v_ptr);
+            args.push_arg(&o_ptr);
+            args.push_arg(&n_q_i);
+            args.push_arg(&n_heads_q_i);
+            args.push_arg(&n_heads_kv_i);
+            push_scalar_maybe_slot(&mut args, &n_k_i, n_k_slot);
+            push_scalar_maybe_slot(&mut args, &q_off_i, q_off_slot);
+            args.push_arg(&scale);
+            args.push_arg(&window_size);
+            args.push_arg(&ring_depth);
+            let cfg = LaunchCfg {
+                grid: ((n_q_tokens as u32) / 128, n_heads_q as u32, 1),
+                block: (32, 8, 1),
+                shared_bytes: 0,
+            };
+            B::launch(&kernel, stream, cfg, args)?;
+            return Ok(());
+        }
+    }
+
     if use_flash_tile {
         // BR=4 LDS-tiled kernel.
         let module = reg.expect_module("attention_prefill_flash_tile_f16")?;
