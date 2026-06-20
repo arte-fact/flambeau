@@ -50,6 +50,20 @@ static __device__ __forceinline__ void load_a(tile_a& t, const __half* __restric
         t.x[l] = *(const unsigned*) (base + tile_a::row(l) * stride + tile_a::col(l));
 }
 
+// Like load_a but for a partial M-tile: `row0` points at row 0 of the matrix,
+// and each fragment's global row (start_row + row(l)) is clamped to `n_rows - 1`
+// so an over-the-end tile reads in-bounds (its garbage output is dropped by a
+// guarded store).
+static __device__ __forceinline__ void load_a_bounded(
+    tile_a& t, const __half* __restrict__ row0, int stride, int start_row, int n_rows) {
+    #pragma unroll
+    for (int l = 0; l < tile_a::ne; ++l) {
+        int gr = start_row + tile_a::row(l);
+        if (gr >= n_rows) gr = n_rows - 1;
+        t.x[l] = *(const unsigned*) (row0 + (size_t) gr * stride + tile_a::col(l));
+    }
+}
+
 // Load B from a row-major [N][stride] f16 tile (the K matrix in S=Q·Kᵀ stored
 // [n][d]); the two K-consecutive f16 of a B reg are contiguous there.
 static __device__ __forceinline__ void load_b(tile_b& t, const __half* __restrict__ base, int stride) {

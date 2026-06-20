@@ -1179,13 +1179,10 @@ pub fn attention_prefill_f16_slots<B: flambeau_core::KernelBackend>(
 
     // Tensor-core (f16 mma) prefill — CUDA-only. Present only when the backend
     // compiled `attention_prefill_mma` (gfx906 has no matrix core, so the module
-    // is absent there and this branch is skipped). NW=8 → BR=128 q rows/block, so
-    // it requires n_q % 128 == 0 (the register Q load has no partial-tile guard);
-    // the tail ubatch and head_dims outside {128,256} fall through to flash_tile.
-    if (head_dim == 128 || head_dim == 256)
-        && n_q_tokens >= 128
-        && n_q_tokens % 128 == 0
-    {
+    // is absent there and this branch is skipped). NW=8 → BR=128 q rows/block; the
+    // kernel bounds-clamps a partial final tile, so any n_q ≥ 16 is fine. head_dims
+    // outside {128,256} (gemma d512 globals) fall through to flash_tile.
+    if (head_dim == 128 || head_dim == 256) && n_q_tokens >= 16 {
         if let Some(module) = reg.module("attention_prefill_mma") {
             let entry = match head_dim {
                 128 => "flambeau_attention_prefill_mma_d128_f16",
@@ -1207,7 +1204,7 @@ pub fn attention_prefill_f16_slots<B: flambeau_core::KernelBackend>(
             args.push_arg(&window_size);
             args.push_arg(&ring_depth);
             let cfg = LaunchCfg {
-                grid: ((n_q_tokens as u32) / 128, n_heads_q as u32, 1),
+                grid: ((n_q_tokens as u32).div_ceil(128), n_heads_q as u32, 1),
                 block: (32, 8, 1),
                 shared_bytes: 0,
             };

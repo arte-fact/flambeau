@@ -8,8 +8,9 @@
 // head). Q fragments and the O accumulator stay register-resident across the KV
 // loop; K/V chunks (BC=16) are staged to shared cooperatively and reused across
 // all BR rows. S=Q·Kᵀ and O=P·V both run on the f16 mma; the online softmax is
-// reduced in shared. Caller routes here only when n_q % BR == 0 (no partial-tile
-// OOB on the register Q load); the tail ubatch falls back to flash_tile.
+// reduced in shared. A partial final tile (n_q not a multiple of BR) is handled:
+// the register Q load clamps over-the-end rows in-bounds (load_a_bounded) and the
+// store drops them, so over-range warps still reach every block-wide barrier.
 #include "mma_f16.cuh"
 
 namespace fm = flambeau_mma_f16;
@@ -38,7 +39,7 @@ static __device__ __forceinline__ void flash_attn_prefill_mma_impl(
     fm::tile_a Qf[D / 16];
     #pragma unroll
     for (int kd = 0; kd < D / 16; ++kd)
-        fm::load_a(Qf[kd], q + ((size_t)my_row0 * n_heads_q + h_q) * D + kd * 16, n_heads_q * D);
+        fm::load_a_bounded(Qf[kd], q + (size_t) h_q * D + kd * 16, n_heads_q * D, my_row0, n_q);
     float Of[D / 8][4];
     #pragma unroll
     for (int nt = 0; nt < D / 8; ++nt) for (int l = 0; l < 4; ++l) Of[nt][l] = 0.f;
@@ -115,6 +116,7 @@ static __device__ __forceinline__ void flash_attn_prefill_mma_impl(
         #pragma unroll
         for (int l = 0; l < 4; ++l) {
             int r = fm::tile_c::get_i(l), d = nt * 8 + fm::tile_c::get_j(l);
+            if (my_row0 + r >= n_q) continue;
             float inv = lw[r] > 0.f ? 1.f / lw[r] : 0.f;
             out[((size_t)(my_row0 + r) * n_heads_q + h_q) * D + d] = __float2half(Of[nt][l] * inv);
         }
