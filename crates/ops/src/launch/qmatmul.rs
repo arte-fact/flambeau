@@ -2309,7 +2309,7 @@ impl Recipe {
                 entry: "flambeau_mmq_q4_0_mma_q8_1",
                 threads: 0,
                 rows_per_block: 0,
-                mmq_tile: (128, 64),
+                mmq_tile: (256, 128),
             },
             // wave64 MMQ for Q5_0. Same tile shape + launch as Q4_0;
             // inner loop adds the 5th-bit `16·bit·y` DP4A term
@@ -2597,7 +2597,7 @@ fn mmq_mma_launch<B: flambeau_core::KernelBackend>(
     let grid_y = (n_batches as u32).div_ceil(batches_per_tile);
     let cfg = LaunchCfg {
         grid: (grid_x, grid_y, 1),
-        block: (32, 8, 1),
+        block: (32, 16, 1),
         shared_bytes: 0,
     };
     B::launch(&kernel, stream, cfg, args)?;

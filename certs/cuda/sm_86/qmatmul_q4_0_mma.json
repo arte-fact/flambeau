@@ -118,10 +118,10 @@
     }
   ],
   "pass": true,
-  "emitted_at": "2026-06-19T20:00:00Z",
+  "emitted_at": "2026-06-20T00:00:00Z",
   "rig": "flambeau-rtx3090-sm_86",
   "pmc": {
-    "vgpr_count": 102,
+    "vgpr_count": 128,
     "sgpr_count": null,
     "waves_per_simd": null,
     "mem_busy_pct": null,

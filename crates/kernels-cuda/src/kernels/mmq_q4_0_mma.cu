@@ -6,12 +6,13 @@
 // 16x8 input fragment differs from a row-major read), B via load_generic.
 // Float-accumulates d_x·d_y·Σ(q-8)·q_y per 32-K Q4_0 block.
 //
-// Software-pipelined: tile kb+1's raw weights/activation are prefetched
-// global->registers right after the kb barrier, so the global-load latency
-// overlaps the kb mma (Q4_0's 2-byte-aligned blocks rule out cp.async, which
-// needs 4/8/16-B alignment; the register prefetch is the equivalent here).
-// Requires ncols_x % 128 == 0 (the dispatch k%128 guard routes the remainder
-// to MMVQ).
+// Double-buffered + register-prefetched: tile kb+1's raw weights/activation are
+// loaded global->registers, then dequanted into the alternate shared buffer
+// while the mma consumes the current buffer — this hides global latency and
+// halves the per-tile __syncthreads (one barrier per kb instead of two).
+// (Q4_0's 2-byte-aligned blocks rule out cp.async, which needs 4/8/16-B
+// alignment; the register prefetch is the equivalent here.) Requires
+// ncols_x % 128 == 0 (the dispatch k%128 guard routes the remainder to MMVQ).
 #include "sm_80.cuh"
 #include "block_quant.cuh"
 #include "quant_traits.cuh"
@@ -31,13 +32,13 @@ static __device__ __forceinline__ void mmq_q4_0_mma_row(
     constexpr int MMQ_INTS = 36;    // 144-B activation block / 4
     constexpr int tnN = (MMQ_Y / WN) / 16;
     constexpr int tnM = (MMQ_X / WM) / 8;
-    constexpr int RW  = (MMQ_Y + NTHREADS - 1) / NTHREADS;        // weight rows / thread
+    constexpr int RW  = (MMQ_Y + NTHREADS - 1) / NTHREADS;         // weight rows / thread
     constexpr int RA  = (MMQ_X * K_INTS + NTHREADS - 1) / NTHREADS; // act int32 / thread
 
-    __shared__ __align__(16) int a_sh[MMQ_Y * K_INTS];
-    __shared__ int   b_sh[MMQ_X * K_INTS];
-    __shared__ float dx_sh[MMQ_Y];
-    __shared__ float dy_sh[MMQ_X];
+    __shared__ __align__(16) int a_sh[2][MMQ_Y * K_INTS];
+    __shared__ int   b_sh[2][MMQ_X * K_INTS];
+    __shared__ float dx_sh[2][MMQ_Y];
+    __shared__ float dy_sh[2][MMQ_X];
 
     const int it  = blockIdx.x;
     const int jt  = blockIdx.y;
@@ -94,16 +95,16 @@ static __device__ __forceinline__ void mmq_q4_0_mma_row(
             }                                                                                      \
         } while (0)
 
-    // Dequant the prefetched registers into shared.
-    #define STORE_TILE()                                                                            \
+    // Dequant the prefetched registers into shared buffer `buf`.
+    #define STORE_TILE(buf)                                                                         \
         do {                                                                                       \
             _Pragma("unroll") for (int u = 0; u < RW; ++u) {                                        \
                 int r = tid + u * NTHREADS;                                                         \
                 if (r < MMQ_Y) {                                                                    \
-                    dx_sh[r] = wd[u];                                                               \
+                    dx_sh[buf][r] = wd[u];                                                          \
                     _Pragma("unroll") for (int jc = 0; jc < 4; ++jc) {                             \
-                        a_sh[r * K_INTS + jc]     = __vsubss4((wq[u][jc] >> 0) & 0x0F0F0F0F, 0x08080808); \
-                        a_sh[r * K_INTS + jc + 4] = __vsubss4((wq[u][jc] >> 4) & 0x0F0F0F0F, 0x08080808); \
+                        a_sh[buf][r * K_INTS + jc]     = __vsubss4((wq[u][jc] >> 0) & 0x0F0F0F0F, 0x08080808); \
+                        a_sh[buf][r * K_INTS + jc + 4] = __vsubss4((wq[u][jc] >> 4) & 0x0F0F0F0F, 0x08080808); \
                     }                                                                              \
                 }                                                                                  \
             }                                                                                      \
@@ -111,15 +112,16 @@ static __device__ __forceinline__ void mmq_q4_0_mma_row(
                 int idx = tid + u * NTHREADS;                                                       \
                 if (idx < MMQ_X * K_INTS) {                                                         \
                     int token = idx / K_INTS, jc = idx % K_INTS;                                    \
-                    b_sh[token * K_INTS + jc] = aq[u];                                              \
-                    if (jc == 0) dy_sh[token] = ad[u];                                              \
+                    b_sh[buf][token * K_INTS + jc] = aq[u];                                         \
+                    if (jc == 0) dy_sh[buf][token] = ad[u];                                         \
                 }                                                                                  \
             }                                                                                      \
         } while (0)
 
     PREFETCH_TILE(0);
+    STORE_TILE(0);
     for (int kb = 0; kb < n_blocks; ++kb) {
-        STORE_TILE();
+        const int cur = kb & 1;
         __syncthreads();
         if (kb + 1 < n_blocks) PREFETCH_TILE(kb + 1);
 
@@ -127,10 +129,10 @@ static __device__ __forceinline__ void mmq_q4_0_mma_row(
         flambeau_mma::tile_i8  bf[tnM];
         #pragma unroll
         for (int nn = 0; nn < tnN; ++nn)
-            flambeau_mma::load_ldmatrix(af[nn], &a_sh[(row_base + nn * 16) * K_INTS], K_INTS);
+            flambeau_mma::load_ldmatrix(af[nn], &a_sh[cur][(row_base + nn * 16) * K_INTS], K_INTS);
         #pragma unroll
         for (int mm = 0; mm < tnM; ++mm)
-            flambeau_mma::load_generic(bf[mm], &b_sh[(tok_base + mm * 8) * K_INTS], K_INTS);
+            flambeau_mma::load_generic(bf[mm], &b_sh[cur][(tok_base + mm * 8) * K_INTS], K_INTS);
 
         #pragma unroll
         for (int nn = 0; nn < tnN; ++nn) {
@@ -142,11 +144,11 @@ static __device__ __forceinline__ void mmq_q4_0_mma_row(
                 for (int l = 0; l < 4; ++l) {
                     const int r = row_base + nn * 16 + flambeau_mma::tile_i16::get_i(l);
                     const int t = tok_base + mm * 8  + flambeau_mma::tile_i16::get_j(l);
-                    acc[nn][mm][l] += (float) c.x[l] * dx_sh[r] * dy_sh[t];
+                    acc[nn][mm][l] += (float) c.x[l] * dx_sh[cur][r] * dy_sh[cur][t];
                 }
             }
         }
-        __syncthreads();
+        if (kb + 1 < n_blocks) STORE_TILE((kb + 1) & 1);
     }
     #undef PREFETCH_TILE
     #undef STORE_TILE
@@ -168,7 +170,7 @@ static __device__ __forceinline__ void mmq_q4_0_mma_row(
     }
 }
 
-extern "C" __global__ __launch_bounds__(256, 1)
+extern "C" __global__ __launch_bounds__(512, 1)
 void flambeau_mmq_q4_0_mma_q8_1(
     const void* __restrict__ vx,
     const void* __restrict__ vy,
@@ -176,6 +178,6 @@ void flambeau_mmq_q4_0_mma_q8_1(
     const int ncols_x, const int nrows_x, const int ncols_y,
     const int stride_col_y, const int stride_row_x, const int nrows_dst)
 {
-    mmq_q4_0_mma_row<128, 64, 8, 1>(vx, vy, dst, ncols_x, nrows_x, ncols_y,
-                                    stride_col_y, stride_row_x, nrows_dst);
+    mmq_q4_0_mma_row<256, 128, 4, 4>(vx, vy, dst, ncols_x, nrows_x, ncols_y,
+                                     stride_col_y, stride_row_x, nrows_dst);
 }

@@ -125,13 +125,10 @@ pub const QMATMUL_SM86: &[KernelDescriptor] = &[
         m_range: (1, 127),
         cert_rel_path: "certs/cuda/sm_86/qmatmul_q4_0_mmvq_dp4a.json",
     },
-    // Dense-prefill: int8 tensor-core MMQ (mma.sync, register-prefetched) at
-    // m >= 128. The (k%128) guard in ops::launch::qmatmul re-dispatches
+    // Dense-prefill: int8 tensor-core MMQ (mma.sync, double-buffered 256x128
+    // tile) at m >= 128. The (k%128) guard in ops::launch::qmatmul re-dispatches
     // non-128-aligned contractions back to the MMVQ row above. CUDA-only —
-    // gfx906 has no matrix core and keeps the dp4a 4warp_lds kernel. Currently
-    // at parity with that dp4a kernel end-to-end (~1080 tok/s prefill,
-    // gemma-12b); the prefetch hides global latency but it stays shared-pipeline
-    // bound — a larger-tile / cp.async pipeline is the next lever.
+    // gfx906 has no matrix core and keeps the dp4a 4warp_lds kernel.
     KernelDescriptor {
         op_name: "QMatMul",
         impl_id: "qmatmul_q4_0_mma",
