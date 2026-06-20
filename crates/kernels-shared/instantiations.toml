@@ -341,12 +341,12 @@ params = """
     const int n_superblocks_per_row"""
 body = "mmvq_q4_k_batched_row<64, 4>(x, y, dst, n_rows, n_superblocks_per_row);"
 
-# Q6_K batched MMVQ — scalar-FP32 super-block path (64 threads/row), own neutral
-# body (mmvq_q6_k_batched.cuh) sharing the N-way reduce. Same stem/entries as
-# the retired hand kernel.
+# Q6_K batched MMVQ — dp4a super-block path (64 threads/row), one weight read
+# feeds N activation columns (mmvq_q6_k_dp4a_batched.cuh). dp4a keeps the batch
+# bandwidth-bound; the scalar-FP32 sibling was compute-bound (~linear in N).
 [[kernel]]
 stem = "mmvq_q6_k_batched"
-includes = ["quant_traits.cuh", "mmvq_q6_k_batched.cuh"]
+includes = ["quant_traits.cuh", "mmvq_q6_k_dp4a_batched.cuh"]
 
 [[kernel.entry]]
 name = "flambeau_mmvq_q6_k_q8_1_batched_n2"
@@ -356,7 +356,7 @@ params = """
     float* __restrict__ dst,
     const int n_rows,
     const int n_superblocks_per_row"""
-body = "mmvq_q6_k_batched_row<64, 2>(x, y, dst, n_rows, n_superblocks_per_row);"
+body = "mmvq_q6_k_dp4a_batched_row<2>(x, y, dst, n_rows, n_superblocks_per_row);"
 
 [[kernel.entry]]
 name = "flambeau_mmvq_q6_k_q8_1_batched_n3"
@@ -366,7 +366,7 @@ params = """
     float* __restrict__ dst,
     const int n_rows,
     const int n_superblocks_per_row"""
-body = "mmvq_q6_k_batched_row<64, 3>(x, y, dst, n_rows, n_superblocks_per_row);"
+body = "mmvq_q6_k_dp4a_batched_row<3>(x, y, dst, n_rows, n_superblocks_per_row);"
 
 [[kernel.entry]]
 name = "flambeau_mmvq_q6_k_q8_1_batched_n4"
@@ -376,7 +376,7 @@ params = """
     float* __restrict__ dst,
     const int n_rows,
     const int n_superblocks_per_row"""
-body = "mmvq_q6_k_batched_row<64, 4>(x, y, dst, n_rows, n_superblocks_per_row);"
+body = "mmvq_q6_k_dp4a_batched_row<4>(x, y, dst, n_rows, n_superblocks_per_row);"
 
 # Q5_K batched MMVQ — r2 multi-row (64 threads = 2 rows/block), own neutral body
 # (mmvq_q5_k_r2_batched.cuh) sharing the r2 N-way reduce. Same stem/entries as
