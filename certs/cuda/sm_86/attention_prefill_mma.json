@@ -97,6 +97,33 @@
       "max_rel_err": 0.0003077519,
       "tolerance": 0.005,
       "pass": true
+    },
+    {
+      "m": 512,
+      "k": 512,
+      "n": 512,
+      "seed": 3428989595,
+      "max_rel_err": 0.00036654326,
+      "tolerance": 0.005,
+      "pass": true
+    },
+    {
+      "m": 419,
+      "k": 512,
+      "n": 419,
+      "seed": 1788458060,
+      "max_rel_err": 0.0003734532,
+      "tolerance": 0.005,
+      "pass": true
+    },
+    {
+      "m": 256,
+      "k": 512,
+      "n": 256,
+      "seed": 147926525,
+      "max_rel_err": 0.00036096743,
+      "tolerance": 0.005,
+      "pass": true
     }
   ],
   "pass": true,
