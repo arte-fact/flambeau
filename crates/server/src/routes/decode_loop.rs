@@ -693,6 +693,194 @@ fn run_completion_scheduler_pp_blocking(
     result
 }
 
+/// Streaming counterpart of [`run_completion_scheduler_pp_blocking`]: the
+/// decode loop coalesces via `decode_via_scheduler_into` (no slot mutex held
+/// across the loop), and each sampled token is streamed through the same
+/// incremental-detokenise `push_and_emit` the legacy streaming path uses.
+/// Engaged from `run_completion_blocking_streaming` when
+/// [`scheduler_can_engage`] holds. Output behaviour matches the legacy
+/// streaming path; only the decode source differs (coalescing vs N=1).
+#[allow(clippy::too_many_lines)]
+fn run_completion_streaming_scheduler_pp_blocking(
+    state: SharedState,
+    prompt_ids: Vec<u32>,
+    params: SamplingParams,
+    relax_stop_mask: bool,
+    emit: &mut dyn FnMut(&str) -> bool,
+) -> Result<(String, u32, u32)> {
+    let request_start = Instant::now();
+    let slot_idx = state.claim_slot_blocking();
+    let result = (|| -> Result<(String, u32, u32)> {
+        if prompt_ids.is_empty() {
+            bail!("prompt tokenized to 0 tokens");
+        }
+        let prompt_tokens = prompt_ids.len() as u32;
+
+        tracing::info!(
+            target: "server.completion.start",
+            prompt_tokens,
+            max_tokens = params.max_tokens,
+            stream = true,
+            slot_idx,
+            scheduler = true,
+            "streaming completion accepted (scheduler path)"
+        );
+
+        let stop_ids = &state.tokenizer.stop_ids;
+        let always_stop_ids = &state.tokenizer.always_stop_ids;
+        let is_stop = |t: u32| stop_ids.contains(&t);
+        let vocab = state.cfg.vocab_size;
+        let sampling = &params.sampling;
+
+        let mut sampler = Sampler::from_seed(params.seed);
+        sampler.reserve(vocab);
+
+        let mut logits_buf: Vec<f32> = Vec::with_capacity(vocab);
+        let prefill_start = Instant::now();
+        let full_hit = chunked_prefill_pp(&state, slot_idx, &prompt_ids, &mut logits_buf)?;
+        // Capture the unmasked prefill logits into the prefix cache under a
+        // brief lock (the decode loop below holds no mutex).
+        if !full_hit {
+            let mut guard = state.inflight_pool[slot_idx].blocking_lock();
+            state.prefix_cache_try_capture_full(&mut **guard, &prompt_ids, &logits_buf);
+        }
+        if !relax_stop_mask {
+            for &sid in stop_ids {
+                if (sid as usize) < logits_buf.len() {
+                    logits_buf[sid as usize] = f32::NEG_INFINITY;
+                }
+            }
+        }
+        let first_next = sampler.sample(&logits_buf, sampling, &[]);
+        tracing::info!(
+            target: "server.completion.first_token",
+            prompt_tokens,
+            ttft_ms = prefill_start.elapsed().as_secs_f64() * 1000.0,
+            scheduler = true,
+            "first token produced (time-to-first-token)"
+        );
+
+        let mut generated: Vec<u32> = Vec::with_capacity(params.max_tokens as usize);
+        let mut emitted_text = String::new();
+        let mut decode_cursor: usize = 0;
+        let mut pending_emitted_in_segment: usize = 0;
+        let mut push_and_emit =
+            |tok: u32, generated: &mut Vec<u32>, emitted_text: &mut String| -> Result<bool> {
+                generated.push(tok);
+                let stop_hit = is_stop(tok);
+                let end = if stop_hit { generated.len() - 1 } else { generated.len() };
+                if end <= decode_cursor {
+                    return Ok(!stop_hit);
+                }
+                let raw = state
+                    .tokenizer
+                    .decode(&generated[decode_cursor..end])
+                    .context("decode")?;
+                let safe = raw.trim_end_matches('\u{FFFD}');
+                if safe.len() > pending_emitted_in_segment {
+                    let delta = &safe[pending_emitted_in_segment..];
+                    if !emit(delta) {
+                        return Ok(false);
+                    }
+                    emitted_text.push_str(delta);
+                    pending_emitted_in_segment = safe.len();
+                }
+                if safe.len() == raw.len() {
+                    decode_cursor = end;
+                    pending_emitted_in_segment = 0;
+                }
+                Ok(!stop_hit)
+            };
+
+        let alive = push_and_emit(first_next, &mut generated, &mut emitted_text)?;
+        if !alive {
+            return Ok(("stop".into(), prompt_tokens, generated.len() as u32));
+        }
+
+        let mut finish_reason: &str = "length";
+        let mut last_token = first_next;
+        let min_response_tokens = crate::v2_handle::min_response_tokens_for(&state.cfg.arch);
+        let stop_bias = crate::v2_handle::stop_bias_for(&state.cfg.arch);
+        let mut reasoning_closer = ReasoningCloser::new(reasoning_close_ids(&state, &params));
+        let user_stop_max = params.stop_strings.iter().map(|s| s.len()).max().unwrap_or(0);
+
+        let mut logits: Vec<f32> = Vec::with_capacity(vocab);
+        for step in 1..params.max_tokens as usize {
+            let force_mask = step < min_response_tokens && !relax_stop_mask;
+            state
+                .decode_via_scheduler_into(
+                    slot_idx,
+                    last_token,
+                    prompt_ids.len() + step,
+                    &mut logits,
+                )
+                .context("scheduler-path decode step")?;
+            if !relax_stop_mask {
+                for &sid in stop_ids {
+                    if (sid as usize) < logits.len() {
+                        if force_mask || always_stop_ids.contains(&sid) {
+                            logits[sid as usize] = f32::NEG_INFINITY;
+                        } else {
+                            logits[sid as usize] -= stop_bias;
+                        }
+                    }
+                }
+            }
+            let next = match reasoning_closer.next_forced(&generated, params.reasoning_budget) {
+                Some(forced) => forced,
+                None => sampler.sample(&logits, sampling, &generated),
+            };
+            let alive = push_and_emit(next, &mut generated, &mut emitted_text)?;
+            last_token = next;
+            if !alive {
+                finish_reason = "stop";
+                break;
+            }
+            if !relax_stop_mask || !params.stop_strings.is_empty() {
+                let window_bytes = 64.max(user_stop_max + 16);
+                let tail_window = if emitted_text.len() > window_bytes {
+                    let mut start = emitted_text.len() - window_bytes;
+                    while start < emitted_text.len() && !emitted_text.is_char_boundary(start) {
+                        start += 1;
+                    }
+                    &emitted_text[start..]
+                } else {
+                    emitted_text.as_str()
+                };
+                let marker_hit = !relax_stop_mask
+                    && !params.enable_thinking
+                    && (tail_window.contains("</think>")
+                        || tail_window.contains("<end_thought>")
+                        || tail_window.contains("<end_think>")
+                        || tail_window.contains("</thought>"));
+                let user_hit = params
+                    .stop_strings
+                    .iter()
+                    .any(|s| tail_window.contains(s.as_str()));
+                if marker_hit || user_hit {
+                    finish_reason = "stop";
+                    break;
+                }
+            }
+        }
+
+        tracing::info!(
+            target: "server.completion.finish",
+            prompt_tokens,
+            completion_tokens = generated.len() as u32,
+            finish_reason,
+            total_ms = request_start.elapsed().as_secs_f64() * 1000.0,
+            stream = true,
+            scheduler = true,
+            "streaming completion finished (scheduler path)"
+        );
+
+        Ok((finish_reason.to_owned(), prompt_tokens, generated.len() as u32))
+    })();
+    state.release_slot(slot_idx);
+    result
+}
+
 /// The token sequence for the arch's reasoning-close marker, resolved once
 /// per request — only when a thinking budget is in play. Empty otherwise.
 /// The marker is often multi-token (qwen `</think>` = `[510, 26003, 29]`),
@@ -1186,6 +1374,19 @@ pub(crate) fn run_completion_blocking_streaming(
         .context("tokenize prompt")?;
     if prompt_ids.is_empty() {
         bail!("prompt tokenized to 0 tokens");
+    }
+
+    // Coalescing streaming path: same gate as the non-streaming handler.
+    // Falls through to the mutex-held N=1 loop for JSON / logprobs / GPU
+    // sampler / non-scheduler archs.
+    if scheduler_can_engage(&state, &params) {
+        return run_completion_streaming_scheduler_pp_blocking(
+            state,
+            prompt_ids,
+            params,
+            relax_stop_mask,
+            emit,
+        );
     }
 
     let slot_idx = state.claim_slot_blocking();
