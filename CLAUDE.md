@@ -383,6 +383,8 @@ Before any substantive commit (anything beyond a one-line fix):
 
 ## Pointers
 
+- `doc/ROADMAP.md` — **the single live roadmap** (open work, tracked +
+  checkable). Superseded plans live in `doc/archive/`.
 - `doc/ARCHITECTURE.md` — framework design (crates, traits, dispatch,
   KV cache families).
 - `/artefact/candle/` — source framework; read for kernel prior art,

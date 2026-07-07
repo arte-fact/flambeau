@@ -5,7 +5,7 @@ ranks a cert-gated candidate pool and `--check` fails CI on dispatch drift
 (>3% hysteresis or a lost cert); a GPU-free `dispatch_cert_real` test gates
 every committed row on a green cert. Remaining from this doc: dense candidate
 pool per family (templating), `--model` real-shape buckets, the result-record
-schema + crowdsourced DB. The third sub-plan of `doc/PORTABILITY-ROADMAP.md`
+schema + crowdsourced DB. The third sub-plan of `doc/archive/PORTABILITY-ROADMAP.md`
 (with `CUDA-PORT-PLAN.md` and `KERNEL-TEMPLATING.md`). Builds the harness that
 turns a variant candidate pool into a per-arch dispatch table **by measurement
 instead of hand-tuning**. Aligns with architecture rule 1 (dispatch is a
