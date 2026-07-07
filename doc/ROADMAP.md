@@ -66,13 +66,19 @@ Ranked by ROI. **Track-level target: flambeau N=4 throughput > llama 228.8 tok/s
     (n_slots=1)** — the earlier "unequal-length" framing was coincidental. Full table
     + fast repro (`/tmp/solo.py`, words=900 BAD / 1200 OK) in
     `memory/artifacts/lever2-diagnosis-2026-07-07.md`.
-  - **Definitive next step:** per-layer e2e oracle-diff — inside
-    `attention_decode_f16_batched_splitk`, also run the serial batched kernel into a
-    scratch out-buffer and device-compare max-abs per layer on the `words=900`
-    (n_chunks=5) forward; the first diverging layer pins it. Suspects: (1) combine
-    recombination when the leading chunk is window-clamped at small n_chunks; (2)
-    off-by-one in chunk coverage at small n_chunks. Kernel math is proven equivalent
-    to the working serial/single-stream paths — it's a narrow combine/boundary bug.
+  - **Kernel PROVEN correct** (standalone `oracle_diff_batched_splitk.cu`): split-K ==
+    serial batched oracle bit-exact across head_dim {256,512} × window {0,1024} × ring
+    {0,wrap} × n_chunks {5..8} × cs {128,256,512}, incl. all failing configs.
+    `alloc_bytes` is separate-malloc-per-buffer → no pool overlap; sizes fit.
+  - **serial-overwrite bisection:** running serial into `out_batched` *after* split-K
+    (same buffers) FIXES every failing case → the bug is the split-K **output in-situ**;
+    inputs are fine (serial recomputes correctly), side-effects harmless.
+  - **Pinned paradox:** correct kernel + correct inputs → wrong output, only in-situ,
+    deterministic by n_chunks — rules out kernel math; points at partials-pool state or a
+    stream/concurrency interaction. **Next:** dump the exact in-situ split-K inputs +
+    partials on the first failing call, replay through the standalone harness (wrong there
+    ⇒ data differs; correct ⇒ runtime/aliasing/stream). Trail:
+    `memory/artifacts/lever2-diagnosis-2026-07-07.md`.
   - **⚠ port note:** 8080 is held by the `claw-rwire` app (a different project) — do
     NOT kill it; serve flambeau on a free port (e.g. 8091).
   - **Done when:** concurrent 2-slot needle at unequal lengths (1898 vs 1548) is
