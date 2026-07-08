@@ -146,6 +146,60 @@ pub fn kv_append_f16_to_q8_slots(
     Ok(())
 }
 
+/// Device-position variant of [`kv_append_f16_to_q8`]. Decode-only single-row
+/// (`n_tokens == 1`) quantize-and-append: reads `position` from `pos_ptr[0]`
+/// on-device and writes the Q8_0 blocks at physical cache row
+/// `ring_depth > 0 ? position % ring_depth : position`, so a captured decode
+/// graph advances the Q8 KV write cursor with no rebind. `k_cache` / `v_cache`
+/// are the UNSLID cache slab base pointers. CUDA-only kernel.
+pub fn kv_append_f16_to_q8_dpos(
+    k_src: &Tensor<F16>,
+    v_src: &Tensor<F16>,
+    k_cache: &mut Tensor<Q8_0>,
+    v_cache: &mut Tensor<Q8_0>,
+    spec: crate::ops::kv_append::KvAppendSpec,
+    ops: &impl Ops,
+    pos_ptr: DevicePtr,
+) -> Result<()> {
+    let crate::ops::kv_append::KvAppendSpec {
+        n_tokens,
+        kv_width,
+        write_pos: _,
+        max_seq_len,
+        ring_depth,
+    } = spec;
+    if n_tokens != 1 {
+        bail!("kv_append_f16_to_q8_dpos: decode-only (n_tokens == 1); got {n_tokens}");
+    }
+    if kv_width % QK8_0 != 0 {
+        bail!("kv_append_f16_to_q8_dpos: kv_width {kv_width} must be a multiple of {QK8_0}");
+    }
+    if k_src.n_elems < kv_width {
+        bail!("kv_append_f16_to_q8_dpos: k_src has {} F16 elems, need >= {kv_width}", k_src.n_elems);
+    }
+    if v_src.n_elems < kv_width {
+        bail!("kv_append_f16_to_q8_dpos: v_src has {} F16 elems, need >= {kv_width}", v_src.n_elems);
+    }
+    // `Tensor<Q8_0>::n_elems` counts logical F16-equivalent elements.
+    let cache_elems_need = max_seq_len * kv_width;
+    if k_cache.n_elems < cache_elems_need {
+        bail!(
+            "kv_append_f16_to_q8_dpos: k_cache has {} logical Q8_0 elems, need >= {cache_elems_need}",
+            k_cache.n_elems
+        );
+    }
+    if v_cache.n_elems < cache_elems_need {
+        bail!(
+            "kv_append_f16_to_q8_dpos: v_cache has {} logical Q8_0 elems, need >= {cache_elems_need}",
+            v_cache.n_elems
+        );
+    }
+    let ring = ring_depth as i32;
+    ops.quantize_f16_q8_0_dpos(k_src.ptr, k_cache.ptr, kv_width, ring, pos_ptr)?;
+    ops.quantize_f16_q8_0_dpos(v_src.ptr, v_cache.ptr, kv_width, ring, pos_ptr)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

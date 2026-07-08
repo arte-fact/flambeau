@@ -879,6 +879,94 @@ pub fn attention_decode_f16_splitk_dpos<B: flambeau_core::KernelBackend>(
     Ok(())
 }
 
+/// Device-position split-K decode attention, Q8_0 KV. Q8 sibling of
+/// [`attention_decode_f16_splitk_dpos`]: reads `position` on-device from
+/// `pos_ptr` and derives `n_tokens_kv` / `chunk_base` / the slid K-V cache
+/// pointer from the baked [`crate::AttnDposKnobs`] regime, so a captured decode
+/// graph rebinds nothing per token. The chunk kernel is CUDA-only
+/// (`attention_decode_q8_kv_splitk_dpos`); the position-free combine reuses the
+/// `attention_decode_q8_kv_splitk` module. `q`/`k`/`v` are the UNSLID base
+/// pointers (the kernel slides in-band using the Q8 row stride in bytes).
+pub fn attention_decode_q8_kv_splitk_dpos<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
+    buffers: crate::AttnBuffers,
+    partials: crate::AttnSplitkPartials,
+    shape: crate::AttnSplitkDposShape,
+    knobs: crate::AttnDposKnobs,
+    pos_ptr: flambeau_core::DevicePtr,
+) -> Result<()> {
+    let crate::AttnBuffers { q, k, v, out } = buffers;
+    let crate::AttnSplitkPartials { partials_m, partials_s, partials_o } = partials;
+    let crate::AttnSplitkDposShape { n_heads_q, n_heads_kv, head_dim, n_chunks, chunk_size } = shape;
+    let crate::AttnDposKnobs { scale, window, ring_depth, slide_row_stride } = knobs;
+    assert!(
+        matches!(head_dim, 64 | 128 | 256 | 512),
+        "attention_decode_q8_kv_splitk_dpos: head_dim {head_dim} not supported"
+    );
+    assert!(chunk_size > 0 && n_chunks > 0);
+
+    let module = reg.expect_module("attention_decode_q8_kv_splitk_dpos")?;
+    let k_chunk = B::kernel(module, "flambeau_attention_decode_q8_kv_splitk_dpos_chunk")?;
+    let combine_module = reg.expect_module("attention_decode_q8_kv_splitk")?;
+    let k_combine = B::kernel(combine_module, "flambeau_attention_decode_q8_kv_splitk_combine")?;
+
+    let n_heads_q_i = n_heads_q as i32;
+    let n_heads_kv_i = n_heads_kv as i32;
+    let head_dim_i = head_dim as i32;
+    let n_chunks_i = n_chunks as i32;
+    let chunk_size_i = chunk_size as i32;
+    let q_ptr: u64 = q.as_usize() as u64;
+    let k_ptr: u64 = k.as_usize() as u64;
+    let v_ptr: u64 = v.as_usize() as u64;
+    let o_ptr: u64 = out.as_usize() as u64;
+    let m_ptr: u64 = partials_m.as_usize() as u64;
+    let s_ptr: u64 = partials_s.as_usize() as u64;
+    let po_ptr: u64 = partials_o.as_usize() as u64;
+    let pos_p: u64 = pos_ptr.as_usize() as u64;
+
+    let mut a1 = <B::Args<'_>>::default();
+    a1.push_arg(&q_ptr);
+    a1.push_arg(&k_ptr);
+    a1.push_arg(&v_ptr);
+    a1.push_arg(&m_ptr);
+    a1.push_arg(&s_ptr);
+    a1.push_arg(&po_ptr);
+    a1.push_arg(&n_heads_q_i);
+    a1.push_arg(&n_heads_kv_i);
+    a1.push_arg(&head_dim_i);
+    a1.push_arg(&n_chunks_i);
+    a1.push_arg(&chunk_size_i);
+    a1.push_arg(&scale);
+    a1.push_arg(&window);
+    a1.push_arg(&ring_depth);
+    a1.push_arg(&slide_row_stride);
+    a1.push_arg(&pos_p);
+    // Chunk pass: block = head_dim/4 (one thread per int32-packed Q8 quad).
+    let cfg1 = LaunchCfg {
+        grid: (n_heads_q as u32, n_chunks as u32, 1),
+        block: ((head_dim / 4) as u32, 1, 1),
+        shared_bytes: 0,
+    };
+    B::launch(&k_chunk, stream, cfg1, a1)?;
+
+    let mut a2 = <B::Args<'_>>::default();
+    a2.push_arg(&m_ptr);
+    a2.push_arg(&s_ptr);
+    a2.push_arg(&po_ptr);
+    a2.push_arg(&o_ptr);
+    a2.push_arg(&n_heads_q_i);
+    a2.push_arg(&n_chunks_i);
+    a2.push_arg(&head_dim_i);
+    let cfg2 = LaunchCfg {
+        grid: (n_heads_q as u32, 1, 1),
+        block: (head_dim as u32, 1, 1),
+        shared_bytes: 0,
+    };
+    B::launch(&k_combine, stream, cfg2, a2)?;
+    Ok(())
+}
+
 /// Half2-packed split-K decode attention, F16 KV. Identical math + partials
 /// layout to `attention_decode_f16_splitk`; inner KQ dot and VKQ accumulate
 /// use `__hmul2` so gfx906 issues `v_pk_mul_f16` (2 F16 mul/cycle vs the

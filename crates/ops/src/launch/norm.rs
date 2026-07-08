@@ -460,3 +460,37 @@ pub fn quantize_f16_q8_0_slots<B: flambeau_core::KernelBackend>(
     B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
+
+/// Device-position variant of [`quantize_f16_q8_0`]. Quantizes one decode row of
+/// `n_elems` F16 into `n_elems / 32` Q8_0 blocks, written at physical cache row
+/// `ring_depth > 0 ? position % ring_depth : position`, with `position` read
+/// on-device from `pos_ptr[0]`. `y_q8_0_base` is the UNSLID cache slab base, so a
+/// captured decode graph advances the Q8 KV write cursor with no rebind.
+/// CUDA-only kernel (`quantize_f16_q8_0_dpos`).
+pub fn quantize_f16_q8_0_dpos<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
+    x_f16: DevicePtr,
+    y_q8_0_base: DevicePtr,
+    n_elems: usize,
+    ring_depth: i32,
+    pos_ptr: DevicePtr,
+) -> Result<()> {
+    assert_eq!(n_elems % 32, 0, "quantize_f16_q8_0_dpos expects n_elems % 32 == 0");
+    let module = reg.expect_module("quantize_f16_q8_0_dpos")?;
+    let kernel = B::kernel(module, "flambeau_quantize_row_f16_q8_0_dpos")?;
+    let n_i = n_elems as i32;
+    let x_ptr: u64 = x_f16.as_usize() as u64;
+    let y_ptr: u64 = y_q8_0_base.as_usize() as u64;
+    let pos_p: u64 = pos_ptr.as_usize() as u64;
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&x_ptr);
+    args.push_arg(&y_ptr);
+    args.push_arg(&n_i);
+    args.push_arg(&ring_depth);
+    args.push_arg(&pos_p);
+    let n_blocks = (n_elems / 32) as u32;
+    let cfg = LaunchCfg::one_d(n_blocks, 32);
+    B::launch(&kernel, stream, cfg, args)?;
+    Ok(())
+}

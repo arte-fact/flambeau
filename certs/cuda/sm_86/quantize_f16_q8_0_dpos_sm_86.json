@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "impl_id": "quantize_f16_q8_0_dpos_sm_86",
+  "backend": "cuda",
+  "arch": "sm_86",
+  "op": "quantize",
+  "dtype_weight": "Q8_0",
+  "dtype_activation": "F16",
+  "tolerance_formula": "|err| <= 2e-2 * max(|ref|, 1)  (Q8_0 quant round-trip)",
+  "results": [
+    {
+      "m": 1,
+      "k": 300,
+      "n": 256,
+      "seed": 1966675,
+      "max_rel_err": 0.0019416809,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 511,
+      "n": 512,
+      "seed": 4033684,
+      "max_rel_err": 0.0019683838,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 1641,
+      "n": 2048,
+      "seed": 16082018,
+      "max_rel_err": 0.0021209717,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 4000,
+      "n": 512,
+      "seed": 3888559,
+      "max_rel_err": 0.0021476746,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 1200,
+      "n": 512,
+      "seed": 3974911,
+      "max_rel_err": 0.0021820068,
+      "tolerance": 0.02,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-07-08T16:13:08Z",
+  "rig": "threadreaper-sm_86",
+  "pmc": {
+    "vgpr_count": 16,
+    "sgpr_count": null,
+    "waves_per_simd": null,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

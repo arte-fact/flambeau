@@ -132,6 +132,83 @@ pub fn attn_decode_q8_kv_splitk_slots(
     )
 }
 
+/// Device-position variant of [`attn_decode_q8_kv_splitk`]. Q8_0-KV sibling of
+/// `attn_decode_f16_splitk_dpos`: reads `position` from `pos_ptr` on-device and
+/// derives the per-token `n_tokens_kv` / `chunk_base` / slid cache pointer from
+/// the baked [`flambeau_ops::AttnDposKnobs`] regime, so a captured decode graph
+/// rebinds nothing per token. `k_cache` / `v_cache` are the UNSLID slot base
+/// pointers (the kernel slides in the SWA in-band regime using the Q8 row
+/// stride in bytes).
+#[allow(clippy::too_many_arguments)]
+pub fn attn_decode_q8_kv_splitk_dpos(
+    q: &Tensor<F16>,
+    k_cache: &Tensor<Q8_0>,
+    v_cache: &Tensor<Q8_0>,
+    outputs: crate::ops::attn_decode_splitk::SplitkOutputs<'_>,
+    shape: flambeau_ops::AttnSplitkDposShape,
+    knobs: flambeau_ops::AttnDposKnobs,
+    ops: &impl Ops,
+    pos_ptr: flambeau_core::DevicePtr,
+) -> Result<()> {
+    let crate::ops::attn_decode_splitk::SplitkOutputs {
+        out,
+        m: partials_m,
+        s: partials_s,
+        o: partials_o,
+    } = outputs;
+    let flambeau_ops::AttnSplitkDposShape { n_heads_q, n_heads_kv, head_dim, n_chunks, chunk_size } =
+        shape;
+    if !matches!(head_dim, 64 | 128 | 256 | 512) {
+        bail!("attn_decode_q8_kv_splitk_dpos: head_dim {head_dim} not in {{64, 128, 256, 512}}");
+    }
+    if n_heads_q == 0 || n_heads_kv == 0 || chunk_size == 0 || n_chunks == 0 {
+        bail!(
+            "attn_decode_q8_kv_splitk_dpos: zero counts (n_heads_q={n_heads_q}, \
+             n_heads_kv={n_heads_kv}, chunk_size={chunk_size}, n_chunks={n_chunks})"
+        );
+    }
+    if n_heads_q % n_heads_kv != 0 {
+        bail!(
+            "attn_decode_q8_kv_splitk_dpos: n_heads_q ({n_heads_q}) must be divisible by \
+             n_heads_kv ({n_heads_kv})"
+        );
+    }
+    let q_need = n_heads_q * head_dim;
+    let ms_need = n_heads_q * n_chunks;
+    let o_need = ms_need * head_dim;
+    if q.n_elems < q_need {
+        bail!("attn_decode_q8_kv_splitk_dpos: q has {} F16 elems, need >= {q_need}", q.n_elems);
+    }
+    if out.n_elems < q_need {
+        bail!("attn_decode_q8_kv_splitk_dpos: out has {} F16 elems, need >= {q_need}", out.n_elems);
+    }
+    if partials_m.n_elems < ms_need || partials_s.n_elems < ms_need {
+        bail!("attn_decode_q8_kv_splitk_dpos: partials_m/s too small, need >= {ms_need}");
+    }
+    if partials_o.n_elems < o_need {
+        bail!(
+            "attn_decode_q8_kv_splitk_dpos: partials_o has {} F32 elems, need >= {o_need}",
+            partials_o.n_elems
+        );
+    }
+    ops.attention_decode_q8_kv_splitk_dpos(
+        flambeau_ops::AttnBuffers {
+            q: q.ptr,
+            k: k_cache.ptr,
+            v: v_cache.ptr,
+            out: out.ptr,
+        },
+        flambeau_ops::AttnSplitkPartials {
+            partials_m: partials_m.ptr,
+            partials_s: partials_s.ptr,
+            partials_o: partials_o.ptr,
+        },
+        shape,
+        knobs,
+        pos_ptr,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

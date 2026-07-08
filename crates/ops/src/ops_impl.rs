@@ -540,6 +540,19 @@ impl<B: KernelBackend> Ops for OpsImpl<'_, B> {
         )
     }
 
+    fn attention_decode_q8_kv_splitk_dpos(
+        &self,
+        buffers: crate::AttnBuffers,
+        partials: crate::AttnSplitkPartials,
+        shape: crate::AttnSplitkDposShape,
+        knobs: crate::AttnDposKnobs,
+        pos_ptr: DevicePtr,
+    ) -> Result<()> {
+        crate::launch::attention::attention_decode_q8_kv_splitk_dpos(
+            self.reg, self.stream, buffers, partials, shape, knobs, pos_ptr,
+        )
+    }
+
     fn attention_prefill_q8_kv(
         &self,
         buffers: crate::AttnBuffers,
@@ -740,6 +753,19 @@ impl<B: KernelBackend> Ops for OpsImpl<'_, B> {
     ) -> Result<()> {
         crate::launch::norm::quantize_f16_q8_0_slots(
             self.reg, self.stream, x_f16, y_q8_0, n_elems, dst_slot,
+        )
+    }
+
+    fn quantize_f16_q8_0_dpos(
+        &self,
+        x_f16: DevicePtr,
+        y_q8_0_base: DevicePtr,
+        n_elems: usize,
+        ring_depth: i32,
+        pos_ptr: DevicePtr,
+    ) -> Result<()> {
+        crate::launch::norm::quantize_f16_q8_0_dpos(
+            self.reg, self.stream, x_f16, y_q8_0_base, n_elems, ring_depth, pos_ptr,
         )
     }
 

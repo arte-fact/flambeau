@@ -369,6 +369,19 @@ pub trait Ops {
         slots: Option<crate::AttnDecodeQ8SplitkSlots>,
     ) -> Result<()>;
 
+    /// Device-position split-K decode attention, Q8_0 KV. Q8 sibling of
+    /// `attention_decode_f16_splitk_dpos`: reads `position` from `pos_ptr`
+    /// on-device and derives `n_tokens_kv` / `chunk_base` / the K-V cache pointer
+    /// from the baked [`crate::AttnDposKnobs`] regime. CUDA-only.
+    fn attention_decode_q8_kv_splitk_dpos(
+        &self,
+        buffers: crate::AttnBuffers,
+        partials: crate::AttnSplitkPartials,
+        shape: crate::AttnSplitkDposShape,
+        knobs: crate::AttnDposKnobs,
+        pos_ptr: DevicePtr,
+    ) -> Result<()>;
+
     fn attention_prefill_q8_kv(
         &self,
         buffers: crate::AttnBuffers,
@@ -499,6 +512,20 @@ pub trait Ops {
         y_q8_0: DevicePtr,
         n_elems: usize,
         dst_slot: Option<flambeau_core::ScalarSlot>,
+    ) -> Result<()>;
+
+    /// Device-position variant of `quantize_f16_q8_0`. Quantizes one decode row
+    /// (`n_elems` F16) into Q8_0 blocks at physical cache row
+    /// `ring_depth > 0 ? position % ring_depth : position`, `position` read from
+    /// `pos_ptr[0]` on-device. `y_q8_0_base` is the UNSLID cache slab base.
+    /// CUDA-only.
+    fn quantize_f16_q8_0_dpos(
+        &self,
+        x_f16: DevicePtr,
+        y_q8_0_base: DevicePtr,
+        n_elems: usize,
+        ring_depth: i32,
+        pos_ptr: DevicePtr,
     ) -> Result<()>;
 
     // -- mlp (pointwise + gated activations) --

@@ -1799,6 +1799,32 @@ fn sweep_cuda(op: &str, dtype: &str) -> Result<()> {
         );
         return Ok(());
     }
+    if op == "attention_decode_q8_kv_splitk_dpos" {
+        let cert = flambeau_bench::sweep_attention_q8_kv_splitk_dpos::run_sweep::<Cuda>(
+            &repo_root(),
+            "sm_86",
+        )?;
+        println!(
+            "sweep attention_decode_q8_kv_splitk_dpos: pass={} shapes={} rig={}",
+            cert.pass,
+            cert.results.len(),
+            cert.rig
+        );
+        return Ok(());
+    }
+    if op == "quantize_f16_q8_0_dpos" {
+        let cert = flambeau_bench::sweep_quantize_f16_q8_0_dpos::run_sweep::<Cuda>(
+            &repo_root(),
+            "sm_86",
+        )?;
+        println!(
+            "sweep quantize_f16_q8_0_dpos: pass={} shapes={} rig={}",
+            cert.pass,
+            cert.results.len(),
+            cert.rig
+        );
+        return Ok(());
+    }
     if op != "qmatmul" {
         anyhow::bail!(
             "--arch sm_86: only --op qmatmul (mmvq) has CUDA kernels; \
