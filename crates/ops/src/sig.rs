@@ -200,6 +200,19 @@ pub struct AttnDecodeBatchedShape {
 }
 
 #[derive(Copy, Clone, Debug)]
+pub struct AttnDecodeBatchedSplitkShape {
+    pub n_heads_q: usize,
+    pub n_heads_kv: usize,
+    pub head_dim: usize,
+    pub n_slots: usize,
+    /// Max KV length across the batched slots; drives `n_chunks =
+    /// max_n_tokens_kv.div_ceil(chunk_size)`. Per-slot lengths (device-side
+    /// `n_tokens_kv`) clamp each chunk, so shorter slots emit empty partials.
+    pub max_n_tokens_kv: usize,
+    pub chunk_size: usize,
+}
+
+#[derive(Copy, Clone, Debug)]
 pub struct AttnDecodePagedShape {
     pub n_heads_q: usize,
     pub n_heads_kv: usize,
@@ -220,6 +233,37 @@ pub struct AttnSplitkShape {
     /// decode). `0` = chunk from position 0. `n_chunks` is derived as
     /// `(n_tokens_kv - chunk_base).div_ceil(chunk_size)`.
     pub chunk_base: usize,
+}
+
+/// Shape for `attention_decode_f16_splitk_dpos`. The per-token `n_tokens_kv` /
+/// `chunk_base` are computed on-device from `position` (read from a device
+/// buffer) using the baked [`AttnDposKnobs`] regime, so only the capture-time
+/// grid (`n_chunks`) and `chunk_size` are host constants here.
+#[derive(Copy, Clone, Debug)]
+pub struct AttnSplitkDposShape {
+    pub n_heads_q: usize,
+    pub n_heads_kv: usize,
+    pub head_dim: usize,
+    /// Split-K grid.y baked at capture.
+    pub n_chunks: usize,
+    pub chunk_size: usize,
+}
+
+/// Baked regime knobs for `attention_decode_f16_splitk_dpos`. The kernel selects
+/// the KV-addressing regime from these constants + the device `position`:
+/// `slide_row_stride > 0` ⇒ SWA in-band slid; else `ring_depth > 0` ⇒ SWA ring;
+/// else global / pre-window.
+#[derive(Copy, Clone, Debug)]
+pub struct AttnDposKnobs {
+    pub scale: f32,
+    /// SWA window radius (`0` for a global layer). Used by the ring and slid
+    /// regimes; ignored in the global/pre-window regime.
+    pub window: i32,
+    /// Ring-buffer slab depth in rows (`0` = absolute addressing / slid).
+    pub ring_depth: i32,
+    /// KV-cache row stride in BYTES for the SWA in-band slide (`0` = no slide).
+    /// Matches the host `kv.bytes_per_row`.
+    pub slide_row_stride: i32,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -267,6 +311,44 @@ pub struct AttnDecodeSlots {
 pub struct AttnPrefillSlots {
     pub n_k: ScalarSlot,
     pub q_off: ScalarSlot,
+}
+
+/// Graph-capture slots for `attention_decode_f16_splitk_slots`. Tags the two
+/// per-token scalars the split-K chunk kernel reads — `n_tokens_kv` (KV tail)
+/// and `chunk_base` (SWA window start). The derived `n_chunks` grid stays
+/// fixed within a capture regime; a token that would change `n_chunks` needs
+/// recapture, not a slot update. `k_ptr` / `v_ptr` additionally tag the chunk
+/// kernel's K/V cache pointer args for the SWA SlideBand, where the caller
+/// slides the cache pointer per token (`None` everywhere else).
+#[derive(Copy, Clone, Debug)]
+pub struct AttnSplitkSlots {
+    pub n_tokens_kv: ScalarSlot,
+    pub chunk_base: ScalarSlot,
+    pub k_ptr: Option<ScalarSlot>,
+    pub v_ptr: Option<ScalarSlot>,
+}
+
+/// Graph-capture slot for `attention_decode_q8_kv_slots`. Mirrors
+/// [`AttnDecodeSlots`] for the Q8_0-KV single-pass decode kernel.
+#[derive(Copy, Clone, Debug)]
+pub struct AttnDecodeQ8Slots {
+    pub n_tokens_kv: ScalarSlot,
+}
+
+/// Graph-capture slots for `attention_decode_q8_kv_splitk_slots`. The Q8_0-KV
+/// sibling of [`AttnSplitkSlots`].
+#[derive(Copy, Clone, Debug)]
+pub struct AttnDecodeQ8SplitkSlots {
+    pub n_tokens_kv: ScalarSlot,
+    pub chunk_base: ScalarSlot,
+}
+
+/// Graph-capture slot for `kv_append_v_unit_norm_f16_slots`. Tags the
+/// `write_pos` cache-row offset the fused V-unit-norm append kernel reads as a
+/// scalar arg, so a captured graph can advance the write cursor per replay.
+#[derive(Copy, Clone, Debug)]
+pub struct KvAppendSlots {
+    pub write_pos: ScalarSlot,
 }
 
 // --- MoE family ------------------------------------------------------------

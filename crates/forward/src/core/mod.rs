@@ -2,10 +2,15 @@
 //! state in `CoreState`, hooks via `TopologyHooks`, composite bodies
 //! as free functions in `composites/`.
 
+pub mod capture;
 pub mod composites;
 pub mod hooks;
 pub mod scratch;
 pub mod state;
+
+pub use capture::{
+    AttnGridWitness, DecodeCapture, DecodeRebindPlan, RebindEntry, RebindValue, ScalarRule,
+};
 
 pub use hooks::{
     ArPostAttnRmsNormHookBuffers, ArResidualRmsNormHookBuffers, NoopHooks, TopologyHooks,

@@ -23,8 +23,12 @@ pub type CUgraph = *mut c_void;
 pub type CUgraphExec = *mut c_void;
 
 // `CUstreamCaptureMode`. GLOBAL is the default whole-process capture mode.
+// RELAXED lets the capturing thread call host APIs (pointer derivation,
+// context bind, scratch-slot selection) interleaved with the enqueues — our
+// slot-capture closure runs Rust between launches, so it needs RELAXED.
 pub const CU_STREAM_CAPTURE_MODE_GLOBAL: c_int = 0;
 pub const CU_STREAM_CAPTURE_MODE_THREAD_LOCAL: c_int = 1;
+pub const CU_STREAM_CAPTURE_MODE_RELAXED: c_int = 2;
 /// `CUdevice` is an `int` ordinal.
 pub type CUdevice = c_int;
 /// `CUdeviceptr` is `unsigned long long` on the 64-bit driver ABI (`_v2`).
@@ -45,6 +49,85 @@ pub const CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK: c_int = 0;
 pub const CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES: c_int = 1;
 pub const CU_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES: c_int = 3;
 pub const CU_FUNC_ATTRIBUTE_NUM_REGS: c_int = 4;
+
+/// Opaque graph-node handle. `CUgraphNode` is `typedef struct CUgraphNode_st*`;
+/// pass it opaquely like the other driver handles.
+pub type CUgraphNode = *mut c_void;
+/// `CUarray` opaque handle — only ever NULL for our device/host memcpys.
+pub type CUarray = *mut c_void;
+
+// `CUgraphNodeType` enum values from `cuda.h`. Only kernel + memcpy are
+// emitted by our forward-path ops; the rest are enumerated for completeness.
+pub const CU_GRAPH_NODE_TYPE_KERNEL: c_int = 0;
+pub const CU_GRAPH_NODE_TYPE_MEMCPY: c_int = 1;
+
+// `CUmemorytype` enum values from `cuda.h`.
+pub const CU_MEMORYTYPE_HOST: c_uint = 0x01;
+pub const CU_MEMORYTYPE_DEVICE: c_uint = 0x02;
+pub const CU_MEMORYTYPE_ARRAY: c_uint = 0x03;
+pub const CU_MEMORYTYPE_UNIFIED: c_uint = 0x04;
+
+/// `CUDA_KERNEL_NODE_PARAMS` **v1** layout (`CUDA_KERNEL_NODE_PARAMS_st` /
+/// `CUDA_KERNEL_NODE_PARAMS_v1` in `cuda.h`). Field order + types match the
+/// header exactly — a mismatch silently writes garbage into the launch arg
+/// frame. The default `CUDA_KERNEL_NODE_PARAMS` typedef in a modern `cuda.h`
+/// aliases the *v2* struct (with trailing `kern` + `ctx` fields) and the
+/// `cuGraphExecKernelNodeSetParams` macro redirects to `_v2`; we bind the
+/// **base** symbol below (no `_v2`), whose driver entry point consumes this
+/// v1 struct.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+#[allow(non_snake_case)]
+#[allow(non_camel_case_types)]
+pub struct CUDA_KERNEL_NODE_PARAMS {
+    pub func: CUfunction,
+    pub gridDimX: c_uint,
+    pub gridDimY: c_uint,
+    pub gridDimZ: c_uint,
+    pub blockDimX: c_uint,
+    pub blockDimY: c_uint,
+    pub blockDimZ: c_uint,
+    pub sharedMemBytes: c_uint,
+    pub kernelParams: *mut *mut c_void,
+    pub extra: *mut *mut c_void,
+}
+
+/// `CUDA_MEMCPY3D` (`CUDA_MEMCPY3D_st` / `CUDA_MEMCPY3D_v2` in `cuda.h`).
+/// All offsets/pitches/extents are `size_t`. Field order matches the header
+/// exactly. For a 1D copy we set `Height = Depth = 1`, `WidthInBytes = count`,
+/// zero the offsets/pitches, and set only the src/dst memory-type + pointer
+/// pair implied by the copy direction.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+#[allow(non_snake_case)]
+#[allow(non_camel_case_types)]
+pub struct CUDA_MEMCPY3D {
+    pub srcXInBytes: usize,
+    pub srcY: usize,
+    pub srcZ: usize,
+    pub srcLOD: usize,
+    pub srcMemoryType: c_uint,
+    pub srcHost: *const c_void,
+    pub srcDevice: CUdeviceptr,
+    pub srcArray: CUarray,
+    pub reserved0: *mut c_void,
+    pub srcPitch: usize,
+    pub srcHeight: usize,
+    pub dstXInBytes: usize,
+    pub dstY: usize,
+    pub dstZ: usize,
+    pub dstLOD: usize,
+    pub dstMemoryType: c_uint,
+    pub dstHost: *mut c_void,
+    pub dstDevice: CUdeviceptr,
+    pub dstArray: CUarray,
+    pub reserved1: *mut c_void,
+    pub dstPitch: usize,
+    pub dstHeight: usize,
+    pub WidthInBytes: usize,
+    pub Height: usize,
+    pub Depth: usize,
+}
 
 extern "C" {
     // --- init / device / context ---
@@ -153,6 +236,40 @@ extern "C" {
     pub fn cuGraphDestroy(graph: CUgraph) -> c_int;
     #[link_name = "cuGraphExecDestroy"]
     pub fn cuGraphExecDestroy(exec: CUgraphExec) -> c_int;
+
+    // --- graph node introspection + per-node param rebind ---
+    /// `nodes = null` writes the node count through `num_nodes`; otherwise
+    /// fills `nodes` (in dispatch order) with up to `*num_nodes` handles.
+    pub fn cuGraphGetNodes(graph: CUgraph, nodes: *mut CUgraphNode, num_nodes: *mut usize)
+        -> c_int;
+    pub fn cuGraphNodeGetType(node: CUgraphNode, ntype: *mut c_int) -> c_int;
+    /// Read a kernel node's params (v1 struct). Used to seed the Rust-side
+    /// shadow with the source graph's captured `kernelParams` pointer array —
+    /// its entries are driver-owned stable storage, safe to reuse for the args
+    /// a later `set_slot` leaves untouched. Bound to the **base** symbol so the
+    /// v1 `CUDA_KERNEL_NODE_PARAMS` ABI matches (the `_v2` symbol expects the
+    /// larger v2 struct).
+    #[link_name = "cuGraphKernelNodeGetParams"]
+    pub fn cuGraphKernelNodeGetParams(
+        node: CUgraphNode,
+        params: *mut CUDA_KERNEL_NODE_PARAMS,
+    ) -> c_int;
+    /// In-place kernel-node param update on an instantiated exec (v1 struct).
+    /// Bound to the **base** symbol (NOT `_v2`) so the v1 ABI matches.
+    #[link_name = "cuGraphExecKernelNodeSetParams"]
+    pub fn cuGraphExecKernelNodeSetParams(
+        exec: CUgraphExec,
+        node: CUgraphNode,
+        params: *const CUDA_KERNEL_NODE_PARAMS,
+    ) -> c_int;
+    /// In-place memcpy-node param update on an instantiated exec. `ctx` is the
+    /// context the copy executes in (the capture-time current context).
+    pub fn cuGraphExecMemcpyNodeSetParams(
+        exec: CUgraphExec,
+        node: CUgraphNode,
+        copy_params: *const CUDA_MEMCPY3D,
+        ctx: CUcontext,
+    ) -> c_int;
 }
 
 /// Format a `CUresult` for error messages. The driver returns the strings

@@ -4,7 +4,7 @@
 use anyhow::bail;
 use flambeau_ops::Ops;
 
-use crate::dtype::{F16, F32};
+use crate::dtype::{F16, F32, Q8_1};
 use crate::error::Result;
 use crate::tensor::Tensor;
 
@@ -90,6 +90,34 @@ pub fn gelu_mul_f32_to_f16(
     ops.gelu_f32_to_f16(gate.ptr, up.ptr, output.ptr, n)
 }
 
+/// `output = quantize_row_q8_1(gelu_tanh(gate) * up)`, F32 gate/up → Q8_1.
+/// Fused twin of [`gelu_mul_f32_to_f16`] + `quantize_f16_to_q8_1`: skips the
+/// F16 gated intermediate. `n` must be a multiple of 32 (QK8_1).
+pub fn gelu_mul_f32_to_q8_1(
+    gate: &Tensor<F32>,
+    up: &Tensor<F32>,
+    output: &mut Tensor<Q8_1>,
+    n: usize,
+    ops: &impl Ops,
+) -> Result<()> {
+    if gate.n_elems < n {
+        bail!(
+            "gelu_mul_f32_to_q8_1: gate has {} elems, need >= {n}",
+            gate.n_elems
+        );
+    }
+    if up.n_elems < n {
+        bail!("gelu_mul_f32_to_q8_1: up has {} elems, need >= {n}", up.n_elems);
+    }
+    if output.n_elems == 0 {
+        bail!("gelu_mul_f32_to_q8_1: output tensor unallocated");
+    }
+    if n % 32 != 0 {
+        bail!("gelu_mul_f32_to_q8_1: n={n} must be a multiple of 32");
+    }
+    ops.gelu_mul_f32_to_q8_1(gate.ptr, up.ptr, output.ptr, n)
+}
+
 #[cfg(test)]
 fn silu_f32(x: f32) -> f32 {
     x / (1.0 + (-x).exp())
@@ -130,7 +158,8 @@ mod tests {
     use super::*;
     use flambeau_ops::HipOps;
     use crate::testing::{
-        alloc, assert_close_f16, download, free, test_device, test_ops_registry, upload,
+        alloc, assert_close_f16, assert_close_f32, download, free, test_device, test_ops_registry,
+        upload,
     };
     use flambeau_core::Device;
     use half::f16;
@@ -217,6 +246,36 @@ mod tests {
         // SwiGLU due to the cubic term + tanh; 4e-3 covers F16
         // round-trip + approximation noise.
         assert_close_f16(&got, &expected, 4e-3, 4e-3);
+
+        free(&device, gate_ptr, gate_t.bytes());
+        free(&device, up_ptr, up_t.bytes());
+        free(&device, out_ptr, out_t.bytes());
+    }
+
+    #[test]
+    fn gelu_mul_f32_to_q8_1_matches_cpu_reference() {
+        const N: usize = 256;
+        let device = test_device();
+        device.bind().expect("device bind");
+        let stream = device.default_stream();
+        let reg = test_ops_registry(&device);
+        let ops = HipOps::new(&reg, stream);
+
+        let gate_host: Vec<f32> = (0..N).map(|i| (i as f32) * 0.02 - 2.5).collect();
+        let up_host: Vec<f32> = (0..N).map(|i| 1.0 + (i as f32) * 0.005).collect();
+        let expected = cpu_gelu_mul_f32(&gate_host, &up_host);
+
+        let (gate_t, gate_ptr) = upload::<F32, f32>(&device, &gate_host, gate_host.len());
+        let (up_t, up_ptr) = upload::<F32, f32>(&device, &up_host, up_host.len());
+        let (mut out_t, out_ptr) = alloc::<Q8_1>(&device, N);
+
+        gelu_mul_f32_to_q8_1(&gate_t, &up_t, &mut out_t, N, &ops).expect("gelu_mul_f32_to_q8_1");
+
+        let raw: Vec<u8> = download::<Q8_1, u8>(&device, &out_t);
+        let got = flambeau_quant::dequantize_to_vec(flambeau_quant::GgmlDType::Q8_1, &raw, N)
+            .expect("dequant q8_1");
+        // Q8_1 step (~2*amax/255 per 32-block) + tanh-approx GELU noise.
+        assert_close_f32(&got, &expected, 2e-2, 5e-2);
 
         free(&device, gate_ptr, gate_t.bytes());
         free(&device, up_ptr, up_t.bytes());

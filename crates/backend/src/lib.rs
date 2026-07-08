@@ -13,6 +13,7 @@
 //! (no backend trait) will host it.
 
 use flambeau_core::device::{Device, Event, Stream};
+use flambeau_core::{DevicePtr, MemcpySlot, ScalarSlot};
 use flambeau_ops::Ops;
 use flambeau_runtime::Cluster;
 
@@ -37,6 +38,21 @@ pub trait Backend: Send + Sync + 'static {
     where
         Self: 'a;
 
+    /// Single-token decode-graph executor for this backend (real on CUDA, a
+    /// null unit type on HIP). The session driver captures the n=1 decode
+    /// forward once, then rebinds slots + replays through this seam — so no
+    /// `Cuda*`/`Hip*` graph type leaks into `flambeau-forward` (rule 9).
+    type DecodeGraph: DecodeGraphExec<Self>;
+
+    /// Whether [`Self::DecodeGraph`] can actually capture + replay the n=1
+    /// decode graph. A genuine capability query — CUDA answers `true`, HIP
+    /// `false` (gfx906 graph capture is null-to-negative). Both answer
+    /// concretely, so this is not an `is_<arch>` predicate: the driver gates on
+    /// the capability, never on the backend's identity.
+    fn supports_decode_graph() -> bool {
+        false
+    }
+
     /// Build the per-launch op object for a `(registry, stream)` pair —
     /// the backend-neutral form of `HipOps::new(reg, stream)`.
     fn ops<'a>(reg: &'a Self::Registry, stream: &'a Self::Stream) -> Self::Ops<'a>;
@@ -50,6 +66,36 @@ pub trait Backend: Send + Sync + 'static {
     /// Load the per-device kernel-module registry — the backend-neutral form of
     /// `OpsRegistry::new(device)` / `CudaOpsRegistry::new(device)`.
     fn new_registry(device: &Self::Device) -> anyhow::Result<Self::Registry>;
+}
+
+/// Capture + replay a single-token decode graph, rebinding per-token slots
+/// between replays. Generic over the backend bundle `B` so the session driver
+/// names no vendor type. Implemented by `CudaGraphExec` (real) and the HIP null
+/// unit type (never constructed — `capture` bails and the driver gates on
+/// [`Backend::supports_decode_graph`]).
+pub trait DecodeGraphExec<B: Backend + ?Sized>: Sized + Send + Sync {
+    /// Capture the stream work enqueued by `body` (run ONCE) into a replayable
+    /// graph with a slot map. Slot-tagged kernel args + memcpy sources become
+    /// rebindable via the setters below.
+    fn capture(
+        stream: &B::Stream,
+        body: impl FnOnce(&B::Stream) -> anyhow::Result<()>,
+    ) -> anyhow::Result<Self>;
+
+    /// Rebind a scalar `i32` kernel arg. `value` must stay live until the next
+    /// [`Self::launch`] (the graph executor holds the pointer across sibling
+    /// slot updates on the same node).
+    fn set_scalar_i32(&self, slot: ScalarSlot, value: &i32) -> anyhow::Result<()>;
+
+    /// Rebind a `u64` pointer kernel arg. Same liveness contract as
+    /// [`Self::set_scalar_i32`].
+    fn set_pointer_u64(&self, slot: ScalarSlot, value: &u64) -> anyhow::Result<()>;
+
+    /// Retarget a memcpy node's source pointer (the embedding-row lookup).
+    fn set_memcpy_src(&self, slot: MemcpySlot, src: DevicePtr) -> anyhow::Result<()>;
+
+    /// Replay the captured graph on `stream` (asynchronous).
+    fn launch(&self, stream: &B::Stream) -> anyhow::Result<()>;
 }
 
 #[cfg(feature = "hip")]

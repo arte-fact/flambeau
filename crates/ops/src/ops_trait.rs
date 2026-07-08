@@ -251,12 +251,36 @@ pub trait Ops {
         eps: f32,
     ) -> Result<()>;
 
+    /// Graph-capture variant of `kv_append_v_unit_norm_f16`. When `slots` is
+    /// `Some`, the `write_pos` cache-row scalar arg is tagged for per-replay
+    /// update so the captured graph advances the write cursor.
+    fn kv_append_v_unit_norm_f16_slots(
+        &self,
+        buf: crate::KvAppendBuffers,
+        shape: crate::KvAppendVUnitShape,
+        write_pos: usize,
+        eps: f32,
+        slots: Option<crate::KvAppendSlots>,
+    ) -> Result<()>;
+
     fn attention_decode_f16_splitk(
         &self,
         buffers: crate::AttnBuffers,
         partials: crate::AttnSplitkPartials,
         shape: crate::AttnSplitkShape,
         knobs: crate::AttnKnobs,
+    ) -> Result<()>;
+
+    /// Graph-capture variant of `attention_decode_f16_splitk`. When `slots`
+    /// is `Some`, the chunk kernel's `n_tokens_kv` + `chunk_base` scalar args
+    /// are tagged for per-replay update while `n_chunks` is fixed.
+    fn attention_decode_f16_splitk_slots(
+        &self,
+        buffers: crate::AttnBuffers,
+        partials: crate::AttnSplitkPartials,
+        shape: crate::AttnSplitkShape,
+        knobs: crate::AttnKnobs,
+        slots: Option<crate::AttnSplitkSlots>,
     ) -> Result<()>;
 
     fn attention_decode_f16_splitk_h2(
@@ -267,11 +291,62 @@ pub trait Ops {
         knobs: crate::AttnKnobs,
     ) -> Result<()>;
 
+    /// Device-position split-K decode attention. Reads `position` from `pos_ptr`
+    /// on-device and derives `n_tokens_kv` / `chunk_base` / the K-V cache pointer
+    /// from the baked [`crate::AttnDposKnobs`] regime, so a captured decode graph
+    /// needs no per-arg rebind. CUDA-only.
+    fn attention_decode_f16_splitk_dpos(
+        &self,
+        buffers: crate::AttnBuffers,
+        partials: crate::AttnSplitkPartials,
+        shape: crate::AttnSplitkDposShape,
+        knobs: crate::AttnDposKnobs,
+        pos_ptr: DevicePtr,
+    ) -> Result<()>;
+
+    /// Device-position fused V-unit-norm + KV append. The write row is read from
+    /// `pos_ptr[0]` on-device; `shape.ring_depth` + `eps` are baked. CUDA-only.
+    fn kv_append_v_unit_norm_f16_dpos(
+        &self,
+        buf: crate::KvAppendBuffers,
+        shape: crate::KvAppendVUnitShape,
+        eps: f32,
+        pos_ptr: DevicePtr,
+    ) -> Result<()>;
+
+    /// Device-position embedding-row gather. Reads `token_id` from `ctx_ptr[1]`
+    /// on-device and copies `embd[token_id * hidden + j]` → `dst[j]`. CUDA-only.
+    fn embed_gather_f16_dpos(
+        &self,
+        embd: DevicePtr,
+        dst: DevicePtr,
+        hidden: usize,
+        ctx_ptr: DevicePtr,
+    ) -> Result<()>;
+
+    fn attention_decode_f16_batched_splitk(
+        &self,
+        buffers: crate::AttnBatchedBuffers,
+        partials: crate::AttnSplitkPartials,
+        shape: crate::AttnDecodeBatchedSplitkShape,
+        knobs: crate::AttnKnobs,
+    ) -> Result<()>;
+
     fn attention_decode_q8_kv(
         &self,
         buffers: crate::AttnBuffers,
         shape: crate::AttnDecodeShape,
         knobs: crate::AttnKnobs,
+    ) -> Result<()>;
+
+    /// Graph-capture variant of `attention_decode_q8_kv`. When `slots` is
+    /// `Some`, the `n_tokens_kv` kernel arg is tagged for per-replay update.
+    fn attention_decode_q8_kv_slots(
+        &self,
+        buffers: crate::AttnBuffers,
+        shape: crate::AttnDecodeShape,
+        knobs: crate::AttnKnobs,
+        slots: Option<crate::AttnDecodeQ8Slots>,
     ) -> Result<()>;
 
     fn attention_decode_q8_kv_splitk(
@@ -280,6 +355,18 @@ pub trait Ops {
         partials: crate::AttnSplitkPartials,
         shape: crate::AttnSplitkShape,
         knobs: crate::AttnKnobs,
+    ) -> Result<()>;
+
+    /// Graph-capture variant of `attention_decode_q8_kv_splitk`. When `slots`
+    /// is `Some`, the chunk kernel's `n_tokens_kv` + `chunk_base` scalar args
+    /// are tagged for per-replay update while `n_chunks` is fixed.
+    fn attention_decode_q8_kv_splitk_slots(
+        &self,
+        buffers: crate::AttnBuffers,
+        partials: crate::AttnSplitkPartials,
+        shape: crate::AttnSplitkShape,
+        knobs: crate::AttnKnobs,
+        slots: Option<crate::AttnDecodeQ8SplitkSlots>,
     ) -> Result<()>;
 
     fn attention_prefill_q8_kv(
@@ -402,6 +489,18 @@ pub trait Ops {
 
     fn quantize_f16_q8_0(&self, x_f16: DevicePtr, y_q8_0: DevicePtr, n_elems: usize) -> Result<()>;
 
+    /// Graph-capture variant of `quantize_f16_q8_0`. When `dst_slot` is
+    /// `Some`, the `y_q8_0` destination-pointer kernel arg is tagged so a
+    /// captured graph can rebind the per-token cache-write destination per
+    /// replay; `None` is byte-identical to `quantize_f16_q8_0`.
+    fn quantize_f16_q8_0_slots(
+        &self,
+        x_f16: DevicePtr,
+        y_q8_0: DevicePtr,
+        n_elems: usize,
+        dst_slot: Option<flambeau_core::ScalarSlot>,
+    ) -> Result<()>;
+
     // -- mlp (pointwise + gated activations) --
 
     fn silu_f32(&self, x: DevicePtr, y: DevicePtr, n: usize) -> Result<()>;
@@ -411,6 +510,17 @@ pub trait Ops {
     fn swiglu_f32_to_f16(&self, a: DevicePtr, b: DevicePtr, y: DevicePtr, n: usize) -> Result<()>;
 
     fn swiglu_f32_to_q8_1(
+        &self,
+        a: DevicePtr,
+        b: DevicePtr,
+        y_q8_1: DevicePtr,
+        n: usize,
+    ) -> Result<()>;
+
+    /// Fused `y_q8_1 = quantize_row_q8_1(gelu(a) * b)` for F32 inputs —
+    /// Gemma-4 dense-FFN twin of [`Ops::swiglu_f32_to_q8_1`]. GELU is the
+    /// ggml tanh-approximation form.
+    fn gelu_mul_f32_to_q8_1(
         &self,
         a: DevicePtr,
         b: DevicePtr,

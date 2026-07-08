@@ -13,7 +13,7 @@ use flambeau_core::{CopyDirection, Device, DevicePtr, Event};
 use flambeau_model_ops::{Tensor, F16};
 use flambeau_ops::{Ops, OpsRegistry};
 
-use crate::core::{composites, CoreState, NoopHooks, ScratchPool, TopologyHooks};
+use crate::core::{composites, CoreState, DecodeCapture, NoopHooks, ScratchPool, TopologyHooks};
 use crate::ctx::{
     AttnWeights, EmbeddingWeights, FfnWeights, ForwardCtx, LmHeadWeights, ModelLayout, MoeWeights,
 };
@@ -701,6 +701,25 @@ impl<'a, B: Backend> ForwardEngine<'a, B, NoopHooks, SoloStage> {
         pool: &'a mut ScratchPool,
     ) -> Self {
         Self::build(device, stream, reg, pool, NoopHooks, SoloStage, 0)
+    }
+
+    /// Capturing single-device engine: threads a [`DecodeCapture`] handle into
+    /// [`CoreState`] so the per-token composites (`embed` / `standard_attn` /
+    /// `output_head`) take the graph-capture branch — allocating slots +
+    /// recording rebind rules and skipping the trailing logits D2H. Identical
+    /// to [`Self::new_solo`] otherwise. The session driver runs `A::forward`
+    /// through this once, reads back the [`crate::core::DecodeRebindPlan`], and
+    /// replays the captured graph for subsequent tokens.
+    pub fn new_solo_capturing(
+        device: &'a B::Device,
+        stream: &'a B::Stream,
+        reg: &'a B::Registry,
+        pool: &'a mut ScratchPool,
+        capture: &'a mut DecodeCapture,
+    ) -> Self {
+        let mut engine = Self::build(device, stream, reg, pool, NoopHooks, SoloStage, 0);
+        engine.core.capture = Some(capture);
+        engine
     }
 }
 

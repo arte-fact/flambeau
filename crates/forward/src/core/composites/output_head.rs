@@ -107,6 +107,14 @@ pub fn output_head_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
         )?;
     }
 
+    // Under decode-graph capture the softcap above wrote the final logits into
+    // `pool.logits_f32_dev` (captured); the trailing D2H + stream sync are the
+    // graph's split point and run UNCAPTURED in the session driver after
+    // `cuGraphLaunch`. Skip them here so they don't land inside the graph.
+    if state.capture.is_some() {
+        return Ok(());
+    }
+
     let n_elems = n_emit * vocab;
     if state.logits_host.len() != n_elems {
         state.logits_host = vec![0.0_f32; n_elems];

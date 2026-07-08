@@ -40,6 +40,7 @@ pub fn run_pointwise_sweep<B: BenchBackend>(
         "swiglu_f16" => run_swiglu_f16_sweep::<B>(repo_root, arch),
         "sigmoid_mul_f16" => run_sigmoid_mul_f16_sweep::<B>(repo_root, arch),
         "swiglu_f32_to_q8_1" => run_swiglu_f32_to_q8_1_sweep::<B>(repo_root, arch),
+        "gelu_mul_f32_to_q8_1" => run_gelu_mul_f32_to_q8_1_sweep::<B>(repo_root, arch),
         "split_q_gate_f16" => run_split_q_gate_f16_sweep::<B>(repo_root, arch),
         "rmsnorm_f32" => run_rmsnorm_f32_sweep::<B>(repo_root, arch),
         "rmsnorm_f16" => run_rmsnorm_f16_sweep::<B>(repo_root, arch),
@@ -4131,6 +4132,109 @@ pub fn run_swiglu_f32_to_q8_1_sweep<B: BenchBackend>(repo_root: &Path, arch: &st
         dtype_weight: "F32".to_string(),
         dtype_activation: "Q8_1".to_string(),
         tolerance_formula: "|dequant - oracle| <= 5e-3 * max(|oracle|, 1) (Q8_1 step + __expf)".to_string(),
+        results,
+        pass,
+        emitted_at: now_utc_iso8601(),
+        rig: rig_for(arch),
+        pmc: Some(pmc),
+    };
+    cert.write_to_disk(repo_root)?;
+    Ok(cert)
+}
+
+/// `gelu_mul_f32_to_q8_1` — Gemma-4 dense-FFN fused `gelu_tanh(a)*b → Q8_1`.
+/// Dequantize the block output and compare to the F64 tanh-approx GELU oracle.
+pub fn run_gelu_mul_f32_to_q8_1_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) -> Result<Cert> {
+    let dev = B::new_device(0)?;
+    let image = B::image("gelu_mul_f32_to_q8_1").ok_or_else(|| anyhow!("gelu_mul_f32_to_q8_1 not compiled"))?;
+    let module = B::load(&dev, image)?;
+    let kernel = B::kernel(&module, "flambeau_gelu_mul_f32_to_q8_1")?;
+    let pmc = B::attributes(&kernel)?;
+
+    let shapes = [32usize, 256, 4096];
+    let mut results = Vec::new();
+    for n in shapes {
+        let seed = 0xC0FFEE ^ ((n as u64).wrapping_mul(173).wrapping_add(0x67));
+        let a = seeded_f32_range(seed, n, -0.5, 0.5);
+        let b = seeded_f32_range(seed ^ 0xCD, n, -0.5, 0.5);
+        // F64 oracle: the un-quantized fused activation per element, tanh-approx
+        // GELU matching gelu_mul_f32 (ggml LLM_FFN_GELU).
+        let k = (2.0_f64 / std::f64::consts::PI).sqrt();
+        let xi: Vec<f32> = a
+            .iter()
+            .zip(&b)
+            .map(|(&av, &bv)| {
+                let d = av as f64;
+                let g = 0.5 * d * (1.0 + (k * (d + 0.044715 * d * d * d)).tanh());
+                (g * bv as f64) as f32
+            })
+            .collect();
+
+        let d_a = alloc_and_upload(&dev, &a);
+        let d_b = alloc_and_upload(&dev, &b);
+        let n_blocks = n / 32;
+        let out_bytes = n_blocks * 36;
+        let d_y = dev.alloc(out_bytes)?;
+        {
+            let stream = dev.default_stream();
+            let n_i = n as i32;
+            let a_ptr: u64 = d_a.as_usize() as u64;
+            let b_ptr: u64 = d_b.as_usize() as u64;
+            let y_ptr: u64 = d_y.as_usize() as u64;
+            let mut args = <B::Args<'_>>::default();
+            args.push_arg(&a_ptr);
+            args.push_arg(&b_ptr);
+            args.push_arg(&y_ptr);
+            args.push_arg(&n_i);
+            B::launch(&kernel, stream, LaunchCfg::one_d(n_blocks as u32, 32), args)?;
+            stream.synchronize()?;
+        }
+        let mut got = vec![0u8; out_bytes];
+        unsafe {
+            dev.memcpy_async(
+                dev.default_stream(),
+                CopyDirection::DeviceToHost,
+                DevicePtr(got.as_mut_ptr() as usize),
+                d_y,
+                out_bytes,
+            )?;
+        }
+        dev.default_stream().synchronize()?;
+        unsafe {
+            dev.dealloc(d_a, n * 4)?;
+            dev.dealloc(d_b, n * 4)?;
+            dev.dealloc(d_y, out_bytes)?;
+        }
+
+        let mut dequant = vec![0.0f32; n];
+        for (blk_idx, block) in got.chunks(36).enumerate() {
+            let d = f16::from_bits(u16::from_le_bytes([block[0], block[1]])).to_f32();
+            for (lane, &qb) in block[4..36].iter().enumerate() {
+                dequant[blk_idx * 32 + lane] = d * (qb as i8) as f32;
+            }
+        }
+        let err = max_rel_err_with_floor(&dequant, &xi, 1.0);
+        results.push(ShapeResult {
+            m: n,
+            k: 1,
+            n: 1,
+            seed,
+            max_rel_err: err,
+            tolerance: 5e-3,
+            pass: err <= 5e-3,
+        });
+    }
+
+    let pass = results.iter().all(|r| r.pass);
+    let cert = Cert {
+        schema_version: SCHEMA_VERSION,
+        impl_id: "gelu_mul_f32_to_q8_1".to_string(),
+        backend: dev.backend().to_string(),
+        arch: arch.to_string(),
+        op: "gelu_mul_f32_to_q8_1".to_string(),
+        dtype_weight: "F32".to_string(),
+        dtype_activation: "Q8_1".to_string(),
+        tolerance_formula: "|dequant - oracle| <= 5e-3 * max(|oracle|, 1) (Q8_1 step + tanhf)".to_string(),
         results,
         pass,
         emitted_at: now_utc_iso8601(),

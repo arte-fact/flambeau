@@ -579,27 +579,63 @@ pub fn standard_attn_mixed_local<B: flambeau_backend::Backend, H: TopologyHooks<
             }
             flambeau_core::Stream::synchronize(state.stream)?;
         }
-        flambeau_model_ops::attn_decode_f16_batched(
-            flambeau_ops::AttnBatchedBuffers {
-                q_batched: q_dec_ptr,
-                k_cache_ptrs: state.pool.attn_slot_k_dst_ptrs,
-                v_cache_ptrs: state.pool.attn_slot_v_dst_ptrs,
-                out_batched: out_dec_ptr,
-                n_tokens_kv_ptrs: state.pool.attn_slot_n_kv,
-            },
-            flambeau_ops::AttnDecodeBatchedShape {
-                n_heads_q: weights.n_heads,
-                n_heads_kv: weights.n_kv_heads,
-                head_dim: weights.head_dim,
-                n_slots: n_dec,
-            },
-            flambeau_ops::AttnKnobs {
-                scale,
-                window_size: kernel_window,
-                ring_depth: ring_depth_i,
-            },
-            &ops,
-        )?;
+        let batched_bufs = flambeau_ops::AttnBatchedBuffers {
+            q_batched: q_dec_ptr,
+            k_cache_ptrs: state.pool.attn_slot_k_dst_ptrs,
+            v_cache_ptrs: state.pool.attn_slot_v_dst_ptrs,
+            out_batched: out_dec_ptr,
+            n_tokens_kv_ptrs: state.pool.attn_slot_n_kv,
+        };
+        let knobs = flambeau_ops::AttnKnobs {
+            scale,
+            window_size: kernel_window,
+            ring_depth: ring_depth_i,
+        };
+        // Split-K the batched decode when the longest slot is deep enough that
+        // the serial (one block per head×slot) kernel starves the GPU. chunk_base
+        // stays 0 (full causal range); ring layers above MAX_SPLITK_CHUNKS fall
+        // back to serial.
+        let max_dec_kv = host_n_kv.iter().copied().max().unwrap_or(0) as usize;
+        let chunk_size =
+            flambeau_model_ops::splitk_chunk_size(max_dec_kv, crate::core::scratch::MAX_SPLITK_CHUNKS);
+        let n_chunks = max_dec_kv.div_ceil(chunk_size.max(1));
+        let use_splitk = !is_ring_layer
+            && max_dec_kv > 256
+            && n_chunks > 1
+            && n_chunks <= crate::core::scratch::MAX_SPLITK_CHUNKS
+            && state.pool.splitk_partials_m.as_usize() != 0;
+        if use_splitk {
+            flambeau_model_ops::attn_decode_f16_batched_splitk(
+                batched_bufs,
+                flambeau_ops::AttnSplitkPartials {
+                    partials_m: state.pool.splitk_partials_m,
+                    partials_s: state.pool.splitk_partials_s,
+                    partials_o: state.pool.splitk_partials_o,
+                },
+                flambeau_ops::AttnDecodeBatchedSplitkShape {
+                    n_heads_q: weights.n_heads,
+                    n_heads_kv: weights.n_kv_heads,
+                    head_dim: weights.head_dim,
+                    n_slots: n_dec,
+                    max_n_tokens_kv: max_dec_kv,
+                    chunk_size,
+                },
+                knobs,
+                &ops,
+            )?;
+        } else {
+            flambeau_model_ops::attn_decode_f16_batched(
+                batched_bufs,
+                flambeau_ops::AttnDecodeBatchedShape {
+                    n_heads_q: weights.n_heads,
+                    n_heads_kv: weights.n_kv_heads,
+                    head_dim: weights.head_dim,
+                    n_slots: n_dec,
+                },
+                knobs,
+                &ops,
+            )?;
+        }
     }
 
     // ---- Apply Q-gate sigmoid·mul if gated, then output proj on K+N rows ----

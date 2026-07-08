@@ -49,10 +49,15 @@ pub mod sig;
 pub use hip::{OpsRegistry, OpsRegistryError};
 
 pub use sig::{
-    AttnBatchedBuffers, AttnBuffers, AttnDecodeBatchedShape, AttnDecodePagedShape,
-    AttnDecodeShape, AttnDecodeSlots, AttnKnobs, AttnPagedDecodeBuffers, AttnPagedPrefillBuffers,
-    AttnPrefillPagedShape, AttnPrefillShape, AttnPrefillSlots, AttnSplitkPartials,
-    AttnSplitkShape, MatmulShape, MmvqBatchShape, MmvqBuffers, MmvqGateUpBatchShape,
+    AttnBatchedBuffers, AttnBuffers, AttnDecodeBatchedShape, AttnDecodeBatchedSplitkShape,
+    AttnDecodePagedShape,
+    AttnDecodeQ8Slots, AttnDecodeQ8SplitkSlots,
+    AttnDecodeShape, AttnDecodeSlots, AttnDposKnobs, AttnKnobs, AttnPagedDecodeBuffers,
+    AttnPagedPrefillBuffers,
+    AttnPrefillPagedShape, AttnPrefillShape, AttnPrefillSlots, AttnSplitkDposShape,
+    AttnSplitkPartials,
+    AttnSplitkShape, AttnSplitkSlots, KvAppendSlots,
+    MatmulShape, MmvqBatchShape, MmvqBuffers, MmvqGateUpBatchShape,
     MmvqGateUpBuffers, MmvqGateUpShape, MmvqShape, MoeMmvqBuffers, MoeMmvqGateUpBuffers,
     MoeMmqTile8DownBuffers, MoeMmqTile8GateUpBuffers, MoeMmvqGateUpSortedBuffers, MoeMmvqShape,
     KvAppendBatchedSlotsBuffers, KvAppendBatchedSlotsShape, KvAppendBuffers,

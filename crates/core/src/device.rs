@@ -184,6 +184,27 @@ pub trait Device: Send + Sync + 'static {
         bytes: usize,
     ) -> DeviceResult<()>;
 
+    /// Graph-captureable variant of [`Self::memcpy_async`] that tags the copy
+    /// with a [`MemcpySlot`](crate::slot::MemcpySlot) so a backend graph
+    /// executor can retarget the source pointer per replay. The default ignores
+    /// the slot (plain memcpy) — correct for backends without a graph slot-map;
+    /// the real backends override it to record the tag under an active capture.
+    /// Mirrors [`LaunchArgs::push_slot`](crate::kernel_backend::LaunchArgs::push_slot).
+    /// # Safety
+    /// Same as [`Self::memcpy_async`].
+    unsafe fn memcpy_async_slot(
+        &self,
+        stream: &Self::Stream,
+        dir: CopyDirection,
+        dst: DevicePtr,
+        src: DevicePtr,
+        bytes: usize,
+        _slot: crate::slot::MemcpySlot,
+    ) -> DeviceResult<()> {
+        // SAFETY: forwarded verbatim under the caller's contract.
+        unsafe { self.memcpy_async(stream, dir, dst, src, bytes) }
+    }
+
     /// Block until **all** streams on this device have retired. Session
     /// boundaries only; hot paths must use `Stream::synchronize`.
     /// # Errors

@@ -1157,6 +1157,44 @@ params = """
     const int n_blocks_per_row"""
 body = "mmvq_dp4a_row<Q4_0, 256, fb_fp16_t>(x, y, dst, n_rows, n_blocks_per_row);"
 
+# Q4_0 t128 config variant — same single-row DP4A skeleton at 128 threads/block
+# (4 warps on CUDA → more in-flight blocks/CU). Autotune candidate vs the
+# 256-thread base `mmvq_q4_0` for sm_86 m=1 decode; THREADS is the only
+# difference. Distinct stem from the gfx906-only hand kernel `mmvq_q4_0_t128`
+# (which carries the same entry symbol) so the shared manifest can compile it on
+# both backends without a stem/output collision.
+[[kernel]]
+stem = "mmvq_q4_0_t128_dp4a"
+includes = ["quant_traits.cuh", "mmvq.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_0_t128_dp4a_q8_1"
+params = """
+    const flambeau_block_q4_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_dp4a_row<Q4_0, 128>(x, y, dst, n_rows, n_blocks_per_row);"
+
+# Q4_0 t128 + VDR=2 config variant — 128 threads, each owning 2 consecutive
+# int32 lanes of the block (2 threads/quant-block), chaining 4 dp4a into one int
+# sum before the block-scale multiply for a tighter dp4a register chain (ILP).
+# Autotune candidate vs t128 and the 256-thread base.
+[[kernel]]
+stem = "mmvq_q4_0_t128_vdr2"
+includes = ["quant_traits.cuh", "mmvq.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_0_t128_vdr2_q8_1"
+params = """
+    const flambeau_block_q4_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_dp4a_vdr_row<Q4_0, 128, 2>(x, y, dst, n_rows, n_blocks_per_row);"
+
 # Q4_1 single-row MMVQ — legacy 4-bit with per-block min (y = d*q + m).
 # Base kernel is F32-only (the F16-dst Q4_1 path is a separate t128 kernel).
 [[kernel]]

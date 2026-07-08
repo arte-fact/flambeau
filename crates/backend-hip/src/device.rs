@@ -1168,6 +1168,21 @@ impl Device for HipDevice {
         check(code, "hipMemcpyAsync")
     }
 
+    unsafe fn memcpy_async_slot(
+        &self,
+        stream: &Self::Stream,
+        dir: CopyDirection,
+        dst: DevicePtr,
+        src: DevicePtr,
+        bytes: usize,
+        slot: crate::graph_capture::MemcpySlot,
+    ) -> DeviceResult<()> {
+        // Delegate to the inherent recording implementation so the generic
+        // `Device` surface records the tag under an active capture scope.
+        // SAFETY: forwarded verbatim under the caller's contract.
+        unsafe { HipDevice::memcpy_async_slot(self, stream, dir, dst, src, bytes, slot) }
+    }
+
     fn synchronize(&self) -> DeviceResult<()> {
         self.bind()?;
         check(

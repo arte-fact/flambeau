@@ -568,6 +568,31 @@ pub fn attention_decode_f16_splitk<B: flambeau_core::KernelBackend>(
     shape: crate::AttnSplitkShape,
     knobs: crate::AttnKnobs,
 ) -> Result<()> {
+    attention_decode_f16_splitk_slots(reg, stream, buffers, partials, shape, knobs, None)
+}
+
+/// Graph-captureable variant of [`attention_decode_f16_splitk`]. With
+/// `slots=None` the behaviour is byte-identical to the wrapper. With `Some`,
+/// the chunk kernel's `n_tokens_kv` + `chunk_base` scalar args — and, when
+/// `k_ptr`/`v_ptr` are `Some`, its K/V cache pointer args (SWA SlideBand
+/// slide) — are tagged via `KernelArgs::push_slot` so a captured graph can
+/// rebind them per replay — valid while the derived `n_chunks` grid is
+/// unchanged (a token that would change `n_chunks` needs recapture, not a
+/// slot update). Only the chunk kernel reads K/V; the combine kernel reads
+/// partials and is never tagged.
+pub fn attention_decode_f16_splitk_slots<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
+    buffers: crate::AttnBuffers,
+    partials: crate::AttnSplitkPartials,
+    shape: crate::AttnSplitkShape,
+    knobs: crate::AttnKnobs,
+    slots: Option<crate::AttnSplitkSlots>,
+) -> Result<()> {
+    let (n_tokens_slot, chunk_base_slot, k_ptr_slot, v_ptr_slot) = match slots {
+        Some(s) => (Some(s.n_tokens_kv), Some(s.chunk_base), s.k_ptr, s.v_ptr),
+        None => (None, None, None, None),
+    };
     let crate::AttnBuffers { q, k, v, out } = buffers;
     let crate::AttnSplitkPartials {
         partials_m,
@@ -611,21 +636,21 @@ pub fn attention_decode_f16_splitk<B: flambeau_core::KernelBackend>(
     let po_ptr: u64 = partials_o.as_usize() as u64;
     let mut a1 = <B::Args<'_>>::default();
     a1.push_arg(&q_ptr);
-    a1.push_arg(&k_ptr);
-    a1.push_arg(&v_ptr);
+    push_scalar_maybe_slot(&mut a1, &k_ptr, k_ptr_slot);
+    push_scalar_maybe_slot(&mut a1, &v_ptr, v_ptr_slot);
     a1.push_arg(&m_ptr);
     a1.push_arg(&s_ptr);
     a1.push_arg(&po_ptr);
     a1.push_arg(&n_heads_q_i);
     a1.push_arg(&n_heads_kv_i);
     a1.push_arg(&head_dim_i);
-    a1.push_arg(&n_tokens_i);
+    push_scalar_maybe_slot(&mut a1, &n_tokens_i, n_tokens_slot);
     a1.push_arg(&n_chunks_i);
     a1.push_arg(&chunk_size_i);
     a1.push_arg(&scale);
     a1.push_arg(&window_size);
     a1.push_arg(&ring_depth);
-    a1.push_arg(&chunk_base_i);
+    push_scalar_maybe_slot(&mut a1, &chunk_base_i, chunk_base_slot);
     let cfg1 = LaunchCfg {
         grid: (n_heads_q as u32, n_chunks as u32, 1),
         block: (head_dim as u32, 1, 1),
@@ -648,6 +673,209 @@ pub fn attention_decode_f16_splitk<B: flambeau_core::KernelBackend>(
     };
     B::launch(&k_combine, stream, cfg2, a2)?;
 
+    Ok(())
+}
+
+/// Batched-slots split-K (flash-decoding) decode attention, F16 KV. The
+/// per-slot sibling of [`attention_decode_f16_splitk`]: grid.z fans each slot's
+/// KV into `n_chunks`, then a combine pass merges per (q_head, slot). CUDA-only
+/// (the kernel lives in kernels-cuda); on a backend without the module (gfx906)
+/// this falls back to the serial [`attention_decode_f16_batched`]. `n_chunks`
+/// derives from the host-side `max_n_tokens_kv`; per-slot device lengths clamp
+/// each chunk so shorter slots emit empty partials.
+///
+/// Partials (caller-provided, f32): `partials_m`/`partials_s` at
+/// `n_heads_q * n_slots * n_chunks`, `partials_o` at `* head_dim`.
+pub fn attention_decode_f16_batched_splitk<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
+    buffers: crate::AttnBatchedBuffers,
+    partials: crate::AttnSplitkPartials,
+    shape: crate::AttnDecodeBatchedSplitkShape,
+    knobs: crate::AttnKnobs,
+) -> Result<()> {
+    let crate::AttnDecodeBatchedSplitkShape {
+        n_heads_q,
+        n_heads_kv,
+        head_dim,
+        n_slots,
+        max_n_tokens_kv,
+        chunk_size,
+    } = shape;
+    // gfx906 has no split-K batched module — keep the serial batched kernel.
+    if reg.module("attention_decode_batched_splitk").is_none() {
+        return attention_decode_f16_batched(
+            reg,
+            stream,
+            buffers,
+            crate::AttnDecodeBatchedShape { n_heads_q, n_heads_kv, head_dim, n_slots },
+            knobs,
+        );
+    }
+    assert!(
+        head_dim == 64 || head_dim == 128 || head_dim == 256 || head_dim == 512,
+        "attention_decode_f16_batched_splitk: head_dim {head_dim} not supported"
+    );
+    assert!((1..=32).contains(&n_slots));
+    assert!(chunk_size > 0);
+
+    let crate::AttnBatchedBuffers {
+        q_batched,
+        k_cache_ptrs,
+        v_cache_ptrs,
+        out_batched,
+        n_tokens_kv_ptrs,
+    } = buffers;
+    let crate::AttnSplitkPartials { partials_m, partials_s, partials_o } = partials;
+    let crate::AttnKnobs { scale, window_size, ring_depth } = knobs;
+
+    let module = reg.expect_module("attention_decode_batched_splitk")?;
+    let k_chunk = B::kernel(module, "flambeau_attention_decode_f16_batched_splitk_chunk")?;
+    let k_combine = B::kernel(module, "flambeau_attention_decode_f16_batched_splitk_combine")?;
+
+    let n_chunks = max_n_tokens_kv.div_ceil(chunk_size).max(1);
+    let n_heads_q_i = n_heads_q as i32;
+    let n_heads_kv_i = n_heads_kv as i32;
+    let head_dim_i = head_dim as i32;
+    let n_slots_i = n_slots as i32;
+    let n_chunks_i = n_chunks as i32;
+    let chunk_size_i = chunk_size as i32;
+    let q_ptr: u64 = q_batched.as_usize() as u64;
+    let k_ptrs_ptr: u64 = k_cache_ptrs.as_usize() as u64;
+    let v_ptrs_ptr: u64 = v_cache_ptrs.as_usize() as u64;
+    let o_ptr: u64 = out_batched.as_usize() as u64;
+    let n_kv_ptr: u64 = n_tokens_kv_ptrs.as_usize() as u64;
+    let m_ptr: u64 = partials_m.as_usize() as u64;
+    let s_ptr: u64 = partials_s.as_usize() as u64;
+    let po_ptr: u64 = partials_o.as_usize() as u64;
+
+    let mut a1 = <B::Args<'_>>::default();
+    a1.push_arg(&q_ptr);
+    a1.push_arg(&k_ptrs_ptr);
+    a1.push_arg(&v_ptrs_ptr);
+    a1.push_arg(&m_ptr);
+    a1.push_arg(&s_ptr);
+    a1.push_arg(&po_ptr);
+    a1.push_arg(&n_kv_ptr);
+    a1.push_arg(&n_heads_q_i);
+    a1.push_arg(&n_heads_kv_i);
+    a1.push_arg(&head_dim_i);
+    a1.push_arg(&n_slots_i);
+    a1.push_arg(&n_chunks_i);
+    a1.push_arg(&chunk_size_i);
+    a1.push_arg(&scale);
+    a1.push_arg(&window_size);
+    a1.push_arg(&ring_depth);
+    let cfg1 = LaunchCfg {
+        grid: (n_heads_q as u32, n_slots as u32, n_chunks as u32),
+        block: (head_dim as u32, 1, 1),
+        shared_bytes: 0,
+    };
+    B::launch(&k_chunk, stream, cfg1, a1)?;
+
+    let mut a2 = <B::Args<'_>>::default();
+    a2.push_arg(&m_ptr);
+    a2.push_arg(&s_ptr);
+    a2.push_arg(&po_ptr);
+    a2.push_arg(&o_ptr);
+    a2.push_arg(&n_heads_q_i);
+    a2.push_arg(&n_slots_i);
+    a2.push_arg(&n_chunks_i);
+    a2.push_arg(&head_dim_i);
+    let cfg2 = LaunchCfg {
+        grid: (n_heads_q as u32, n_slots as u32, 1),
+        block: (head_dim as u32, 1, 1),
+        shared_bytes: 0,
+    };
+    B::launch(&k_combine, stream, cfg2, a2)?;
+    Ok(())
+}
+
+/// Device-position split-K decode attention, F16 KV. Behaviour matches
+/// [`attention_decode_f16_splitk`] for the position the device buffer
+/// `pos_ptr` holds, but reads `position` on-device and derives `n_tokens_kv` /
+/// `chunk_base` / the K-V cache pointer from the baked [`crate::AttnDposKnobs`]
+/// regime — so a captured decode graph rebinds nothing per token (one 8-byte
+/// HtoD of the shared `[position, token_id]` context suffices). The chunk kernel
+/// is CUDA-only (`attention_decode_f16_splitk_dpos`); the combine pass is
+/// position-free and reuses the shared `attention_decode_f16_splitk` module.
+/// `q`/`k`/`v` are the UNSLID base pointers (the kernel slides in-band).
+pub fn attention_decode_f16_splitk_dpos<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
+    buffers: crate::AttnBuffers,
+    partials: crate::AttnSplitkPartials,
+    shape: crate::AttnSplitkDposShape,
+    knobs: crate::AttnDposKnobs,
+    pos_ptr: flambeau_core::DevicePtr,
+) -> Result<()> {
+    let crate::AttnBuffers { q, k, v, out } = buffers;
+    let crate::AttnSplitkPartials { partials_m, partials_s, partials_o } = partials;
+    let crate::AttnSplitkDposShape { n_heads_q, n_heads_kv, head_dim, n_chunks, chunk_size } = shape;
+    let crate::AttnDposKnobs { scale, window, ring_depth, slide_row_stride } = knobs;
+    assert!(
+        matches!(head_dim, 64 | 128 | 256 | 512),
+        "attention_decode_f16_splitk_dpos: head_dim {head_dim} not supported"
+    );
+    assert!(chunk_size > 0 && n_chunks > 0);
+
+    let module = reg.expect_module("attention_decode_f16_splitk_dpos")?;
+    let k_chunk = B::kernel(module, "flambeau_attention_decode_f16_splitk_dpos_chunk")?;
+    let combine_module = reg.expect_module("attention_decode_f16_splitk")?;
+    let k_combine = B::kernel(combine_module, "flambeau_attention_decode_f16_splitk_combine")?;
+
+    let n_heads_q_i = n_heads_q as i32;
+    let n_heads_kv_i = n_heads_kv as i32;
+    let head_dim_i = head_dim as i32;
+    let n_chunks_i = n_chunks as i32;
+    let chunk_size_i = chunk_size as i32;
+    let q_ptr: u64 = q.as_usize() as u64;
+    let k_ptr: u64 = k.as_usize() as u64;
+    let v_ptr: u64 = v.as_usize() as u64;
+    let o_ptr: u64 = out.as_usize() as u64;
+    let m_ptr: u64 = partials_m.as_usize() as u64;
+    let s_ptr: u64 = partials_s.as_usize() as u64;
+    let po_ptr: u64 = partials_o.as_usize() as u64;
+    let pos_p: u64 = pos_ptr.as_usize() as u64;
+
+    let mut a1 = <B::Args<'_>>::default();
+    a1.push_arg(&q_ptr);
+    a1.push_arg(&k_ptr);
+    a1.push_arg(&v_ptr);
+    a1.push_arg(&m_ptr);
+    a1.push_arg(&s_ptr);
+    a1.push_arg(&po_ptr);
+    a1.push_arg(&n_heads_q_i);
+    a1.push_arg(&n_heads_kv_i);
+    a1.push_arg(&head_dim_i);
+    a1.push_arg(&n_chunks_i);
+    a1.push_arg(&chunk_size_i);
+    a1.push_arg(&scale);
+    a1.push_arg(&window);
+    a1.push_arg(&ring_depth);
+    a1.push_arg(&slide_row_stride);
+    a1.push_arg(&pos_p);
+    let cfg1 = LaunchCfg {
+        grid: (n_heads_q as u32, n_chunks as u32, 1),
+        block: (head_dim as u32, 1, 1),
+        shared_bytes: 0,
+    };
+    B::launch(&k_chunk, stream, cfg1, a1)?;
+
+    let mut a2 = <B::Args<'_>>::default();
+    a2.push_arg(&m_ptr);
+    a2.push_arg(&s_ptr);
+    a2.push_arg(&po_ptr);
+    a2.push_arg(&o_ptr);
+    a2.push_arg(&n_heads_q_i);
+    a2.push_arg(&n_chunks_i);
+    a2.push_arg(&head_dim_i);
+    let cfg2 = LaunchCfg {
+        grid: (n_heads_q as u32, 1, 1),
+        block: (head_dim as u32, 1, 1),
+        shared_bytes: 0,
+    };
+    B::launch(&k_combine, stream, cfg2, a2)?;
     Ok(())
 }
 
@@ -795,6 +1023,21 @@ pub fn attention_decode_q8_kv<B: flambeau_core::KernelBackend>(
     shape: crate::AttnDecodeShape,
     knobs: crate::AttnKnobs,
 ) -> Result<()> {
+    attention_decode_q8_kv_slots(reg, stream, buffers, shape, knobs, None)
+}
+
+/// Graph-captureable variant of [`attention_decode_q8_kv`]. Q8_0-KV sibling of
+/// [`attention_decode_f16_slots`]: with `slots=None` behaviour is byte-
+/// identical to the wrapper; with `Some`, the `n_tokens_kv` kernel arg is
+/// tagged via `KernelArgs::push_slot` for per-replay rebind.
+pub fn attention_decode_q8_kv_slots<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
+    buffers: crate::AttnBuffers,
+    shape: crate::AttnDecodeShape,
+    knobs: crate::AttnKnobs,
+    slots: Option<crate::AttnDecodeQ8Slots>,
+) -> Result<()> {
     let crate::AttnBuffers { q, k, v, out } = buffers;
     let crate::AttnDecodeShape {
         n_heads_q,
@@ -831,7 +1074,10 @@ pub fn attention_decode_q8_kv<B: flambeau_core::KernelBackend>(
     args.push_arg(&n_heads_q_i);
     args.push_arg(&n_heads_kv_i);
     args.push_arg(&head_dim_i);
-    args.push_arg(&n_tokens_i);
+    match slots {
+        Some(s) => args.push_slot(&n_tokens_i, s.n_tokens_kv),
+        None => args.push_arg(&n_tokens_i),
+    }
     args.push_arg(&scale);
     args.push_arg(&window_size);
     args.push_arg(&ring_depth);
@@ -856,6 +1102,27 @@ pub fn attention_decode_q8_kv_splitk<B: flambeau_core::KernelBackend>(
     shape: crate::AttnSplitkShape,
     knobs: crate::AttnKnobs,
 ) -> Result<()> {
+    attention_decode_q8_kv_splitk_slots(reg, stream, buffers, partials, shape, knobs, None)
+}
+
+/// Graph-captureable variant of [`attention_decode_q8_kv_splitk`]. Q8_0-KV
+/// sibling of [`attention_decode_f16_splitk_slots`]: with `slots=None`
+/// behaviour is byte-identical to the wrapper; with `Some`, the chunk kernel's
+/// `n_tokens_kv` + `chunk_base` scalar args are tagged via
+/// `KernelArgs::push_slot` for per-replay rebind while `n_chunks` is fixed.
+pub fn attention_decode_q8_kv_splitk_slots<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
+    buffers: crate::AttnBuffers,
+    partials: crate::AttnSplitkPartials,
+    shape: crate::AttnSplitkShape,
+    knobs: crate::AttnKnobs,
+    slots: Option<crate::AttnDecodeQ8SplitkSlots>,
+) -> Result<()> {
+    let (n_tokens_slot, chunk_base_slot) = match slots {
+        Some(s) => (Some(s.n_tokens_kv), Some(s.chunk_base)),
+        None => (None, None),
+    };
     let crate::AttnBuffers { q, k, v, out } = buffers;
     let crate::AttnSplitkPartials {
         partials_m,
@@ -911,13 +1178,13 @@ pub fn attention_decode_q8_kv_splitk<B: flambeau_core::KernelBackend>(
     a1.push_arg(&n_heads_q_i);
     a1.push_arg(&n_heads_kv_i);
     a1.push_arg(&head_dim_i);
-    a1.push_arg(&n_tokens_i);
+    push_scalar_maybe_slot(&mut a1, &n_tokens_i, n_tokens_slot);
     a1.push_arg(&n_chunks_i);
     a1.push_arg(&chunk_size_i);
     a1.push_arg(&scale);
     a1.push_arg(&window_size);
     a1.push_arg(&ring_depth);
-    a1.push_arg(&chunk_base_i);
+    push_scalar_maybe_slot(&mut a1, &chunk_base_i, chunk_base_slot);
     // chunk pass uses block = head_dim/4 (one
     // thread per int32-packed quad). Combine pass still needs
     // head_dim threads (one per output element).
@@ -1309,6 +1576,23 @@ pub fn kv_append_v_unit_norm_f16<B: flambeau_core::KernelBackend>(
     write_pos: usize,
     eps: f32,
 ) -> Result<()> {
+    kv_append_v_unit_norm_f16_slots(reg, stream, buf, shape, write_pos, eps, None)
+}
+
+/// Graph-captureable variant of [`kv_append_v_unit_norm_f16`]. With
+/// `slots=None` behaviour is byte-identical to the wrapper; with `Some`, the
+/// `write_pos` cache-row offset (a scalar kernel arg) is tagged via
+/// `KernelArgs::push_slot` so a captured graph advances the write cursor per
+/// replay.
+pub fn kv_append_v_unit_norm_f16_slots<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
+    buf: crate::KvAppendBuffers,
+    shape: crate::KvAppendVUnitShape,
+    write_pos: usize,
+    eps: f32,
+    slots: Option<crate::KvAppendSlots>,
+) -> Result<()> {
     let entry = match shape.head_dim {
         64 => "flambeau_kv_append_v_unit_norm_f16_d64",
         128 => "flambeau_kv_append_v_unit_norm_f16_d128",
@@ -1334,7 +1618,10 @@ pub fn kv_append_v_unit_norm_f16<B: flambeau_core::KernelBackend>(
     args.push_arg(&k_dst_p);
     args.push_arg(&v_dst_p);
     args.push_arg(&n_kv_heads_i);
-    args.push_arg(&write_pos_i);
+    match slots {
+        Some(s) => args.push_slot(&write_pos_i, s.write_pos),
+        None => args.push_arg(&write_pos_i),
+    }
     args.push_arg(&eps);
     args.push_arg(&ring_depth_i);
     let cfg = LaunchCfg {
@@ -1342,6 +1629,87 @@ pub fn kv_append_v_unit_norm_f16<B: flambeau_core::KernelBackend>(
         block: (shape.head_dim as u32, 1, 1),
         shared_bytes: 0,
     };
+    B::launch(&kernel, stream, cfg, args)?;
+    Ok(())
+}
+
+/// Device-position variant of [`kv_append_v_unit_norm_f16`]. The write row is
+/// read on-device from `pos_ptr[0]` instead of a host `write_pos`
+/// scalar, so a captured decode graph advances the KV write cursor with no
+/// rebind. CUDA-only kernel (`kv_append_v_unit_norm_f16_dpos`); `shape.ring_depth`
+/// and `eps` stay baked constants.
+pub fn kv_append_v_unit_norm_f16_dpos<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
+    buf: crate::KvAppendBuffers,
+    shape: crate::KvAppendVUnitShape,
+    eps: f32,
+    pos_ptr: flambeau_core::DevicePtr,
+) -> Result<()> {
+    let entry = match shape.head_dim {
+        64 => "flambeau_kv_append_v_unit_norm_f16_dpos_d64",
+        128 => "flambeau_kv_append_v_unit_norm_f16_dpos_d128",
+        256 => "flambeau_kv_append_v_unit_norm_f16_dpos_d256",
+        512 => "flambeau_kv_append_v_unit_norm_f16_dpos_d512",
+        other => anyhow::bail!(
+            "kv_append_v_unit_norm_f16_dpos: head_dim {other} not in {{64, 128, 256, 512}}"
+        ),
+    };
+    let module = reg.expect_module("kv_append_v_unit_norm_f16_dpos")?;
+    let kernel = B::kernel(module, entry)?;
+
+    let n_kv_heads_i = shape.n_kv_heads as i32;
+    let ring_depth_i = shape.ring_depth as i32;
+    let k_src_p: u64 = buf.k_src.as_usize() as u64;
+    let v_src_p: u64 = buf.v_src.as_usize() as u64;
+    let k_dst_p: u64 = buf.k_dst.as_usize() as u64;
+    let v_dst_p: u64 = buf.v_dst.as_usize() as u64;
+    let pos_p: u64 = pos_ptr.as_usize() as u64;
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&k_src_p);
+    args.push_arg(&v_src_p);
+    args.push_arg(&k_dst_p);
+    args.push_arg(&v_dst_p);
+    args.push_arg(&n_kv_heads_i);
+    args.push_arg(&eps);
+    args.push_arg(&ring_depth_i);
+    args.push_arg(&pos_p);
+    let cfg = LaunchCfg {
+        grid: (shape.n_tokens as u32, shape.n_kv_heads as u32, 1),
+        block: (shape.head_dim as u32, 1, 1),
+        shared_bytes: 0,
+    };
+    B::launch(&kernel, stream, cfg, args)?;
+    Ok(())
+}
+
+/// Device-position embedding-row gather, F16. Copies one hidden-width
+/// row `embd[token_id * hidden + j]` → `dst[j]`, reading `token_id` on-device
+/// from `ctx_ptr[1]` (the decode-graph `[position, token_id]` context). Used
+/// only under decode-graph capture; the non-capture path keeps a plain DtoD
+/// memcpy. CUDA-only kernel (`embed_gather_f16_dpos`).
+pub fn embed_gather_f16_dpos<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
+    embd: flambeau_core::DevicePtr,
+    dst: flambeau_core::DevicePtr,
+    hidden: usize,
+    ctx_ptr: flambeau_core::DevicePtr,
+) -> Result<()> {
+    let module = reg.expect_module("embed_gather_f16_dpos")?;
+    let kernel = B::kernel(module, "flambeau_embed_gather_f16_dpos")?;
+
+    let hidden_i = hidden as i32;
+    let embd_p: u64 = embd.as_usize() as u64;
+    let dst_p: u64 = dst.as_usize() as u64;
+    let ctx_p: u64 = ctx_ptr.as_usize() as u64;
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&embd_p);
+    args.push_arg(&dst_p);
+    args.push_arg(&hidden_i);
+    args.push_arg(&ctx_p);
+    let threads = 256u32;
+    let cfg = LaunchCfg::one_d((hidden as u32).div_ceil(threads), threads);
     B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }

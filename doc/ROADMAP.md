@@ -40,62 +40,143 @@ The N=4 gap decomposes (iter14 nsys) into three fixable levers plus CUDA graphs.
 Ranked by ROI. **Track-level target: flambeau N=4 throughput > llama 228.8 tok/s**
 (or, interim, batch-scaling ≥ 2.5×).
 
-- [ ] **A1 — Batched split-K decode attention** *(kernel proven; wiring bug)*
+- [x] **A1 — Batched split-K decode attention** *(CLOSED: kernel certified correct; e2e throughput = measured NULL; wiring reverted)*
   Batched decode attention is single-block-per-(head,slot), serial-KV (20% of
-  N=4 decode). Split-K kernel is verified **2.8–5.7× and bit-exact** in isolation
-  (iter16); the e2e wiring produces wrong output on the longer slot in concurrent
-  variable-length decode (iter17), matching a recurring pre-existing bug.
-  - Artifacts: `memory/artifacts/lever2-batched-splitk.patch` + `.cu` (verified kernel).
-  - **Refined diagnosis (2026-07-07, static):** the split-K chunk kernel is proven
-    **line-by-line identical** to the verified serial batched oracle
-    (`attention_f16.cuh:82`) — same window mask (`swa_min = n_tokens - window_size`),
-    same ring read (`t_phys = t % ring_depth`); chunks tile exactly `[swa_min,
-    n_tokens)`; combine zero-weights empty chunks. Buffer sizing is adequate
-    (single-stream splitk d512@2448 works ⇒ `q_width` uses max head_dim 512).
-    `n_chunks = ceil(max(host_n_kv)/chunk_size)` is consistent across all layers.
-    **All three original suspects (mixed-head_dim overflow, SWA slid-pointer,
-    per-call buffer variance) are REFUTED.** gemma SWA layers are *ring* layers
-    (`is_ring_layer`, no slide), so `any_offset` is never set; the untested regime
-    is nt > window (ring wrap + masking), which the iter16 microbench never hit
-    (all its lengths < the 1024 window).
-  - **Empirical result (2026-07-07, built + served + needle-swept):** the bug is
-    **deterministic in `n_chunks`**, not multi-slot and not the slide path. With SWA
-    masking active (n_tokens > 1024 window), `n_chunks ∈ {5,6}` corrupts the
-    **max-length** slot (progressively worse with length); `n_chunks ≥ 7` is correct.
-    `chunk_size=512` (n>2048) always yields n_chunks=5 → BAD. **Reproduces solo
-    (n_slots=1)** — the earlier "unequal-length" framing was coincidental. Full table
-    + fast repro (`/tmp/solo.py`, words=900 BAD / 1200 OK) in
-    `memory/artifacts/lever2-diagnosis-2026-07-07.md`.
-  - **Kernel PROVEN correct** (standalone `oracle_diff_batched_splitk.cu`): split-K ==
-    serial batched oracle bit-exact across head_dim {256,512} × window {0,1024} × ring
-    {0,wrap} × n_chunks {5..8} × cs {128,256,512}, incl. all failing configs.
-    `alloc_bytes` is separate-malloc-per-buffer → no pool overlap; sizes fit.
-  - **serial-overwrite bisection:** running serial into `out_batched` *after* split-K
-    (same buffers) FIXES every failing case → the bug is the split-K **output in-situ**;
-    inputs are fine (serial recomputes correctly), side-effects harmless.
-  - **Pinned paradox:** correct kernel + correct inputs → wrong output, only in-situ,
-    deterministic by n_chunks — rules out kernel math; points at partials-pool state or a
-    stream/concurrency interaction. **Next:** dump the exact in-situ split-K inputs +
-    partials on the first failing call, replay through the standalone harness (wrong there
-    ⇒ data differs; correct ⇒ runtime/aliasing/stream). Trail:
-    `memory/artifacts/lever2-diagnosis-2026-07-07.md`.
+  N=4 decode). Split-K kernel is verified **2.8–5.7× and bit-exact** in isolation.
+  Artifacts: `memory/artifacts/lever2-batched-splitk.patch` + `.cu` (verified kernel),
+  `oracle_diff_batched_splitk.cu` (kernel-vs-oracle proof).
+  - **⚠ The "wiring bug" was a MISDIAGNOSIS (2026-07-07).** The needle-recall test
+    used to "find" it is invalid: forcing `use_splitk=false` (split-K never launched)
+    AND testing the **fully clean baseline** (no patch) both reproduce the *identical*
+    failure pattern (1242 tok empty, 1642 OK, 2127/2463 garbage). The split-K kernel is
+    not involved. The earlier "deterministic in n_chunks" table and "serial-overwrite
+    bisection" were confounded by the invalid test. Full retraction +
+    the 5 decisive experiments in `memory/artifacts/lever2-diagnosis-2026-07-07.md`.
+  - **No valid local oracle:** the only CUDA llama.cpp build (`build-cuda`) misreads the
+    gemma-4 GGUF (emits `<|channel>` harmony tokens / `011111` garbage for "2+2"); HIP
+    builds are gfx906 + need libomp. Needle results are prompt-formulation noise (mayor
+    recalled at 962 tok; number-distractor code fails at 667 tok) — borderline QAT-model
+    behavior, not a kernel signal.
+  - **Correct path (per CLAUDE.md "Run sweep first"):**
+    1. ✅ **DONE — sweep cert green.** `sweep --arch sm_86 --op attention_decode_batched_splitk`
+       → `certs/cuda/sm_86/attention_decode_f16_batched_splitk_sm_86.json` (pass=true, 8
+       shapes, worst max_rel 6.7e-5 vs 2e-2 tol, VGPR 40). Covers exactly the configs the
+       needle test flagged: hd512/max_n2127 (cs512 nc5), hd256/1242 (nc5) + 1382 (nc6) w/
+       SWA window=ring=1024 wrap, and multi-slot unequal `[2127,1242]` / `[2043,545]`.
+       Kernel + sweep: `crates/kernels-cuda/src/kernels/attention_decode_batched_splitk.cu`,
+       `crates/bench/src/sweep_attention_batched_splitk.rs`.
+    2. ✅ **DONE — re-enabled + benched → measured NULL (throughput-neutral).** Applied the
+       wiring, verified e2e-correct (self-consistency smoke: mayor@962tok = split-K active →
+       reproduces the serial baseline answer), then a **same-session on-vs-off A/B** on the
+       1024-tok and 3000-tok concurrent harness (`scripts/bench/bench_pp1024_tg128_concurrent.py`,
+       and a 3× extension):
+       | ctx | N | off | on |
+       |---|---|---|---|
+       | 1024 | 1/2/4 | 65.3 / 63.9 / 62.2 | 65.9 / 64.1 / 62.8 |
+       | 3000 | 1/2/4 | 62.0 / 60.2 / 57.0 | 62.2 / 60.4 / 58.3 (3-run mean) |
+       On ≈ off at every N/context — but this A/B is **INVALID, not a null (retracted 2026-07-07).**
+       Two independent reasons the "on" config never actually ran split-K on the batched path:
+       (1) the harness (`bench_pp1024_tg128_concurrent.py`) **streams**, and pre-slice-1 the
+       streaming path bypassed the coalescing scheduler → each request ran N=1 single-slot decode,
+       so the batched decode attention kernel was never invoked (note the "off" numbers *decrease*
+       with N: 65→62 — the streaming-bypass signature, now fixed by A2 slice 1). (2) the wiring
+       patch (`lever2-batched-splitk.patch`) wires split-K **only into `standard_attn_mixed.rs`**
+       (the Sarathi mixed path, env-gated OFF by default) — it never touches the pure batched
+       decode path (`standard_attn.rs:1227`). So both on/off ran the identical serial single-slot
+       kernel. on≡off by construction.
+    3. **Disposition (REOPENED 2026-07-07 by nsys profile):** the kernel is CERTIFIED CORRECT
+       (sweep green) + bit-exact; the throughput conclusion was wrong. Post-slice-1, nsys of steady
+       batch=4 decode at ~1000-tok ctx shows **`attention_decode_f16_batched` = 60.4% of GPU time**
+       (699µs/call; grid = n_heads_q·n_slots = 64 blocks each serially scanning ~1000 KV →
+       under-occupied, latency-bound). Split-K (chunk KV → ~384 blocks) targets exactly this.
+       **Real fix = wire `attn_decode_f16_batched_splitk` into the PURE batched decode path**
+       (`standard_attn.rs:1227`, mirroring the mixed-path wiring already in the patch), size the
+       partials scratch for `n_slots × n_chunks`, then A/B at LONG ctx through the now-coalescing
+       streaming/non-streaming path. This is the A2 slice-2 lever (see below); A1 and A2-slice-2
+       are the same work now.
   - **⚠ port note:** 8080 is held by the `claw-rwire` app (a different project) — do
     NOT kill it; serve flambeau on a free port (e.g. 8091).
-  - **Done when:** concurrent 2-slot needle at unequal lengths (1898 vs 1548) is
-    correct on both slots; kernel re-certed on sm_86 (serial fallback on gfx906);
-    e2e throughput measured vs the 103 tok/s @ N=4 baseline.
-  - **Target:** N=4 ≥ **112 tok/s** (attn 20% × ~3× → ~+10%), no correctness regression.
+  - **Done when:** sweep cert green ✅ + split-K wired into the **pure** batched decode path +
+    long-ctx N=4 A/B shows on > off (attention share drops, aggregate tok/s rises). REOPENED.
+  - **Note (separate track, not A1):** flambeau's long-context recall is mediocre on
+    these tests, but with no valid oracle it cannot be attributed to a bug vs the QAT
+    model. If pursued, get a WORKING oracle first (fresh llama.cpp CUDA w/ gemma-4, or a
+    non-QAT reference), then A/B identical prompts on the clean baseline.
 
-- [ ] **A2 — Continuous batching / coalescence** *(biggest structural lever)*
-  ~30% of GEMV work falls to batch=1/2/3 because the 4 requests drift out of
-  lockstep (different prefill-finish, different lengths). llama `-cb` admits/evicts
-  slots mid-flight and always runs max batch; flambeau's K4c scheduler +
-  decode-batch-window leaves gaps. This is the main cause of 1.94× vs 2.95× scaling.
-  - Scope: scheduler change in the server decode loop; keep the batched kernels.
-    No new env flags (rule 1) — behavior lives in the scheduler, not a `CANDLE_*`.
-  - **Done when:** nsys N=4 shows the batch=1/2/3 fallback GEMV share drop from
-    ~30% to <10%; correctness (concurrent coherence + needle) intact.
-  - **Target:** batch scaling ≥ **2.5×** (N=4 ≥ **132 tok/s**), stretch → beat llama.
+- [~] **A2 — Continuous batching / coalescence** *(biggest structural lever)*
+  ~30% of GEMV work falls to batch=1/2/3 because requests drift out of lockstep.
+  llama `-cb` always runs max batch; flambeau leaves gaps. **Slice 1 (streaming→scheduler)
+  landed +92% N=4 streaming; slice 2 (staggered-prefill coalescing) open — see below.**
+  - **⚡ DIAGNOSIS SHARPENED (2026-07-07) — the dominant gap is the STREAMING PATH.**
+    Measured (short prompt, agg = total_tok/wall, gemma-4-12b sm_86, inflight-slots 4):
+    | N=4 mode | agg tok/s | scaling |
+    |---|---|---|
+    | streaming (`stream:true`) | 49.0 | **1.0×** (serialized) |
+    | non-streaming | 95.3 | **1.95×** (coalesces) |
+    The coalescing scheduler *works* (non-stream 1.95×, matches the recorded baseline), but
+    `run_completion_blocking_streaming` (`decode_loop.rs:1174`) **bypasses it entirely**: it
+    `blocking_lock`s the slot for the whole loop (`:1234`) and calls N=1 `dispatch_decode_one`
+    (`:1413`) — no `scheduler_can_engage` check. **Real chat traffic streams → gets half the
+    throughput.** (My A1 A/B used `stream:true`, which is why it showed flat ~0.9× — that was
+    the streaming bypass, not attention.)
+  - **✅ Slice 1 LANDED + MEASURED (2026-07-07).** Added `run_completion_streaming_scheduler_pp_blocking`
+    (`decode_loop.rs`): mirrors `run_completion_scheduler_pp_blocking` (coalescing via
+    `decode_via_scheduler_into`, no slot mutex held) with the streaming path's incremental-
+    detokenise `push_and_emit` SSE. `run_completion_blocking_streaming` gates on
+    `scheduler_can_engage` and routes here; JSON/logprobs still fall through to the legacy N=1 loop.
+    Measured (gemma-4-12b sm_86, short prompt, agg=total_tok/wall, slots 4):
+    | N | stream before | stream after | non-stream ref |
+    |---|---|---|---|
+    | 1 | 48.5 | 49.3 | — |
+    | 2 | — | 66.6 (1.35×) | — |
+    | 4 | **49.0 (1.0×)** | **94.1 (1.91×)** | 95.4 |
+    | 8 (slots 4) | — | 93.1 (saturated) | — |
+    **Streaming N=4 +92% (1.0×→1.91×), now matches non-streaming.** Correctness: 4 concurrent
+    distinct streaming prompts each answered correctly (no per-slot cross-contamination).
+    - **rule-14 debt accepted (user call):** this is a 4th near-duplicate decode loop. Follow-up
+      to unify all four onto one parameterised step fn = **task #67**.
+  - **Slice 2 — split-K batched decode attention (= reopened A1). Profiled 2026-07-07.**
+    Three hypotheses were **measured false** before the profile settled it:
+    - *Not scheduler drift.* N=4 stream vs request-start stagger: 0ms→95.4, 250ms→95.1
+      (fully recovers), 1000ms→78.4 (tail only). Coalescing is robust to realistic stagger.
+      Findings (b)/(c)/(d) + the `FLAMBEAU_MIXED_BATCH` rule-1 env-gate are second-order — defer.
+    - *Not weight re-streaming.* Q4_0 batched decode uses `mmvq_q4_0_row_tile_batched` (R=4 row-tile,
+      one weight read → N cols), compiled for CUDA too (`instantiations.toml` → `kernels-cuda/build.rs:40`).
+    - *Not fusion.* nsys of steady batch=4 decode at ~1000-tok ctx: the unfused-path candidates
+      (rmsnorm + 2 quants + cast, incl. the "wasted" `q8_1_mmq`) are **~3% of GPU time TOTAL** — noise.
+    - **✅ Real cause — batched decode ATTENTION at long ctx.** nsys `cuda_gpu_kern_sum`
+      (gemma-4-12b-qat, sm_86, N=4, ~1000-tok ctx): `attention_decode_f16_batched` = **60.4%**
+      (699µs/call, 6198 calls), `mmvq_q4_0_row_tile_batched_n4` = 31.8%, `mmvq_q6_k_batched_n4`
+      (lm_head) = 3.5%, everything else <1%. The attention kernel's grid = n_heads_q·n_slots = 64
+      blocks, each serially scanning the whole KV → under-occupied on 82 SMs, latency-bound; cost
+      ∝ KV length. (Kernsum: `/tmp/a2_batch4_kernsum.txt`.)
+  - **DONE — split-K wired into the pure batched decode path; e2e = VALID NULL (iter28, 2026-07-07).**
+    Wired `attn_decode_f16_batched_splitk` at `standard_attn.rs:1227` (gate `!is_ring_layer &&
+    max_dec_kv>256 && n_chunks∈(1,MAX] && partials!=null`), + `!is_ring_layer` guard added to the
+    mixed path (patch lacked it → latent ring bug). Sweep green (8 shapes).
+    - **Thermally-controlled interleaved A/B (N=4, TG=192, ~1.2k prompt):** serial mean **47.64**,
+      split-K mean **47.65** tok/s — identical within noise. (A naive first A/B showed "+12%" that
+      was **100% thermal artifact**: same split-K config = 55.0 cold vs 47.6 hot; the 90s rebuilds
+      between configs were cooldowns. No clock-lock perm → fix was two md5-distinct binaries
+      alternated with order flipped, temp/clk logged.) Deep 2.4k prompt also null (43.8 vs 44.5).
+    - **Engagement proven (not a silent fallback).** nsys `cuda_gpu_kern_sum` of the split-K binary:
+      `attention_decode_f16_batched` (SERIAL) = **59.3%** (11052 inst, 979µs), `..._splitk_chunk` =
+      7.1% (2211 inst, 587µs), `..._splitk_combine` = 0.0%. Ratio **11052:2211 = 5.0:1** =
+      gemma-4 `sliding_window_pattern` (5 local : 1 global; window 1024, 48 layers = 40 SWA + 8 global).
+    - **Root cause of the null:** split-K fires on **exactly the 8 global layers** (1/6 of attention
+      calls), 1.66× faster each — but the **40 SWA/local layers dominate (59.3% GPU) and can't be
+      split-K'd** (ring/modular KV addressing). iter27's "attention=60%" was right; ~all of it is the
+      untouchable SWA kernel, not the global one split-K addresses.
+  - **REAL LEVER (new) = SWA/local-layer batched decode attention.** Window 1024, 40 layers, the same
+    64-block under-occupied serial scan, 59% of N=4 GPU time. Needs a **ring-aware** occupancy fix
+    (split-K inside the window's modular address space, or a restructured windowed-attention kernel) —
+    bigger than global-only split-K. This is the frontier for gemma-4 N=4 decode.
+  - **Split-K kernel is correct + certified** and would fire on 100% of layers for a **dense-attention**
+    model (Mistral/Qwen dense, all-global) → potential long-ctx win there, **UNVALIDATED** (no dense A/B).
+  - **Disposition pending user:** (a) revert hot-path wiring to clean serial; (b) `cfg(unverified)` the
+    kernel + wiring with the null diagnosis (rule 10); or (c) keep the wiring (correct, low-overhead,
+    may help dense models) + validate on a dense model later. Binaries/harness in `/tmp`.
+    Secondary (A4): lm_head `mmvq_q6_k_batched_n4` = 1.93ms/call (3.5%), heavy per-call.
 
 - [ ] **A3 — CUDA graphs for the batched decode step**
   llama boots `USE_GRAPHS=1`; flambeau has none on CUDA → per-step launch overhead
@@ -191,8 +272,11 @@ complete (see `archive/PORTABILITY-ROADMAP.md`); this is the remaining P6 tail.
 
 ## Sequencing (recommended)
 
-1. **A1** — debug lever-2 (proven kernel, oracle-diff method ready; highest value/effort).
-2. **A2** — continuous batching (the big structural closer of the scaling gap).
+1. ~~**A1**~~ — CLOSED. Kernel certified correct (sweep green); e2e throughput a measured
+   null (attention not the N=4 bottleneck); wiring reverted. Re-openable post-A2 if the
+   bottleneck moves. The A/B *confirmed* A2 is the real lever (flat ~0.9× scaling).
+2. **A2** — continuous batching / coalescence — **now the active frontier.** The A1 A/B
+   directly implicates it: N=4 decode scaling is ~0.9× regardless of attention kernel.
 3. **A3 + A4** — CUDA graphs + K-quant lm_head generalization (self-contained).
 4. **B1** — MMQ 69→100 (pull prefill ahead; multi-session).
 5. **B2 / B3 / H1 / H2** — as time allows.

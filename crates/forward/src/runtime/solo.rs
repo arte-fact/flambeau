@@ -5,17 +5,56 @@
 //! drives for `Topology::SingleDevice` on either backend (the only path CUDA
 //! supports today — multi-device CUDA needs cluster peer-copy).
 
-use anyhow::{anyhow, Result};
-use flambeau_backend::Backend;
-use flambeau_core::Device;
+use anyhow::{anyhow, Context, Result};
+use flambeau_backend::{Backend, DecodeGraphExec};
+use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_quant::GgufFile;
 
-use crate::core::ScratchPool;
+use crate::core::scratch::MAX_SPLITK_CHUNKS;
+use crate::core::{DecodeCapture, DecodeRebindPlan, RebindValue, ScratchPool};
 use crate::ctx::ForwardCtx;
 use crate::engine::ForwardEngine;
 use crate::loader::ShardMode;
 use crate::runtime::orchestrate::LaunchParams;
 use crate::runtime::Arch;
+
+/// KV-tail threshold below which single-token decode uses the single-pass
+/// attention kernel (no `_slots` variant → not graph-capturable). The driver
+/// runs the plain forward for these early tokens; the graph engages once
+/// `position + 1` crosses into the split-K regime.
+const DECODE_GRAPH_MIN_KV: usize = 257;
+
+/// Cached captured decode graph + its rebind program, keyed by the inflight
+/// slot it was captured against. `DecodeRebindPlan::reusable_at` decides whether
+/// a later position can replay it or forces a recapture.
+struct DecodeGraphCache<B: Backend> {
+    exec: B::DecodeGraph,
+    plan: DecodeRebindPlan,
+    slot_id: usize,
+}
+
+/// Standing refusal after an uncapturable capture attempt. Without it the
+/// driver pays a full capture+instantiate+discard (~5-7 ms) EVERY token while
+/// the condition persists (e.g. the whole SWA SlideBand). Blocks capture
+/// attempts for `slot_id` at positions in `[marked_at, retry_at)`; a slot
+/// reset (position dropping below `marked_at`) naturally unblocks, and a
+/// config-permanent reason blocks to `usize::MAX`.
+struct DecodeGraphBlock {
+    slot_id: usize,
+    marked_at: usize,
+    retry_at: usize,
+}
+
+/// `FLAMBEAU_DECODE_GRAPH` — rollout/debug gate for the single-stream decode
+/// graph. Default OFF: the graph path is never touched and decode is
+/// byte-identical to today. This is the ONE env var and it is a capability
+/// rollout switch, not kernel-variant selection (root rule 1).
+fn decode_graph_enabled() -> bool {
+    matches!(
+        std::env::var("FLAMBEAU_DECODE_GRAPH").ok().as_deref(),
+        Some("1") | Some("true") | Some("on") | Some("yes")
+    )
+}
 
 /// Single-device, single-rank session. Owns the device, registry, scratch pool
 /// and model; every forward builds a fresh `ForwardEngine::<B>::new_solo` over
@@ -25,6 +64,13 @@ pub struct SoloSession<B: Backend, A: Arch> {
     model: A::Model,
     pool: ScratchPool,
     reg: B::Registry,
+    /// Cached single-token decode graph (CUDA-only, `FLAMBEAU_DECODE_GRAPH` on).
+    /// `None` until the first eligible decode token captures one; invalidated
+    /// (recaptured) when the split-K grid / SWA regime / slot changes.
+    /// Declared BEFORE `device` so the graph exec (which needs the CUDA context
+    /// in its destructor) drops before the device releases it.
+    graph: Option<DecodeGraphCache<B>>,
+    graph_block: Option<DecodeGraphBlock>,
     device: B::Device,
     last_logits: Vec<f32>,
     prefill_ubatch: usize,
@@ -63,6 +109,8 @@ impl<B: Backend, A: Arch> SoloSession<B, A> {
             device,
             last_logits: Vec::new(),
             prefill_ubatch,
+            graph: None,
+            graph_block: None,
             disposed: false,
         })
     }
@@ -71,9 +119,11 @@ impl<B: Backend, A: Arch> SoloSession<B, A> {
         self.prefill_ubatch
     }
 
-    /// Core forward: one `ForwardEngine::<B>::new_solo` pass over `tokens`.
-    /// Logits for the last token (or N rows under distinct slot_ids) land in
-    /// `self.last_logits`.
+    /// Core forward dispatcher. Routes the single-token, contiguous-KV CUDA
+    /// decode case through the capture/replay graph driver when
+    /// `FLAMBEAU_DECODE_GRAPH` is on; everything else (prefill, batched decode,
+    /// HIP, paged KV, graph off) runs the untouched inline forward. With the
+    /// gate off the graph path is never reached and behaviour is byte-identical.
     fn forward(&mut self, tokens: &[u32], positions: &[usize], slot_ids: &[usize]) -> Result<()> {
         if tokens.is_empty() {
             anyhow::bail!("SoloSession::forward: empty tokens");
@@ -86,11 +136,181 @@ impl<B: Backend, A: Arch> SoloSession<B, A> {
                 tokens.len()
             );
         }
+        if B::supports_decode_graph()
+            && decode_graph_enabled()
+            && tokens.len() == 1
+            && self.pool.paged_kv_caches.is_none()
+        {
+            return self.forward_decode_graph(tokens[0], positions[0], slot_ids[0]);
+        }
+        self.forward_general(tokens, positions, slot_ids)
+    }
+
+    /// The inline single-pass forward (one `ForwardEngine::<B>::new_solo`).
+    /// Logits for the last token (or N rows under distinct slot_ids) land in
+    /// `self.last_logits`. This is the untouched pre-graph path; the driver
+    /// falls back to it for uncapturable / early-token decode.
+    fn forward_general(
+        &mut self,
+        tokens: &[u32],
+        positions: &[usize],
+        slot_ids: &[usize],
+    ) -> Result<()> {
         let stream = self.device.default_stream();
         let mut ctx = ForwardEngine::<B>::new_solo(&self.device, stream, &self.reg, &mut self.pool);
         A::forward(&self.model, &mut ctx, tokens, positions, slot_ids)?;
         let logits = ctx.logits().to_vec();
         self.last_logits = logits;
+        Ok(())
+    }
+
+    /// Capture-or-replay driver for CUDA single-stream n=1 decode. Replays the
+    /// cached graph when its split-K grid + SWA regime + slot still match this
+    /// `position`; otherwise recaptures (the forward runs ONCE inside capture,
+    /// which records but does not execute — the subsequent `launch` computes
+    /// this token). Early tokens (`position + 1 < DECODE_GRAPH_MIN_KV`) and any
+    /// pass a composite flagged uncapturable (SWA SlideBand, Q8, single-pass)
+    /// fall back to the plain forward.
+    fn forward_decode_graph(&mut self, token: u32, position: usize, slot_id: usize) -> Result<()> {
+        let vocab = self.pool.config.vocab;
+        let reusable = self.graph.as_ref().is_some_and(|g| {
+            g.slot_id == slot_id
+                && g.plan
+                    .reusable_at(position, |cl| flambeau_model_ops::splitk_chunk_size(cl, MAX_SPLITK_CHUNKS))
+        });
+        if reusable {
+            return self.graph_set_and_launch(token, position, vocab);
+        }
+        // Below the split-K threshold the attention takes the single-pass
+        // (uncapturable) path — run the plain forward and keep any stale graph
+        // (it will be revalidated / recaptured once we re-enter the split-K
+        // regime).
+        if position + 1 < DECODE_GRAPH_MIN_KV {
+            return self.forward_general(&[token], &[position], &[slot_id]);
+        }
+        // A prior capture attempt at this slot failed as uncapturable and its
+        // condition still holds — don't pay capture+instantiate+discard again.
+        if let Some(b) = &self.graph_block {
+            if b.slot_id == slot_id && position >= b.marked_at && position < b.retry_at {
+                return self.forward_general(&[token], &[position], &[slot_id]);
+            }
+        }
+
+        // Recapture. The forward runs once in record-only capture mode, building
+        // the rebind plan + grid witnesses.
+        let mut capture = DecodeCapture::new();
+        let exec_res = {
+            let device = &self.device;
+            let reg = &self.reg;
+            let model = &self.model;
+            let pool = &mut self.pool;
+            let cap_ref = &mut capture;
+            let stream = device.default_stream();
+            <B::DecodeGraph as DecodeGraphExec<B>>::capture(stream, move |s| {
+                let mut engine =
+                    ForwardEngine::<B>::new_solo_capturing(device, s, reg, pool, cap_ref);
+                A::forward(model, &mut engine, &[token], &[position], &[slot_id])
+            })
+        };
+        let exec = exec_res.context("SoloSession::forward_decode_graph: capture")?;
+        if let Some(why) = capture.is_uncapturable() {
+            tracing::debug!(position, why, "decode-graph capture refused");
+            let retry_at = match capture.uncapturable_retry() {
+                Some(crate::core::capture::RetryAt::Position(p)) => p,
+                _ => usize::MAX,
+            };
+            self.graph_block = Some(DecodeGraphBlock { slot_id, marked_at: position, retry_at });
+            // The captured forward did not execute; run the real one for the
+            // correct logits and drop the unusable graph.
+            drop(exec);
+            self.graph = None;
+            return self.forward_general(&[token], &[position], &[slot_id]);
+        }
+        tracing::debug!(position, slots = capture.entries().len(), "decode-graph captured");
+        self.graph_block = None;
+        let plan = capture.into_plan();
+        self.graph = Some(DecodeGraphCache { exec, plan, slot_id });
+        self.graph_set_and_launch(token, position, vocab)
+    }
+
+    /// Rebind every slot for `(position, token)`, upload the position (uncaptured
+    /// — kept out of the graph), replay the captured graph, then D2H the logits.
+    fn graph_set_and_launch(&mut self, token: u32, position: usize, vocab: usize) -> Result<()> {
+        // Uncaptured positions upload into the fixed device buffer the captured
+        // RoPE kernels read. Same stream as the launch, so it is ordered before
+        // the graph; the host staging buffer stays valid until the D2H sync.
+        self.pool.position_stage_host[0] = position as i32;
+        let pos_src = DevicePtr(self.pool.position_stage_host.as_ptr() as usize);
+        let pos_dst = self.pool.position_i32;
+        // Decode context: `[position, token_id]` read on-device by the captured
+        // `_dpos` kernels. One uncaptured 8-byte HtoD replaces the
+        // per-arg rebind loop; ordered before the launch on the same stream,
+        // valid until the D2H sync in graph_download_logits.
+        self.pool.decode_ctx_host[0] = position as i32;
+        self.pool.decode_ctx_host[1] = token as i32;
+        let ctx_src = DevicePtr(self.pool.decode_ctx_host.as_ptr() as usize);
+        let ctx_dst = self.pool.decode_ctx_i32;
+        let values = self
+            .graph
+            .as_ref()
+            .expect("graph_set_and_launch: graph cache present")
+            .plan
+            .evaluate(position, token);
+        {
+            let stream = self.device.default_stream();
+            // SAFETY: pos_src is the pool's stable host buffer (>= 1 i32);
+            // pos_dst is position_i32 (>= max_prefill_tokens i32). Valid until
+            // the sync in graph_download_logits.
+            unsafe {
+                self.device
+                    .memcpy_async(stream, CopyDirection::HostToDevice, pos_dst, pos_src, 4)
+                    .context("decode-graph: positions HtoD")?;
+            }
+            // SAFETY: ctx_src is the pool's stable 2-i32 host buffer; ctx_dst is
+            // decode_ctx_i32 (2 i32). Valid until the D2H sync.
+            unsafe {
+                self.device
+                    .memcpy_async(stream, CopyDirection::HostToDevice, ctx_dst, ctx_src, 8)
+                    .context("decode-graph: decode-ctx HtoD")?;
+            }
+            let exec = &self
+                .graph
+                .as_ref()
+                .expect("graph_set_and_launch: graph cache present")
+                .exec;
+            // `values` outlives `launch`, so every scalar/pointer backing a slot
+            // stays live across sibling updates on the same node + the launch.
+            for v in &values {
+                match v {
+                    RebindValue::ScalarI32 { slot, value } => exec.set_scalar_i32(*slot, value)?,
+                    RebindValue::PointerU64 { slot, value } => exec.set_pointer_u64(*slot, value)?,
+                    RebindValue::MemcpySrc { slot, value } => {
+                        exec.set_memcpy_src(*slot, DevicePtr(*value))?
+                    }
+                }
+            }
+            exec.launch(stream).context("decode-graph: launch")?;
+        }
+        self.graph_download_logits(vocab)
+    }
+
+    /// Uncaptured D2H of the softcapped logits from `pool.logits_f32_dev`
+    /// (the graph's split point) into `self.last_logits`, then sync.
+    fn graph_download_logits(&mut self, vocab: usize) -> Result<()> {
+        if self.last_logits.len() != vocab {
+            self.last_logits = vec![0.0_f32; vocab];
+        }
+        let dst = DevicePtr(self.last_logits.as_mut_ptr() as usize);
+        let src = self.pool.logits_f32_dev;
+        let stream = self.device.default_stream();
+        // SAFETY: dst holds `vocab` f32; src is the logits device buffer
+        // (>= max_slots * vocab f32); synced immediately below.
+        unsafe {
+            self.device
+                .memcpy_async(stream, CopyDirection::DeviceToHost, dst, src, vocab * 4)
+                .context("decode-graph: logits D2H")?;
+        }
+        Stream::synchronize(stream).context("decode-graph: logits sync")?;
         Ok(())
     }
 
@@ -226,6 +446,8 @@ impl<B: Backend, A: Arch> SoloSession<B, A> {
             return Ok(());
         }
         self.disposed = true;
+        // Destroy the captured graph while the device/context is still live.
+        self.graph = None;
         let pool_res = self.pool.dispose(&self.device);
         let model_res = A::dispose(&mut self.model, &self.device);
         pool_res.and(model_res)
@@ -238,6 +460,8 @@ impl<B: Backend, A: Arch> Drop for SoloSession<B, A> {
             return;
         }
         self.disposed = true;
+        // Destroy the captured graph while the device/context is still live.
+        self.graph = None;
         let _ = self.pool.dispose(&self.device);
         let _ = A::dispose(&mut self.model, &self.device);
     }

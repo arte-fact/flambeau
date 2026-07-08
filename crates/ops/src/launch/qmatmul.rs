@@ -2108,6 +2108,26 @@ impl Recipe {
                 rows_per_block: 1,
                 mmq_tile: (0, 0),
             },
+            // Q4_0 m=1 decode autotune candidates — the templated 128-thread
+            // single-row DP4A and its VDR=2 sibling. Distinct stems from the
+            // gfx906-only hand kernel `mmvq_q4_0_t128`; certified + ranked by
+            // `autotune --dtype Q4_0`, wired only through the sm_86 dispatch table.
+            "qmatmul_q4_0_mmvq_t128_dp4a" => Self {
+                kind: RecipeKind::Mmvq,
+                stem: "mmvq_q4_0_t128_dp4a",
+                entry: "flambeau_mmvq_q4_0_t128_dp4a_q8_1",
+                threads: 128,
+                rows_per_block: 1,
+                mmq_tile: (0, 0),
+            },
+            "qmatmul_q4_0_mmvq_t128_vdr2" => Self {
+                kind: RecipeKind::Mmvq,
+                stem: "mmvq_q4_0_t128_vdr2",
+                entry: "flambeau_mmvq_q4_0_t128_vdr2_q8_1",
+                threads: 128,
+                rows_per_block: 1,
+                mmq_tile: (0, 0),
+            },
             "qmatmul_q5_0_mmvq_dp4a" => Self {
                 kind: RecipeKind::Mmvq,
                 stem: "mmvq_q5_0",

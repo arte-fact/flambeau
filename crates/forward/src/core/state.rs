@@ -4,6 +4,7 @@
 
 use flambeau_backend::{Backend, HipBackend};
 
+use super::capture::DecodeCapture;
 use super::ScratchPool;
 
 pub struct CoreState<'a, B: Backend = HipBackend> {
@@ -16,6 +17,13 @@ pub struct CoreState<'a, B: Backend = HipBackend> {
     /// `pool.kv_caches` subtract this so the model can pass a global
     /// `layer_idx` and PP/Hybrid hit slot 0 of their owned-slice pool.
     pub layer_idx_offset: usize,
+    /// `Some` only during a decode-graph capture forward. When set, the
+    /// per-token composites (`embed`, `standard_attn`, `output_head`) allocate
+    /// graph slots + record their rebind rules here and take the capture
+    /// branch (tag args via the `_slots` op variants, skip the trailing logits
+    /// D2H+sync). `None` is today's path, byte-identical. Backend-neutral:
+    /// the handle is plain data, not a `Cuda*` type (rule 9).
+    pub capture: Option<&'a mut DecodeCapture>,
 }
 
 impl<'a, B: Backend> CoreState<'a, B> {
@@ -32,6 +40,7 @@ impl<'a, B: Backend> CoreState<'a, B> {
             pool,
             logits_host: Vec::new(),
             layer_idx_offset: 0,
+            capture: None,
         }
     }
 

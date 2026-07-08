@@ -312,20 +312,32 @@ pub fn standard_attn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
 
     // Positions HtoD hoisted ahead of the Q/K norm step so the fused
     // rmsnorm+RoPE kernel can read positions when q_norm / k_norm are set.
-    let positions_i32: Vec<i32> = positions.iter().map(|&p| p as i32).collect();
-    let pos_bytes = n * 4;
-    // SAFETY: position_i32 sized max_prefill_tokens * i32.
-    unsafe {
-        state
-            .device
-            .memcpy_async(
-                state.stream,
-                CopyDirection::HostToDevice,
-                state.pool.position_i32,
-                DevicePtr(positions_i32.as_ptr() as usize),
-                pos_bytes,
-            )
-            .context("standard_attn: positions HtoD")?;
+    // Under decode-graph capture this HtoD is kept OUT of the captured region:
+    // the session driver uploads `position` into `pool.position_i32` (device,
+    // fixed address) itself before each replay, so the captured RoPE kernels
+    // read a driver-refreshed value without baking a host source into the graph
+    // (which pageable-host memcpy nodes handle unreliably). The non-capture path
+    // uploads from the pool's stable host staging buffer as before.
+    if state.capture.is_none() {
+        let pos_bytes = n * 4;
+        for (i, &p) in positions.iter().enumerate() {
+            state.pool.position_stage_host[i] = p as i32;
+        }
+        let pos_src = DevicePtr(state.pool.position_stage_host.as_ptr() as usize);
+        // SAFETY: position_i32 sized max_prefill_tokens * i32; pos_src points at
+        // the pool's stable host buffer (>= n i32) live for the stream's lifetime.
+        unsafe {
+            state
+                .device
+                .memcpy_async(
+                    state.stream,
+                    CopyDirection::HostToDevice,
+                    state.pool.position_i32,
+                    pos_src,
+                    pos_bytes,
+                )
+                .context("standard_attn: positions HtoD")?;
+        }
     }
     let pos_tensor = unsafe { Tensor::<I32>::from_raw(state.pool.position_i32, n) };
     let mut q_f16_rope = unsafe { Tensor::<F16>::from_raw(state.pool.q_f16, n * q_width) };
@@ -419,6 +431,11 @@ pub fn standard_attn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
         .softmax_scale
         .unwrap_or_else(|| (weights.head_dim as f32).sqrt().recip());
 
+    if let Some(cap) = state.capture.as_deref_mut() {
+        if state.pool.paged_kv_caches.is_some() || !prefill_shape {
+            cap.mark_uncapturable("standard_attn: only contiguous non-paged single-slot decode is captured");
+        }
+    }
     if let Some(paged_caches) = state.pool.paged_kv_caches.as_ref().filter(|_| prefill_shape) {
         // Paged prefill / single-slot path. Pre-acquire all pages
         // spanned by `[start_position, start_position + n)`, patch
@@ -554,25 +571,44 @@ pub fn standard_attn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
         let v_f16_view = unsafe { Tensor::<F16>::from_raw(state.pool.v_f16, n * kv_width) };
         if !is_kv_shared {
             if weights.attn_v_unit_norm_w.is_some() && !is_q8 {
-                // gemma4 F16 path: fuse V unit-RMSNorm into the cache
-                // write. K copy + V normalize-then-copy in one launch.
-                ops.kv_append_v_unit_norm_f16(
-                    flambeau_ops::KvAppendBuffers {
-                        k_src: state.pool.k_f16,
-                        v_src: state.pool.v_f16,
-                        k_dst: k_cache.ptr,
-                        v_dst: v_cache.ptr,
-                    },
-                    flambeau_ops::KvAppendVUnitShape {
-                        n_tokens: n,
-                        n_kv_heads: weights.n_kv_heads,
-                        head_dim: weights.head_dim,
-                        ring_depth: if is_ring_layer { slab_depth } else { 0 },
-                    },
-                    start_position,
-                    weights.rms_eps,
-                )?;
+                // gemma4 F16 path: fuse V unit-RMSNorm into the cache write.
+                // K copy + V normalize-then-copy in one launch. Under
+                // decode-graph capture the write row is read on-device from
+                // `decode_ctx_i32[0]`, so the captured graph
+                // advances the KV write cursor with no rebind (base K/V dst
+                // pointers stay fixed, ring or not).
+                let kv_buffers = flambeau_ops::KvAppendBuffers {
+                    k_src: state.pool.k_f16,
+                    v_src: state.pool.v_f16,
+                    k_dst: k_cache.ptr,
+                    v_dst: v_cache.ptr,
+                };
+                let kv_shape = flambeau_ops::KvAppendVUnitShape {
+                    n_tokens: n,
+                    n_kv_heads: weights.n_kv_heads,
+                    head_dim: weights.head_dim,
+                    ring_depth: if is_ring_layer { slab_depth } else { 0 },
+                };
+                if state.capture.is_some() {
+                    ops.kv_append_v_unit_norm_f16_dpos(
+                        kv_buffers,
+                        kv_shape,
+                        weights.rms_eps,
+                        state.pool.decode_ctx_i32,
+                    )?;
+                } else {
+                    ops.kv_append_v_unit_norm_f16_slots(
+                        kv_buffers,
+                        kv_shape,
+                        start_position,
+                        weights.rms_eps,
+                        None,
+                    )?;
+                }
             } else if weights.attn_v_unit_norm_w.is_some() && is_q8 {
+                if let Some(cap) = state.capture.as_deref_mut() {
+                    cap.mark_uncapturable("kv_append: Q8 V-unit-norm append not captured");
+                }
                 // gemma4 Q8 path: V-unit-norm in place on the F16 scratch,
                 // then F16→Q8 quantize-and-write. The fused F16 kernel
                 // can't target a Q8 slab (different byte stride per row),
@@ -615,6 +651,9 @@ pub fn standard_attn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
                     &ops,
                 )?;
             } else if is_q8 {
+                if let Some(cap) = state.capture.as_deref_mut() {
+                    cap.mark_uncapturable("kv_append: Q8 append not captured");
+                }
                 let mut k_cache_q8 = unsafe {
                     Tensor::<flambeau_model_ops::Q8_0>::from_raw(
                         k_slot_ptr,
@@ -642,6 +681,9 @@ pub fn standard_attn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
                     &ops,
                 )?;
             } else {
+                if let Some(cap) = state.capture.as_deref_mut() {
+                    cap.mark_uncapturable("kv_append: plain F16 append (no _slots) not captured");
+                }
                 flambeau_model_ops::kv_append_f16(
                     &k_f16_rope,
                     &v_f16_view,
@@ -668,6 +710,9 @@ pub fn standard_attn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
             let ring_active = is_ring_layer && n_tokens_kv > slab_depth;
             let ring_depth_arg: i32 = if ring_active { slab_depth as i32 } else { 0 };
             if is_q8 {
+                if let Some(cap) = state.capture.as_deref_mut() {
+                    cap.mark_uncapturable("attn decode: Q8 KV path not captured");
+                }
                 // SWA at decode: when window < n_tokens_kv, slide the
                 // cache pointer to the window's start and pass the
                 // window length as n_tokens_kv. The kernel's `qpos =
@@ -784,11 +829,11 @@ pub fn standard_attn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
             // splitk launches for out-of-window chunks and lets the
             // chunk_size heuristic pick a tighter chunking for the
             // active window.
+            let in_band = !ring_active
+                && weights.window_size > 0
+                && (weights.window_size as usize) < n_tokens_kv;
             let (eff_n_tokens_kv, k_cache_eff_t, v_cache_eff_t) =
-                if !ring_active
-                    && weights.window_size > 0
-                    && (weights.window_size as usize) < n_tokens_kv
-                {
+                if in_band {
                     let w = weights.window_size as usize;
                     let offset_tokens = n_tokens_kv - w;
                     let offset_bytes = offset_tokens * kv.bytes_per_row;
@@ -836,28 +881,92 @@ pub fn standard_attn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
                     unsafe { Tensor::<F32>::from_raw(state.pool.splitk_partials_s, partials_m_n) };
                 let mut partials_o =
                     unsafe { Tensor::<F32>::from_raw(state.pool.splitk_partials_o, partials_o_n) };
-                flambeau_model_ops::attn_decode_f16_splitk(
-                    &q_f16_rope,
-                    &k_cache_eff_t,
-                    &v_cache_eff_t,
-                    flambeau_model_ops::SplitkOutputs {
-                        out: &mut attn_out,
-                        m: &mut partials_m,
-                        s: &mut partials_s,
-                        o: &mut partials_o,
-                    },
-                    flambeau_ops::AttnSplitkShape {
-                        n_heads_q: weights.n_heads,
-                        n_heads_kv: weights.n_kv_heads,
-                        head_dim: weights.head_dim,
-                        n_tokens_kv: eff_n_tokens_kv,
-                        chunk_size,
-                        chunk_base,
-                    },
-                    flambeau_ops::AttnKnobs { scale, window_size: kernel_window, ring_depth: ring_depth_arg },
-                    &ops,
-                )?;
+                if state.capture.is_some() {
+                    // Under capture: record only the grid witness (the driver's
+                    // reusability bucket logic is unchanged); the device-position
+                    // kernel derives `n_tokens_kv` / `chunk_base` / the slid K/V
+                    // pointer on-device from `decode_ctx_i32[0]`, so the rebind
+                    // plan stays empty. The regime is baked as
+                    // (window, ring_depth, slide_row_stride): slide > 0 ⇒ in-band
+                    // slid; else ring_depth > 0 ⇒ ring; else global/pre-window.
+                    if let Some(cap) = state.capture.as_deref_mut() {
+                        cap.record_attn_grid(crate::core::AttnGridWitness {
+                            is_ring_layer,
+                            slab_depth,
+                            window_size: weights.window_size as usize,
+                            ring_active,
+                            n_chunks,
+                            chunk_size,
+                            slid: in_band,
+                        });
+                    }
+                    let slide_row_stride = if in_band { kv.bytes_per_row as i32 } else { 0 };
+                    // The kernel slides the UNSLID slot base pointers itself.
+                    let k_base_t = unsafe { Tensor::<F16>::from_raw(k_slot_ptr, slot_stride_elems) };
+                    let v_base_t = unsafe { Tensor::<F16>::from_raw(v_slot_ptr, slot_stride_elems) };
+                    flambeau_model_ops::attn_decode_f16_splitk_dpos(
+                        &q_f16_rope,
+                        &k_base_t,
+                        &v_base_t,
+                        flambeau_model_ops::SplitkOutputs {
+                            out: &mut attn_out,
+                            m: &mut partials_m,
+                            s: &mut partials_s,
+                            o: &mut partials_o,
+                        },
+                        flambeau_ops::AttnSplitkDposShape {
+                            n_heads_q: weights.n_heads,
+                            n_heads_kv: weights.n_kv_heads,
+                            head_dim: weights.head_dim,
+                            n_chunks,
+                            chunk_size,
+                        },
+                        flambeau_ops::AttnDposKnobs {
+                            scale,
+                            window: weights.window_size,
+                            ring_depth: ring_depth_arg,
+                            slide_row_stride,
+                        },
+                        &ops,
+                        state.pool.decode_ctx_i32,
+                    )?;
+                } else {
+                    flambeau_model_ops::attn_decode_f16_splitk_slots(
+                        &q_f16_rope,
+                        &k_cache_eff_t,
+                        &v_cache_eff_t,
+                        flambeau_model_ops::SplitkOutputs {
+                            out: &mut attn_out,
+                            m: &mut partials_m,
+                            s: &mut partials_s,
+                            o: &mut partials_o,
+                        },
+                        flambeau_ops::AttnSplitkShape {
+                            n_heads_q: weights.n_heads,
+                            n_heads_kv: weights.n_kv_heads,
+                            head_dim: weights.head_dim,
+                            n_tokens_kv: eff_n_tokens_kv,
+                            chunk_size,
+                            chunk_base,
+                        },
+                        flambeau_ops::AttnKnobs { scale, window_size: kernel_window, ring_depth: ring_depth_arg },
+                        &ops,
+                        None,
+                    )?;
+                }
             } else {
+                if let Some(cap) = state.capture.as_deref_mut() {
+                    if in_band {
+                        cap.mark_uncapturable_until(
+                            "attn decode: SWA SlideBand single-pass not captured",
+                            crate::core::capture::RetryAt::Position(slab_depth),
+                        );
+                    } else {
+                        cap.mark_uncapturable(
+                            "attn decode: F16 single-pass (no _slots) not captured",
+                        );
+                    }
+                }
                 flambeau_model_ops::attn_decode_f16(
                     &q_f16_rope,
                     &k_cache_eff_t,
@@ -1224,27 +1333,63 @@ pub fn standard_attn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
             }
             flambeau_core::Stream::synchronize(state.stream)?;
         }
-        flambeau_model_ops::attn_decode_f16_batched(
-            flambeau_ops::AttnBatchedBuffers {
-                q_batched: state.pool.q_f16,
-                k_cache_ptrs: state.pool.attn_slot_k_dst_ptrs,
-                v_cache_ptrs: state.pool.attn_slot_v_dst_ptrs,
-                out_batched: state.pool.attn_out_f16,
-                n_tokens_kv_ptrs: state.pool.attn_slot_n_kv,
-            },
-            flambeau_ops::AttnDecodeBatchedShape {
-                n_heads_q: weights.n_heads,
-                n_heads_kv: weights.n_kv_heads,
-                head_dim: weights.head_dim,
-                n_slots: n,
-            },
-            flambeau_ops::AttnKnobs {
-                scale,
-                window_size: kernel_window,
-                ring_depth: if is_ring_layer { slab_depth as i32 } else { 0 },
-            },
-            &ops,
-        )?;
+        let batched_bufs = flambeau_ops::AttnBatchedBuffers {
+            q_batched: state.pool.q_f16,
+            k_cache_ptrs: state.pool.attn_slot_k_dst_ptrs,
+            v_cache_ptrs: state.pool.attn_slot_v_dst_ptrs,
+            out_batched: state.pool.attn_out_f16,
+            n_tokens_kv_ptrs: state.pool.attn_slot_n_kv,
+        };
+        let knobs = flambeau_ops::AttnKnobs {
+            scale,
+            window_size: kernel_window,
+            ring_depth: if is_ring_layer { slab_depth as i32 } else { 0 },
+        };
+        // Split-K the batched decode when the deepest slot is long enough that
+        // the serial one-block-per-(head,slot) kernel starves the GPU. Ring/SWA
+        // layers are excluded: split-K can't bound its chunk count in modular
+        // KV space, and the window cap keeps those layers short anyway.
+        let max_dec_kv = host_n_kv.iter().copied().max().unwrap_or(0) as usize;
+        let chunk_size =
+            flambeau_model_ops::splitk_chunk_size(max_dec_kv, crate::core::scratch::MAX_SPLITK_CHUNKS);
+        let n_chunks = max_dec_kv.div_ceil(chunk_size.max(1));
+        let use_splitk = !is_ring_layer
+            && max_dec_kv > 256
+            && n_chunks > 1
+            && n_chunks <= crate::core::scratch::MAX_SPLITK_CHUNKS
+            && state.pool.splitk_partials_m.as_usize() != 0;
+        if use_splitk {
+            flambeau_model_ops::attn_decode_f16_batched_splitk(
+                batched_bufs,
+                flambeau_ops::AttnSplitkPartials {
+                    partials_m: state.pool.splitk_partials_m,
+                    partials_s: state.pool.splitk_partials_s,
+                    partials_o: state.pool.splitk_partials_o,
+                },
+                flambeau_ops::AttnDecodeBatchedSplitkShape {
+                    n_heads_q: weights.n_heads,
+                    n_heads_kv: weights.n_kv_heads,
+                    head_dim: weights.head_dim,
+                    n_slots: n,
+                    max_n_tokens_kv: max_dec_kv,
+                    chunk_size,
+                },
+                knobs,
+                &ops,
+            )?;
+        } else {
+            flambeau_model_ops::attn_decode_f16_batched(
+                batched_bufs,
+                flambeau_ops::AttnDecodeBatchedShape {
+                    n_heads_q: weights.n_heads,
+                    n_heads_kv: weights.n_kv_heads,
+                    head_dim: weights.head_dim,
+                    n_slots: n,
+                },
+                knobs,
+                &ops,
+            )?;
+        }
     }
 
     let post_attn_ptr = if weights.attn_q_gated {

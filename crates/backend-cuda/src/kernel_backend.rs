@@ -12,6 +12,12 @@ impl<'a> LaunchArgs<'a> for KernelArgs<'a> {
     fn push_arg<T>(&mut self, v: &'a T) {
         self.push(v);
     }
+
+    fn push_slot<T>(&mut self, v: &'a T, slot: flambeau_core::ScalarSlot) {
+        // The inherent `KernelArgs::push_slot` records the (slot, arg_index) tag
+        // for graph-capture rebind; UFCS picks it over this trait method.
+        KernelArgs::push_slot(self, v, slot);
+    }
 }
 
 /// CUDA launch-plane marker (sm_80+ family).

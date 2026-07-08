@@ -118,6 +118,38 @@ pub fn swiglu_f32_to_q8_1<B: flambeau_core::KernelBackend>(
     Ok(())
 }
 
+/// Fused `y_q8_1 = quantize_row_q8_1(gelu_tanh(a) * b)` for F32 inputs —
+/// Gemma-4 dense-FFN twin of [`swiglu_f32_to_q8_1`]. Replaces the
+/// `gelu_f32_to_f16` → `quantize_f16_q8_1` pair on the gemma decode path,
+/// saving one launch + the F16 gated round-trip. GELU is the ggml
+/// tanh-approximation form. Grid: one thread block per 32-element Q8_1
+/// block, 32 threads/block. `n` must be a multiple of 32.
+pub fn gelu_mul_f32_to_q8_1<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
+    a: DevicePtr,
+    b: DevicePtr,
+    y_q8_1: DevicePtr,
+    n: usize,
+) -> Result<()> {
+    assert_eq!(n % 32, 0, "gelu_mul_f32_to_q8_1 expects n % 32 == 0");
+    let module = reg.expect_module("gelu_mul_f32_to_q8_1")?;
+    let kernel = B::kernel(module, "flambeau_gelu_mul_f32_to_q8_1")?;
+    let n_i = n as i32;
+    let a_ptr: u64 = a.as_usize() as u64;
+    let b_ptr: u64 = b.as_usize() as u64;
+    let y_ptr: u64 = y_q8_1.as_usize() as u64;
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&a_ptr);
+    args.push_arg(&b_ptr);
+    args.push_arg(&y_ptr);
+    args.push_arg(&n_i);
+    let n_blocks = (n / 32) as u32;
+    let cfg = LaunchCfg::one_d(n_blocks, 32);
+    B::launch(&kernel, stream, cfg, args)?;
+    Ok(())
+}
+
 /// Pointwise `y[i] = x[i] * scale`. Used by the GDN path to apply the
 /// attention scale `1 / sqrt(head_k_dim)` to Q before the state step.
 pub fn scale_f32<B: flambeau_core::KernelBackend>(

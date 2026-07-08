@@ -859,6 +859,14 @@ pub struct ScratchPool {
 
     pub logits_f32_dev: DevicePtr,
     pub position_i32: DevicePtr,
+    /// Decode-graph device context: `[position, token_id]` (2 × i32). The
+    /// `_dpos` kernels read `position` from `[0]` (attention + kv_append) and
+    /// `token_id` from `[1]` (embed gather) directly on-device, so a captured
+    /// decode graph needs no per-arg rebind — the driver writes
+    /// both scalars via one 8-byte uncaptured HtoD from [`Self::decode_ctx_host`]
+    /// before each replay. Distinct from `position_i32` (which RoPE reads as a
+    /// positions tensor; that mechanism is left untouched).
+    pub decode_ctx_i32: DevicePtr,
 
     /// `[max_experts]` F32. NULL when `config.max_experts == 0`.
     pub router_logits_f32: DevicePtr,
@@ -960,6 +968,22 @@ pub struct ScratchPool {
     /// `residual_add_local`.
     pub fused_residual_already_done: bool,
 
+    /// Stable host staging buffer for the per-forward positions HtoD upload
+    /// (`standard_attn`). Sized `max_prefill_tokens`; only ever index-assigned,
+    /// never reallocated, so `as_ptr()` is a stable host address for the pool's
+    /// lifetime. A decode-graph capture bakes that address into the captured
+    /// HtoD memcpy node; the driver rewrites `position_stage_host[0] = position`
+    /// before each replay (a host write — NOT a graph slot). The non-capture
+    /// path writes the same bytes it used to build a throwaway `Vec`, so the
+    /// device sees identical uploads.
+    pub position_stage_host: Vec<i32>,
+
+    /// Stable 2-element host staging for [`Self::decode_ctx_i32`]:
+    /// `[position, token_id]`. Only index-assigned, never reallocated, so
+    /// `as_ptr()` is a stable host address; the decode-graph driver rewrites
+    /// both entries then issues one uncaptured 8-byte HtoD before each replay.
+    pub decode_ctx_host: Vec<i32>,
+
     allocs: Vec<(DevicePtr, usize)>,
 }
 
@@ -1022,14 +1046,17 @@ impl ScratchPool {
         let q_or_fused = if config.attn_q_gated { 2 * qw } else { qw };
         let attn_proj_f32 = alloc_bytes(n * q_or_fused.max(kvw).max(h) * f32)?;
 
-        // Split-K decode-attn partials. Over-allocate `partials_m/s`
-        // at q_width elems (= n_heads_q * head_dim) rather than the
-        // exact n_heads_q — saves storing head_dim in ScratchConfig
-        // and the waste is sub-MB.
+        // Split-K decode-attn partials. `m`/`s` over-allocate at q_width elems
+        // (= n_heads_q * head_dim) rather than the exact n_heads_q — this also
+        // covers the batched layout (n_heads_q * n_slots * n_chunks), since
+        // head_dim >= max_slots. `o` is the batched (n_heads_q * n_slots *
+        // n_chunks * head_dim) buffer = q_width * max_slots * MAX_SPLITK_CHUNKS;
+        // single-stream uses its n_slots=1 prefix.
+        let splitk_slots = config.max_slots.max(1);
         let (splitk_partials_m, splitk_partials_s, splitk_partials_o) = if qw > 0 {
             let m = alloc_bytes(qw * MAX_SPLITK_CHUNKS * f32)?;
             let s = alloc_bytes(qw * MAX_SPLITK_CHUNKS * f32)?;
-            let o = alloc_bytes(qw * MAX_SPLITK_CHUNKS * f32)?;
+            let o = alloc_bytes(qw * splitk_slots * MAX_SPLITK_CHUNKS * f32)?;
             (m, s, o)
         } else {
             (DevicePtr::NULL, DevicePtr::NULL, DevicePtr::NULL)
@@ -1055,6 +1082,7 @@ impl ScratchPool {
 
         let logits_f32_dev = alloc_bytes(config.max_slots.max(1) * config.vocab * f32)?;
         let position_i32 = alloc_bytes(n * i32_b)?;
+        let decode_ctx_i32 = alloc_bytes(2 * i32_b)?;
 
         let (router_logits_f32, moe_accum_f16) = if config.max_experts > 0 {
             let r = alloc_bytes(n * config.max_experts * f32)?;
@@ -1420,6 +1448,7 @@ impl ScratchPool {
             down_f32,
             logits_f32_dev,
             position_i32,
+            decode_ctx_i32,
             router_logits_f32,
             moe_accum_f16,
             shared_x_norm_f32,
@@ -1454,6 +1483,8 @@ impl ScratchPool {
             current_residual_is_a: true,
             input_pre_normed: false,
             fused_residual_already_done: false,
+            position_stage_host: vec![0i32; n],
+            decode_ctx_host: vec![0i32; 2],
             allocs,
         })
     }

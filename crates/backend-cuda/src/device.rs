@@ -277,6 +277,51 @@ impl CudaDevice {
     pub(crate) fn cu_device(&self) -> crate::sys::CUdevice {
         self.device
     }
+
+    /// Graph-captureable variant of `memcpy_async` that tags the memcpy with a
+    /// [`MemcpySlot`](crate::graph_capture::MemcpySlot). Under a capture scope,
+    /// the memcpy is recorded with `slot`; post-capture the exec's `SlotMap`
+    /// binds the slot to the resulting memcpy graph node, enabling
+    /// [`crate::CudaGraphExec::set_memcpy_slot`] to retarget the copy's source
+    /// pointer per replay.
+    /// # Safety
+    /// Same as [`flambeau_core::Device::memcpy_async`] — `dst` and `src` must
+    /// be valid for `bytes` in their respective address spaces per `dir`, and
+    /// neither aliased by another pending op on the same stream.
+    pub unsafe fn memcpy_async_slot(
+        &self,
+        stream: &CudaStream,
+        dir: CopyDirection,
+        dst: DevicePtr,
+        src: DevicePtr,
+        bytes: usize,
+        slot: crate::graph_capture::MemcpySlot,
+    ) -> DeviceResult<()> {
+        if bytes == 0 {
+            return Ok(());
+        }
+        self.bind()?;
+        crate::graph_capture::record_memcpy(Some(slot), dst.0, src.0, bytes, dir);
+        let s = stream.raw();
+        // SAFETY: same invariants as `Device::memcpy_async`; `src`/`dst` are
+        // valid for `bytes` per `dir`, unaliased on `stream`. Direction is
+        // encoded in the function name; each `DevicePtr` holds a device or host
+        // address per `dir`.
+        let code = unsafe {
+            match dir {
+                CopyDirection::HostToDevice => {
+                    cuMemcpyHtoDAsync(dst.0 as CUdeviceptr, src.0 as *const _, bytes, s)
+                }
+                CopyDirection::DeviceToHost => {
+                    cuMemcpyDtoHAsync(dst.0 as *mut _, src.0 as CUdeviceptr, bytes, s)
+                }
+                CopyDirection::DeviceToDevice => {
+                    cuMemcpyDtoDAsync(dst.0 as CUdeviceptr, src.0 as CUdeviceptr, bytes, s)
+                }
+            }
+        };
+        check(code, "cuMemcpyAsync(slot)")
+    }
 }
 
 impl Drop for CudaDevice {
@@ -356,6 +401,11 @@ impl Device for CudaDevice {
             return Ok(());
         }
         self.bind()?;
+        // Record the memcpy for graph-slot binding when inside a capture
+        // scope. `slot: None` here — the Device trait surface doesn't carry
+        // per-call slot info; callers that want a tagged memcpy go through
+        // `CudaDevice::memcpy_async_slot`. No-op outside capture.
+        crate::graph_capture::record_memcpy(None, dst.0, src.0, bytes, dir);
         // SAFETY: caller's `Device::memcpy_async` contract — `src`/`dst` are
         // valid for `bytes` in their respective address spaces per `dir`, not
         // aliased by another pending op on `stream`. The driver API encodes
@@ -377,6 +427,21 @@ impl Device for CudaDevice {
             }
         };
         check(code, "cuMemcpyAsync")
+    }
+
+    unsafe fn memcpy_async_slot(
+        &self,
+        stream: &Self::Stream,
+        dir: CopyDirection,
+        dst: DevicePtr,
+        src: DevicePtr,
+        bytes: usize,
+        slot: crate::graph_capture::MemcpySlot,
+    ) -> DeviceResult<()> {
+        // Delegate to the inherent recording implementation so the generic
+        // `Device` surface records the tag under an active capture scope.
+        // SAFETY: forwarded verbatim under the caller's contract.
+        unsafe { CudaDevice::memcpy_async_slot(self, stream, dir, dst, src, bytes, slot) }
     }
 
     fn synchronize(&self) -> DeviceResult<()> {

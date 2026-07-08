@@ -121,15 +121,26 @@ pub use flambeau_core::LaunchCfg;
 /// Kernel argument buffer. Stores a pointer to each arg's storage; the
 /// underlying storage must outlive the launch (the kernel reads it
 /// asynchronously on the stream).
+/// `push_slot` tags a pushed arg with a
+/// [`ScalarSlot`](crate::graph_capture::ScalarSlot) so post-capture the exec
+/// can bind the slot to its kernel-node arg index for later
+/// `cuGraphExecKernelNodeSetParams` updates. `push` (untagged) is unchanged.
 #[derive(Default)]
 pub struct KernelArgs<'a> {
     ptrs: Vec<*mut std::os::raw::c_void>,
+    /// (slot, arg_index_within_this_launch) for every tagged push. Only
+    /// drained into the thread-local capture state at launch time — so
+    /// untagged launches pay zero cost.
+    tagged_slots: Vec<(crate::graph_capture::ScalarSlot, usize)>,
     _marker: PhantomData<&'a ()>,
 }
 
 impl std::fmt::Debug for KernelArgs<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("KernelArgs").field("len", &self.ptrs.len()).finish()
+        f.debug_struct("KernelArgs")
+            .field("len", &self.ptrs.len())
+            .field("tagged", &self.tagged_slots.len())
+            .finish()
     }
 }
 
@@ -141,6 +152,18 @@ impl<'a> KernelArgs<'a> {
     /// Push an argument by reference; it must live until the launch retires.
     pub fn push<T>(&mut self, v: &'a T) {
         self.ptrs.push(std::ptr::from_ref::<T>(v) as *mut _);
+    }
+
+    /// Push an argument tagged as an updateable scalar. Same as `push`
+    /// for the launch itself; additionally, during an active graph
+    /// capture the tag is recorded so the exec can later update this
+    /// arg in-place via `cuGraphExecKernelNodeSetParams`. Outside a
+    /// capture scope this is functionally identical to `push` — the tag
+    /// is stored but never consumed.
+    pub fn push_slot<T>(&mut self, v: &'a T, slot: crate::graph_capture::ScalarSlot) {
+        let arg_index = self.ptrs.len();
+        self.push(v);
+        self.tagged_slots.push((slot, arg_index));
     }
 
     /// Overwrite arg `idx` (reuse-pool callers that update pointers per launch).
@@ -199,6 +222,11 @@ impl CudaKernel<'_> {
 
     /// Launch the kernel on `stream` with `cfg` + `args`.
     pub fn launch(&self, stream: &CudaStream, cfg: LaunchCfg, mut args: KernelArgs<'_>) -> DeviceResult<()> {
+        // If a capture is active on this thread, record the launch's arity +
+        // tagged slots so post-capture the exec can build a SlotMap. Outside
+        // capture this is a no-op.
+        crate::graph_capture::record_launch(args.len(), &args.tagged_slots);
+
         let params = if args.is_empty() { std::ptr::null_mut() } else { args.raw_ptrs() };
         // SAFETY: `self.raw` is a live function handle; `params` points at
         // `args`'s pointer array, which outlives this synchronous enqueue. The

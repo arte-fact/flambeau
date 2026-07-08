@@ -21,6 +21,23 @@ pub fn attn_decode_q8_kv(
     knobs: flambeau_ops::AttnKnobs,
     ops: &impl Ops,
 ) -> Result<()> {
+    attn_decode_q8_kv_slots(q, k_cache, v_cache, out, shape, knobs, ops, None)
+}
+
+/// Graph-captureable variant of [`attn_decode_q8_kv`]. `slots=None` is byte-
+/// identical to the wrapper; `Some` tags the `n_tokens_kv` scalar so a
+/// captured graph rebinds it per replay.
+#[allow(clippy::too_many_arguments)]
+pub fn attn_decode_q8_kv_slots(
+    q: &Tensor<F16>,
+    k_cache: &Tensor<Q8_0>,
+    v_cache: &Tensor<Q8_0>,
+    out: &mut Tensor<F16>,
+    shape: flambeau_ops::AttnDecodeShape,
+    knobs: flambeau_ops::AttnKnobs,
+    ops: &impl Ops,
+    slots: Option<flambeau_ops::AttnDecodeQ8Slots>,
+) -> Result<()> {
     let flambeau_ops::AttnDecodeShape { n_heads_q, n_heads_kv, head_dim, n_tokens_kv } = shape;
     if !matches!(head_dim, 64 | 128 | 256 | 512) {
         bail!("attn_decode_q8_kv: head_dim {head_dim} not in {{64, 128, 256, 512}}");
@@ -60,7 +77,7 @@ pub fn attn_decode_q8_kv(
             out.n_elems
         );
     }
-    ops.attention_decode_q8_kv(
+    ops.attention_decode_q8_kv_slots(
         flambeau_ops::AttnBuffers {
             q: q.ptr,
             k: k_cache.ptr,
@@ -69,6 +86,7 @@ pub fn attn_decode_q8_kv(
         },
         shape,
         knobs,
+        slots,
     )
 }
 
@@ -230,5 +248,93 @@ mod tests {
         free(&device, k_cache_q8_ptr, k_cache_q8.bytes());
         free(&device, v_cache_q8_ptr, v_cache_q8.bytes());
         free(&device, out_q8_ptr, out_q8.bytes());
+    }
+
+    /// `attn_decode_q8_kv_slots(None)` must produce the exact same device
+    /// output as `attn_decode_q8_kv` — transparency contract for the
+    /// graph-capture variant outside capture.
+    #[test]
+    fn attn_decode_q8_kv_slots_none_bit_identical() {
+        const N_HEADS_Q: usize = 4;
+        const N_HEADS_KV: usize = 2;
+        const HEAD_DIM: usize = 64;
+        const N_TOKENS_KV: usize = 5;
+        const MAX_SEQ_LEN: usize = 8;
+        const KV_WIDTH: usize = N_HEADS_KV * HEAD_DIM;
+        const SCALE: f32 = 0.125;
+
+        let device = test_device();
+        device.bind().expect("device bind");
+        let stream = device.default_stream();
+        let reg = test_ops_registry(&device);
+        let ops = HipOps::new(&reg, stream);
+
+        let q_host: Vec<f16> = (0..N_HEADS_Q * HEAD_DIM)
+            .map(|i| f16::from_f32(0.5 * ((i as f32) / (N_HEADS_Q * HEAD_DIM) as f32 - 0.5)))
+            .collect();
+        let k_host: Vec<f16> = (0..N_TOKENS_KV * KV_WIDTH)
+            .map(|i| f16::from_f32(0.6 * (((i as f32) / (N_TOKENS_KV * KV_WIDTH) as f32).sin() - 0.3)))
+            .collect();
+        let v_host: Vec<f16> = (0..N_TOKENS_KV * KV_WIDTH)
+            .map(|i| f16::from_f32(0.4 * (((i as f32) / (N_TOKENS_KV * KV_WIDTH) as f32).cos() + 0.1)))
+            .collect();
+
+        let (q_t, q_ptr) = upload::<F16, f16>(&device, &q_host, q_host.len());
+        let (k_src_t, k_src_ptr) = upload::<F16, f16>(&device, &k_host, k_host.len());
+        let (v_src_t, v_src_ptr) = upload::<F16, f16>(&device, &v_host, v_host.len());
+
+        const Q8_CACHE_BYTES: usize = MAX_SEQ_LEN * (KV_WIDTH / 32) * 34;
+        let q8_cache_init = vec![0u8; Q8_CACHE_BYTES];
+        let (mut k_cache_q8, k_cache_q8_ptr) =
+            upload::<Q8_0, u8>(&device, &q8_cache_init, MAX_SEQ_LEN * KV_WIDTH);
+        let (mut v_cache_q8, v_cache_q8_ptr) =
+            upload::<Q8_0, u8>(&device, &q8_cache_init, MAX_SEQ_LEN * KV_WIDTH);
+        kv_append_f16_to_q8(
+            &k_src_t,
+            &v_src_t,
+            &mut k_cache_q8,
+            &mut v_cache_q8,
+            crate::ops::kv_append::KvAppendSpec {
+                n_tokens: N_TOKENS_KV,
+                kv_width: KV_WIDTH,
+                write_pos: 0,
+                max_seq_len: MAX_SEQ_LEN,
+                ring_depth: 0,
+            },
+            &ops,
+        )
+        .expect("kv_append_f16_to_q8");
+
+        let dec_shape = flambeau_ops::AttnDecodeShape {
+            n_heads_q: N_HEADS_Q,
+            n_heads_kv: N_HEADS_KV,
+            head_dim: HEAD_DIM,
+            n_tokens_kv: N_TOKENS_KV,
+        };
+        let dec_knobs = flambeau_ops::AttnKnobs { scale: SCALE, window_size: 0, ring_depth: 0 };
+
+        let (mut out_a, out_a_ptr) = alloc::<F16>(&device, N_HEADS_Q * HEAD_DIM);
+        attn_decode_q8_kv(&q_t, &k_cache_q8, &v_cache_q8, &mut out_a, dec_shape, dec_knobs, &ops)
+            .expect("plain q8 decode");
+        let (mut out_b, out_b_ptr) = alloc::<F16>(&device, N_HEADS_Q * HEAD_DIM);
+        attn_decode_q8_kv_slots(
+            &q_t, &k_cache_q8, &v_cache_q8, &mut out_b, dec_shape, dec_knobs, &ops, None,
+        )
+        .expect("q8 decode slots=None");
+        stream.synchronize().expect("sync");
+
+        let a: Vec<f16> = download::<F16, f16>(&device, &out_a);
+        let b: Vec<f16> = download::<F16, f16>(&device, &out_b);
+        let a_bits: Vec<u16> = a.iter().map(|x| x.to_bits()).collect();
+        let b_bits: Vec<u16> = b.iter().map(|x| x.to_bits()).collect();
+        assert_eq!(a_bits, b_bits, "slots=None output must be bit-identical to plain");
+
+        free(&device, q_ptr, q_t.bytes());
+        free(&device, k_src_ptr, k_src_t.bytes());
+        free(&device, v_src_ptr, v_src_t.bytes());
+        free(&device, k_cache_q8_ptr, k_cache_q8.bytes());
+        free(&device, v_cache_q8_ptr, v_cache_q8.bytes());
+        free(&device, out_a_ptr, out_a.bytes());
+        free(&device, out_b_ptr, out_b.bytes());
     }
 }

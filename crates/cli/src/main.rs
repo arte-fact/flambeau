@@ -1447,6 +1447,11 @@ fn autotune(arch: &str, op: &str, dtype: &str, emit: bool, check: bool) -> Resul
                 Dtype::Q8_0R2,
                 Dtype::Q8_0R4,
             ],
+            // Q4_0 m=1 decode thread-count tune on sm_86: the 256-thread
+            // base vs the templated 128-thread and t128+VDR2 candidates. HIP keeps
+            // the single productionised base kernel (its t128 hand kernel is
+            // gfx906-only and dispatched through MMQ, not this row).
+            "Q4_0" if cuda => vec![Dtype::Q4_0, Dtype::Q4_0T128, Dtype::Q4_0T128VDR2],
             // The legacy quants are each a single productionised kernel (no
             // shape-dependent variant choice) — a degenerate one-candidate
             // rank that just emits the dispatch row, the same on either backend.
@@ -1742,6 +1747,58 @@ fn sweep_cuda(op: &str, dtype: &str) -> Result<()> {
         );
         return Ok(());
     }
+    if op == "attention_decode_batched_splitk" {
+        let cert = flambeau_bench::sweep_attention_batched_splitk::run_sweep::<Cuda>(
+            &repo_root(),
+            "sm_86",
+        )?;
+        println!(
+            "sweep attention_decode_batched_splitk: pass={} shapes={} rig={}",
+            cert.pass,
+            cert.results.len(),
+            cert.rig
+        );
+        return Ok(());
+    }
+    if op == "attention_decode_f16_splitk_dpos" {
+        let cert = flambeau_bench::sweep_attention_splitk_dpos::run_sweep::<Cuda>(
+            &repo_root(),
+            "sm_86",
+        )?;
+        println!(
+            "sweep attention_decode_f16_splitk_dpos: pass={} shapes={} rig={}",
+            cert.pass,
+            cert.results.len(),
+            cert.rig
+        );
+        return Ok(());
+    }
+    if op == "kv_append_v_unit_norm_f16_dpos" {
+        let cert = flambeau_bench::sweep_kv_append_v_unit_norm_dpos::run_sweep::<Cuda>(
+            &repo_root(),
+            "sm_86",
+        )?;
+        println!(
+            "sweep kv_append_v_unit_norm_f16_dpos: pass={} shapes={} rig={}",
+            cert.pass,
+            cert.results.len(),
+            cert.rig
+        );
+        return Ok(());
+    }
+    if op == "embed_gather_f16_dpos" {
+        let cert = flambeau_bench::sweep_embed_gather_dpos::run_sweep::<Cuda>(
+            &repo_root(),
+            "sm_86",
+        )?;
+        println!(
+            "sweep embed_gather_f16_dpos: pass={} shapes={} rig={}",
+            cert.pass,
+            cert.results.len(),
+            cert.rig
+        );
+        return Ok(());
+    }
     if op != "qmatmul" {
         anyhow::bail!(
             "--arch sm_86: only --op qmatmul (mmvq) has CUDA kernels; \
@@ -1908,7 +1965,9 @@ fn sweep_cuda(op: &str, dtype: &str) -> Result<()> {
         "Q8_0_t128_vdr2" => vec![Dtype::Q8_0T128VDR2],
         "Q8_0_r2" => vec![Dtype::Q8_0R2],
         "Q8_0_r4" => vec![Dtype::Q8_0R4],
-        "Q4_0" => vec![Dtype::Q4_0],
+        "Q4_0" => vec![Dtype::Q4_0, Dtype::Q4_0T128, Dtype::Q4_0T128VDR2],
+        "Q4_0_t128" => vec![Dtype::Q4_0T128],
+        "Q4_0_t128_vdr2" => vec![Dtype::Q4_0T128VDR2],
         "Q4_1" => vec![Dtype::Q4_1Dp4a],
         "Q5_0" => vec![Dtype::Q5_0],
         "Q5_1" => vec![Dtype::Q5_1],

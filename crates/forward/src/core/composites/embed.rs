@@ -39,25 +39,46 @@ pub fn embed_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
     let row_bytes = hidden * 2;
     let dst = state.pool.next_residual_slot();
     let n_elems = tokens.len() * hidden;
-    for (i, &t) in tokens.iter().enumerate() {
-        let src = weights
-            .token_embd
-            .ptr
-            .offset_bytes((t as usize) * row_bytes);
-        let row_dst = dst.offset_bytes(i * row_bytes);
-        // SAFETY: src points at row_bytes of token_embd; dst residual
-        // slot is sized for max_prefill_tokens * hidden F16.
-        unsafe {
-            state
-                .device
-                .memcpy_async(
-                    state.stream,
-                    CopyDirection::DeviceToDevice,
-                    row_dst,
-                    src,
-                    row_bytes,
-                )
-                .context("embed: DtoD row memcpy")?;
+    // Decode-graph capture (n==1): gather the embedding row with a
+    // device-position kernel that reads `token_id` from `pool.decode_ctx_i32[1]`,
+    // so the captured graph re-sources the row per token with no memcpy-node
+    // rebind. Multi-token prefill can't be captured this way — mark the pass
+    // uncapturable so the driver falls back. The non-capture path keeps the
+    // plain DtoD memcpy (byte-identical).
+    let capture_single = tokens.len() == 1 && state.capture.is_some();
+    if tokens.len() != 1 {
+        if let Some(cap) = state.capture.as_deref_mut() {
+            cap.mark_uncapturable("embed: multi-token capture unsupported");
+        }
+    }
+    if capture_single {
+        use flambeau_ops::Ops;
+        let ctx_ptr = state.pool.decode_ctx_i32;
+        let embd = weights.token_embd.ptr;
+        let ops = state.ops();
+        ops.embed_gather_f16_dpos(embd, dst, hidden, ctx_ptr)
+            .context("embed: device-position row gather")?;
+    } else {
+        for (i, &t) in tokens.iter().enumerate() {
+            let src = weights
+                .token_embd
+                .ptr
+                .offset_bytes((t as usize) * row_bytes);
+            let row_dst = dst.offset_bytes(i * row_bytes);
+            // SAFETY: src points at row_bytes of token_embd; dst residual
+            // slot is sized for max_prefill_tokens * hidden F16.
+            unsafe {
+                state
+                    .device
+                    .memcpy_async(
+                        state.stream,
+                        CopyDirection::DeviceToDevice,
+                        row_dst,
+                        src,
+                        row_bytes,
+                    )
+                    .context("embed: DtoD row memcpy")?;
+            }
         }
     }
     if let Some(scale) = weights.post_scale {

@@ -132,6 +132,29 @@ template<> struct quant_traits<Q4_0> {
         return sumi * (d_x * (float) by.d) - 8.0f * d_x * (float) by.s * 0.25f;
     }
 
+    // VDR variant: one thread owns `grp`'s VDR consecutive int32 lanes of the
+    // nibble-packed block, chaining each lane's lo/hi dp4a into one int sum
+    // before a single block-scale multiply. The -8*d_x*s_y zero-point correction
+    // is folded 0.25 per lane, so a thread covering VDR lanes folds 0.25*VDR;
+    // summed over the block's INT32_PER_BLOCK/VDR threads this totals exactly one
+    // correction per block. VDR=1 matches `partial` up to F32 accumulation order.
+    template<int VDR>
+    static __device__ __forceinline__ float
+    partial_vdr(const block_t& bx, const flambeau_block_q8_1& by, int grp) {
+        int sumi = 0;
+        #pragma unroll
+        for (int i = 0; i < VDR; ++i) {
+            const int j     = grp * VDR + i;
+            const int v     = load_int_b2((const int8_t*) bx.qs, j);
+            const int vi_lo = (v >> 0) & 0x0F0F0F0F;
+            const int vi_hi = (v >> 4) & 0x0F0F0F0F;
+            sumi = dp4a(vi_lo, load_int_b2(by.qs, j),     sumi);
+            sumi = dp4a(vi_hi, load_int_b2(by.qs, j + 4), sumi);
+        }
+        const float d_x = (float) bx.d;
+        return sumi * (d_x * (float) by.d) - 8.0f * d_x * (float) by.s * (0.25f * VDR);
+    }
+
     struct mmq_weight { int v[8]; float d; };
     static __device__ __forceinline__ mmq_weight mmq_decode(const block_t& bx) {
         mmq_weight w;

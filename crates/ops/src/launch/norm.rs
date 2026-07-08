@@ -423,6 +423,21 @@ pub fn quantize_f16_q8_0<B: flambeau_core::KernelBackend>(
     y_q8_0: DevicePtr,
     n_elems: usize,
 ) -> Result<()> {
+    quantize_f16_q8_0_slots(reg, stream, x_f16, y_q8_0, n_elems, None)
+}
+
+/// Graph-captureable variant of [`quantize_f16_q8_0`]. With `dst_slot=None`
+/// the behaviour is byte-identical to the wrapper; with `Some`, the `y_q8_0`
+/// destination-pointer kernel arg is tagged via `LaunchArgs::push_slot` so a
+/// captured graph can rebind the per-token cache-write destination per replay.
+pub fn quantize_f16_q8_0_slots<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
+    x_f16: DevicePtr,
+    y_q8_0: DevicePtr,
+    n_elems: usize,
+    dst_slot: Option<flambeau_core::ScalarSlot>,
+) -> Result<()> {
     assert_eq!(
         n_elems % 32,
         0,
@@ -435,7 +450,10 @@ pub fn quantize_f16_q8_0<B: flambeau_core::KernelBackend>(
     let y_ptr: u64 = y_q8_0.as_usize() as u64;
     let mut args = <B::Args<'_>>::default();
     args.push_arg(&x_ptr);
-    args.push_arg(&y_ptr);
+    match dst_slot {
+        Some(s) => args.push_slot(&y_ptr, s),
+        None => args.push_arg(&y_ptr),
+    }
     args.push_arg(&n_i);
     let n_blocks = (n_elems / 32) as u32;
     let cfg = LaunchCfg::one_d(n_blocks, 32);

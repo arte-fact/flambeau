@@ -32,6 +32,23 @@ pub fn attn_decode_f16_splitk(
     knobs: flambeau_ops::AttnKnobs,
     ops: &impl Ops,
 ) -> Result<()> {
+    attn_decode_f16_splitk_slots(q, k_cache, v_cache, outputs, shape, knobs, ops, None)
+}
+
+/// Graph-captureable variant of [`attn_decode_f16_splitk`]. `slots=None` is
+/// byte-identical to the wrapper; `Some` tags the chunk kernel's `n_tokens_kv`
+/// + `chunk_base` scalars so a captured graph rebinds them per replay.
+#[allow(clippy::too_many_arguments)]
+pub fn attn_decode_f16_splitk_slots(
+    q: &Tensor<F16>,
+    k_cache: &Tensor<F16>,
+    v_cache: &Tensor<F16>,
+    outputs: SplitkOutputs<'_>,
+    shape: flambeau_ops::AttnSplitkShape,
+    knobs: flambeau_ops::AttnKnobs,
+    ops: &impl Ops,
+    slots: Option<flambeau_ops::AttnSplitkSlots>,
+) -> Result<()> {
     let SplitkOutputs { out, m: partials_m, s: partials_s, o: partials_o } = outputs;
     let flambeau_ops::AttnSplitkShape {
         n_heads_q,
@@ -104,7 +121,7 @@ pub fn attn_decode_f16_splitk(
             partials_o.n_elems
         );
     }
-    ops.attention_decode_f16_splitk(
+    ops.attention_decode_f16_splitk_slots(
         flambeau_ops::AttnBuffers {
             q: q.ptr,
             k: k_cache.ptr,
@@ -118,6 +135,79 @@ pub fn attn_decode_f16_splitk(
         },
         shape,
         knobs,
+        slots,
+    )
+}
+
+/// Device-position variant of [`attn_decode_f16_splitk`]. Reads `position` from
+/// `pos_ptr` on-device (the decode-graph `[position, token_id]` context) and
+/// derives the per-token `n_tokens_kv` / `chunk_base` / slid cache pointer from
+/// the baked [`flambeau_ops::AttnDposKnobs`] regime, so a captured decode graph
+/// rebinds nothing per token. `k_cache` / `v_cache` are the UNSLID slot base
+/// pointers (the kernel slides in the SWA in-band regime).
+#[allow(clippy::too_many_arguments)]
+pub fn attn_decode_f16_splitk_dpos(
+    q: &Tensor<F16>,
+    k_cache: &Tensor<F16>,
+    v_cache: &Tensor<F16>,
+    outputs: SplitkOutputs<'_>,
+    shape: flambeau_ops::AttnSplitkDposShape,
+    knobs: flambeau_ops::AttnDposKnobs,
+    ops: &impl Ops,
+    pos_ptr: flambeau_core::DevicePtr,
+) -> Result<()> {
+    let SplitkOutputs { out, m: partials_m, s: partials_s, o: partials_o } = outputs;
+    let flambeau_ops::AttnSplitkDposShape { n_heads_q, n_heads_kv, head_dim, n_chunks, chunk_size } =
+        shape;
+    if !matches!(head_dim, 64 | 128 | 256 | 512) {
+        bail!("attn_decode_f16_splitk_dpos: head_dim {head_dim} not in {{64, 128, 256, 512}}");
+    }
+    if n_heads_q == 0 || n_heads_kv == 0 || chunk_size == 0 || n_chunks == 0 {
+        bail!(
+            "attn_decode_f16_splitk_dpos: zero counts (n_heads_q={n_heads_q}, \
+             n_heads_kv={n_heads_kv}, chunk_size={chunk_size}, n_chunks={n_chunks})"
+        );
+    }
+    if n_heads_q % n_heads_kv != 0 {
+        bail!(
+            "attn_decode_f16_splitk_dpos: n_heads_q ({n_heads_q}) must be divisible by \
+             n_heads_kv ({n_heads_kv}) for GQA"
+        );
+    }
+    let q_need = n_heads_q * head_dim;
+    let ms_need = n_heads_q * n_chunks;
+    let o_need = ms_need * head_dim;
+    if q.n_elems < q_need {
+        bail!("attn_decode_f16_splitk_dpos: q has {} F16 elems, need >= {q_need}", q.n_elems);
+    }
+    if out.n_elems < q_need {
+        bail!("attn_decode_f16_splitk_dpos: out has {} F16 elems, need >= {q_need}", out.n_elems);
+    }
+    if partials_m.n_elems < ms_need || partials_s.n_elems < ms_need {
+        bail!("attn_decode_f16_splitk_dpos: partials_m/s too small, need >= {ms_need}");
+    }
+    if partials_o.n_elems < o_need {
+        bail!(
+            "attn_decode_f16_splitk_dpos: partials_o has {} F32 elems, need >= {o_need}",
+            partials_o.n_elems
+        );
+    }
+    let _ = (k_cache, v_cache);
+    ops.attention_decode_f16_splitk_dpos(
+        flambeau_ops::AttnBuffers {
+            q: q.ptr,
+            k: k_cache.ptr,
+            v: v_cache.ptr,
+            out: out.ptr,
+        },
+        flambeau_ops::AttnSplitkPartials {
+            partials_m: partials_m.ptr,
+            partials_s: partials_s.ptr,
+            partials_o: partials_o.ptr,
+        },
+        shape,
+        knobs,
+        pos_ptr,
     )
 }
 
@@ -305,5 +395,111 @@ mod attn_microbench {
         println!(
             "\n  gfx906 peak HBM BW = ~1024 GB/s (HBM2 1.0 TB/s nominal).\n  Effective BW well below ceiling → kernel undertuned → S5b lever exists.\n  Effective BW near ceiling → bandwidth-bound → S5 is null.\n"
         );
+    }
+}
+
+#[cfg(test)]
+mod slots_parity {
+    use super::*;
+    use crate::testing::{alloc, download, free, test_device, test_ops_registry, upload};
+    use flambeau_core::{Device, Stream};
+    use flambeau_ops::HipOps;
+    use half::f16;
+
+    /// `attn_decode_f16_splitk_slots(None)` must produce the exact same
+    /// device output as `attn_decode_f16_splitk` — the transparency contract
+    /// for the graph-capture variant outside capture.
+    #[test]
+    fn splitk_slots_none_bit_identical() {
+        const N_HEADS_Q: usize = 4;
+        const N_HEADS_KV: usize = 2;
+        const HEAD_DIM: usize = 128;
+        const N_TOKENS_KV: usize = 12;
+        const CHUNK_SIZE: usize = 4;
+        const CHUNK_BASE: usize = 0;
+        let scale = (HEAD_DIM as f32).sqrt().recip();
+
+        let device = test_device();
+        device.bind().expect("bind");
+        let stream = device.default_stream();
+        let reg = test_ops_registry(&device);
+        let ops = HipOps::new(&reg, stream);
+
+        let n_chunks = (N_TOKENS_KV - CHUNK_BASE).div_ceil(CHUNK_SIZE);
+        let q_n = N_HEADS_Q * HEAD_DIM;
+        let cache_n = N_TOKENS_KV * N_HEADS_KV * HEAD_DIM;
+        let ms_n = N_HEADS_Q * n_chunks;
+        let o_n = ms_n * HEAD_DIM;
+
+        let q_host: Vec<f16> =
+            (0..q_n).map(|i| f16::from_f32(((i as f32) * 0.017 + 0.3).sin() * 0.5)).collect();
+        let k_host: Vec<f16> =
+            (0..cache_n).map(|i| f16::from_f32(((i as f32) * 0.023 - 0.4).cos() * 0.5)).collect();
+        let v_host: Vec<f16> =
+            (0..cache_n).map(|i| f16::from_f32(((i as f32) * 0.031 + 0.1).sin() * 0.5)).collect();
+
+        let (q_t, q_ptr) = upload::<F16, f16>(&device, &q_host, q_n);
+        let (k_t, k_ptr) = upload::<F16, f16>(&device, &k_host, cache_n);
+        let (v_t, v_ptr) = upload::<F16, f16>(&device, &v_host, cache_n);
+
+        let shape = flambeau_ops::AttnSplitkShape {
+            n_heads_q: N_HEADS_Q,
+            n_heads_kv: N_HEADS_KV,
+            head_dim: HEAD_DIM,
+            n_tokens_kv: N_TOKENS_KV,
+            chunk_size: CHUNK_SIZE,
+            chunk_base: CHUNK_BASE,
+        };
+        let knobs = flambeau_ops::AttnKnobs { scale, window_size: 0, ring_depth: 0 };
+
+        let (mut out_a, out_a_ptr) = alloc::<F16>(&device, q_n);
+        let (mut m_a, m_a_ptr) = alloc::<F32>(&device, ms_n);
+        let (mut s_a, s_a_ptr) = alloc::<F32>(&device, ms_n);
+        let (mut o_a, o_a_ptr) = alloc::<F32>(&device, o_n);
+        attn_decode_f16_splitk(
+            &q_t,
+            &k_t,
+            &v_t,
+            SplitkOutputs { out: &mut out_a, m: &mut m_a, s: &mut s_a, o: &mut o_a },
+            shape,
+            knobs,
+            &ops,
+        )
+        .expect("plain split-K");
+
+        let (mut out_b, out_b_ptr) = alloc::<F16>(&device, q_n);
+        let (mut m_b, m_b_ptr) = alloc::<F32>(&device, ms_n);
+        let (mut s_b, s_b_ptr) = alloc::<F32>(&device, ms_n);
+        let (mut o_b, o_b_ptr) = alloc::<F32>(&device, o_n);
+        attn_decode_f16_splitk_slots(
+            &q_t,
+            &k_t,
+            &v_t,
+            SplitkOutputs { out: &mut out_b, m: &mut m_b, s: &mut s_b, o: &mut o_b },
+            shape,
+            knobs,
+            &ops,
+            None,
+        )
+        .expect("split-K slots=None");
+
+        stream.synchronize().expect("sync");
+        let a: Vec<f16> = download::<F16, f16>(&device, &out_a);
+        let b: Vec<f16> = download::<F16, f16>(&device, &out_b);
+        let a_bits: Vec<u16> = a.iter().map(|x| x.to_bits()).collect();
+        let b_bits: Vec<u16> = b.iter().map(|x| x.to_bits()).collect();
+        assert_eq!(a_bits, b_bits, "slots=None output must be bit-identical to plain");
+
+        free(&device, q_ptr, q_t.bytes());
+        free(&device, k_ptr, k_t.bytes());
+        free(&device, v_ptr, v_t.bytes());
+        free(&device, out_a_ptr, out_a.bytes());
+        free(&device, m_a_ptr, m_a.bytes());
+        free(&device, s_a_ptr, s_a.bytes());
+        free(&device, o_a_ptr, o_a.bytes());
+        free(&device, out_b_ptr, out_b.bytes());
+        free(&device, m_b_ptr, m_b.bytes());
+        free(&device, s_b_ptr, s_b.bytes());
+        free(&device, o_b_ptr, o_b.bytes());
     }
 }

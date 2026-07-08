@@ -352,6 +352,19 @@ impl<B: KernelBackend> Ops for OpsImpl<'_, B> {
         crate::launch::attention::kv_append_v_unit_norm_f16(self.reg, self.stream, buf, shape, write_pos, eps)
     }
 
+    fn kv_append_v_unit_norm_f16_slots(
+        &self,
+        buf: crate::KvAppendBuffers,
+        shape: crate::KvAppendVUnitShape,
+        write_pos: usize,
+        eps: f32,
+        slots: Option<crate::KvAppendSlots>,
+    ) -> Result<()> {
+        crate::launch::attention::kv_append_v_unit_norm_f16_slots(
+            self.reg, self.stream, buf, shape, write_pos, eps, slots,
+        )
+    }
+
     fn attention_decode_f16_splitk(
         &self,
         buffers: crate::AttnBuffers,
@@ -369,6 +382,25 @@ impl<B: KernelBackend> Ops for OpsImpl<'_, B> {
         )
     }
 
+    fn attention_decode_f16_splitk_slots(
+        &self,
+        buffers: crate::AttnBuffers,
+        partials: crate::AttnSplitkPartials,
+        shape: crate::AttnSplitkShape,
+        knobs: crate::AttnKnobs,
+        slots: Option<crate::AttnSplitkSlots>,
+    ) -> Result<()> {
+        crate::launch::attention::attention_decode_f16_splitk_slots(
+            self.reg,
+            self.stream,
+            buffers,
+            partials,
+            shape,
+            knobs,
+            slots,
+        )
+    }
+
     fn attention_decode_f16_splitk_h2(
         &self,
         buffers: crate::AttnBuffers,
@@ -377,6 +409,60 @@ impl<B: KernelBackend> Ops for OpsImpl<'_, B> {
         knobs: crate::AttnKnobs,
     ) -> Result<()> {
         crate::launch::attention::attention_decode_f16_splitk_h2(
+            self.reg,
+            self.stream,
+            buffers,
+            partials,
+            shape,
+            knobs,
+        )
+    }
+
+    fn attention_decode_f16_splitk_dpos(
+        &self,
+        buffers: crate::AttnBuffers,
+        partials: crate::AttnSplitkPartials,
+        shape: crate::AttnSplitkDposShape,
+        knobs: crate::AttnDposKnobs,
+        pos_ptr: DevicePtr,
+    ) -> Result<()> {
+        crate::launch::attention::attention_decode_f16_splitk_dpos(
+            self.reg, self.stream, buffers, partials, shape, knobs, pos_ptr,
+        )
+    }
+
+    fn kv_append_v_unit_norm_f16_dpos(
+        &self,
+        buf: crate::KvAppendBuffers,
+        shape: crate::KvAppendVUnitShape,
+        eps: f32,
+        pos_ptr: DevicePtr,
+    ) -> Result<()> {
+        crate::launch::attention::kv_append_v_unit_norm_f16_dpos(
+            self.reg, self.stream, buf, shape, eps, pos_ptr,
+        )
+    }
+
+    fn embed_gather_f16_dpos(
+        &self,
+        embd: DevicePtr,
+        dst: DevicePtr,
+        hidden: usize,
+        ctx_ptr: DevicePtr,
+    ) -> Result<()> {
+        crate::launch::attention::embed_gather_f16_dpos(
+            self.reg, self.stream, embd, dst, hidden, ctx_ptr,
+        )
+    }
+
+    fn attention_decode_f16_batched_splitk(
+        &self,
+        buffers: crate::AttnBatchedBuffers,
+        partials: crate::AttnSplitkPartials,
+        shape: crate::AttnDecodeBatchedSplitkShape,
+        knobs: crate::AttnKnobs,
+    ) -> Result<()> {
+        crate::launch::attention::attention_decode_f16_batched_splitk(
             self.reg,
             self.stream,
             buffers,
@@ -401,6 +487,23 @@ impl<B: KernelBackend> Ops for OpsImpl<'_, B> {
         )
     }
 
+    fn attention_decode_q8_kv_slots(
+        &self,
+        buffers: crate::AttnBuffers,
+        shape: crate::AttnDecodeShape,
+        knobs: crate::AttnKnobs,
+        slots: Option<crate::AttnDecodeQ8Slots>,
+    ) -> Result<()> {
+        crate::launch::attention::attention_decode_q8_kv_slots(
+            self.reg,
+            self.stream,
+            buffers,
+            shape,
+            knobs,
+            slots,
+        )
+    }
+
     fn attention_decode_q8_kv_splitk(
         &self,
         buffers: crate::AttnBuffers,
@@ -415,6 +518,25 @@ impl<B: KernelBackend> Ops for OpsImpl<'_, B> {
             partials,
             shape,
             knobs,
+        )
+    }
+
+    fn attention_decode_q8_kv_splitk_slots(
+        &self,
+        buffers: crate::AttnBuffers,
+        partials: crate::AttnSplitkPartials,
+        shape: crate::AttnSplitkShape,
+        knobs: crate::AttnKnobs,
+        slots: Option<crate::AttnDecodeQ8SplitkSlots>,
+    ) -> Result<()> {
+        crate::launch::attention::attention_decode_q8_kv_splitk_slots(
+            self.reg,
+            self.stream,
+            buffers,
+            partials,
+            shape,
+            knobs,
+            slots,
         )
     }
 
@@ -609,6 +731,18 @@ impl<B: KernelBackend> Ops for OpsImpl<'_, B> {
         crate::launch::norm::quantize_f16_q8_0(self.reg, self.stream, x_f16, y_q8_0, n_elems)
     }
 
+    fn quantize_f16_q8_0_slots(
+        &self,
+        x_f16: DevicePtr,
+        y_q8_0: DevicePtr,
+        n_elems: usize,
+        dst_slot: Option<flambeau_core::ScalarSlot>,
+    ) -> Result<()> {
+        crate::launch::norm::quantize_f16_q8_0_slots(
+            self.reg, self.stream, x_f16, y_q8_0, n_elems, dst_slot,
+        )
+    }
+
     // -- mlp --
 
     fn silu_f32(&self, x: DevicePtr, y: DevicePtr, n: usize) -> Result<()> {
@@ -631,6 +765,16 @@ impl<B: KernelBackend> Ops for OpsImpl<'_, B> {
         n: usize,
     ) -> Result<()> {
         crate::launch::mlp::swiglu_f32_to_q8_1(self.reg, self.stream, a, b, y_q8_1, n)
+    }
+
+    fn gelu_mul_f32_to_q8_1(
+        &self,
+        a: DevicePtr,
+        b: DevicePtr,
+        y_q8_1: DevicePtr,
+        n: usize,
+    ) -> Result<()> {
+        crate::launch::mlp::gelu_mul_f32_to_q8_1(self.reg, self.stream, a, b, y_q8_1, n)
     }
 
     fn scale_f32(&self, x: DevicePtr, y: DevicePtr, n: usize, scale: f32) -> Result<()> {
