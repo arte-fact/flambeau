@@ -982,35 +982,21 @@ pub fn attention_decode_f16_splitk_h2<B: flambeau_core::KernelBackend>(
     Ok(())
 }
 
-/// Pick a reasonable split-K chunk size given `n_tokens`. Target n_chunks in
-/// [4, 16] so we land 16 heads × n_chunks = 64–256 blocks on 60 CUs
-/// (1–4× saturation, more than enough to hide the per-block serial loop).
-/// Returns the single-pass fallback `chunk_size = n_tokens` when the
-/// context is short enough that split-K overhead (the combine kernel +
-/// partials write/read) costs more than the occupancy win.
+/// Pick a split-K chunk size that partitions `n_tokens_kv` into at most
+/// `max_chunks` chunks of >= 32 tokens each. The chunk kernel launches
+/// `n_heads * n_slots * n_chunks` blocks, so the caller sizes `max_chunks` to
+/// fill the device's block slots: single-slot decode passes
+/// `MAX_SPLITK_CHUNKS` (n_heads * 32 blocks saturates the target GPUs at
+/// n_heads=16); batched decode passes `MAX_SPLITK_CHUNKS / n_slots` so the
+/// block count stays at that budget instead of over-subscribing by the slot
+/// count. Returns the single-pass fallback `chunk_size = n_tokens_kv` below
+/// 257 tokens, where split-K overhead (the combine kernel + partials
+/// write/read) exceeds the occupancy win.
 pub fn splitk_chunk_size(n_tokens_kv: usize, max_chunks: usize) -> usize {
-    // Threshold tuned by A/B: at n_tokens=128 split-K already
-    // ties the single-pass and every larger shape wins hard, so
-    // default to split-K whenever it gives ≥ 4 chunks.
-    let base = if n_tokens_kv <= 256 {
-        return n_tokens_kv; // one chunk; caller should just use single-pass
-    } else if n_tokens_kv <= 1024 {
-        128
-    } else if n_tokens_kv <= 2048 {
-        256
-    } else {
-        512
-    };
-    // Grow the chunk for long contexts so ceil(n_tokens_kv / chunk) never
-    // exceeds `max_chunks` (the split-K partials-buffer capacity). With the
-    // fixed 512-token chunk the count crosses `max_chunks` above
-    // 512 * max_chunks tokens, where the caller would otherwise fall back to
-    // the single-block decode kernel — an O(KV) latency cliff at long ctx.
-    if n_tokens_kv.div_ceil(base) <= max_chunks {
-        base
-    } else {
-        n_tokens_kv.div_ceil(max_chunks).next_multiple_of(32)
+    if n_tokens_kv <= 256 {
+        return n_tokens_kv;
     }
+    n_tokens_kv.div_ceil(max_chunks.max(1)).max(32).next_multiple_of(4)
 }
 
 /// Decode attention with Q8_0-quantised KV. Same args as the F16 variant;

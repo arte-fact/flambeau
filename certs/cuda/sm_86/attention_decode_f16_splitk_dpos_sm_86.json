@@ -22,7 +22,7 @@
       "k": 1642,
       "n": 256,
       "seed": 1177660,
-      "max_rel_err": 0.000023841858,
+      "max_rel_err": 0.0000059604645,
       "tolerance": 0.02,
       "pass": true
     },
@@ -31,7 +31,7 @@
       "k": 2127,
       "n": 512,
       "seed": 3344535,
-      "max_rel_err": 0.00006743496,
+      "max_rel_err": 0.00000842937,
       "tolerance": 0.02,
       "pass": true
     },
@@ -49,7 +49,7 @@
       "k": 1301,
       "n": 256,
       "seed": 1133493,
-      "max_rel_err": 0.000011920929,
+      "max_rel_err": 0.00009536743,
       "tolerance": 0.02,
       "pass": true
     },
@@ -58,7 +58,7 @@
       "k": 4001,
       "n": 256,
       "seed": 1401201,
-      "max_rel_err": 0.000011920929,
+      "max_rel_err": 0.0000029802322,
       "tolerance": 0.02,
       "pass": true
     },
@@ -82,7 +82,7 @@
     }
   ],
   "pass": true,
-  "emitted_at": "2026-07-08T07:42:19Z",
+  "emitted_at": "2026-07-08T13:02:45Z",
   "rig": "threadreaper-sm_86",
   "pmc": {
     "vgpr_count": 40,

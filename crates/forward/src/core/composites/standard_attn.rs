@@ -1350,8 +1350,9 @@ pub fn standard_attn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
         // layers are excluded: split-K can't bound its chunk count in modular
         // KV space, and the window cap keeps those layers short anyway.
         let max_dec_kv = host_n_kv.iter().copied().max().unwrap_or(0) as usize;
-        let chunk_size =
-            flambeau_model_ops::splitk_chunk_size(max_dec_kv, crate::core::scratch::MAX_SPLITK_CHUNKS);
+        let batched_chunk_budget =
+            crate::core::scratch::MAX_SPLITK_CHUNKS.div_ceil(host_n_kv.len().max(1));
+        let chunk_size = flambeau_model_ops::splitk_chunk_size(max_dec_kv, batched_chunk_budget);
         let n_chunks = max_dec_kv.div_ceil(chunk_size.max(1));
         let use_splitk = !is_ring_layer
             && max_dec_kv > 256

@@ -62,9 +62,10 @@ const CASES: &[Case] = &[
     // Global mid-context, head_dim 256 / 512 (gemma-4 global GQA 16/8-ish).
     Case { head_dim: 256, n_heads_q: 16, n_heads_kv: 8, position: 1641, window: 0, slab_depth: 0, regime: Regime::Global, bake_n_chunks: None },
     Case { head_dim: 512, n_heads_q: 16, n_heads_kv: 8, position: 2126, window: 0, slab_depth: 0, regime: Regime::Global, bake_n_chunks: None },
-    // Global mid-bucket: grid baked for the top of the bucket (n_chunks 8), run
-    // at a lower eff so the last chunks run the empty sentinel.
-    Case { head_dim: 256, n_heads_q: 16, n_heads_kv: 8, position: 900, window: 0, slab_depth: 0, regime: Regime::Global, bake_n_chunks: Some(8) },
+    // Global mid-bucket: grid baked for the top of the bucket (n_chunks =
+    // MAX_SPLITK_CHUNKS), run at a lower eff so the last chunks run the empty
+    // sentinel.
+    Case { head_dim: 256, n_heads_q: 16, n_heads_kv: 8, position: 900, window: 0, slab_depth: 0, regime: Regime::Global, bake_n_chunks: Some(MAX_SPLITK_CHUNKS) },
     // SWA ring (window 1024, slab 1152 = window + 128 ubatch), several eff.
     Case { head_dim: 256, n_heads_q: 16, n_heads_kv: 8, position: 1300, window: 1024, slab_depth: 1152, regime: Regime::Ring, bake_n_chunks: None },
     Case { head_dim: 256, n_heads_q: 16, n_heads_kv: 8, position: 4000, window: 1024, slab_depth: 1152, regime: Regime::Ring, bake_n_chunks: None },
@@ -74,20 +75,10 @@ const CASES: &[Case] = &[
 ];
 
 fn splitk_chunk_size(n: usize) -> usize {
-    let base = if n <= 256 {
+    if n <= 256 {
         return n;
-    } else if n <= 1024 {
-        128
-    } else if n <= 2048 {
-        256
-    } else {
-        512
-    };
-    if n.div_ceil(base) <= MAX_SPLITK_CHUNKS {
-        base
-    } else {
-        n.div_ceil(MAX_SPLITK_CHUNKS).div_ceil(32) * 32
     }
+    n.div_ceil(MAX_SPLITK_CHUNKS).max(32).next_multiple_of(4)
 }
 
 /// Backend-generic entry point.
