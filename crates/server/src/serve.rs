@@ -173,10 +173,11 @@ pub(crate) async fn serve_inner_v2(
     let gguf_arch: &str = &gguf_arch_owned;
 
     let kv_layout = match cfg.kv.as_str() {
+        "auto" => crate::v2_handle::default_kv_layout(gguf_arch),
         "f16" => flambeau_forward::KvLayout::F16Contig,
         "q8" => flambeau_forward::KvLayout::Q8Contig,
         other => anyhow::bail!(
-            "--kv {other}: unknown KV cache layout (supported: f16, q8)"
+            "--kv {other}: unknown KV cache layout (supported: auto, f16, q8)"
         ),
     };
 

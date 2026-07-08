@@ -595,6 +595,18 @@ pub fn wants_bos_prepend(gguf_arch: &str) -> bool {
     is_gemma_family(gguf_arch)
 }
 
+/// Default KV-cache layout when the request does not force one via `--kv`.
+/// gemma4 decode is certified and quality-neutral on Q8Contig — half the KV
+/// bytes and faster once the decode graph captures the Q8 path — so it defaults
+/// to Q8; every other arch stays on F16Contig until measured on Q8.
+pub fn default_kv_layout(gguf_arch: &str) -> flambeau_forward::KvLayout {
+    if is_gemma_family(gguf_arch) {
+        flambeau_forward::KvLayout::Q8Contig
+    } else {
+        flambeau_forward::KvLayout::F16Contig
+    }
+}
+
 fn is_gemma_family(gguf_arch: &str) -> bool {
     matches!(
         gguf_arch,

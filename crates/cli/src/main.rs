@@ -216,9 +216,10 @@ enum Cmd {
             default_value_t = 2.0
         )]
         prefix_cache_max_gb: f64,
-        /// KV cache layout. `f16` (default, canonical) or `q8` (~2× HBM
-        /// saving on decode; quality cert required per model).
-        #[arg(long = "kv", env = "FLAMBEAU_KV", default_value = "f16")]
+        /// KV cache layout. `auto` (default: per-arch — gemma uses `q8`,
+        /// others `f16`) or force `f16` / `q8` (`q8` ≈ 2× HBM saving on
+        /// decode; correctness cert required per model).
+        #[arg(long = "kv", env = "FLAMBEAU_KV", default_value = "auto")]
         kv: String,
         /// Default system prompt prepended to chat-template requests
         /// when none is provided in the request.
