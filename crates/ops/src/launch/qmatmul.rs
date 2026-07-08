@@ -191,42 +191,7 @@ pub fn qmatmul<B: flambeau_core::KernelBackend>(
         return Ok(());
     }
 
-    let cfg = QMatMulCfg {
-        dtype_weight,
-        dtype_activation: QDtype::Q8_1,
-        m,
-        k,
-        n,
-    };
-    let desc = B::dispatch_qmatmul(&cfg).ok_or_else(|| {
-        anyhow!(
-            "no QMatMul impl for dtype={} m={m} k={k} n={n}",
-            dtype_weight.name()
-        )
-    })?;
-    let mut recipe = Recipe::from_impl_id(desc.impl_id)?;
-    // MmqLdsX64 (LDS-tiled MMQ with the DS4 144-B/block activation) requires
-    // k % 128 == 0. The m-range dispatch table doesn't encode that, so a
-    // non-128-aligned contraction dim (e.g. a shared-expert intermediate)
-    // can resolve here. Re-dispatch as if m=1 to obtain the dtype's MMVQ
-    // impl, which consumes the standard Q8_1 activation and only needs
-    // k % 32; the Mmvq arm then loops it over the real m rows.
-    if matches!(recipe.kind, RecipeKind::MmqLdsX64 | RecipeKind::MmqMma) && k % 128 != 0 {
-        let mmvq_cfg = QMatMulCfg {
-            dtype_weight,
-            dtype_activation: QDtype::Q8_1,
-            m: 1,
-            k,
-            n,
-        };
-        let mmvq_desc = B::dispatch_qmatmul(&mmvq_cfg).ok_or_else(|| {
-            anyhow!(
-                "no MMVQ fallback impl for dtype={} k={k} n={n} (k % 128 != 0)",
-                dtype_weight.name()
-            )
-        })?;
-        recipe = Recipe::from_impl_id(mmvq_desc.impl_id)?;
-    }
+    let recipe = resolve_dispatch_recipe::<B>(dtype_weight, m, k, n)?;
 
     match recipe.kind {
         RecipeKind::Mmvq => {
@@ -274,11 +239,11 @@ pub fn qmatmul<B: flambeau_core::KernelBackend>(
         RecipeKind::MmqLdsX64 => {
             if act_q8_1_mmq.as_usize() == 0 {
                 bail!(
-                    "qmatmul dispatched to MmqLdsX64 (impl {}) but caller \
+                    "qmatmul dispatched to MmqLdsX64 (stem {}) but caller \
                      did not populate act_q8_1_mmq — run \
                      ops::norm::quantize_f16_q8_1_mmq upstream or use \
                      qmatmul_decode() if this is a decode path",
-                    desc.impl_id
+                    recipe.stem
                 );
             }
             let nb_per_row = k / block_elems(dtype_weight);
@@ -294,10 +259,10 @@ pub fn qmatmul<B: flambeau_core::KernelBackend>(
         RecipeKind::MmqMma => {
             if act_q8_1_mmq.as_usize() == 0 {
                 bail!(
-                    "qmatmul dispatched to MmqMma (impl {}) but caller did not \
+                    "qmatmul dispatched to MmqMma (stem {}) but caller did not \
                      populate act_q8_1_mmq — run ops::norm::quantize_f16_q8_1_mmq \
                      upstream",
-                    desc.impl_id
+                    recipe.stem
                 );
             }
             let nb_per_row = k / block_elems(dtype_weight);
@@ -320,6 +285,101 @@ pub fn qmatmul<B: flambeau_core::KernelBackend>(
                 k,
             )
         }
+    }
+}
+
+/// Resolve the dispatch-table recipe for `(dtype, m, k, n)`, applying the
+/// `k % 128 != 0` re-dispatch that swaps a DS4-layout MMQ recipe for the
+/// dtype's MMVQ (which consumes the standard Q8_1 activation and only needs
+/// `k % 32`). Shared by [`qmatmul`] (to launch) and
+/// [`qmatmul_reads_mmq_activation`] (to classify) so the two can never
+/// disagree on which recipe a shape resolves to.
+fn resolve_dispatch_recipe<B: flambeau_core::KernelBackend>(
+    dtype_weight: QDtype,
+    m: usize,
+    k: usize,
+    n: usize,
+) -> Result<Recipe> {
+    let cfg = QMatMulCfg {
+        dtype_weight,
+        dtype_activation: QDtype::Q8_1,
+        m,
+        k,
+        n,
+    };
+    let desc = B::dispatch_qmatmul(&cfg).ok_or_else(|| {
+        anyhow!(
+            "no QMatMul impl for dtype={} m={m} k={k} n={n}",
+            dtype_weight.name()
+        )
+    })?;
+    let mut recipe = Recipe::from_impl_id(desc.impl_id)?;
+    // MmqLdsX64 / MmqMma (DS4 144-B/block activation) require k % 128 == 0.
+    // The m-range dispatch table doesn't encode that, so a non-128-aligned
+    // contraction dim (e.g. a shared-expert intermediate) can resolve here.
+    // Re-dispatch as if m=1 to obtain the dtype's MMVQ impl, which consumes
+    // the standard Q8_1 activation; the Mmvq arm then loops it over the real
+    // m rows.
+    if matches!(recipe.kind, RecipeKind::MmqLdsX64 | RecipeKind::MmqMma) && k % 128 != 0 {
+        let mmvq_cfg = QMatMulCfg {
+            dtype_weight,
+            dtype_activation: QDtype::Q8_1,
+            m: 1,
+            k,
+            n,
+        };
+        let mmvq_desc = B::dispatch_qmatmul(&mmvq_cfg).ok_or_else(|| {
+            anyhow!(
+                "no MMVQ fallback impl for dtype={} k={k} n={n} (k % 128 != 0)",
+                dtype_weight.name()
+            )
+        })?;
+        recipe = Recipe::from_impl_id(mmvq_desc.impl_id)?;
+    }
+    Ok(recipe)
+}
+
+/// Whether the auto-dispatched [`qmatmul`] reads the 144-B DS4 `act_q8_1_mmq`
+/// activation (`true`) or the 36-B standard `act_q8_1` (`false`) for
+/// `(dtype_weight, shape)`. Callers that pre-quantise activations use this to
+/// skip whichever layout is dead.
+///
+/// MUST track [`qmatmul`]'s routing: every early-return short-circuit there
+/// consumes the standard layout — only the terminal `MmqLdsX64` / `MmqMma`
+/// recipe arms read DS4. The dispatch-table resolution is shared verbatim via
+/// [`resolve_dispatch_recipe`], so the only mirrored logic is the pre-dispatch
+/// short-circuit guards below; keep them in lockstep with `qmatmul`.
+pub fn qmatmul_reads_mmq_activation<B: flambeau_core::KernelBackend>(
+    shape: crate::MatmulShape,
+    dtype_weight: QDtype,
+) -> bool {
+    let crate::MatmulShape { m, k, n } = shape;
+    // F16 has no MMQ — all M route through per-row MMVQ (standard layout).
+    if dtype_weight == QDtype::F16 {
+        return false;
+    }
+    // Compile-time batched MMVQ short-circuits (standard layout).
+    if matches!(
+        dtype_weight,
+        QDtype::Q4_1 | QDtype::Q8_0 | QDtype::Q4_K | QDtype::Q6_K
+    ) && (2..=4).contains(&m)
+    {
+        return false;
+    }
+    // Q4_0/Q5_0/Q5_1 route to per-row / batched MMVQ with no MMQ amortization
+    // (m < 32) or non-128-aligned dims (standard layout).
+    if (m < 32 || k % 128 != 0 || n % 128 != 0)
+        && matches!(dtype_weight, QDtype::Q4_0 | QDtype::Q5_0 | QDtype::Q5_1)
+    {
+        return false;
+    }
+    // Q5_K row-tile batched MMVQ short-circuit (standard layout).
+    if dtype_weight == QDtype::Q5_K && (2..=4).contains(&m) {
+        return false;
+    }
+    match resolve_dispatch_recipe::<B>(dtype_weight, m, k, n) {
+        Ok(recipe) => matches!(recipe.kind, RecipeKind::MmqLdsX64 | RecipeKind::MmqMma),
+        Err(_) => false,
     }
 }
 

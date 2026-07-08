@@ -528,6 +528,29 @@ pub trait Ops {
         n: usize,
     ) -> Result<()>;
 
+    /// MMQ-layout twin of [`Ops::gelu_mul_f32_to_q8_1`]: emits the DS4 144-B
+    /// `block_q8_1_mmq` the prefill down-projection MMQ reads. `ncols` is the
+    /// intermediate width (must be `% 128 == 0`); `total_b` the token count.
+    fn gelu_mul_f32_to_q8_1_mmq(
+        &self,
+        a: DevicePtr,
+        b: DevicePtr,
+        y_q8_1_mmq: DevicePtr,
+        ncols: usize,
+        total_b: usize,
+    ) -> Result<()>;
+
+    /// Whether the auto-dispatched [`Ops::qmatmul`] reads the 144-B DS4
+    /// `act_q8_1_mmq` activation (`true`) or the 36-B standard `act_q8_1`
+    /// (`false`) for `(dtype_weight, shape)`. Callers that pre-quantise both
+    /// layouts use this to skip whichever is dead. Backed by the same
+    /// dispatch used to launch, so it never disagrees with the real routing.
+    fn qmatmul_reads_mmq_activation(
+        &self,
+        shape: crate::MatmulShape,
+        dtype_weight: QDtype,
+    ) -> bool;
+
     /// Fused `y_f16[i] = (fp16)(gelu(a[i]) * b[i])` — Gemma 4 dense
     /// FFN. GELU = ggml tanh-approximation form.
     fn gelu_f32_to_f16(&self, a: DevicePtr, b: DevicePtr, y: DevicePtr, n: usize) -> Result<()>;

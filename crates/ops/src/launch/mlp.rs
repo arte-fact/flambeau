@@ -150,6 +150,49 @@ pub fn gelu_mul_f32_to_q8_1<B: flambeau_core::KernelBackend>(
     Ok(())
 }
 
+/// Fused `y_mmq = quantize_q8_1_mmq(gelu_tanh(a) * b)` for F32 inputs — the
+/// MMQ-layout twin of [`gelu_mul_f32_to_q8_1`]. Emits the DS4 144-B block
+/// layout the prefill down-projection MMQ reads, replacing the
+/// `gelu_f32_to_f16` → `quantize_f16_q8_1_mmq` pair on gemma-4 prefill and
+/// eliminating the F16 gated intermediate write + re-read. `ncols` (the
+/// intermediate width) must be a multiple of 128. Grid: one block per
+/// (`ncols/128`, `total_b`); 128 threads/block.
+pub fn gelu_mul_f32_to_q8_1_mmq<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
+    a: DevicePtr,
+    b: DevicePtr,
+    y_q8_1_mmq: DevicePtr,
+    ncols: usize,
+    total_b: usize,
+) -> Result<()> {
+    assert_eq!(
+        ncols % 128,
+        0,
+        "gelu_mul_f32_to_q8_1_mmq expects ncols % 128 == 0"
+    );
+    let module = reg.expect_module("gelu_mul_f32_to_q8_1_mmq")?;
+    let kernel = B::kernel(module, "flambeau_gelu_mul_f32_to_q8_1_mmq")?;
+    let ncols_i = ncols as i32;
+    let total_b_i = total_b as i32;
+    let a_ptr: u64 = a.as_usize() as u64;
+    let b_ptr: u64 = b.as_usize() as u64;
+    let y_ptr: u64 = y_q8_1_mmq.as_usize() as u64;
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&a_ptr);
+    args.push_arg(&b_ptr);
+    args.push_arg(&y_ptr);
+    args.push_arg(&ncols_i);
+    args.push_arg(&total_b_i);
+    let cfg = LaunchCfg {
+        grid: ((ncols / 128) as u32, total_b as u32, 1),
+        block: (128, 1, 1),
+        shared_bytes: 0,
+    };
+    B::launch(&kernel, stream, cfg, args)?;
+    Ok(())
+}
+
 /// Pointwise `y[i] = x[i] * scale`. Used by the GDN path to apply the
 /// attention scale `1 / sqrt(head_k_dim)` to Q before the state step.
 pub fn scale_f32<B: flambeau_core::KernelBackend>(

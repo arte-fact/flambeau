@@ -214,6 +214,7 @@ pub const KERNEL_STEMS: &[&str] = &[
     "swiglu_f32_to_f16",
     "swiglu_f32_to_q8_1",
     "gelu_mul_f32_to_q8_1",
+    "gelu_mul_f32_to_q8_1_mmq",
     "silu_f32",
     "sigmoid_mul_f16",
     "scale_f32",

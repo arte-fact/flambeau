@@ -777,6 +777,27 @@ impl<B: KernelBackend> Ops for OpsImpl<'_, B> {
         crate::launch::mlp::gelu_mul_f32_to_q8_1(self.reg, self.stream, a, b, y_q8_1, n)
     }
 
+    fn gelu_mul_f32_to_q8_1_mmq(
+        &self,
+        a: DevicePtr,
+        b: DevicePtr,
+        y_q8_1_mmq: DevicePtr,
+        ncols: usize,
+        total_b: usize,
+    ) -> Result<()> {
+        crate::launch::mlp::gelu_mul_f32_to_q8_1_mmq(
+            self.reg, self.stream, a, b, y_q8_1_mmq, ncols, total_b,
+        )
+    }
+
+    fn qmatmul_reads_mmq_activation(
+        &self,
+        shape: crate::MatmulShape,
+        dtype_weight: QDtype,
+    ) -> bool {
+        crate::launch::qmatmul::qmatmul_reads_mmq_activation::<B>(shape, dtype_weight)
+    }
+
     fn scale_f32(&self, x: DevicePtr, y: DevicePtr, n: usize, scale: f32) -> Result<()> {
         crate::launch::mlp::scale_f32(self.reg, self.stream, x, y, n, scale)
     }

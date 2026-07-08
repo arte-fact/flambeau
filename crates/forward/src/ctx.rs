@@ -249,6 +249,19 @@ impl QuantWeight {
         )
     }
 
+    /// Whether this projection's auto-dispatched `qmatmul` at `shape` reads
+    /// the DS4 144-B mmq activation (`true`) or the standard 36-B Q8_1
+    /// activation (`false`). Composites that pre-quantise both layouts use
+    /// this to skip the dead one; the answer comes from the same dispatch
+    /// that launches, so it never disagrees with the kernel actually run.
+    pub fn reads_mmq_activation(
+        &self,
+        shape: flambeau_ops::MatmulShape,
+        ops: &impl flambeau_ops::Ops,
+    ) -> bool {
+        ops.qmatmul_reads_mmq_activation(shape, self.dtype)
+    }
+
     /// True iff `dtype` has an F16-direct MMVQ kernel registered in
     /// `ops.mmvq_f16_direct`. Callers gate the fused-cast fast path on
     /// this; unsupported dtypes (F16, BF16) keep the F32+cast pair.

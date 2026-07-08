@@ -41,6 +41,7 @@ pub fn run_pointwise_sweep<B: BenchBackend>(
         "sigmoid_mul_f16" => run_sigmoid_mul_f16_sweep::<B>(repo_root, arch),
         "swiglu_f32_to_q8_1" => run_swiglu_f32_to_q8_1_sweep::<B>(repo_root, arch),
         "gelu_mul_f32_to_q8_1" => run_gelu_mul_f32_to_q8_1_sweep::<B>(repo_root, arch),
+        "gelu_mul_f32_to_q8_1_mmq" => run_gelu_mul_f32_to_q8_1_mmq_sweep::<B>(repo_root, arch),
         "split_q_gate_f16" => run_split_q_gate_f16_sweep::<B>(repo_root, arch),
         "rmsnorm_f32" => run_rmsnorm_f32_sweep::<B>(repo_root, arch),
         "rmsnorm_f16" => run_rmsnorm_f16_sweep::<B>(repo_root, arch),
@@ -1014,6 +1015,103 @@ pub fn run_rope_f16_sweep<B: BenchBackend>(repo_root: &Path, arch: &str, neox: b
 /// `quantize_f16_q8_1_mmq` — F16 activation → BlockQ8_1Mmq (DS4, 144 B: 4
 /// (d,ssum) half2 headers + 128 int8). One block per (big-block, row), 128
 /// threads. Scored by dequantizing (d·q) vs the F16 input (5e-3).
+pub fn run_gelu_mul_f32_to_q8_1_mmq_sweep<B: BenchBackend>(
+    repo_root: &Path,
+    arch: &str,
+) -> Result<Cert> {
+    let dev = B::new_device(0)?;
+    let image = B::image("gelu_mul_f32_to_q8_1_mmq")
+        .ok_or_else(|| anyhow!("gelu_mul_f32_to_q8_1_mmq not compiled"))?;
+    let module = B::load(&dev, image)?;
+    let kernel = B::kernel(&module, "flambeau_gelu_mul_f32_to_q8_1_mmq")?;
+    let pmc = B::attributes(&kernel)?;
+
+    // (total_b tokens, ncols intermediate); ncols % 128 == 0.
+    let shapes = [(1usize, 128usize), (4, 256), (2, 384)];
+    let mut results = Vec::new();
+    for (total_b, ncols) in shapes {
+        let n = total_b * ncols;
+        let seed = 0xC0FFEE ^ ((total_b as u64) * 71 + (ncols as u64) * 13);
+        let a = seeded_f32_range(seed, n, -0.5, 0.5);
+        let b = seeded_f32_range(seed ^ 0xCD, n, -0.5, 0.5);
+        // F64 oracle: tanh-approx GELU (ggml LLM_FFN_GELU) matching gelu_mul_f32.
+        let k = (2.0_f64 / std::f64::consts::PI).sqrt();
+        let xi: Vec<f32> = a
+            .iter()
+            .zip(&b)
+            .map(|(&av, &bv)| {
+                let d = av as f64;
+                let g = 0.5 * d * (1.0 + (k * (d + 0.044715 * d * d * d)).tanh());
+                (g * bv as f64) as f32
+            })
+            .collect();
+
+        let n_big = ncols / 128;
+        let out_bytes = n_big * total_b * 144;
+        let d_a = alloc_and_upload(&dev, &a);
+        let d_b = alloc_and_upload(&dev, &b);
+        let d_y = dev.alloc(out_bytes)?;
+        {
+            let stream = dev.default_stream();
+            let nc = ncols as i32;
+            let tb = total_b as i32;
+            let a_ptr: u64 = d_a.as_usize() as u64;
+            let b_ptr: u64 = d_b.as_usize() as u64;
+            let y_ptr: u64 = d_y.as_usize() as u64;
+            let mut args = <B::Args<'_>>::default();
+            args.push_arg(&a_ptr);
+            args.push_arg(&b_ptr);
+            args.push_arg(&y_ptr);
+            args.push_arg(&nc);
+            args.push_arg(&tb);
+            let cfg = LaunchCfg { grid: (n_big as u32, total_b as u32, 1), block: (128, 1, 1), shared_bytes: 0 };
+            B::launch(&kernel, stream, cfg, args)?;
+            stream.synchronize()?;
+        }
+        let mut got = vec![0u8; out_bytes];
+        unsafe {
+            dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost,
+                DevicePtr(got.as_mut_ptr() as usize), d_y, out_bytes)?;
+        }
+        dev.default_stream().synchronize()?;
+        unsafe { dev.dealloc(d_a, n * 4)?; dev.dealloc(d_b, n * 4)?; dev.dealloc(d_y, out_bytes)?; }
+
+        let mut dequant = vec![0.0f32; n];
+        for c in 0..total_b {
+            for b in 0..n_big {
+                let base = (b * total_b + c) * 144;
+                for ki in 0..128 {
+                    let sub = ki / 32;
+                    let d = f16::from_bits(u16::from_le_bytes([got[base + sub * 4], got[base + sub * 4 + 1]])).to_f32();
+                    let q = got[base + 16 + ki] as i8;
+                    dequant[c * ncols + b * 128 + ki] = d * q as f32;
+                }
+            }
+        }
+        let err = max_rel_err_with_floor(&dequant, &xi, 1.0);
+        results.push(ShapeResult { m: total_b, k: ncols, n: 1, seed, max_rel_err: err, tolerance: 5e-3, pass: err <= 5e-3 });
+    }
+
+    let pass = results.iter().all(|r| r.pass);
+    let cert = Cert {
+        schema_version: SCHEMA_VERSION,
+        impl_id: "gelu_mul_f32_to_q8_1_mmq".to_string(),
+        backend: dev.backend().to_string(),
+        arch: arch.to_string(),
+        op: "gelu_mul_f32_to_q8_1_mmq".to_string(),
+        dtype_weight: "F32".to_string(),
+        dtype_activation: "Q8_1".to_string(),
+        tolerance_formula: "|dequant - oracle| <= 5e-3 * max(|oracle|, 1) (DS4 Q8_1 step + tanhf)".to_string(),
+        results,
+        pass,
+        emitted_at: now_utc_iso8601(),
+        rig: rig_for(arch),
+        pmc: Some(pmc),
+    };
+    cert.write_to_disk(repo_root)?;
+    Ok(cert)
+}
+
 pub fn run_quantize_f16_q8_1_mmq_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) -> Result<Cert> {
     let dev = B::new_device(0)?;
     let image = B::image("quantize_f16_q8_1_mmq").ok_or_else(|| anyhow!("quantize_f16_q8_1_mmq not compiled"))?;

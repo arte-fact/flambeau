@@ -50,7 +50,8 @@ pub use shared_expert::{
 pub use weight_handle::WeightHandle;
 
 pub use ops::activation::{
-    gelu_mul_f32_to_f16, gelu_mul_f32_to_q8_1, swiglu_f16, swiglu_f32_to_f16,
+    gelu_mul_f32_to_f16, gelu_mul_f32_to_q8_1, gelu_mul_f32_to_q8_1_mmq, swiglu_f16,
+    swiglu_f32_to_f16,
 };
 pub use ops::add::{add_f16, add_f32};
 pub use ops::attn_decode::attn_decode_f16;
