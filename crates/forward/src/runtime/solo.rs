@@ -45,14 +45,16 @@ struct DecodeGraphBlock {
     retry_at: usize,
 }
 
-/// `FLAMBEAU_DECODE_GRAPH` — rollout/debug gate for the single-stream decode
-/// graph. Default OFF: the graph path is never touched and decode is
-/// byte-identical to today. This is the ONE env var and it is a capability
-/// rollout switch, not kernel-variant selection (root rule 1).
+/// `FLAMBEAU_DECODE_GRAPH` — capability switch for the single-stream decode
+/// graph. Default ON now that capture is validated (bit-identical off-vs-on
+/// across the SWA regimes on gemma + qwen). Set to `0`/`false`/`off`/`no` to
+/// force the byte-identical non-graph path. One capability switch, not
+/// kernel-variant selection (root rule 1); the graph only engages where the
+/// dispatch already permits (n=1, CUDA, non-paged).
 fn decode_graph_enabled() -> bool {
-    matches!(
+    !matches!(
         std::env::var("FLAMBEAU_DECODE_GRAPH").ok().as_deref(),
-        Some("1") | Some("true") | Some("on") | Some("yes")
+        Some("0") | Some("false") | Some("off") | Some("no")
     )
 }
 
