@@ -123,7 +123,34 @@ pub trait Arch: Send + Sync + 'static {
         max_slots: usize,
         paged_kv_pages: Option<usize>,
         kv_layout: KvLayout,
+        mtp_max_draft: usize,
     ) -> ScratchConfig;
+
+    /// Whether the loaded model carries an MTP/nextn draft head.
+    fn has_mtp(_model: &Self::Model) -> bool {
+        false
+    }
+
+    /// One MTP cycle with rejection sampling (llama.cpp `draft-mtp`
+    /// style): forward the anchor token at `anchor_pos` (capturing its
+    /// hidden as the next anchor), draft up to `n_draft` tokens with the
+    /// nextn head, verify them in one batched forward, accept/reject via
+    /// `sample` (greedy = one-hot dists), and return the tokens to emit
+    /// (accepted drafts + bonus token). `out_logits` receives the target
+    /// logits row the bonus token was drawn from.
+    /// Default impl bails (arch has no MTP).
+    fn mtp_cycle<C: ForwardCtx>(
+        _model: &Self::Model,
+        _ctx: &mut C,
+        _anchor_token: u32,
+        _anchor_pos: usize,
+        _slot_id: usize,
+        _n_draft: usize,
+        _sample: &mut dyn FnMut(&[f32]) -> (u32, Vec<(u32, f32)>),
+        _out_logits: &mut Vec<f32>,
+    ) -> Result<Vec<u32>> {
+        anyhow::bail!("mtp_cycle: arch has no MTP support")
+    }
 
     /// Per-layer attention kind (FullAttn / Gdn) if the arch is
     /// hybrid; `None` if every layer is uniform (qwen3 dense, gemma4
@@ -158,6 +185,7 @@ impl<A: Arch> Session<A> {
             max_slots,
             paged_kv_pages: _,
             kv_layout: _,
+            mtp_max_draft: _,
         } = params;
         if prefill_ubatch == 0 {
             anyhow::bail!("Session::new: prefill_ubatch must be > 0");
@@ -215,6 +243,58 @@ impl<A: Arch> Session<A> {
 
     pub fn forward_one_token(&mut self, token: u32, position: usize) -> Result<()> {
         self.forward(&[token], &[position], &[0])
+    }
+
+    /// One greedy MTP cycle on a single-device or TP topology. All ranks
+    /// run the cycle in lockstep (TP shards the draft layer like any other
+    /// layer); rank 0's reply carries the (replicated) result. Returns
+    /// `Ok(None)` for PP/hybrid or when the arch has no MTP head.
+    pub fn mtp_step(
+        &mut self,
+        token: u32,
+        position: usize,
+        slot_id: usize,
+        n_draft: usize,
+        sample_factory: workers::SampleFactory,
+        seed: u64,
+    ) -> Result<Option<(Vec<u32>, Vec<f32>)>> {
+        if !matches!(
+            self.topology,
+            Topology::SingleDevice { .. } | Topology::Tp { .. }
+        ) {
+            return Ok(None);
+        }
+        let mut first: Option<(Vec<u32>, Vec<f32>)> = None;
+        for (i, handle) in self.handles.iter().enumerate() {
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            handle
+                .cmd_tx
+                .send(workers::Command::MtpStep {
+                    token,
+                    position,
+                    slot_id,
+                    n_draft,
+                    sample_factory: std::sync::Arc::clone(&sample_factory),
+                    seed,
+                    reply: tx,
+                })
+                .map_err(|e| anyhow::anyhow!("mtp_step send: {e}"))?;
+            match rx.recv().map_err(|e| anyhow::anyhow!("mtp_step recv: {e}"))? {
+                Ok(v) => {
+                    if i == 0 {
+                        first = Some(v);
+                    }
+                }
+                Err(e) => {
+                    let msg = format!("{e:#}");
+                    if msg.contains("no MTP") || msg.contains("not supported") {
+                        return Ok(None);
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        Ok(first)
     }
 
     /// Sarathi-Serve mixed-batch dispatch (Phase K4). Rows

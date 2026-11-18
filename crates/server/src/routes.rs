@@ -155,6 +155,7 @@ pub struct ServerState {
     /// `--prefill-chunk-tokens` (default 512). Per-chunk prefill budget
     /// for the K4c mixed-batch scheduler.
     pub prefill_chunk_tokens: usize,
+    pub mtp_max_draft: usize,
     /// `--gpu-sampler` (default true). When true the head rank's
     /// top-K + softmax (+ penalties) run on device.
     pub gpu_sampler: bool,

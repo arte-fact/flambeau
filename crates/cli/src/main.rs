@@ -139,6 +139,10 @@ enum Cmd {
             default_value_t = 512
         )]
         prefill_ubatch: usize,
+        /// Max MTP (multi-token prediction) draft tokens verified per step
+        /// using the GGUF's embedded nextn head. 0 disables MTP.
+        #[arg(long = "mtp", env = "FLAMBEAU_MTP", default_value_t = 0)]
+        mtp: usize,
         /// Per-chunk prefill budget used by the K4c mixed-batch
         /// scheduler. Smaller chunks improve short-request TTFT
         /// under load (Sarathi-Serve trade) at the cost of slightly
@@ -342,6 +346,7 @@ fn main() -> Result<()> {
             embedding_device,
             inflight_slots,
             prefill_ubatch,
+            mtp,
             prefill_chunk_tokens,
             paged_kv,
             max_queue_depth,
@@ -367,6 +372,7 @@ fn main() -> Result<()> {
             embedding_device,
             inflight_slots,
             prefill_ubatch,
+            mtp,
             prefill_chunk_tokens,
             paged_kv,
             max_queue_depth,
@@ -404,6 +410,7 @@ struct ServeArgs {
     embedding_device: Option<i32>,
     inflight_slots: usize,
     prefill_ubatch: usize,
+    mtp: usize,
     prefill_chunk_tokens: usize,
     paged_kv: Option<usize>,
     max_queue_depth: usize,
@@ -449,6 +456,7 @@ fn serve_cmd(args: ServeArgs) -> Result<()> {
         embedding_device,
         inflight_slots,
         prefill_ubatch,
+        mtp,
         prefill_chunk_tokens,
         paged_kv,
         max_queue_depth,
@@ -566,6 +574,7 @@ fn serve_cmd(args: ServeArgs) -> Result<()> {
         embedding_device_id: resolved_embedding_device,
         inflight_slots,
         prefill_ubatch,
+        mtp,
         prefill_chunk_tokens,
         paged_kv_pages: paged_kv,
         max_queue_depth,

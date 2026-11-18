@@ -327,6 +327,10 @@ fn scheduler_can_engage(state: &ServerState, params: &SamplingParams) -> bool {
     if !state.batched_decode {
         return false;
     }
+    // MTP draft/verify cycles run on the legacy handler.
+    if state.mtp_max_draft > 0 {
+        return false;
+    }
     // JSON / logprobs paths still go through the legacy handler —
     // those features carry extra device-side state (JSON DFA, top-K
     // logprobs grab) that isn't yet plumbed through the scheduler.
@@ -1187,20 +1191,66 @@ fn run_completion_blocking_ids(
     // Qwen3.6 doesn't show that failure at this bias on chat tests.
     let stop_bias = crate::v2_handle::stop_bias_for(&state.cfg.arch);
     let mut reasoning_closer = ReasoningCloser::new(reasoning_close_ids(&state, &params));
+    // MTP (greedy only): draft+verify cycles through the session's nextn
+    // head. Disabled for JSON mode, logprobs, stochastic sampling, and
+    // reasoning budgets (forced tokens would desync the draft chain).
+    let mtp_on = state.mtp_max_draft > 0
+        && json_state.is_none()
+        && logprobs_acc.is_none()
+        && params.reasoning_budget.is_none();
+    let mut mtp_offset = 0usize;
+    let mut mtp_cycles = 0u32;
     for step in 1..params.max_tokens as usize {
         let force_mask = step < min_response_tokens && !relax_stop_mask;
         // Phase 12.5 — decode goes through the host-path DtoH always.
         // The GPU sampler keep-on-device branch was retired with the
         // decode/batched collapse (see `use_gpu_sampler` initialiser).
+        let mut mtp_emitted: Option<Vec<u32>> = None;
         let next = {
-            state
-                .dispatch_decode_one(
-                    &mut *inflight,
-                    last_token,
-                    prompt_ids.len() + step,
-                    &mut logits_buf,
-                )
-                .context("decode step logits")?;
+            let pos = prompt_ids.len() + step + mtp_offset;
+            if mtp_on {
+                let sampling2 = sampling.clone();
+                let history2 = generated.clone();
+                let factory: std::sync::Arc<dyn Fn(u64) -> flambeau_server_core::MtpSampleFn + Send + Sync> =
+                    std::sync::Arc::new(move |seed: u64| {
+                        let sampling = sampling2.clone();
+                        let history = history2.clone();
+                        Box::new(move |logits: &[f32]| -> (u32, Vec<(u32, f32)>) {
+                            let dist = flambeau_runtime::build_distribution(logits, &sampling, &history);
+                            let mut rng = flambeau_runtime::Rng::from_seed(seed);
+                            let r = rng.next_f32();
+                            let mut acc = 0.0f32;
+                            let mut tok = dist.last().map(|(t, _)| *t).unwrap_or(0);
+                            for &(t, p) in &dist {
+                                acc += p;
+                                if r <= acc {
+                                    tok = t;
+                                    break;
+                                }
+                            }
+                            (tok, dist)
+                        })
+                    });
+                let seed = params.seed ^ (pos as u64).wrapping_mul(0x9E3779B9);
+                match inflight
+                    .mtp_step(last_token, pos, state.mtp_max_draft, factory, seed, &mut logits_buf)
+                    .context("mtp step")?
+                {
+                    Some(emitted) => {
+                        mtp_cycles += 1;
+                        mtp_emitted = Some(emitted);
+                    }
+                    None => {
+                        state
+                            .dispatch_decode_one(&mut *inflight, last_token, pos, &mut logits_buf)
+                            .context("decode step logits")?;
+                    }
+                }
+            } else {
+                state
+                    .dispatch_decode_one(&mut *inflight, last_token, pos, &mut logits_buf)
+                    .context("decode step logits")?;
+            }
             if !relax_stop_mask {
                 for &sid in stop_ids {
                     if (sid as usize) < logits_buf.len() {
@@ -1257,6 +1307,32 @@ fn run_completion_blocking_ids(
                 let _ = js.feed_slice(text.as_bytes());
             }
             json_complete = js.is_complete();
+        }
+        // MTP: the cycle already produced the full token run (accepted
+        // drafts + bonus token as the last element). Emit them all.
+        if let Some(em) = mtp_emitted.take() {
+            let mut stopped = false;
+            let em_len = em.len();
+            for t in em {
+                generated.push(t);
+                last_token = t;
+                if is_stop(t) {
+                    finish_reason = "stop";
+                    stopped = true;
+                    break;
+                }
+                if generated.len() >= params.max_tokens as usize {
+                    break;
+                }
+            }
+            mtp_offset += em_len.saturating_sub(1);
+            if stopped || generated.len() >= params.max_tokens as usize {
+                if !stopped {
+                    finish_reason = "length";
+                }
+                break;
+            }
+            continue;
         }
         generated.push(next);
         last_token = next;
@@ -1333,6 +1409,7 @@ fn run_completion_blocking_ids(
         completion_tokens = generated.len() as u32,
         finish_reason,
         total_ms = request_start.elapsed().as_secs_f64() * 1000.0,
+        mtp_cycles,
         "completion request finished"
     );
 

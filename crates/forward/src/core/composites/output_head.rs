@@ -16,6 +16,7 @@ pub fn output_head_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
     input: &Tensor<F16>,
     lm_head: &LmHeadWeights,
     slot_ids: &[usize],
+    force_emit_all: bool,
 ) -> Result<()> {
     let hidden = state.hidden();
     if hidden != lm_head.hidden {
@@ -30,7 +31,7 @@ pub fn output_head_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
     }
     let vocab = lm_head.vocab_size;
     let ops = state.ops();
-    let emit_all = n_tokens > 1 && slot_ids.iter().any(|&s| s != slot_ids[0]);
+    let emit_all = force_emit_all || (n_tokens > 1 && slot_ids.iter().any(|&s| s != slot_ids[0]));
     let n_emit = if emit_all { n_tokens } else { 1 };
     if n_emit > state.pool.config.max_slots.max(1) {
         bail!(

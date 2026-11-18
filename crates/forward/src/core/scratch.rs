@@ -88,6 +88,21 @@ pub struct ScratchConfig {
     /// and addressed modulo `v[li]` (ring-buffered SWA). Built from
     /// [`KvLayerShape::kv_depth_at`] via [`per_layer_kv_depths`].
     pub per_layer_kv_depths: Option<Vec<usize>>,
+    /// MTP/nextn draft-head configuration. `Some` when the GGUF embeds a
+    /// nextn block AND the operator enabled MTP: the pool allocates one
+    /// extra KV slab (index `num_layers`) for the draft layer, an F16
+    /// anchor-hidden buffer, and sizes the logits buffer for
+    /// `max_draft` verify rows.
+    pub mtp: Option<MtpScratch>,
+}
+
+/// MTP draft-head scratch sizing.
+#[derive(Clone, Copy, Debug)]
+pub struct MtpScratch {
+    /// KV width of the draft layer (full-attn `n_kv_heads * head_dim`).
+    pub kv_width: usize,
+    /// Max drafted tokens per verify batch; also the logits row count.
+    pub max_draft: usize,
 }
 
 impl Default for ScratchConfig {
@@ -113,6 +128,7 @@ impl Default for ScratchConfig {
             kv_layout: KvLayout::F16Contig,
             per_layer_kv_layouts: None,
             per_layer_kv_depths: None,
+            mtp: None,
         }
     }
 }
@@ -221,6 +237,12 @@ pub trait ScratchShape: KvLayerShape {
     fn per_layer_embd(&self) -> usize {
         0
     }
+    /// KV width of the embedded MTP/nextn draft layer when the arch has
+    /// one (`Some`), else `None`. The draft layer gets its own KV slab at
+    /// index `num_layers`. Takes `n_ranks` for TP sharding.
+    fn mtp_kv_width(&self, _n_ranks: usize) -> Option<usize> {
+        None
+    }
 }
 
 /// Build a `ScratchConfig` from a shape spec. Each arch's
@@ -237,11 +259,29 @@ pub fn scratch_config_for<S: ScratchShape + ?Sized>(
     max_slots: usize,
     paged_kv_pages: Option<usize>,
     kv_layout: KvLayout,
+    mtp_max_draft: usize,
 ) -> ScratchConfig {
     let n_ranks = shard.n_ranks();
-    let per_layer_kv = per_layer_kv_widths(shape, n_ranks);
+    let mut per_layer_kv = per_layer_kv_widths(shape, n_ranks);
+    let mut per_layer_depths = per_layer_kv_depths(shape, shape.max_seq_len(), prefill_ubatch);
+    let mut num_layers = shape.num_layers();
+    // MTP: the embedded nextn draft layer gets its own KV slab appended at
+    // index `num_layers`; `num_layers` is bumped so the per-layer width /
+    // depth vectors stay in lockstep with `kv_caches`.
+    let mtp = if mtp_max_draft > 0 {
+        shape.mtp_kv_width(n_ranks).map(|w| {
+            per_layer_kv.push(w);
+            per_layer_depths.push(shape.max_seq_len());
+            num_layers += 1;
+            MtpScratch {
+                kv_width: w,
+                max_draft: mtp_max_draft,
+            }
+        })
+    } else {
+        None
+    };
     let kv_width = per_layer_kv.iter().copied().max().unwrap_or(0);
-    let per_layer_depths = per_layer_kv_depths(shape, shape.max_seq_len(), prefill_ubatch);
     // Per-layer KV layout. `kv_layout` is the uniform request from --kv.
     // Q8 attention now covers head_dim ∈ {64, 128, 256, 512}; the d=512
     // path uses a 2-wave block with cross-wave LDS reduction. Layers
@@ -315,7 +355,7 @@ pub fn scratch_config_for<S: ScratchShape + ?Sized>(
         kv_width,
         vocab: shape.vocab(),
         max_seq_len: shape.max_seq_len(),
-        num_layers: shape.num_layers(),
+        num_layers,
         max_experts: moe.map_or(0, |m| m.num_experts),
         max_experts_per_tok: moe.map_or(0, |m| m.experts_per_tok),
         gdn: shape.gdn_per_rank(n_ranks),
@@ -329,6 +369,7 @@ pub fn scratch_config_for<S: ScratchShape + ?Sized>(
         kv_layout,
         per_layer_kv_layouts,
         per_layer_kv_depths: Some(per_layer_depths),
+        mtp,
     }
 }
 
@@ -915,6 +956,26 @@ pub struct ScratchPool {
 
     pub kv_caches: Vec<KvCache>,
 
+    /// MTP anchor hidden (target post-`output_norm` hidden of the anchor
+    /// row) and the draft chain's current hidden. F16 `[hidden]`.
+    /// NULL when `config.mtp` is `None`.
+    pub mtp_anchor_f16: DevicePtr,
+    pub mtp_hidden_f16: DevicePtr,
+    /// MTP composite work buffers (F16 `[hidden]` norms + post-eh_proj
+    /// input; F32 `[hidden]` eh_proj partials). NULL when no MTP.
+    pub mtp_e_f16: DevicePtr,
+    pub mtp_h_f16: DevicePtr,
+    pub mtp_in_f16: DevicePtr,
+    pub mtp_proj_a_f32: DevicePtr,
+    pub mtp_proj_b_f32: DevicePtr,
+    /// Device-side GDN snapshot for MTP rollback (one slot's worth of
+    /// per-layer state+history). NULL when MTP off or arch non-GDN.
+    pub mtp_gdn_snap: DevicePtr,
+    /// Bytes per slot in `mtp_gdn_snap`.
+    pub mtp_gdn_snap_slot_bytes: usize,
+    /// Set when `mtp_gdn_snap` holds a valid snapshot.
+    pub mtp_snap_valid: bool,
+
     /// Per-layer paged KV cache, when `config.paged_kv` is `Some`.
     /// Coexists with `kv_caches` until E3c rewires `standard_attn`
     /// to dispatch on the paged path; today's runtime still reads
@@ -1266,6 +1327,56 @@ impl ScratchPool {
             });
         }
 
+        // MTP anchor / chain hidden buffers (F16 `[hidden]`). The draft
+        // layer's own KV slab is allocated by the loop above at index
+        // `num_layers - 1` (scratch_config_for appends its width/depth and
+        // bumps `num_layers` when `config.mtp` is `Some`).
+        let (
+            mtp_anchor_f16,
+            mtp_hidden_f16,
+            mtp_e_f16,
+            mtp_h_f16,
+            mtp_in_f16,
+            mtp_proj_a_f32,
+            mtp_proj_b_f32,
+            mtp_gdn_snap,
+            mtp_gdn_snap_slot_bytes,
+        ) = match config.mtp {
+            Some(_) => {
+                let snap_bytes = match config.gdn {
+                    Some(g) => {
+                        let f32b = 4usize;
+                        let per_layer = g.num_v_heads * g.head_k_dim * g.head_v_dim * f32b
+                            + (g.conv_kernel - 1) * g.conv_channels * f32b;
+                        config.num_layers * per_layer
+                    }
+                    None => 0,
+                };
+                (
+                    alloc_bytes(h * f16)?,
+                    alloc_bytes(h * f16)?,
+                    alloc_bytes(h * f16)?,
+                    alloc_bytes(h * f16)?,
+                    alloc_bytes(h * f16)?,
+                    alloc_bytes(h * f32)?,
+                    alloc_bytes(h * f32)?,
+                    if snap_bytes > 0 { alloc_bytes(snap_bytes)? } else { DevicePtr::NULL },
+                    snap_bytes,
+                )
+            }
+            None => (
+                DevicePtr::NULL,
+                DevicePtr::NULL,
+                DevicePtr::NULL,
+                DevicePtr::NULL,
+                DevicePtr::NULL,
+                DevicePtr::NULL,
+                DevicePtr::NULL,
+                DevicePtr::NULL,
+                0,
+            ),
+        };
+
         // Paged-KV allocation runs alongside the contiguous cache when
         // `config.paged_kv` is `Some`. Today's `standard_attn` still
         // reads + writes via `kv_caches`; the paged structures sit
@@ -1472,6 +1583,16 @@ impl ScratchPool {
             ple_proj_out_f16,
             ple_normed_f16,
             kv_caches,
+            mtp_anchor_f16,
+            mtp_hidden_f16,
+            mtp_e_f16,
+            mtp_h_f16,
+            mtp_in_f16,
+            mtp_proj_a_f32,
+            mtp_proj_b_f32,
+            mtp_gdn_snap,
+            mtp_gdn_snap_slot_bytes,
+            mtp_snap_valid: false,
             paged_kv_caches,
             page_pools,
             gdn_state,

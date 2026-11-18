@@ -84,7 +84,7 @@ impl<B: Backend, A: Arch> SoloSession<B, A> {
     /// scratch pool and registry. Mirrors `workers::init_rank` for the
     /// single-device (`Replicated`, no layer slice) case.
     pub fn new(file: GgufFile, device_id: i32, params: LaunchParams) -> Result<Self> {
-        let LaunchParams { ctx_cap, prefill_ubatch, max_slots, paged_kv_pages, kv_layout } = params;
+        let LaunchParams { ctx_cap, prefill_ubatch, max_slots, paged_kv_pages, kv_layout, mtp_max_draft } = params;
         if prefill_ubatch == 0 {
             anyhow::bail!("SoloSession::new: prefill_ubatch must be > 0");
         }
@@ -101,6 +101,7 @@ impl<B: Backend, A: Arch> SoloSession<B, A> {
             max_slots,
             paged_kv_pages,
             kv_layout,
+            mtp_max_draft,
         );
         let pool = ScratchPool::new(&device, cfg)?;
         let reg = B::new_registry(&device)?;
@@ -327,6 +328,38 @@ impl<B: Backend, A: Arch> SoloSession<B, A> {
         out.clear();
         out.extend_from_slice(&self.last_logits);
         Ok(())
+    }
+
+    /// One greedy MTP cycle (single-device). `Ok(None)` when the model has
+    /// no MTP head. Returns (accepted draft tokens, logits at the last
+    /// accepted position).
+    pub fn mtp_step(
+        &mut self,
+        token: u32,
+        position: usize,
+        slot_id: usize,
+        n_draft: usize,
+        sample_factory: crate::runtime::workers::SampleFactory,
+        seed: u64,
+    ) -> Result<Option<(Vec<u32>, Vec<f32>)>> {
+        if !A::has_mtp(&self.model) {
+            return Ok(None);
+        }
+        let stream = self.device.default_stream();
+        let mut ctx = ForwardEngine::<B>::new_solo(&self.device, stream, &self.reg, &mut self.pool);
+        let mut out_logits = Vec::new();
+        let emitted = A::mtp_cycle(
+            &self.model,
+            &mut ctx,
+            token,
+            position,
+            slot_id,
+            n_draft,
+            &mut (sample_factory)(seed),
+            &mut out_logits,
+        )?;
+        self.last_logits = out_logits.clone();
+        Ok(Some((emitted, out_logits)))
     }
 
     /// Chunked prefill into `slot_id` (chunk size = `prefill_ubatch`).

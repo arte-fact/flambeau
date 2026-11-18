@@ -247,6 +247,22 @@ recover the last decode kernel. Lower priority than Track A.
     spills past 128 VGPR and regresses — keep `#pragma nounroll`.
   - Harness: `scripts/bench/qwen38_27b_vs_llamacpp.py`.
 
+- [ ] **B5 — MTP (qwen35 nextn head): make the draft/verify cycle pay**
+  `--mtp N` loads the GGUF's embedded nextn block and runs greedy-exact
+  draft → verify → accept cycles (SD/TP, non-streaming legacy handler; default 0).
+  Output is bit-identical to plain decode, but it is a net **loss** on gfx906:
+  Qwen3.8-27B UD-Q3_K_XL, 1×MI50: ~14 t/s plain → ~8 (N=1), 6–8 (N=2), ~4 (N=4),
+  with ~1.6 tokens emitted per cycle at N=1.
+  - Why: a cycle costs ~2.6 decode steps — anchor forward, a *separate* verify
+    forward, then GDN snapshot-restore + re-forward of the accepted prefix on any
+    rejection — and gfx906 small-m forwards do not amortize weight reads.
+  - To do: (1) one merged target forward over `[last, d1..dk]`, drafting from the
+    previous cycle's captured hidden; (2) per-row GDN state checkpoints so a
+    rejection needs no re-forward; (3) wire the scheduler + SSE paths; (4) apply
+    stop-mask / min-response rules inside the cycle; (5) measure on sm_86, where
+    decode is bandwidth-bound and a batched verify can amortize.
+  - **Done when:** `--mtp N` beats plain decode e2e on at least one backend.
+
 ---
 
 ## Track C — Breadth & hardware-gated

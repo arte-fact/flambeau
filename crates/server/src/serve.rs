@@ -101,6 +101,8 @@ pub struct ServeConfig {
     /// architectural max; many GGUFs ship 262 144 which OOMs the per-rank
     /// KV cache on 16 GB MI50. Only shrinks.
     pub ctx_cap: Option<usize>,
+    /// Max MTP draft tokens per verify step (0 = off).
+    pub mtp: usize,
     /// On-device GPU sampler (top-k + softmax + penalties on the head
     /// rank, single DtoH per token). Drops sampler cost from ~12 ms to
     /// ~0 ms on chat workloads.
@@ -269,6 +271,7 @@ pub(crate) async fn serve_inner_v2(
             max_slots: inflight_slots,
             paged_kv_pages: cfg.paged_kv_pages,
             kv_layout,
+            mtp_max_draft: cfg.mtp,
         },
     )
     .with_context(|| format!("v2 shared session ({gguf_arch})"))?;
@@ -310,10 +313,11 @@ pub(crate) async fn serve_inner_v2(
         embedding,
         embedding_rank,
         gpu_sampler: false,
-        batched_decode: true,
+        batched_decode: cfg.batched_decode,
         max_queue_depth,
         prefill_ubatch,
         prefill_chunk_tokens: chunk_tokens,
+        mtp_max_draft: cfg.mtp,
         topology_tag,
         prefix_cache,
         boot,
@@ -529,9 +533,8 @@ fn parse_v2_server_model_cfg(
     let prefix = gguf_arch;
     let key = |suffix: &str| format!("{prefix}.{suffix}");
     let num_layers = f
-        .metadata_u32(&key("block_count"))
-        .ok_or_else(|| anyhow::anyhow!("v2 cfg: missing `{}.block_count`", prefix))?
-        as usize;
+        .forward_block_count(prefix)
+        .ok_or_else(|| anyhow::anyhow!("v2 cfg: missing `{}.block_count`", prefix))?;
     let context_length = f
         .metadata_u32(&key("context_length"))
         .ok_or_else(|| anyhow::anyhow!("v2 cfg: missing `{}.context_length`", prefix))?

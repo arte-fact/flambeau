@@ -31,6 +31,6 @@ pub use kv_cache::{
 pub use mesh::{CollectiveCfg, CollectiveDType, LayerAssignment, Mesh, RankId, ReduceOp};
 pub use model::{Model, ModelDriver};
 pub use registry::{Registry, RegistryError};
-pub use sampling::{sample, Rng, Sampler, Sampling};
+pub use sampling::{build_distribution, sample, Rng, Sampler, Sampling};
 pub use tp_layout::{LayoutError, WeightLayout};
 pub use tp_slice::{slice_bytes_for_tp, slice_for_tp, SliceError};

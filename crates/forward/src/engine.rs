@@ -1078,10 +1078,246 @@ impl<B: Backend, H: TopologyHooks<B>, S: StageHooks<B>> ForwardCtx for ForwardEn
         slot_ids: &[usize],
     ) -> Result<()> {
         if self.stage.is_last() {
-            composites::output_head_local(&mut self.core, &mut self.hooks, input, lm_head, slot_ids)
+            composites::output_head_local(&mut self.core, &mut self.hooks, input, lm_head, slot_ids, false)
         } else {
             self.stage.peer_send(&mut self.core, input, slot_ids.len())
         }
+    }
+
+    fn capture_hidden_from(
+        &mut self,
+        resid: &Tensor<F16>,
+        row: usize,
+        norm: &Tensor<F16>,
+        eps: f32,
+        dst: &mut Tensor<F16>,
+    ) -> Result<()> {
+        let hidden = self.core.hidden();
+        let n_tokens = resid.n_elems / hidden;
+        if row >= n_tokens {
+            anyhow::bail!("capture_hidden_from: row {row} >= n_tokens {n_tokens}");
+        }
+        let src = unsafe {
+            Tensor::<F16>::from_raw(resid.ptr.offset_bytes(row * hidden * 2), hidden)
+        };
+        let ops = self.core.ops();
+        flambeau_model_ops::rmsnorm_f16(&src, norm, dst, 1, hidden, eps, &ops)
+            .context("capture_hidden_from: rmsnorm")
+    }
+
+    fn mtp_draft(
+        &mut self,
+        w: &crate::ctx::MtpWeights,
+        lm_head: &crate::ctx::LmHeadWeights,
+        embedding: &crate::ctx::EmbeddingWeights,
+        anchor_token: u32,
+        anchor_h: &Tensor<F16>,
+        start_pos: usize,
+        slot_id: usize,
+        mtp_layer_idx: usize,
+        n_draft: usize,
+        sample: &mut dyn FnMut(&[f32]) -> (u32, Vec<(u32, f32)>),
+        drafts: &mut Vec<crate::ctx::MtpDraft>,
+    ) -> Result<()> {
+        if !self.stage.is_first() || !self.stage.is_last() {
+            anyhow::bail!("mtp_draft: only single-device stage supported (PP/TP MTP is a follow-up)");
+        }
+        composites::mtp_draft_local(
+            &mut self.core,
+            &mut self.hooks,
+            w,
+            lm_head,
+            embedding,
+            anchor_token,
+            anchor_h,
+            start_pos,
+            slot_id,
+            mtp_layer_idx,
+            n_draft,
+            sample,
+            drafts,
+        )
+    }
+
+    fn output_head_all(
+        &mut self,
+        input: &Tensor<F16>,
+        lm_head: &crate::ctx::LmHeadWeights,
+        slot_ids: &[usize],
+        _n_rows: usize,
+    ) -> Result<()> {
+        if !self.stage.is_last() {
+            anyhow::bail!("output_head_all: only on the last stage");
+        }
+        composites::output_head_local(&mut self.core, &mut self.hooks, input, lm_head, slot_ids, true)
+    }
+
+    fn gdn_snapshot(&mut self, slot_id: usize) -> Result<Vec<u8>> {
+        let Some(g) = self.core.pool.config.gdn else {
+            return Ok(Vec::new());
+        };
+        // MTP fast path: snapshot stays on device (D2D) — no host round trip.
+        if self.core.pool.mtp_gdn_snap != DevicePtr::NULL {
+            let f32b = 4usize;
+            let state_b = g.num_v_heads * g.head_k_dim * g.head_v_dim * f32b;
+            let hist_b = (g.conv_kernel - 1) * g.conv_channels * f32b;
+            let mut off = 0usize;
+            for ls in &self.core.pool.gdn_state {
+                unsafe {
+                    self.core
+                        .device
+                        .memcpy_async(
+                            self.core.stream,
+                            CopyDirection::DeviceToDevice,
+                            self.core.pool.mtp_gdn_snap.offset_bytes(off),
+                            ls.state.offset_bytes(slot_id * state_b),
+                            state_b,
+                        )
+                        .context("gdn_snapshot dev state")?;
+                }
+                off += state_b;
+                unsafe {
+                    self.core
+                        .device
+                        .memcpy_async(
+                            self.core.stream,
+                            CopyDirection::DeviceToDevice,
+                            self.core.pool.mtp_gdn_snap.offset_bytes(off),
+                            ls.conv_history.offset_bytes(slot_id * hist_b),
+                            hist_b,
+                        )
+                        .context("gdn_snapshot dev hist")?;
+                }
+                off += hist_b;
+            }
+            flambeau_core::Stream::synchronize(self.core.stream)?;
+            self.core.pool.mtp_snap_valid = true;
+            return Ok(Vec::new());
+        }
+        let n_slots = self.core.pool.config.max_slots.max(1);
+        if slot_id >= n_slots {
+            anyhow::bail!("gdn_snapshot: slot_id {slot_id} >= max_slots {n_slots}");
+        }
+        let f32b = 4usize;
+        let state_b = g.num_v_heads * g.head_k_dim * g.head_v_dim * f32b;
+        let hist_b = (g.conv_kernel - 1) * g.conv_channels * f32b;
+        let mut out = Vec::new();
+        for ls in &self.core.pool.gdn_state {
+            let mut buf = vec![0u8; state_b.max(hist_b)];
+            unsafe {
+                self.core
+                    .device
+                    .memcpy_async(
+                        self.core.stream,
+                        CopyDirection::DeviceToHost,
+                        DevicePtr(buf.as_mut_ptr() as usize),
+                        ls.state.offset_bytes(slot_id * state_b),
+                        state_b,
+                    )
+                    .context("gdn_snapshot state")?;
+            }
+            out.extend_from_slice(&buf[..state_b]);
+            unsafe {
+                self.core
+                    .device
+                    .memcpy_async(
+                        self.core.stream,
+                        CopyDirection::DeviceToHost,
+                        DevicePtr(buf.as_mut_ptr() as usize),
+                        ls.conv_history.offset_bytes(slot_id * hist_b),
+                        hist_b,
+                    )
+                    .context("gdn_snapshot hist")?;
+            }
+            out.extend_from_slice(&buf[..hist_b]);
+        }
+        flambeau_core::Stream::synchronize(self.core.stream)?;
+        Ok(out)
+    }
+
+    fn mtp_anchor_ptr(&self) -> flambeau_core::DevicePtr {
+        self.core.pool.mtp_anchor_f16
+    }
+
+    fn gdn_restore(&mut self, slot_id: usize, snap: &[u8]) -> Result<()> {
+        let Some(g) = self.core.pool.config.gdn else {
+            return Ok(());
+        };
+        if self.core.pool.mtp_snap_valid && snap.is_empty() {
+            let f32b = 4usize;
+            let state_b = g.num_v_heads * g.head_k_dim * g.head_v_dim * f32b;
+            let hist_b = (g.conv_kernel - 1) * g.conv_channels * f32b;
+            let mut off = 0usize;
+            for ls in &self.core.pool.gdn_state {
+                unsafe {
+                    self.core
+                        .device
+                        .memcpy_async(
+                            self.core.stream,
+                            CopyDirection::DeviceToDevice,
+                            ls.state.offset_bytes(slot_id * state_b),
+                            self.core.pool.mtp_gdn_snap.offset_bytes(off),
+                            state_b,
+                        )
+                        .context("gdn_restore dev state")?;
+                }
+                off += state_b;
+                unsafe {
+                    self.core
+                        .device
+                        .memcpy_async(
+                            self.core.stream,
+                            CopyDirection::DeviceToDevice,
+                            ls.conv_history.offset_bytes(slot_id * hist_b),
+                            self.core.pool.mtp_gdn_snap.offset_bytes(off),
+                            hist_b,
+                        )
+                        .context("gdn_restore dev hist")?;
+                }
+                off += hist_b;
+            }
+            flambeau_core::Stream::synchronize(self.core.stream)?;
+            self.core.pool.mtp_snap_valid = false;
+            return Ok(());
+        }
+        let f32b = 4usize;
+        let state_b = g.num_v_heads * g.head_k_dim * g.head_v_dim * f32b;
+        let hist_b = (g.conv_kernel - 1) * g.conv_channels * f32b;
+        let need = self.core.pool.gdn_state.len() * (state_b + hist_b);
+        if snap.len() != need {
+            anyhow::bail!("gdn_restore: snap {} bytes, expected {need}", snap.len());
+        }
+        let mut off = 0usize;
+        for ls in &self.core.pool.gdn_state {
+            unsafe {
+                self.core
+                    .device
+                    .memcpy_async(
+                        self.core.stream,
+                        CopyDirection::HostToDevice,
+                        ls.state.offset_bytes(slot_id * state_b),
+                        DevicePtr(snap.as_ptr().add(off) as usize),
+                        state_b,
+                    )
+                    .context("gdn_restore state")?;
+            }
+            off += state_b;
+            unsafe {
+                self.core
+                    .device
+                    .memcpy_async(
+                        self.core.stream,
+                        CopyDirection::HostToDevice,
+                        ls.conv_history.offset_bytes(slot_id * hist_b),
+                        DevicePtr(snap.as_ptr().add(off) as usize),
+                        hist_b,
+                    )
+                    .context("gdn_restore hist")?;
+            }
+            off += hist_b;
+        }
+        flambeau_core::Stream::synchronize(self.core.stream)?;
+        Ok(())
     }
 
     fn layer_range<'b>(

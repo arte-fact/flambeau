@@ -181,6 +181,11 @@ pub trait Model: Send + Sync + 'static {
     }
 }
 
+/// Sampler closure + factory shared by the MTP path across crates.
+pub type MtpSampleFn = Box<dyn FnMut(&[f32]) -> (u32, Vec<(u32, f32)>) + Send>;
+pub type SampleFactory =
+    std::sync::Arc<dyn Fn(u64) -> MtpSampleFn + Send + Sync>;
+
 pub trait Session: Send + 'static {
     /// Downcast hatch for arch-specific code paths. Implementors return
     /// `self`. Use per-arch extension traits (e.g. `Qwen3MoeSessionExt::as_pp_mut`)
@@ -189,6 +194,22 @@ pub trait Session: Send + 'static {
     fn as_any_mut(&mut self) -> &mut dyn Any;
 
     fn reset_for_next_request(&mut self) -> Result<()>;
+
+    /// One greedy MTP speculative-decode step. `Ok(None)` when the session
+    /// doesn't support MTP (arch without nextn head, non-SD topology) —
+    /// caller falls back to plain decode. On `Some(accepted)`, `logits_out`
+    /// holds the logits at the last accepted position.
+    fn mtp_step(
+        &mut self,
+        _token: u32,
+        _position: usize,
+        _n_draft: usize,
+        _sample_factory: SampleFactory,
+        _seed: u64,
+        _logits_out: &mut Vec<f32>,
+    ) -> Result<Option<Vec<u32>>> {
+        Ok(None)
+    }
 
     fn dispose(self: Box<Self>) -> Result<()>;
 

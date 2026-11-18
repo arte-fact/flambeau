@@ -203,6 +203,80 @@ pub trait ForwardCtx {
     ) -> Box<dyn Iterator<Item = usize> + 'a>;
 
     fn logits(&self) -> &[f32];
+
+    /// RMSNorm row `row` of `resid` (the pre-head residual) with `norm` and
+    /// write the F16 result to `dst` — the MTP anchor (`h_nextn`).
+    /// Default impl bails — only the engine ctx supports it.
+    fn capture_hidden_from(
+        &mut self,
+        _resid: &Tensor<F16>,
+        _row: usize,
+        _norm: &Tensor<F16>,
+        _eps: f32,
+        _dst: &mut Tensor<F16>,
+    ) -> Result<()> {
+        anyhow::bail!("capture_hidden_from: not implemented on this ctx")
+    }
+
+    /// MTP draft chain: starting from the anchor (`anchor_token` at
+    /// `positions[0]` with target hidden `anchor_h`), run the nextn layer
+    /// for up to `n_draft` steps, each step consuming the previously
+    /// drafted token and the draft layer's own hidden, appending greedy
+    /// argmax draft tokens to `drafts`. The draft layer uses KV slab
+    /// `mtp_layer_idx` at `positions` for slot `slot_id`.
+    /// Default impl bails — only the engine ctx supports it.
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
+    fn mtp_draft(
+        &mut self,
+        _w: &MtpWeights,
+        _lm_head: &LmHeadWeights,
+        _embedding: &EmbeddingWeights,
+        _anchor_token: u32,
+        _anchor_h: &Tensor<F16>,
+        _start_pos: usize,
+        _slot_id: usize,
+        _mtp_layer_idx: usize,
+        _n_draft: usize,
+        _sample: &mut dyn FnMut(&[f32]) -> (u32, Vec<(u32, f32)>),
+        _drafts: &mut Vec<MtpDraft>,
+    ) -> Result<()> {
+        anyhow::bail!("mtp_draft: not implemented on this ctx")
+    }
+
+    /// Like `output_head`, but emits logits for ALL `n_rows` rows of
+    /// `input` (needed to verify a batch of MTP drafts in one forward).
+    /// Default impl falls back to `output_head` when `n_rows == 1`.
+    fn output_head_all(
+        &mut self,
+        input: &Tensor<F16>,
+        lm_head: &LmHeadWeights,
+        slot_ids: &[usize],
+        n_rows: usize,
+    ) -> Result<()> {
+        if n_rows > 1 {
+            anyhow::bail!("output_head_all: not implemented on this ctx")
+        }
+        self.output_head(input, lm_head, slot_ids)
+    }
+
+    /// Snapshot the GDN recurrent state of `slot_id` to host bytes (for
+    /// MTP verify rollback). Default bails.
+    fn gdn_snapshot(&mut self, _slot_id: usize) -> Result<Vec<u8>> {
+        anyhow::bail!("gdn_snapshot: not implemented on this ctx")
+    }
+
+    /// Restore the GDN recurrent state of `slot_id` from a snapshot.
+    /// Default bails.
+    fn gdn_restore(&mut self, _slot_id: usize, _snap: &[u8]) -> Result<()> {
+        anyhow::bail!("gdn_restore: not implemented on this ctx")
+    }
+
+    /// Device pointer of the pool's MTP anchor buffer (F16 `[hidden]`).
+    /// NULL when MTP is off.
+    fn mtp_anchor_ptr(&self) -> flambeau_core::DevicePtr {
+        flambeau_core::DevicePtr::NULL
+    }
 }
 
 /// Runtime-tagged quant weight handle. Holds the device pointer plus
@@ -408,6 +482,34 @@ pub struct AttnWeights {
     /// projection bytes are computed but discarded (cheaper than
     /// branching the composite). `None` ⇒ normal own-KV path.
     pub kv_share_src: Option<usize>,
+}
+
+/// One drafted token with its draft distribution (for rejection sampling).
+pub struct MtpDraft {
+    pub token: u32,
+    /// q(token) under the draft distribution.
+    pub q: f32,
+    /// Full draft distribution (id, prob), top-k truncated.
+    pub dist: Vec<(u32, f32)>,
+}
+
+/// Weights of the embedded MTP/nextn draft head (GGUF `blk.{n_layer}.nextn.*`
+/// plus the draft block's attn/ffn tensors). The draft block is a full-attention
+/// decoder layer whose input is `eh_proj(concat(enorm(e_tok), hnorm(h_tgt)))`
+/// and whose logits go through the shared LM head after `shared_head_norm`.
+/// Loaded only when the GGUF reports `nextn_predict_layers > 0`.
+pub struct MtpWeights {
+    /// F16 halves of the dequantized `nextn.eh_proj` `[2*hidden, hidden]`
+    /// weight, split along the input dim: `eh_proj_e` multiplies the normed
+    /// token embedding, `eh_proj_h` the normed target hidden.
+    pub eh_proj_e: Tensor<F16>,
+    pub eh_proj_h: Tensor<F16>,
+    pub enorm: Tensor<F16>,
+    pub hnorm: Tensor<F16>,
+    pub shared_head_norm: Tensor<F16>,
+    pub attn: AttnWeights,
+    pub ffn: FfnWeights,
+    pub rms_eps: f32,
 }
 
 pub struct FfnWeights {

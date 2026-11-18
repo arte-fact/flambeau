@@ -353,6 +353,23 @@ impl GgufFile {
         self.metadata.get(key).and_then(Value::as_f32)
     }
 
+    /// Number of forward layers for `{arch}.block_count`, excluding embedded
+    /// MTP/nextn draft blocks. The first nextn block is located by its
+    /// `blk.N.nextn.eh_proj.weight` tensor because GGUF exporters disagree
+    /// on whether `block_count` includes the `nextn_predict_layers`.
+    pub fn forward_block_count(&self, arch: &str) -> Option<usize> {
+        let blocks = self.metadata_u32(&format!("{arch}.block_count"))? as usize;
+        let nextn = self
+            .metadata_u32(&format!("{arch}.nextn_predict_layers"))
+            .unwrap_or(0) as usize;
+        if nextn == 0 {
+            return Some(blocks);
+        }
+        let guess = blocks.saturating_sub(nextn);
+        let is_nextn = |n: usize| self.info(&format!("blk.{n}.nextn.eh_proj.weight")).is_ok();
+        Some((guess.saturating_sub(nextn)..=blocks).find(|&n| is_nextn(n)).unwrap_or(guess))
+    }
+
     pub fn metadata_u64(&self, key: &str) -> Option<u64> {
         self.metadata.get(key).and_then(Value::as_u64)
     }

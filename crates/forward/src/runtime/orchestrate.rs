@@ -106,6 +106,8 @@ pub struct LaunchParams {
     pub max_slots: usize,
     pub paged_kv_pages: Option<usize>,
     pub kv_layout: crate::core::KvLayout,
+    /// Max MTP draft tokens per verify step; 0 = MTP off.
+    pub mtp_max_draft: usize,
 }
 
 /// Shared runtime configuration for the topology launchers.

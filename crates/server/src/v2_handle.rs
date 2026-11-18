@@ -81,6 +81,21 @@ pub trait V2BatchableSession: Send {
     fn release_paged_slot(&mut self, slot_id: usize) -> Result<()>;
 
     fn dispose_in_place(&mut self) -> Result<()>;
+
+    /// One greedy MTP cycle. `Ok(None)` when unsupported (arch without MTP
+    /// head, or non-single-device topology). Returns (accepted draft
+    /// tokens, logits at the last accepted position).
+    fn mtp_step(
+        &mut self,
+        _token: u32,
+        _position: usize,
+        _slot_id: usize,
+        _n_draft: usize,
+        _sample_factory: flambeau_server_core::SampleFactory,
+        _seed: u64,
+    ) -> Result<Option<(Vec<u32>, Vec<f32>)>> {
+        Ok(None)
+    }
 }
 
 #[cfg(feature = "hip")]
@@ -167,6 +182,18 @@ impl<A: Arch> V2BatchableSession for Session<A> {
 
     fn dispose_in_place(&mut self) -> Result<()> {
         Session::dispose_in_place(self)
+    }
+
+    fn mtp_step(
+        &mut self,
+        token: u32,
+        position: usize,
+        slot_id: usize,
+        n_draft: usize,
+        sample_factory: flambeau_server_core::SampleFactory,
+        seed: u64,
+    ) -> Result<Option<(Vec<u32>, Vec<f32>)>> {
+        Session::mtp_step(self, token, position, slot_id, n_draft, sample_factory, seed)
     }
 }
 
@@ -257,6 +284,18 @@ impl<B: flambeau_backend::Backend, A: Arch> V2BatchableSession for SoloSession<B
 
     fn dispose_in_place(&mut self) -> Result<()> {
         SoloSession::dispose_in_place(self)
+    }
+
+    fn mtp_step(
+        &mut self,
+        token: u32,
+        position: usize,
+        slot_id: usize,
+        n_draft: usize,
+        sample_factory: flambeau_server_core::SampleFactory,
+        seed: u64,
+    ) -> Result<Option<(Vec<u32>, Vec<f32>)>> {
+        SoloSession::mtp_step(self, token, position, slot_id, n_draft, sample_factory, seed)
     }
 }
 
@@ -490,6 +529,26 @@ impl ServerSession for V2Conv {
         logits_out.clear();
         let mut shared = self.shared.blocking_lock();
         shared.forward_one_token_into_slot(token, position, self.slot_id, logits_out)
+    }
+
+    fn mtp_step(
+        &mut self,
+        token: u32,
+        position: usize,
+        n_draft: usize,
+        sample_factory: flambeau_server_core::SampleFactory,
+        seed: u64,
+        logits_out: &mut Vec<f32>,
+    ) -> Result<Option<Vec<u32>>> {
+        logits_out.clear();
+        let mut shared = self.shared.blocking_lock();
+        match shared.mtp_step(token, position, self.slot_id, n_draft, sample_factory, seed)? {
+            Some((emitted, logits)) => {
+                logits_out.extend_from_slice(&logits);
+                Ok(Some(emitted))
+            }
+            None => Ok(None),
+        }
     }
 
     fn bos_id(&self) -> Option<u32> {

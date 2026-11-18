@@ -34,6 +34,7 @@ fn session_qwen35_9b_pp_size_2_argmax_matches_sd() {
             max_slots: 1,
             paged_kv_pages: None,
             kv_layout: flambeau_forward::KvLayout::F16Contig,
+                    mtp_max_draft: 0,
         },
     )
     .expect("Session<Qwen35V2> PP=2");

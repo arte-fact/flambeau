@@ -66,6 +66,7 @@ impl Arch for Gemma4V2 {
         max_slots: usize,
         paged_kv_pages: Option<usize>,
         kv_layout: KvLayout,
+        mtp_max_draft: usize,
     ) -> ScratchConfig {
         scratch_config_for(
             &model.config,
@@ -74,6 +75,7 @@ impl Arch for Gemma4V2 {
             max_slots,
             paged_kv_pages,
             kv_layout,
+            mtp_max_draft,
         )
     }
 
