@@ -237,9 +237,10 @@ pub fn load_from_gguf(file: &GgufFile) -> Result<GgufTokenizer> {
 
     // Special tokens. Register them so encode/decode honours them as
     // single ids rather than splitting into byte-level fragments.
-    // llama.cpp's `token_type == 3` or `4` flags control tokens, but GGUF
-    // doesn't always reliably surface that; we use a heuristic: any vocab
-    // entry wrapped in `<|...|>` (Qwen/ChatML convention) is a special token.
+    // Primary source is `tokenizer.ggml.token_type` (CONTROL = 3,
+    // USER_DEFINED = 4), as llama.cpp does: it covers non-`<|...|>` markers
+    // such as Qwen's `<think>` / `<tool_call>` and Mistral's `[INST]`. The
+    // `<|...|>` sweep below is the fallback for GGUFs without token types.
     let bos_id = file.metadata_u32("tokenizer.ggml.bos_token_id");
     let eos_id = file.metadata_u32("tokenizer.ggml.eos_token_id");
     let pad_id = file.metadata_u32("tokenizer.ggml.padding_token_id");
@@ -252,7 +253,21 @@ pub fn load_from_gguf(file: &GgufFile) -> Result<GgufTokenizer> {
             }
         }
     }
-    // Sweep vocab for `<|...|>` bracket-style control tokens.
+    if let Some(types) = file
+        .metadata
+        .get("tokenizer.ggml.token_type")
+        .and_then(|v| v.as_array())
+    {
+        for (id, (t, v)) in types.iter().zip(tokens_arr.iter()).enumerate() {
+            if matches!(t.as_u32(), Some(3 | 4)) {
+                if let Some(s) = v.as_str() {
+                    if !s.is_empty() && added_ids.insert(id as u32) {
+                        added.push(AddedToken::from(s.to_owned(), /*special=*/ true));
+                    }
+                }
+            }
+        }
+    }
     for (id, v) in tokens_arr.iter().enumerate() {
         if let Some(s) = v.as_str() {
             if s.starts_with("<|")
