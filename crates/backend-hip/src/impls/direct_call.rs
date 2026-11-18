@@ -936,6 +936,26 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
         cert_rel_path: "certs/hip/gfx906/gelu_mul_f32.json",
     },
     DirectCallKernel {
+        impl_id: "gelu_mul_f32_to_q8_1",
+        cert_rel_path: "certs/hip/gfx906/gelu_mul_f32_to_q8_1.json",
+    },
+    DirectCallKernel {
+        impl_id: "gelu_mul_f32_to_q8_1_mmq",
+        cert_rel_path: "certs/hip/gfx906/gelu_mul_f32_to_q8_1_mmq.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmvq_q4_k_gate_up_r4",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q4_k_gate_up_r4.json",
+    },
+    DirectCallKernel {
+        impl_id: "mmvq_q4_0_kv_f16dst",
+        cert_rel_path: "certs/hip/gfx906/mmvq_q4_0_kv_f16dst.json",
+    },
+    DirectCallKernel {
+        impl_id: "qmatmul_q4_0_gate_up_t128_dp4a",
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q4_0_gate_up_t128_dp4a.json",
+    },
+    DirectCallKernel {
         impl_id: "gelu_f32_to_f16",
         cert_rel_path: "certs/hip/gfx906/gelu_f32_to_f16.json",
     },
