@@ -1239,6 +1239,95 @@ impl<B: Backend, H: TopologyHooks<B>, S: StageHooks<B>> ForwardCtx for ForwardEn
         self.core.pool.mtp_anchor_f16
     }
 
+    fn mtp_spec_rows(&mut self, on: bool) {
+        self.core.pool.mtp_spec_rows = on;
+    }
+
+    fn mtp_set_pending(&mut self, pending: Option<(usize, usize)>) {
+        self.core.pool.mtp_pending = pending;
+    }
+
+    fn mtp_pending(&self) -> Option<(usize, usize)> {
+        self.core.pool.mtp_pending
+    }
+
+    fn gdn_replay_rows(
+        &mut self,
+        weights: &crate::ctx::GdnWeights,
+        layer_idx: usize,
+        slot_id: usize,
+        n_keep: usize,
+    ) -> Result<()> {
+        let pool = &self.core.pool;
+        let Some(g) = pool.config.gdn else {
+            return Ok(());
+        };
+        if !pool.mtp_snap_valid {
+            anyhow::bail!("gdn_replay_rows: no device snapshot");
+        }
+        let dims = weights.dims;
+        let local_idx = layer_idx
+            .checked_sub(self.core.layer_idx_offset)
+            .filter(|&i| i < pool.gdn_state.len())
+            .ok_or_else(|| anyhow::anyhow!("gdn_replay_rows: layer {layer_idx} not owned"))?;
+        let rows = pool
+            .gdn_spec_rows(local_idx, &dims)
+            .ok_or_else(|| anyhow::anyhow!("gdn_replay_rows: pool has no MTP row store"))?;
+        if n_keep == 0 || n_keep > pool.mtp_verify_rows() {
+            anyhow::bail!("gdn_replay_rows: n_keep {n_keep} out of range");
+        }
+        let attn_out = pool
+            .gdn_prefill_scratch
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("gdn_replay_rows: no prefill scratch"))?
+            .state_out;
+        let snap_state_b = g.num_v_heads * g.head_k_dim * g.head_v_dim * 4;
+        let snap_hist_b = (g.conv_kernel - 1) * g.conv_channels * 4;
+        let snap = pool
+            .mtp_gdn_snap
+            .offset_bytes(local_idx * (snap_state_b + snap_hist_b));
+        let ls = pool.gdn_state[local_idx];
+        let state_b = dims.num_v_heads * dims.head_k_dim * dims.head_v_dim * 4;
+        let row_b = dims.conv_channels * 4;
+        let hist_b = (dims.conv_kernel - 1) * row_b;
+        let ops = self.core.ops();
+        ops.gdn_state_step_alphabeta_f32_s128(
+            flambeau_ops::GdnStepAlphaBetaBuffers {
+                q: rows.q,
+                k: rows.k,
+                v: rows.v,
+                alpha_in: rows.alpha,
+                beta_in: rows.beta,
+                ssm_dt_bias: weights.ssm_dt_bias.ptr,
+                ssm_a: weights.ssm_a.ptr,
+                state_in: snap,
+                state_out: ls.state.offset_bytes(slot_id * state_b),
+                attn_out,
+            },
+            flambeau_ops::GdnStepShape {
+                b: 1,
+                h_v: dims.num_v_heads,
+                l: n_keep,
+                n_rep: dims.num_v_heads / dims.num_k_heads,
+                rep_inner_layout: weights.rep_inner_layout,
+            },
+        )
+        .context("gdn_replay_rows: state step")?;
+        unsafe {
+            self.core
+                .device
+                .memcpy_async(
+                    self.core.stream,
+                    CopyDirection::DeviceToDevice,
+                    ls.conv_history.offset_bytes(slot_id * hist_b),
+                    rows.conv_input.offset_bytes(n_keep * row_b),
+                    hist_b,
+                )
+                .context("gdn_replay_rows: conv history")?;
+        }
+        Ok(())
+    }
+
     fn gdn_restore(&mut self, slot_id: usize, snap: &[u8]) -> Result<()> {
         let Some(g) = self.core.pool.config.gdn else {
             return Ok(());

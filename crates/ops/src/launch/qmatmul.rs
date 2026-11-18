@@ -83,15 +83,17 @@ pub fn qmatmul<B: flambeau_core::KernelBackend>(
         let _ = act_q8_1_mmq;
         return Ok(());
     }
-    if dtype_weight == QDtype::Q4_K && m == 2 {
-        mmvq_q4_k_batched(
-
-            reg, stream,
-
+    // Q4_K / Q5_K / IQ4_XS at m = 2..8: row-tiled batched dp4a MMVQ. The
+    // LDS-tiled MMQ pays a fixed ~1.6 decode passes to stage the weight tile;
+    // here the weights stay in registers and only the activation strip is
+    // staged, so a 5-row verify forward costs ~1.5 decode steps, not ~2.9.
+    if rowtile_batched_k_owns(dtype_weight, m, k) {
+        mmvq_dp4a_row_tile_batched_k(
+            reg,
+            stream,
+            dtype_weight,
             crate::MmvqBuffers { weights, act_q8_1, dst },
-
             crate::MmvqBatchShape { n_rows: n, k, n_slots: m },
-
         )?;
         let _ = act_q8_1_mmq;
         return Ok(());
@@ -169,25 +171,6 @@ pub fn qmatmul<B: flambeau_core::KernelBackend>(
                 MmvqLaunchTune { threads, rows_per_block: 1 },
             )?;
         }
-        let _ = act_q8_1_mmq;
-        return Ok(());
-    }
-
-    // Q5_K at m = 2 (m >= 3 dispatches to the small-batch LDS tile): row-tile
-    // batched MMVQ (R=8 rows per block,
-    // LDS-resident activation strip per super-block). Replaced the
-    // earlier r2 batched at this dispatch row; cert.md shows 1.50×–2.68×
-    // vs the r2 sibling on decode-class shapes.
-    if dtype_weight == QDtype::Q5_K && m == 2 {
-        mmvq_q5_k_row_tile_batched(
-
-            reg, stream,
-
-            crate::MmvqBuffers { weights, act_q8_1, dst },
-
-            crate::MmvqBatchShape { n_rows: n, k, n_slots: m },
-
-        )?;
         let _ = act_q8_1_mmq;
         return Ok(());
     }
@@ -360,8 +343,11 @@ pub fn qmatmul_reads_mmq_activation<B: flambeau_core::KernelBackend>(
         return false;
     }
     // Compile-time batched MMVQ short-circuits (standard layout).
+    if rowtile_batched_k_owns(dtype_weight, m, k) {
+        return false;
+    }
     if (matches!(dtype_weight, QDtype::Q4_1 | QDtype::Q8_0) && (2..=4).contains(&m))
-        || (matches!(dtype_weight, QDtype::Q4_K | QDtype::Q6_K) && m == 2)
+        || (dtype_weight == QDtype::Q6_K && m == 2)
     {
         return false;
     }
@@ -370,10 +356,6 @@ pub fn qmatmul_reads_mmq_activation<B: flambeau_core::KernelBackend>(
     if (m < 32 || k % 128 != 0 || n % 128 != 0)
         && matches!(dtype_weight, QDtype::Q4_0 | QDtype::Q5_0 | QDtype::Q5_1)
     {
-        return false;
-    }
-    // Q5_K row-tile batched MMVQ short-circuit (standard layout).
-    if dtype_weight == QDtype::Q5_K && m == 2 {
         return false;
     }
     match resolve_dispatch_recipe::<B>(dtype_weight, m, k, n) {
@@ -508,6 +490,86 @@ pub fn mmvq_q4_k_batched<B: flambeau_core::KernelBackend>(
     args.push_arg(&n_rows_i);
     args.push_arg(&n_superblocks_i);
     let cfg = LaunchCfg::one_d(n_rows as u32, 64);
+    B::launch(&kernel, stream, cfg, args)?;
+    Ok(())
+}
+
+/// Shapes the row-tiled batched dp4a MMVQ serves ahead of the dispatch table.
+fn rowtile_batched_k_owns(dtype_weight: QDtype, m: usize, k: usize) -> bool {
+    matches!(dtype_weight, QDtype::Q4_K | QDtype::Q5_K | QDtype::IQ4_XS)
+        && (2..=8).contains(&m)
+        && k % flambeau_quant::QK_K == 0
+}
+
+/// Row-tiled batched dp4a MMVQ for the 256-element super-block dtypes (Q4_K,
+/// Q5_K, IQ4_XS), `n_slots` ∈ [2, 8]: 8 weight rows per block share one
+/// LDS-staged activation strip and each weight int is decoded once for every
+/// column. Standard Q8_1 activation, slot-major `dst`.
+pub fn mmvq_dp4a_row_tile_batched_k<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
+    dtype: QDtype,
+    buffers: crate::MmvqBuffers,
+    shape: crate::MmvqBatchShape,
+) -> Result<()> {
+    let crate::MmvqBuffers { weights, act_q8_1: y_q8_1, dst } = buffers;
+    let crate::MmvqBatchShape { n_rows, k, n_slots } = shape;
+    if !(2..=8).contains(&n_slots) {
+        bail!("mmvq_dp4a_row_tile_batched_k: n_slots={n_slots} outside [2, 8]");
+    }
+    let (stem, entries): (_, [&'static str; 7]) = match dtype {
+        QDtype::Q4_K => (
+            "mmvq_q4_k_dp4a_batched",
+            [
+                "flambeau_mmvq_q4_k_dp4a_q8_1_batched_n2",
+                "flambeau_mmvq_q4_k_dp4a_q8_1_batched_n3",
+                "flambeau_mmvq_q4_k_dp4a_q8_1_batched_n4",
+                "flambeau_mmvq_q4_k_dp4a_q8_1_batched_n5",
+                "flambeau_mmvq_q4_k_dp4a_q8_1_batched_n6",
+                "flambeau_mmvq_q4_k_dp4a_q8_1_batched_n7",
+                "flambeau_mmvq_q4_k_dp4a_q8_1_batched_n8",
+            ],
+        ),
+        QDtype::Q5_K => (
+            "mmvq_q5_k_dp4a_batched",
+            [
+                "flambeau_mmvq_q5_k_dp4a_q8_1_batched_n2",
+                "flambeau_mmvq_q5_k_dp4a_q8_1_batched_n3",
+                "flambeau_mmvq_q5_k_dp4a_q8_1_batched_n4",
+                "flambeau_mmvq_q5_k_dp4a_q8_1_batched_n5",
+                "flambeau_mmvq_q5_k_dp4a_q8_1_batched_n6",
+                "flambeau_mmvq_q5_k_dp4a_q8_1_batched_n7",
+                "flambeau_mmvq_q5_k_dp4a_q8_1_batched_n8",
+            ],
+        ),
+        QDtype::IQ4_XS => (
+            "mmvq_iq4_xs_dp4a_batched",
+            [
+                "flambeau_mmvq_iq4_xs_dp4a_q8_1_batched_n2",
+                "flambeau_mmvq_iq4_xs_dp4a_q8_1_batched_n3",
+                "flambeau_mmvq_iq4_xs_dp4a_q8_1_batched_n4",
+                "flambeau_mmvq_iq4_xs_dp4a_q8_1_batched_n5",
+                "flambeau_mmvq_iq4_xs_dp4a_q8_1_batched_n6",
+                "flambeau_mmvq_iq4_xs_dp4a_q8_1_batched_n7",
+                "flambeau_mmvq_iq4_xs_dp4a_q8_1_batched_n8",
+            ],
+        ),
+        other => bail!("mmvq_dp4a_row_tile_batched_k: no kernel for {other:?}"),
+    };
+    let module = reg.expect_module(stem)?;
+    let kernel = B::kernel(module, entries[n_slots - 2])?;
+    let n_rows_i = n_rows as i32;
+    let n_superblocks_i = (k / flambeau_quant::QK_K) as i32;
+    let w_ptr: u64 = weights.as_usize() as u64;
+    let y_ptr: u64 = y_q8_1.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&w_ptr);
+    args.push_arg(&y_ptr);
+    args.push_arg(&d_ptr);
+    args.push_arg(&n_rows_i);
+    args.push_arg(&n_superblocks_i);
+    let cfg = LaunchCfg::one_d(n_rows.div_ceil(8) as u32, 256);
     B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }

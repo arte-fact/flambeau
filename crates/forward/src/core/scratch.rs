@@ -975,6 +975,17 @@ pub struct ScratchPool {
     pub mtp_gdn_snap_slot_bytes: usize,
     /// Set when `mtp_gdn_snap` holds a valid snapshot.
     pub mtp_snap_valid: bool,
+    /// Per-GDN-layer state-step inputs of the last verify batch
+    /// (`max_draft + 1` rows), see [`GdnSpecRows`]. NULL when MTP off or
+    /// arch non-GDN.
+    pub mtp_gdn_rows: DevicePtr,
+    pub mtp_gdn_rows_layer_bytes: usize,
+    /// While set, the GDN prefill path keeps its state-step inputs in
+    /// `mtp_gdn_rows` so a rejected draft suffix can be rolled back by
+    /// replaying the state step alone.
+    pub mtp_spec_rows: bool,
+    /// `(slot, position)` whose target hidden `mtp_anchor_f16` holds.
+    pub mtp_pending: Option<(usize, usize)>,
 
     /// Per-layer paged KV cache, when `config.paged_kv` is `Some`.
     /// Coexists with `kv_caches` until E3c rewires `standard_attn`
@@ -1048,6 +1059,40 @@ pub struct ScratchPool {
     allocs: Vec<(DevicePtr, usize)>,
 }
 
+/// One GDN layer's state-step inputs for a verify batch, carved out of
+/// `ScratchPool::mtp_gdn_rows`. `conv_input` holds the `K - 1` history
+/// rows followed by the batch rows.
+#[derive(Clone, Copy)]
+pub struct GdnSpecRows {
+    pub alpha: DevicePtr,
+    pub beta: DevicePtr,
+    pub q: DevicePtr,
+    pub k: DevicePtr,
+    pub v: DevicePtr,
+    pub conv_input: DevicePtr,
+}
+
+impl GdnSpecRows {
+    pub fn layer_bytes(g: &GdnDims, rows: usize) -> usize {
+        let qk = g.num_k_heads * g.head_k_dim;
+        let v = g.num_v_heads * g.head_v_dim;
+        4 * (rows * (2 * g.num_v_heads + 2 * qk + v) + (g.conv_kernel - 1 + rows) * g.conv_channels)
+    }
+
+    pub fn carve(base: DevicePtr, g: &GdnDims, rows: usize) -> Self {
+        let qk = g.num_k_heads * g.head_k_dim * 4;
+        let v = g.num_v_heads * g.head_v_dim * 4;
+        let ab = g.num_v_heads * 4;
+        let alpha = base;
+        let beta = alpha.offset_bytes(rows * ab);
+        let q = beta.offset_bytes(rows * ab);
+        let k = q.offset_bytes(rows * qk);
+        let vp = k.offset_bytes(rows * qk);
+        let conv_input = vp.offset_bytes(rows * v);
+        Self { alpha, beta, q, k, v: vp, conv_input }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct GdnLayerState {
     /// `[num_v_heads, head_k_dim, head_v_dim]` F32 recurrent state.
@@ -1057,6 +1102,25 @@ pub struct GdnLayerState {
 }
 
 impl ScratchPool {
+    /// Rows the MTP verify batch may hold (`max_draft + 1`), 0 when MTP is off.
+    pub fn mtp_verify_rows(&self) -> usize {
+        self.config.mtp.map(|m| m.max_draft + 1).unwrap_or(0)
+    }
+
+    /// Layer `local_idx`'s slice of `mtp_gdn_rows`.
+    pub fn gdn_spec_rows(&self, local_idx: usize, g: &GdnDims) -> Option<GdnSpecRows> {
+        let rows = self.mtp_verify_rows();
+        if self.mtp_gdn_rows == DevicePtr::NULL
+            || GdnSpecRows::layer_bytes(g, rows) > self.mtp_gdn_rows_layer_bytes
+        {
+            return None;
+        }
+        let base = self
+            .mtp_gdn_rows
+            .offset_bytes(local_idx * self.mtp_gdn_rows_layer_bytes);
+        Some(GdnSpecRows::carve(base, g, rows))
+    }
+
     pub fn new(device: &impl Device, config: ScratchConfig) -> Result<Self> {
         let mut allocs: Vec<(DevicePtr, usize)> = Vec::new();
         let mut alloc_bytes = |bytes: usize| -> Result<DevicePtr> {
@@ -1341,8 +1405,14 @@ impl ScratchPool {
             mtp_proj_b_f32,
             mtp_gdn_snap,
             mtp_gdn_snap_slot_bytes,
+            mtp_gdn_rows,
+            mtp_gdn_rows_layer_bytes,
         ) = match config.mtp {
-            Some(_) => {
+            Some(m) => {
+                let rows_layer_bytes = config
+                    .gdn
+                    .map(|g| GdnSpecRows::layer_bytes(&g, m.max_draft + 1))
+                    .unwrap_or(0);
                 let snap_bytes = match config.gdn {
                     Some(g) => {
                         let f32b = 4usize;
@@ -1362,6 +1432,12 @@ impl ScratchPool {
                     alloc_bytes(h * f32)?,
                     if snap_bytes > 0 { alloc_bytes(snap_bytes)? } else { DevicePtr::NULL },
                     snap_bytes,
+                    if rows_layer_bytes > 0 {
+                        alloc_bytes(config.num_layers * rows_layer_bytes)?
+                    } else {
+                        DevicePtr::NULL
+                    },
+                    rows_layer_bytes,
                 )
             }
             None => (
@@ -1372,6 +1448,8 @@ impl ScratchPool {
                 DevicePtr::NULL,
                 DevicePtr::NULL,
                 DevicePtr::NULL,
+                DevicePtr::NULL,
+                0,
                 DevicePtr::NULL,
                 0,
             ),
@@ -1593,6 +1671,10 @@ impl ScratchPool {
             mtp_gdn_snap,
             mtp_gdn_snap_slot_bytes,
             mtp_snap_valid: false,
+            mtp_gdn_rows,
+            mtp_gdn_rows_layer_bytes,
+            mtp_spec_rows: false,
+            mtp_pending: None,
             paged_kv_caches,
             page_pools,
             gdn_state,

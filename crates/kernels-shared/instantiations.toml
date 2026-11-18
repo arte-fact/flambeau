@@ -341,6 +341,252 @@ params = """
     const int n_superblocks_per_row"""
 body = "mmvq_q4_k_batched_row<64, 4>(x, y, dst, n_rows, n_superblocks_per_row);"
 
+# Row-tiled batched dp4a MMVQ for Q4_K / Q5_K / IQ4_XS (mmvq_dp4a_batched_k.cuh):
+# 8 weight rows per block share one LDS-staged activation strip; one weight
+# read feeds N activation columns, N = 2..8 (speculative-decode verify).
+[[kernel]]
+stem = "mmvq_q4_k_dp4a_batched"
+includes = ["mmvq_dp4a_batched_k.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_k_dp4a_q8_1_batched_n2"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_q4_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::Q4K, 2>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_k_dp4a_q8_1_batched_n3"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_q4_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::Q4K, 3>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_k_dp4a_q8_1_batched_n4"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_q4_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::Q4K, 4>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_k_dp4a_q8_1_batched_n5"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_q4_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::Q4K, 5>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_k_dp4a_q8_1_batched_n6"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_q4_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::Q4K, 6>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_k_dp4a_q8_1_batched_n7"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_q4_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::Q4K, 7>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_k_dp4a_q8_1_batched_n8"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_q4_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::Q4K, 8>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel]]
+stem = "mmvq_q5_k_dp4a_batched"
+includes = ["mmvq_dp4a_batched_k.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q5_k_dp4a_q8_1_batched_n2"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_q5_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::Q5K, 2>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q5_k_dp4a_q8_1_batched_n3"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_q5_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::Q5K, 3>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q5_k_dp4a_q8_1_batched_n4"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_q5_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::Q5K, 4>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q5_k_dp4a_q8_1_batched_n5"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_q5_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::Q5K, 5>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q5_k_dp4a_q8_1_batched_n6"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_q5_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::Q5K, 6>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q5_k_dp4a_q8_1_batched_n7"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_q5_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::Q5K, 7>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q5_k_dp4a_q8_1_batched_n8"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_q5_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::Q5K, 8>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel]]
+stem = "mmvq_iq4_xs_dp4a_batched"
+includes = ["mmvq_dp4a_batched_k.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq4_xs_dp4a_q8_1_batched_n2"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_iq4_xs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::IQ4XS, 2>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq4_xs_dp4a_q8_1_batched_n3"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_iq4_xs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::IQ4XS, 3>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq4_xs_dp4a_q8_1_batched_n4"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_iq4_xs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::IQ4XS, 4>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq4_xs_dp4a_q8_1_batched_n5"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_iq4_xs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::IQ4XS, 5>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq4_xs_dp4a_q8_1_batched_n6"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_iq4_xs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::IQ4XS, 6>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq4_xs_dp4a_q8_1_batched_n7"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_iq4_xs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::IQ4XS, 7>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq4_xs_dp4a_q8_1_batched_n8"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_iq4_xs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::IQ4XS, 8>(x, y, dst, n_rows, n_superblocks_per_row);"
+
 # Q6_K batched MMVQ — dp4a super-block path (64 threads/row), one weight read
 # feeds N activation columns (mmvq_q6_k_dp4a_batched.cuh). dp4a keeps the batch
 # bandwidth-bound; the scalar-FP32 sibling was compute-bound (~linear in N).

@@ -218,14 +218,13 @@ pub trait ForwardCtx {
         anyhow::bail!("capture_hidden_from: not implemented on this ctx")
     }
 
-    /// MTP draft chain: starting from the anchor (`anchor_token` at
-    /// `positions[0]` with target hidden `anchor_h`), run the nextn layer
-    /// for up to `n_draft` steps, each step consuming the previously
-    /// drafted token and the draft layer's own hidden, appending greedy
-    /// argmax draft tokens to `drafts`. The draft layer uses KV slab
-    /// `mtp_layer_idx` at `positions` for slot `slot_id`.
+    /// MTP draft chain: pair `anchor_token` (at `start_pos`) with
+    /// `anchor_h`, the target hidden of `start_pos - 1`, and run the nextn
+    /// layer for up to `n_draft` steps, each later step consuming the
+    /// previously drafted token and the draft layer's own hidden. Sampled
+    /// draft tokens are appended to `drafts`. The draft layer uses KV slab
+    /// `mtp_layer_idx` from `start_pos` on for slot `slot_id`.
     /// Default impl bails — only the engine ctx supports it.
-    #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     fn mtp_draft(
         &mut self,
@@ -276,6 +275,33 @@ pub trait ForwardCtx {
     /// NULL when MTP is off.
     fn mtp_anchor_ptr(&self) -> flambeau_core::DevicePtr {
         flambeau_core::DevicePtr::NULL
+    }
+
+    /// Toggle the GDN verify mode: while on, multi-row GDN layers keep
+    /// their state-step inputs so [`Self::gdn_replay_rows`] can roll the
+    /// recurrent state back to a row prefix.
+    fn mtp_spec_rows(&mut self, _on: bool) {}
+
+    /// Rebuild layer `layer_idx`'s recurrent state as "snapshot advanced
+    /// over the first `n_keep` rows of the last verify batch". Requires a
+    /// prior [`Self::gdn_snapshot`] and a verify forward under
+    /// [`Self::mtp_spec_rows`].
+    fn gdn_replay_rows(
+        &mut self,
+        _weights: &GdnWeights,
+        _layer_idx: usize,
+        _slot_id: usize,
+        _n_keep: usize,
+    ) -> Result<()> {
+        anyhow::bail!("gdn_replay_rows: not implemented on this ctx")
+    }
+
+    /// Record that the MTP anchor buffer holds the target hidden of
+    /// `(slot, position)`; `None` invalidates it.
+    fn mtp_set_pending(&mut self, _pending: Option<(usize, usize)>) {}
+
+    fn mtp_pending(&self) -> Option<(usize, usize)> {
+        None
     }
 }
 

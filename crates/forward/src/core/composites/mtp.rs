@@ -1,9 +1,10 @@
 //! MTP (multi-token prediction) draft chain for qwen35 nextn heads.
 //!
 //! Mirrors llama.cpp's `graph_mtp`: each draft step feeds the nextn layer
-//! `eh_proj(concat(enorm(e_tok), hnorm(h)))` where `h` is the target's
-//! post-`output_norm` hidden for the first step and the draft layer's own
-//! post-`shared_head_norm` hidden for chained steps. The draft layer is a
+//! `eh_proj(concat(enorm(e_tok), hnorm(h)))`, pairing the token at position
+//! `p + 1` with the hidden of position `p`: the target's post-`output_norm`
+//! hidden for the first step, the draft layer's own post-`shared_head_norm`
+//! hidden for chained steps. The draft layer is a
 //! full-attention layer driven through its own KV slab
 //! (`kv_caches[mtp_layer_idx]`).
 
@@ -24,9 +25,11 @@ fn slot_f32(ptr: DevicePtr, n: usize) -> Tensor<F32> {
     unsafe { Tensor::<F32>::from_raw(ptr, n) }
 }
 
-/// Run up to `n_draft` greedy draft steps starting from the anchor
-/// (`anchor_token` at `start_pos` with target hidden `anchor_h`, both in
-/// slot `slot_id`). Drafted tokens are appended to `drafts` (host).
+/// Run up to `n_draft` draft steps. Step 0 pairs `anchor_token` (the newest
+/// sampled token, sitting at `start_pos`) with `anchor_h`, the target hidden
+/// of `start_pos - 1`, and drafts the token at `start_pos + 1`; later steps
+/// pair the previous draft with the draft layer's own hidden. Drafted tokens
+/// are appended to `drafts` (host).
 pub fn mtp_draft_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
     state: &mut CoreState<'_, B>,
     hooks: &mut H,

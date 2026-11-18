@@ -114,6 +114,24 @@ pub fn gdn_layer_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
                 )
             })?
             .view();
+        let mut prefill_scratch = prefill_scratch;
+        if state.pool.mtp_spec_rows {
+            let rows = state.pool.gdn_spec_rows(local_idx, &dims).ok_or_else(|| {
+                anyhow::anyhow!("gdn_layer: speculative rows requested but pool has no MTP row store")
+            })?;
+            if n_tokens > state.pool.mtp_verify_rows() {
+                bail!(
+                    "gdn_layer: verify batch {n_tokens} > MTP row store {}",
+                    state.pool.mtp_verify_rows()
+                );
+            }
+            prefill_scratch.alpha_f32 = rows.alpha;
+            prefill_scratch.beta_f32 = rows.beta;
+            prefill_scratch.q_norm_f32 = rows.q;
+            prefill_scratch.k_norm_f32 = rows.k;
+            prefill_scratch.v_f32 = rows.v;
+            prefill_scratch.conv_input = rows.conv_input;
+        }
         let slot = slot_ids[0];
         let state_ptr = layer_state.state.offset_bytes(slot * state_bytes_per_slot);
         let hist_ptr = layer_state

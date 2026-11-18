@@ -247,29 +247,47 @@ recover the last decode kernel. Lower priority than Track A.
     spills past 128 VGPR and regresses — keep `#pragma nounroll`.
   - Harness: `scripts/bench/qwen38_27b_vs_llamacpp.py`.
 
-- [ ] **B5 — Speculative decode (MTP, then DFlash): make the cycle pay**
-  `--mtp N` loads the GGUF's embedded nextn block and runs greedy-exact
-  draft → verify → accept cycles (SD/TP, non-streaming legacy handler; default 0).
-  Output is identical to plain decode. Still a net loss, but the gap is closing.
-  - Small-batch forward cost (Qwen3.8-27B UD-Q4_K_M, 2×MI50 TP2, ms for an N-row
-    forward; decode step = 41 ms):
-    N=4: 160 → 118 · N=8: 252 → 123 · N=16: 472 → 166 · N=32: 1607 → 333 · N=64: 3003 → 488
-    (llama.cpp `-sm layer`: 75 / 259 / 353 / 441 / 594). Done with an 8-column
-    LDS tile for m=3..32 and Q8_0 LDS-tiled from m=32.
-  - MTP e2e, same config: plain 21.9 t/s → N=2 17.5, N=4 16.9 (3.2 tokens/cycle at
-    N=4, ~4.2 decode steps per cycle). On UD-Q3_K_XL (1×MI50) it is unchanged
-    (~14 → ~4.8 at N=4): that file is mostly IQ3_S / IQ3_XXS / IQ2_*, not covered.
-  - llama.cpp reference on the same rigs (UD-Q3_K_XL): 2×MI50 20.6 → 41.6 t/s
-    (DFlash2, 4 drafts) / 39.6 (MTP 4); RTX 3090 45 → 70–95 (thermally throttled).
-  - To do: (1) one merged target forward over `[last, d1..dk]`, drafting from the
-    previous cycle's captured hidden (drops the separate anchor step); (2) per-row
-    GDN state checkpoints so a rejection needs no re-forward; (3) cheaper N<=8
-    pass — the 8-column tile is ~2.5 steps, llama's N<=4 path is ~2; (4) IQ3/IQ2
-    LDS traits; (5) scheduler + SSE paths, stop-mask rules inside the cycle,
-    greedy-only guard (TP ranks sample independently); (6) DFlash2 drafter
-    (`dflash` GGUF arch: 5 layers, block 8, target taps at layers 6/20/34/48/62,
-    selector rank 256 / top-k 16); (7) sm_86.
-  - **Done when:** speculative decode beats plain decode e2e on at least one backend.
+- [ ] **B5 — Speculative decode (MTP, then DFlash): close the gap to llama.cpp**
+  `--mtp N` loads the GGUF's embedded nextn block and runs draft → verify →
+  accept cycles (SD/TP, non-streaming legacy handler; default 0). It now beats
+  plain decode on gfx906 TP2; the remaining gap to llama.cpp is acceptance rate
+  and the plain decode step.
+  - Cycle (llama.cpp `draft-mtp` alignment): the draft head pairs the newest
+    sampled token with the target hidden of the position before it, one target
+    forward over `[last, d1..dk]` verifies every draft, heads are evaluated
+    lazily up to the first rejection, and a rejected suffix is rolled back by
+    replaying the GDN state step from saved inputs (no second forward). Output
+    is not bit-identical to plain decode: the multi-row path quantizes
+    activations through F16 and differs from the single-row path by ~1e-3, so
+    greedy text can fork at near-ties.
+  - Small-batch forward (Qwen3.8-27B UD-Q4_K_M, 2×MI50 TP2, ms for an N-row
+    forward incl. ~20 ms request overhead; decode step = 41 ms):
+    N=2: 93 → 72 · N=3: 118 → 80 · N=4: 118 → 85 · N=5: 120 → 90 · N=8: 123 → 114
+    (llama.cpp `-sm layer`: 50 / 63 / 75 / 210 / 259). Row-tiled batched dp4a
+    MMVQ for Q4_K / Q5_K / IQ4_XS at m=2..8 (`mmvq_dp4a_batched_k.cuh`): the
+    8-column LDS tile costs a fixed ~1.6 decode passes to stage weights, the
+    row tile keeps weights in registers and stages only the activation strip.
+    Null results: a 16-row x8 tile (lane = weight row, so 3/4 of the lanes
+    idle: 31.3 → 25.1 t/s) and a plain batched dp4a MMVQ reading activations
+    from global memory (~15 ms per extra column vs ~3 for the row tile).
+  - MTP e2e, same config, greedy, mean of 3 chat prompts (code / math / prose),
+    t/s: plain 22.2 → N=2 31.4 · N=3 32.7 · N=4 35.1 (42.0 / 37.7 / 25.6) ·
+    N=6 32.2. llama.cpp on the same GGUF: plain 25.9 → MTP-4 41.2 (50.1 / 42.0
+    / 31.6). Same ×1.6 gain; llama accepts 92 / 76 / 53 % of its drafts, we
+    accept 76 / 70 / 40 %.
+  - Not covered: UD-Q3_K_XL (mostly IQ3_S / IQ3_XXS / IQ2_*, still on the x8
+    tile or per-row MMVQ), Q6_K / Q3_K / IQ4_NL at m=2..8 (x8 tile, ~5 % of the
+    cycle), sampling at temperature > 0 under TP (ranks sample independently).
+  - To do: (1) acceptance — fill the draft layer's KV with `(token, target
+    hidden)` pairs for the prompt and for accepted tokens (llama's `process()`
+    catch-up; today it only holds its own draft steps), and stop drafting below
+    a confidence floor (`p_min`); (2) row-tile traits for IQ3/IQ2/Q6_K/Q3_K/
+    IQ4_NL; (3) scheduler + SSE paths, stop-mask rules inside the cycle,
+    greedy-only guard; (4) DFlash2 drafter (`dflash` GGUF arch: 5 layers,
+    block 8, target taps at layers 6/20/34/48/62, selector rank 256 / top-k
+    16) — reuses this verify cycle; (5) sm_86.
+  - **Done when:** speculative decode beats plain decode e2e on at least one backend
+    (met for MTP on gfx906 TP2; open for DFlash and for parity with llama.cpp).
 
 ---
 

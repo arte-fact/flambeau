@@ -81,7 +81,7 @@ dtype_q = "Q8_1"
 shape   = { m = "3..32", k = "any", n = "any" }
 impl    = "qmatmul_iq4_xs_mmq_lds_tiled_x8_gfx906"
 cert    = "certs/hip/gfx906/qmatmul_iq4_xs_mmq_lds_tiled_x8_gfx906.json"
-notes   = "8-column tile (MMQ_Y=64, MMQ_X=8) of the generic LDS-tiled MMQ (mmq_lds_tiled.cuh). One pass over the weights serves up to 8 activation rows, so a small-batch forward (speculative-decode verify) costs ~3 decode steps instead of one per row. Owns m=3..32."
+notes   = "8-column tile (MMQ_Y=64, MMQ_X=8) of the generic LDS-tiled MMQ (mmq_lds_tiled.cuh). One pass over the weights serves up to 8 activation rows, so a small-batch forward (speculative-decode verify) costs ~3 decode steps instead of one per row. Owns m=3..32. For this dtype m=3..8 is served ahead of the table by the row-tiled batched dp4a MMVQ direct call (qmatmul_*_mmvq_dp4a_row_tile_batched); the tile stays the fallback."
 
 [[qmatmul]]
 dtype   = "IQ4_XS"
@@ -250,7 +250,7 @@ dtype_q = "Q8_1"
 shape   = { m = "3..32", k = "any", n = "any" }
 impl    = "qmatmul_q5_K_mmq_lds_tiled_x8_gfx906"
 cert    = "certs/hip/gfx906/qmatmul_q5_K_mmq_lds_tiled_x8_gfx906.json"
-notes   = "8-column tile (MMQ_Y=64, MMQ_X=8) of the generic LDS-tiled MMQ (mmq_lds_tiled.cuh). One pass over the weights serves up to 8 activation rows, so a small-batch forward (speculative-decode verify) costs ~3 decode steps instead of one per row. Owns m=3..32."
+notes   = "8-column tile (MMQ_Y=64, MMQ_X=8) of the generic LDS-tiled MMQ (mmq_lds_tiled.cuh). One pass over the weights serves up to 8 activation rows, so a small-batch forward (speculative-decode verify) costs ~3 decode steps instead of one per row. Owns m=3..32. For this dtype m=3..8 is served ahead of the table by the row-tiled batched dp4a MMVQ direct call (qmatmul_*_mmvq_dp4a_row_tile_batched); the tile stays the fallback."
 
 [[qmatmul_mmq]]
 dtype   = "Q5_K"
@@ -361,7 +361,7 @@ dtype_q = "Q8_1"
 shape   = { m = "3..32", k = "any", n = "any" }
 impl    = "qmatmul_q4_K_mmq_lds_tiled_y64_x8_gfx906"
 cert    = "certs/hip/gfx906/qmatmul_q4_K_mmq_lds_tiled_y64_x8_gfx906.json"
-notes   = "8-column tile (MMQ_Y=64, MMQ_X=8) of the generic LDS-tiled MMQ (mmq_lds_tiled.cuh). One pass over the weights serves up to 8 activation rows, so a small-batch forward (speculative-decode verify) costs ~3 decode steps instead of one per row. Owns m=3..32."
+notes   = "8-column tile (MMQ_Y=64, MMQ_X=8) of the generic LDS-tiled MMQ (mmq_lds_tiled.cuh). One pass over the weights serves up to 8 activation rows, so a small-batch forward (speculative-decode verify) costs ~3 decode steps instead of one per row. Owns m=3..32. For this dtype m=3..8 is served ahead of the table by the row-tiled batched dp4a MMVQ direct call (qmatmul_*_mmvq_dp4a_row_tile_batched); the tile stays the fallback."
 
 [[qmatmul_mmq]]
 dtype   = "Q4_K"
