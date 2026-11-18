@@ -1238,6 +1238,13 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     "Q4_K" | "Q4_K_4warp" => (vec![MmqDtype::Q4K4Warp], SweepSpec::v1_4_prefill),
                     "Q4_K_wave64" => (vec![MmqDtype::Q4KWave64], SweepSpec::v1_4_prefill),
                     "Q4_K_lds_tiled" => (vec![MmqDtype::Q4KLdsTiled], SweepSpec::v1_4_prefill),
+                    "Q5_K_lds_tiled" => (vec![MmqDtype::Q5KLdsTiled], SweepSpec::v1_4_prefill),
+                    "Q6_K_lds_tiled" => (vec![MmqDtype::Q6KLdsTiled], SweepSpec::v1_4_prefill),
+                    "IQ4_XS_lds_tiled" => (vec![MmqDtype::Iq4XsLdsTiled], SweepSpec::v1_4_prefill),
+                    "Q4_K_lds_tiled_y64" => (vec![MmqDtype::Q4KLdsTiledY64], SweepSpec::v1_4_prefill),
+                    "Q3_K_lds_tiled" => (vec![MmqDtype::Q3KLdsTiled], SweepSpec::v1_4_prefill),
+                    "IQ4_NL_lds_tiled" => (vec![MmqDtype::Iq4NlLdsTiled], SweepSpec::v1_4_prefill),
+                    "Q8_0_lds_tiled" => (vec![MmqDtype::Q8_0LdsTiled], SweepSpec::v1_4_prefill),
                     "Q5_K" | "Q5_K_wave64" => (vec![MmqDtype::Q5KWave64], SweepSpec::v1_4_prefill),
                     "Q6_K" | "Q6_K_4warp" => (vec![MmqDtype::Q6K4Warp], SweepSpec::v1_4_prefill),
                     "Q6_K_wave64" => (vec![MmqDtype::Q6KWave64], SweepSpec::v1_4_prefill),
@@ -1305,6 +1312,13 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                             | MmqDtype::Q5_0Wave64
                             | MmqDtype::Q5_1Wave64
                             | MmqDtype::Q4KLdsTiled
+                            | MmqDtype::Q5KLdsTiled
+                            | MmqDtype::Q6KLdsTiled
+                            | MmqDtype::Iq4XsLdsTiled
+                            | MmqDtype::Q4KLdsTiledY64
+                            | MmqDtype::Q3KLdsTiled
+                            | MmqDtype::Iq4NlLdsTiled
+                            | MmqDtype::Q8_0LdsTiled
                             | MmqDtype::Q4K4Warp
                             | MmqDtype::Q4KWave64
                             | MmqDtype::Q5KWave64

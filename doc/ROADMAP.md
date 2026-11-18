@@ -233,6 +233,20 @@ recover the last decode kernel. Lower priority than Track A.
     any dispatch change; re-rank via the MMQ autotune path.
   - **Target:** Q8_0 gfx906 prefill within striking distance of the Q4_0 4warp_lds rate.
 
+- [ ] **B4 — gfx906 generic LDS-tiled MMQ: close the remaining ~1.5× to llama**
+  `mmq_lds_tiled.cuh` (one template + per-dtype traits) now owns m>=128 for Q4_K,
+  Q5_K, Q6_K, Q3_K, IQ4_XS, IQ4_NL, Q8_0 at a 64×64 tile (2 blocks/CU). Qwen3.8-27B
+  UD-Q4_K_M, 2×MI50 TP2, q8 KV: prefill 37 → 229 t/s (pp512), 33 → 208 (pp4096);
+  llama.cpp `-sm layer` same GGUF: 206 / 313. MMQ is still ~90% of prefill GPU time.
+  - Open: IQ3_S / IQ3_XXS / IQ2_* / Q2_K traits (still wave64; they dominate
+    UD-Q3_K_XL); fold Q4_0/Q4_1 4warp_lds and the dormant 128×16 Q4_K into the
+    template; NWARPS=8 (128×64, 512 threads — llama's GCN pick for IQ4_XS/Q5_K);
+    PP2 does not pipeline chunks across stages (131 t/s vs TP2 229).
+  - Ruled out (measured): 128×16 and 64×16 tiles (LDS/amortization), VGPR cap via
+    `__launch_bounds__` alone (spill-free but e2e-null). Unrolling the k01 loop
+    spills past 128 VGPR and regresses — keep `#pragma nounroll`.
+  - Harness: `scripts/bench/qwen38_27b_vs_llamacpp.py`.
+
 ---
 
 ## Track C — Breadth & hardware-gated

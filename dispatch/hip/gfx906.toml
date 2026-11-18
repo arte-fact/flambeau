@@ -78,7 +78,15 @@ notes   = "T-IQ.13 — native IQ4_XS MMVQ. r2 multi-row pattern shared with Q4_K
 [[qmatmul]]
 dtype   = "IQ4_XS"
 dtype_q = "Q8_1"
-shape   = { m = ">=32", k = "any", n = "any" }
+shape   = { m = ">=128", k = "any", n = "any" }
+impl    = "qmatmul_iq4_xs_mmq_lds_tiled_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_iq4_xs_mmq_lds_tiled_gfx906.json"
+notes   = "Generic 4-warp LDS-tiled MMQ (mmq_lds_tiled.cuh): MMQ_Y=64, MMQ_X=32, (64,4,1) block, DS4 Q8_1 activation; weight super-block decoded once into LDS as dp4a-ready int8 lanes. Owns m>=128."
+
+[[qmatmul]]
+dtype   = "IQ4_XS"
+dtype_q = "Q8_1"
+shape   = { m = "32..127", k = "any", n = "any" }
 impl    = "qmatmul_iq4_xs_mmq_wave64_gfx906"
 cert    = "certs/hip/gfx906/qmatmul_iq4_xs_mmq_wave64_gfx906.json"
 notes   = "T-IQ.16 Phase 4 Slice A — wave64 MMQ for IQ4_XS. Pre-applies the IQ4_NL LUT into packed signed-i8, then dp4a vs Q8_1. Mirrors mmq_q4_K_wave64 minus the dmin/min correction."
@@ -158,7 +166,15 @@ notes   = "T-IQ.15 — native IQ1_M MMVQ. Same 2048-entry grid as IQ1_S; `d` rea
 [[qmatmul]]
 dtype   = "IQ4_NL"
 dtype_q = "Q8_1"
-shape   = { m = ">=32", k = "any", n = "any" }
+shape   = { m = ">=128", k = "any", n = "any" }
+impl    = "qmatmul_iq4_nl_mmq_lds_tiled_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_iq4_nl_mmq_lds_tiled_gfx906.json"
+notes   = "Generic 4-warp LDS-tiled MMQ (mmq_lds_tiled.cuh): MMQ_Y=64, MMQ_X=32, (64,4,1) block, DS4 Q8_1 activation; weight super-block decoded once into LDS as dp4a-ready int8 lanes. Owns m>=128."
+
+[[qmatmul]]
+dtype   = "IQ4_NL"
+dtype_q = "Q8_1"
+shape   = { m = "32..127", k = "any", n = "any" }
 impl    = "qmatmul_iq4_nl_mmq_wave64_gfx906"
 cert    = "certs/hip/gfx906/qmatmul_iq4_nl_mmq_wave64_gfx906.json"
 notes   = "T-IQ.16 Phase 4 Slice A — wave64 MMQ for IQ4_NL. dp4a inner loop with signed-i8 weights (sign mask pre-applied)."
@@ -231,7 +247,15 @@ notes   = "DP4A 256-thread Q5_K MMVQ port of llama.cpp's vec_dot_q5_K_q8_1_impl_
 [[qmatmul_mmq]]
 dtype   = "Q5_K"
 dtype_q = "Q8_1"
-shape   = { m = ">=32", k = "any", n = "any" }
+shape   = { m = ">=128", k = "any", n = "any" }
+impl    = "qmatmul_q5_K_mmq_lds_tiled_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_q5_K_mmq_lds_tiled_gfx906.json"
+notes   = "Generic 4-warp LDS-tiled MMQ (mmq_lds_tiled.cuh): MMQ_Y=64, MMQ_X=32, (64,4,1) block, DS4 Q8_1 activation; weight super-block decoded once into LDS as dp4a-ready int8 lanes. Owns m>=128."
+
+[[qmatmul_mmq]]
+dtype   = "Q5_K"
+dtype_q = "Q8_1"
+shape   = { m = "32..127", k = "any", n = "any" }
 impl    = "qmatmul_q5_K_mmq_wave64_gfx906"
 cert    = "certs/hip/gfx906/qmatmul_q5_K_mmq_wave64_gfx906.json"
 notes   = "V2.2.d fix 1 — wave64 MMQ port of candle's `mul_mat_q5_K_gfx906_v2`. Consumes standard flambeau_block_q8_1 layout (NOT DS4 MMQ), so no upstream quantise change. 1 warp / 64 rows × 8 cols per tile, DP4A inner, VGPR≈40, waves/SIMD≈10."
@@ -278,7 +302,15 @@ notes   = "Phase 3b — DP4A 256-thread Q3_K MMVQ port of llama.cpp vec_dot_q3_K
 [[qmatmul_mmq]]
 dtype   = "Q8_0"
 dtype_q = "Q8_1"
-shape   = { m = ">=32", k = "any", n = "any" }
+shape   = { m = ">=128", k = "any", n = "any" }
+impl    = "qmatmul_q8_0_mmq_lds_tiled_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_q8_0_mmq_lds_tiled_gfx906.json"
+notes   = "Generic 4-warp LDS-tiled MMQ (mmq_lds_tiled.cuh): MMQ_Y=64, MMQ_X=32, (64,4,1) block, DS4 Q8_1 activation; weight super-block decoded once into LDS as dp4a-ready int8 lanes. Owns m>=128."
+
+[[qmatmul_mmq]]
+dtype   = "Q8_0"
+dtype_q = "Q8_1"
+shape   = { m = "32..127", k = "any", n = "any" }
 impl    = "qmatmul_q8_0_mmq_wave64_tile16_gfx906"
 cert    = "certs/hip/gfx906/qmatmul_q8_0_mmq_wave64_tile16_gfx906.json"
 notes   = "V2.7: wave64 MMQ with TILE_N=16 (each weight tile reused across 16 activations, halves weight HBM fetches vs TILE_N=8). Kernel PMC at m=512 k=2048 n=4096: MemUnitBusy 97.6% → 83.1%, VALUBusy 19.1% → 65.5%, grid.y halved. VGPR=112 (2 waves/SIMD), 64 threads/block. End-to-end Qwen3.6-35B prefill is a wash (MoE Q4_K dominates); tile16 wins show up on Q8_0-heavy workloads. `FLAMBEAU_VARIANT=baseline` reverts to tile8. V2.11.b attempted n<1024 → tile8 shape-aware but regressed (+4 % kernel time); see memory entry."
@@ -335,9 +367,9 @@ notes   = "Wave64 MMQ for Q5_1. Q5_0 wave64 5th-bit ladder + Q4_1 wave64 d/m red
 dtype   = "Q4_K"
 dtype_q = "Q8_1"
 shape   = { m = ">=128", k = "any", n = "any" }
-impl    = "qmatmul_q4_K_mmq_lds_tiled_gfx906"
-cert    = "certs/hip/gfx906/qmatmul_q4_K_mmq_lds_tiled_gfx906.json"
-notes   = "V1-BENCH-#112 (2026-04-27) — promoted V2.14.b llamacpp-turbo 4-warp LDS-tiled Q4_K MMQ to default at m>=128. MMQ_Y=128, MMQ_X=16, NWARPS=4 (256 threads, (64,4,1) block), DS4 Q8_1 activation, 22528 B dynamic LDS, double-buffered Y per half-super-block. Closes the ~1.4× gap to turbo's pp512=1012.80 measured in candle/bench/qwen36_3way_findings.md. Wave64 row below now owns m=32..127."
+impl    = "qmatmul_q4_K_mmq_lds_tiled_y64_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_q4_K_mmq_lds_tiled_y64_gfx906.json"
+notes   = "Generic 4-warp LDS-tiled MMQ (mmq_lds_tiled.cuh): MMQ_Y=64, MMQ_X=32, (64,4,1) block, DS4 Q8_1 activation; weight super-block decoded once into LDS as dp4a-ready int8 lanes. Owns m>=128."
 
 [[qmatmul_mmq]]
 dtype   = "Q4_K"
@@ -350,7 +382,15 @@ notes   = "V2.3.b.2 — wave64 MMQ port of candle's `mul_mat_q4_K_gfx906_impl_fa
 [[qmatmul_mmq]]
 dtype   = "Q6_K"
 dtype_q = "Q8_1"
-shape   = { m = ">=32", k = "any", n = "any" }
+shape   = { m = ">=128", k = "any", n = "any" }
+impl    = "qmatmul_q6_K_mmq_lds_tiled_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_q6_K_mmq_lds_tiled_gfx906.json"
+notes   = "Generic 4-warp LDS-tiled MMQ (mmq_lds_tiled.cuh): MMQ_Y=64, MMQ_X=32, (64,4,1) block, DS4 Q8_1 activation; weight super-block decoded once into LDS as dp4a-ready int8 lanes. Owns m>=128."
+
+[[qmatmul_mmq]]
+dtype   = "Q6_K"
+dtype_q = "Q8_1"
+shape   = { m = "32..127", k = "any", n = "any" }
 impl    = "qmatmul_q6_K_mmq_wave64_gfx906"
 cert    = "certs/hip/gfx906/qmatmul_q6_K_mmq_wave64_gfx906.json"
 notes   = "V2.3.b.4 — wave64 MMQ Q6_K. Flambeau-authored (candle has no Q6_K MMQ); mirrors the wave64 / MMQ_Y=64 / TILE_N=8 / DP4A structure used by Q4_K and Q5_K wave64. Per-sub-block decode packs 32 weights into 8 signed-int8 int32s (-32 pre-applied). Consumes standard flambeau_block_q8_1."
@@ -374,7 +414,15 @@ notes   = "Q2_K MMQ wave64. Affine quant: y = d*scale*raw - dmin*min. 4-bit (sca
 [[qmatmul_mmq]]
 dtype   = "Q3_K"
 dtype_q = "Q8_1"
-shape   = { m = ">=32", k = "any", n = "any" }
+shape   = { m = ">=128", k = "any", n = "any" }
+impl    = "qmatmul_q3_K_mmq_lds_tiled_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_q3_K_mmq_lds_tiled_gfx906.json"
+notes   = "Generic 4-warp LDS-tiled MMQ (mmq_lds_tiled.cuh): MMQ_Y=64, MMQ_X=32, (64,4,1) block, DS4 Q8_1 activation; weight super-block decoded once into LDS as dp4a-ready int8 lanes. Owns m>=128."
+
+[[qmatmul_mmq]]
+dtype   = "Q3_K"
+dtype_q = "Q8_1"
+shape   = { m = "32..127", k = "any", n = "any" }
 impl    = "qmatmul_q3_K_mmq_wave64_gfx906"
 cert    = "certs/hip/gfx906/qmatmul_q3_K_mmq_wave64_gfx906.json"
 notes   = "Q3_K MMQ wave64. Per element: q = (raw_2bit + 4*hmask_bit) - 4; signed 6-bit scale - 32. Bias correction: (raw_4bit - 4)·y = raw_4bit·y - 4·Σy. Byte-wise u32 loads on qs/hmask/scales — Q3_K is 110 B and alternates 4-byte/2-byte alignment across blocks."

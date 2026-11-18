@@ -1050,6 +1050,135 @@ params = """
     const int nrows_dst"""
 body = "mmq_q4_k_lds_tiled_row<16, 128, 4>(vx, vy, dst, ncols_x, nrows_x, ncols_y, stride_col_y, stride_row_x, nrows_dst);"
 
+# Generic 4-warp LDS-tiled MMQ (prefill GEMM), DS4 144-B activation —
+# MMQ_Y=64 × MMQ_X=64, weight super-block decoded to int8 lanes in LDS.
+# `stride_col_y` is unused; the 9-arg ABI matches the other LDS-tiled entries.
+[[kernel]]
+stem = "mmq_q5_K_lds_tiled"
+includes = ["quant_traits.cuh", "mmq_lds_tiled.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_q5_K_lds_tiled_q8_1"
+launch_bounds = "256, 2"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int stride_col_y,
+    const int stride_row_x,
+    const int nrows_dst"""
+body = "(void) stride_col_y; mmq_lds_tiled_row<mmq_lds::Q5K, 64, 64, 4>(vx, vy, dst, ncols_x, nrows_x, ncols_y, stride_row_x, nrows_dst);"
+
+[[kernel]]
+stem = "mmq_q6_K_lds_tiled"
+includes = ["quant_traits.cuh", "mmq_lds_tiled.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_q6_K_lds_tiled_q8_1"
+launch_bounds = "256, 2"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int stride_col_y,
+    const int stride_row_x,
+    const int nrows_dst"""
+body = "(void) stride_col_y; mmq_lds_tiled_row<mmq_lds::Q6K, 64, 64, 4>(vx, vy, dst, ncols_x, nrows_x, ncols_y, stride_row_x, nrows_dst);"
+
+[[kernel]]
+stem = "mmq_iq4_xs_lds_tiled"
+includes = ["quant_traits.cuh", "mmq_lds_tiled.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_iq4_xs_lds_tiled_q8_1"
+launch_bounds = "256, 2"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int stride_col_y,
+    const int stride_row_x,
+    const int nrows_dst"""
+body = "(void) stride_col_y; mmq_lds_tiled_row<mmq_lds::IQ4XS, 64, 64, 4>(vx, vy, dst, ncols_x, nrows_x, ncols_y, stride_row_x, nrows_dst);"
+
+[[kernel]]
+stem = "mmq_q4_K_lds_tiled_y64"
+includes = ["quant_traits.cuh", "mmq_lds_tiled.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_q4_K_lds_tiled_y64_q8_1"
+launch_bounds = "256, 2"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int stride_col_y,
+    const int stride_row_x,
+    const int nrows_dst"""
+body = "(void) stride_col_y; mmq_lds_tiled_row<mmq_lds::Q4K, 64, 64, 4>(vx, vy, dst, ncols_x, nrows_x, ncols_y, stride_row_x, nrows_dst);"
+
+[[kernel]]
+stem = "mmq_q3_K_lds_tiled"
+includes = ["quant_traits.cuh", "mmq_lds_tiled.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_q3_K_lds_tiled_q8_1"
+launch_bounds = "256, 2"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int stride_col_y,
+    const int stride_row_x,
+    const int nrows_dst"""
+body = "(void) stride_col_y; mmq_lds_tiled_row<mmq_lds::Q3K, 64, 64, 4>(vx, vy, dst, ncols_x, nrows_x, ncols_y, stride_row_x, nrows_dst);"
+
+[[kernel]]
+stem = "mmq_iq4_nl_lds_tiled"
+includes = ["quant_traits.cuh", "mmq_lds_tiled.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_iq4_nl_lds_tiled_q8_1"
+launch_bounds = "256, 2"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int stride_col_y,
+    const int stride_row_x,
+    const int nrows_dst"""
+body = "(void) stride_col_y; mmq_lds_tiled_row<mmq_lds::IQ4NL, 64, 64, 4>(vx, vy, dst, ncols_x, nrows_x, ncols_y, stride_row_x, nrows_dst);"
+
+[[kernel]]
+stem = "mmq_q8_0_lds_tiled"
+includes = ["quant_traits.cuh", "mmq_lds_tiled.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_q8_0_lds_tiled_q8_1"
+launch_bounds = "256, 2"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int stride_col_y,
+    const int stride_row_x,
+    const int nrows_dst"""
+body = "(void) stride_col_y; mmq_lds_tiled_row<mmq_lds::Q8_0, 64, 64, 4>(vx, vy, dst, ncols_x, nrows_x, ncols_y, stride_row_x, nrows_dst);"
+
 # Q4_K 4-warp LDS-tiled MMQ (prefill GEMM), F32-tile variant — MMQ_Y=16 × MMQ_X=8,
 # 128 threads, dequant super-block into LDS then F32 dot. Same stem/entry as the
 # retired hand kernel.

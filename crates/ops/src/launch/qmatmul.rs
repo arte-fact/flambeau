@@ -1692,6 +1692,15 @@ fn mmq_lds_x64_params(stem: &str) -> Result<(u32, u32)> {
         // tile_y(MMQ_X*36=576) + x_qs(4224) + x_dm(128 half2=128 ints) +
         // x_sc(528) = 5456 ints = 21824 B; round up to 22528 B.
         "mmq_q4_K_lds_tiled" => (256, 22528),
+        // Generic LDS-tiled (mmq_lds_tiled.cuh), MMQ_Y=64, MMQ_X=64:
+        // 4 * (MMQ_X * 36 + Tr::x_ints(64)). Q8_0/IQ4_NL weight blocks are 32 elems.
+        "mmq_q5_K_lds_tiled" => (256, 4 * (64 * 36 + 4488)),
+        "mmq_q6_K_lds_tiled" => (256, 4 * (64 * 36 + 4490)),
+        "mmq_iq4_xs_lds_tiled" => (256, 4 * (64 * 36 + 4688)),
+        "mmq_q4_K_lds_tiled_y64" => (256, 4 * (64 * 36 + 2440)),
+        "mmq_q3_K_lds_tiled" => (256, 4 * (64 * 36 + 4488)),
+        "mmq_iq4_nl_lds_tiled" => (32, 4 * (64 * 36 + 4688)),
+        "mmq_q8_0_lds_tiled" => (32, 4 * (64 * 36 + 4688)),
         other => bail!("mmq_lds_x64_params: no entry for stem {other}"),
     })
 }
@@ -2418,11 +2427,9 @@ impl Recipe {
                 rows_per_block: 0,
                 mmq_tile: (16, 8),
             },
-            // llamacpp-turbo
-            // 4-warp LDS-tiled Q4_K MMQ with DS4 Q8_1 activation. MMQ_Y=128,
-            // MMQ_X=16, NWARPS=4 → 256 threads per (64, 4, 1) block. Promoted
-            // to default at m≥128 (Q4_K wave64 owns m=32..127 below). Dynamic
-            // LDS = 22528 B; weight block = QK_K = 256 elems.
+            // 128×16-tile Q4_K LDS-tiled MMQ, DS4 Q8_1 activation, 256 threads
+            // per (64, 4, 1) block, 22528 B dynamic LDS. No longer dispatched on
+            // gfx906 (superseded by the 64×64 `_y64` recipe); kept for A/B.
             "qmatmul_q4_K_mmq_lds_tiled_gfx906" => Self {
                 kind: RecipeKind::MmqLdsX64,
                 stem: "mmq_q4_K_lds_tiled",
@@ -2431,6 +2438,62 @@ impl Recipe {
                 rows_per_block: 0,
                 // MMQ_Y=128, MMQ_X=16 (must match mmq_q4_K_lds_tiled.cu).
                 mmq_tile: (128, 16),
+            },
+            "qmatmul_q5_K_mmq_lds_tiled_gfx906" => Self {
+                kind: RecipeKind::MmqLdsX64,
+                stem: "mmq_q5_K_lds_tiled",
+                entry: "flambeau_mmq_q5_K_lds_tiled_q8_1",
+                threads: 0,
+                rows_per_block: 0,
+                mmq_tile: (64, 64),
+            },
+            "qmatmul_q6_K_mmq_lds_tiled_gfx906" => Self {
+                kind: RecipeKind::MmqLdsX64,
+                stem: "mmq_q6_K_lds_tiled",
+                entry: "flambeau_mmq_q6_K_lds_tiled_q8_1",
+                threads: 0,
+                rows_per_block: 0,
+                mmq_tile: (64, 64),
+            },
+            "qmatmul_iq4_xs_mmq_lds_tiled_gfx906" => Self {
+                kind: RecipeKind::MmqLdsX64,
+                stem: "mmq_iq4_xs_lds_tiled",
+                entry: "flambeau_mmq_iq4_xs_lds_tiled_q8_1",
+                threads: 0,
+                rows_per_block: 0,
+                mmq_tile: (64, 64),
+            },
+            "qmatmul_q4_K_mmq_lds_tiled_y64_gfx906" => Self {
+                kind: RecipeKind::MmqLdsX64,
+                stem: "mmq_q4_K_lds_tiled_y64",
+                entry: "flambeau_mmq_q4_K_lds_tiled_y64_q8_1",
+                threads: 0,
+                rows_per_block: 0,
+                mmq_tile: (64, 64),
+            },
+            "qmatmul_q3_K_mmq_lds_tiled_gfx906" => Self {
+                kind: RecipeKind::MmqLdsX64,
+                stem: "mmq_q3_K_lds_tiled",
+                entry: "flambeau_mmq_q3_K_lds_tiled_q8_1",
+                threads: 0,
+                rows_per_block: 0,
+                mmq_tile: (64, 64),
+            },
+            "qmatmul_iq4_nl_mmq_lds_tiled_gfx906" => Self {
+                kind: RecipeKind::MmqLdsX64,
+                stem: "mmq_iq4_nl_lds_tiled",
+                entry: "flambeau_mmq_iq4_nl_lds_tiled_q8_1",
+                threads: 0,
+                rows_per_block: 0,
+                mmq_tile: (64, 64),
+            },
+            "qmatmul_q8_0_mmq_lds_tiled_gfx906" => Self {
+                kind: RecipeKind::MmqLdsX64,
+                stem: "mmq_q8_0_lds_tiled",
+                entry: "flambeau_mmq_q8_0_lds_tiled_q8_1",
+                threads: 0,
+                rows_per_block: 0,
+                mmq_tile: (64, 64),
             },
             "qmatmul_q4_K_mmq_wave64_gfx906" => Self {
                 kind: RecipeKind::MmqWave64,

@@ -479,16 +479,21 @@ mod tests {
     }
 
     #[test]
-    fn mmq_tile16_at_m_128() {
-        let d = dispatch_qmatmul(&cfg(QDtype::Q8_0, QDtype::Q8_1, 128)).unwrap();
-        // default large-N Q8_0 MMQ is tile16.
+    fn mmq_tile16_at_m_64() {
+        let d = dispatch_qmatmul(&cfg(QDtype::Q8_0, QDtype::Q8_1, 64)).unwrap();
         assert_eq!(d.impl_id, "qmatmul_q8_0_mmq_wave64_tile16_gfx906");
     }
 
     #[test]
-    fn mmq_tile16_at_m_2048() {
+    fn mmq_lds_tiled_at_m_128() {
+        let d = dispatch_qmatmul(&cfg(QDtype::Q8_0, QDtype::Q8_1, 128)).unwrap();
+        assert_eq!(d.impl_id, "qmatmul_q8_0_mmq_lds_tiled_gfx906");
+    }
+
+    #[test]
+    fn mmq_lds_tiled_at_m_2048() {
         let d = dispatch_qmatmul(&cfg(QDtype::Q8_0, QDtype::Q8_1, 2048)).unwrap();
-        assert_eq!(d.impl_id, "qmatmul_q8_0_mmq_wave64_tile16_gfx906");
+        assert_eq!(d.impl_id, "qmatmul_q8_0_mmq_lds_tiled_gfx906");
     }
 
     #[test]

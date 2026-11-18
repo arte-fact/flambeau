@@ -45,12 +45,23 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
     },
     KernelDescriptor {
         op_name: "QMatMul",
+        // Generic LDS-tiled MMQ (`mmq_lds_tiled.cuh`), DS4 activation.
+        impl_id: "qmatmul_iq4_xs_mmq_lds_tiled_gfx906",
+        backend: "hip",
+        arch: "gfx906",
+        dtype_weight: QDtype::IQ4_XS,
+        dtype_activation: QDtype::Q8_1,
+        m_range: (128, usize::MAX),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_iq4_xs_mmq_lds_tiled_gfx906.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul",
         impl_id: "qmatmul_iq4_xs_mmq_wave64_gfx906",
         backend: "hip",
         arch: "gfx906",
         dtype_weight: QDtype::IQ4_XS,
         dtype_activation: QDtype::Q8_1,
-        m_range: (32, usize::MAX),
+        m_range: (32, 127),
         cert_rel_path: "certs/hip/gfx906/qmatmul_iq4_xs_mmq_wave64_gfx906.json",
     },
     KernelDescriptor {
@@ -192,12 +203,23 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
     },
     KernelDescriptor {
         op_name: "QMatMul",
+        // Generic LDS-tiled MMQ (`mmq_lds_tiled.cuh`), DS4 activation.
+        impl_id: "qmatmul_q5_K_mmq_lds_tiled_gfx906",
+        backend: "hip",
+        arch: "gfx906",
+        dtype_weight: QDtype::Q5_K,
+        dtype_activation: QDtype::Q8_1,
+        m_range: (128, usize::MAX),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q5_K_mmq_lds_tiled_gfx906.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul",
         impl_id: "qmatmul_q5_K_mmq_wave64_gfx906",
         backend: "hip",
         arch: "gfx906",
         dtype_weight: QDtype::Q5_K,
         dtype_activation: QDtype::Q8_1,
-        m_range: (32, usize::MAX),
+        m_range: (32, 127),
         cert_rel_path: "certs/hip/gfx906/qmatmul_q5_K_mmq_wave64_gfx906.json",
     },
     KernelDescriptor {
@@ -253,6 +275,17 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
     // oracle re-read all weights per row (~36 % of dense prefill, 7 ms/call).
     KernelDescriptor {
         op_name: "QMatMul",
+        // Generic LDS-tiled MMQ (`mmq_lds_tiled.cuh`), DS4 activation.
+        impl_id: "qmatmul_q8_0_mmq_lds_tiled_gfx906",
+        backend: "hip",
+        arch: "gfx906",
+        dtype_weight: QDtype::Q8_0,
+        dtype_activation: QDtype::Q8_1,
+        m_range: (128, usize::MAX),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q8_0_mmq_lds_tiled_gfx906.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul",
         // TILE_N=16 wave64 MMQ: each decoded weight tile is reused across 16
         // activation columns, halving weight HBM fetches vs the untiled oracle.
         // Owns m >= 32 — the full prefill chunk and its short tail alike (the
@@ -262,7 +295,7 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         arch: "gfx906",
         dtype_weight: QDtype::Q8_0,
         dtype_activation: QDtype::Q8_1,
-        m_range: (32, usize::MAX),
+        m_range: (32, 127),
         cert_rel_path: "certs/hip/gfx906/qmatmul_q8_0_mmq_wave64_tile16_gfx906.json",
     },
     KernelDescriptor {
@@ -341,24 +374,33 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
     },
     KernelDescriptor {
         op_name: "QMatMul",
-        // Promoted (2026-04-27): llamacpp-turbo
-        // 4-warp LDS-tiled Q4_K MMQ port. 256 threads (4 warps × 64), MMQ_Y=128,
-        // MMQ_X=16, double-buffered Y LDS per super-block. Owns m >= 128; the
-        // wave64 row below covers m = 32..127. Static dispatch is first-match
-        // — keep this entry ABOVE the wave64 row (lesson).
-        impl_id: "qmatmul_q4_K_mmq_lds_tiled_gfx906",
+        // Generic LDS-tiled MMQ (`mmq_lds_tiled.cuh`), DS4 activation.
+        impl_id: "qmatmul_q4_K_mmq_lds_tiled_y64_gfx906",
         backend: "hip",
         arch: "gfx906",
         dtype_weight: QDtype::Q4_K,
         dtype_activation: QDtype::Q8_1,
         m_range: (128, usize::MAX),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q4_K_mmq_lds_tiled_y64_gfx906.json",
+    },
+    // Dormant 128×16 tile — superseded at m >= 128 by the 64×32
+    // `qmatmul_q4_K_mmq_lds_tiled_y64_gfx906` above. m_range=(MAX,MAX) keeps
+    // shape-dispatch from picking it; the cert stays for A/B regression checks.
+    KernelDescriptor {
+        op_name: "QMatMul",
+        impl_id: "qmatmul_q4_K_mmq_lds_tiled_gfx906",
+        backend: "hip",
+        arch: "gfx906",
+        dtype_weight: QDtype::Q4_K,
+        dtype_activation: QDtype::Q8_1,
+        m_range: (usize::MAX, usize::MAX),
         cert_rel_path: "certs/hip/gfx906/qmatmul_q4_K_mmq_lds_tiled_gfx906.json",
     },
     KernelDescriptor {
         op_name: "QMatMul",
         // candle port `mmq_q4_K_wave64.cu`; structurally parallels the
         // Q5_K wave64 with flat 4-bit nibble decode (no qh merge).
-        // Owns m = 32..127 since promoted Q4_K turbo to (128, MAX).
+        // Owns m = 32..127; the LDS-tiled row above takes m >= 128.
         impl_id: "qmatmul_q4_K_mmq_wave64_gfx906",
         backend: "hip",
         arch: "gfx906",
@@ -366,6 +408,17 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         dtype_activation: QDtype::Q8_1,
         m_range: (32, 127),
         cert_rel_path: "certs/hip/gfx906/qmatmul_q4_K_mmq_wave64_gfx906.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul",
+        // Generic LDS-tiled MMQ (`mmq_lds_tiled.cuh`), DS4 activation.
+        impl_id: "qmatmul_q6_K_mmq_lds_tiled_gfx906",
+        backend: "hip",
+        arch: "gfx906",
+        dtype_weight: QDtype::Q6_K,
+        dtype_activation: QDtype::Q8_1,
+        m_range: (128, usize::MAX),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q6_K_mmq_lds_tiled_gfx906.json",
     },
     KernelDescriptor {
         op_name: "QMatMul",
@@ -377,7 +430,7 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         arch: "gfx906",
         dtype_weight: QDtype::Q6_K,
         dtype_activation: QDtype::Q8_1,
-        m_range: (32, usize::MAX),
+        m_range: (32, 127),
         cert_rel_path: "certs/hip/gfx906/qmatmul_q6_K_mmq_wave64_gfx906.json",
     },
     KernelDescriptor {
@@ -402,12 +455,23 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
     },
     KernelDescriptor {
         op_name: "QMatMul",
+        // Generic LDS-tiled MMQ (`mmq_lds_tiled.cuh`), DS4 activation.
+        impl_id: "qmatmul_q3_K_mmq_lds_tiled_gfx906",
+        backend: "hip",
+        arch: "gfx906",
+        dtype_weight: QDtype::Q3_K,
+        dtype_activation: QDtype::Q8_1,
+        m_range: (128, usize::MAX),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q3_K_mmq_lds_tiled_gfx906.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul",
         impl_id: "qmatmul_q3_K_mmq_wave64_gfx906",
         backend: "hip",
         arch: "gfx906",
         dtype_weight: QDtype::Q3_K,
         dtype_activation: QDtype::Q8_1,
-        m_range: (32, usize::MAX),
+        m_range: (32, 127),
         cert_rel_path: "certs/hip/gfx906/qmatmul_q3_K_mmq_wave64_gfx906.json",
     },
     // MMQ oracle covers only the tiny-M band (4..31) for Q8_0 — at m < 32 the
@@ -426,12 +490,23 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
     // IQ3_XXS, IQ2_XXS, IQ2_XS, IQ2_S, IQ1_S, IQ1_M). Same wave64 tile shape.
     KernelDescriptor {
         op_name: "QMatMul",
+        // Generic LDS-tiled MMQ (`mmq_lds_tiled.cuh`), DS4 activation.
+        impl_id: "qmatmul_iq4_nl_mmq_lds_tiled_gfx906",
+        backend: "hip",
+        arch: "gfx906",
+        dtype_weight: QDtype::IQ4_NL,
+        dtype_activation: QDtype::Q8_1,
+        m_range: (128, usize::MAX),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_iq4_nl_mmq_lds_tiled_gfx906.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul",
         impl_id: "qmatmul_iq4_nl_mmq_wave64_gfx906",
         backend: "hip",
         arch: "gfx906",
         dtype_weight: QDtype::IQ4_NL,
         dtype_activation: QDtype::Q8_1,
-        m_range: (32, usize::MAX),
+        m_range: (32, 127),
         cert_rel_path: "certs/hip/gfx906/qmatmul_iq4_nl_mmq_wave64_gfx906.json",
     },
     KernelDescriptor {
