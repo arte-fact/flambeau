@@ -569,6 +569,14 @@ fn run_completion_scheduler_pp_blocking(
             }
         }
         let first_next = sampler.sample(&logits_buf, sampling, &[]);
+        tracing::info!(
+            target: "server.completion.first_token",
+            prompt_tokens,
+            ttft_ms = request_start.elapsed().as_secs_f64() * 1000.0,
+            greedy = sampling.is_greedy(),
+            scheduler = true,
+            "first token produced (time-to-first-token)"
+        );
 
         let mut generated: Vec<u32> = Vec::with_capacity(params.max_tokens as usize);
         generated.push(first_next);
