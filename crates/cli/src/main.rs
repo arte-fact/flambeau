@@ -1248,11 +1248,17 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     "Q4_K_wave64" => (vec![MmqDtype::Q4KWave64], SweepSpec::v1_4_prefill),
                     "Q4_K_lds_tiled" => (vec![MmqDtype::Q4KLdsTiled], SweepSpec::v1_4_prefill),
                     "Q5_K_lds_tiled" => (vec![MmqDtype::Q5KLdsTiled], SweepSpec::v1_4_prefill),
+                    "Q5_K_lds_tiled_x8" => (vec![MmqDtype::Q5KLdsTiledX8], SweepSpec::v1_4_prefill),
                     "Q6_K_lds_tiled" => (vec![MmqDtype::Q6KLdsTiled], SweepSpec::v1_4_prefill),
+                    "Q6_K_lds_tiled_x8" => (vec![MmqDtype::Q6KLdsTiledX8], SweepSpec::v1_4_prefill),
                     "IQ4_XS_lds_tiled" => (vec![MmqDtype::Iq4XsLdsTiled], SweepSpec::v1_4_prefill),
+                    "IQ4_XS_lds_tiled_x8" => (vec![MmqDtype::Iq4XsLdsTiledX8], SweepSpec::v1_4_prefill),
                     "Q4_K_lds_tiled_y64" => (vec![MmqDtype::Q4KLdsTiledY64], SweepSpec::v1_4_prefill),
+                    "Q4_K_lds_tiled_y64_x8" => (vec![MmqDtype::Q4KLdsTiledY64X8], SweepSpec::v1_4_prefill),
                     "Q3_K_lds_tiled" => (vec![MmqDtype::Q3KLdsTiled], SweepSpec::v1_4_prefill),
+                    "Q3_K_lds_tiled_x8" => (vec![MmqDtype::Q3KLdsTiledX8], SweepSpec::v1_4_prefill),
                     "IQ4_NL_lds_tiled" => (vec![MmqDtype::Iq4NlLdsTiled], SweepSpec::v1_4_prefill),
+                    "IQ4_NL_lds_tiled_x8" => (vec![MmqDtype::Iq4NlLdsTiledX8], SweepSpec::v1_4_prefill),
                     "Q8_0_lds_tiled" => (vec![MmqDtype::Q8_0LdsTiled], SweepSpec::v1_4_prefill),
                     "Q5_K" | "Q5_K_wave64" => (vec![MmqDtype::Q5KWave64], SweepSpec::v1_4_prefill),
                     "Q6_K" | "Q6_K_4warp" => (vec![MmqDtype::Q6K4Warp], SweepSpec::v1_4_prefill),
@@ -1322,11 +1328,17 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                             | MmqDtype::Q5_1Wave64
                             | MmqDtype::Q4KLdsTiled
                             | MmqDtype::Q5KLdsTiled
+                            | MmqDtype::Q5KLdsTiledX8
                             | MmqDtype::Q6KLdsTiled
+                            | MmqDtype::Q6KLdsTiledX8
                             | MmqDtype::Iq4XsLdsTiled
+                            | MmqDtype::Iq4XsLdsTiledX8
                             | MmqDtype::Q4KLdsTiledY64
+                            | MmqDtype::Q4KLdsTiledY64X8
                             | MmqDtype::Q3KLdsTiled
+                            | MmqDtype::Q3KLdsTiledX8
                             | MmqDtype::Iq4NlLdsTiled
+                            | MmqDtype::Iq4NlLdsTiledX8
                             | MmqDtype::Q8_0LdsTiled
                             | MmqDtype::Q4K4Warp
                             | MmqDtype::Q4KWave64

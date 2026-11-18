@@ -83,7 +83,7 @@ pub fn qmatmul<B: flambeau_core::KernelBackend>(
         let _ = act_q8_1_mmq;
         return Ok(());
     }
-    if dtype_weight == QDtype::Q4_K && (2..=4).contains(&m) {
+    if dtype_weight == QDtype::Q4_K && m == 2 {
         mmvq_q4_k_batched(
 
             reg, stream,
@@ -96,7 +96,7 @@ pub fn qmatmul<B: flambeau_core::KernelBackend>(
         let _ = act_q8_1_mmq;
         return Ok(());
     }
-    if dtype_weight == QDtype::Q6_K && (2..=4).contains(&m) {
+    if dtype_weight == QDtype::Q6_K && m == 2 {
         mmvq_q6_k_batched(
 
             reg, stream,
@@ -173,11 +173,12 @@ pub fn qmatmul<B: flambeau_core::KernelBackend>(
         return Ok(());
     }
 
-    // Q5_K at m ∈ {2, 3, 4}: row-tile batched MMVQ (R=8 rows per block,
+    // Q5_K at m = 2 (m >= 3 dispatches to the small-batch LDS tile): row-tile
+    // batched MMVQ (R=8 rows per block,
     // LDS-resident activation strip per super-block). Replaced the
     // earlier r2 batched at this dispatch row; cert.md shows 1.50×–2.68×
     // vs the r2 sibling on decode-class shapes.
-    if dtype_weight == QDtype::Q5_K && (2..=4).contains(&m) {
+    if dtype_weight == QDtype::Q5_K && m == 2 {
         mmvq_q5_k_row_tile_batched(
 
             reg, stream,
@@ -359,10 +360,8 @@ pub fn qmatmul_reads_mmq_activation<B: flambeau_core::KernelBackend>(
         return false;
     }
     // Compile-time batched MMVQ short-circuits (standard layout).
-    if matches!(
-        dtype_weight,
-        QDtype::Q4_1 | QDtype::Q8_0 | QDtype::Q4_K | QDtype::Q6_K
-    ) && (2..=4).contains(&m)
+    if (matches!(dtype_weight, QDtype::Q4_1 | QDtype::Q8_0) && (2..=4).contains(&m))
+        || (matches!(dtype_weight, QDtype::Q4_K | QDtype::Q6_K) && m == 2)
     {
         return false;
     }
@@ -374,7 +373,7 @@ pub fn qmatmul_reads_mmq_activation<B: flambeau_core::KernelBackend>(
         return false;
     }
     // Q5_K row-tile batched MMVQ short-circuit (standard layout).
-    if dtype_weight == QDtype::Q5_K && (2..=4).contains(&m) {
+    if dtype_weight == QDtype::Q5_K && m == 2 {
         return false;
     }
     match resolve_dispatch_recipe::<B>(dtype_weight, m, k, n) {
@@ -1701,6 +1700,13 @@ fn mmq_lds_x64_params(stem: &str) -> Result<(u32, u32)> {
         "mmq_q3_K_lds_tiled" => (256, 4 * (64 * 36 + 4488)),
         "mmq_iq4_nl_lds_tiled" => (32, 4 * (64 * 36 + 4688)),
         "mmq_q8_0_lds_tiled" => (32, 4 * (64 * 36 + 4688)),
+        // 8-column small-batch tiles.
+        "mmq_q5_K_lds_tiled_x8" => (256, 4 * (8 * 36 + 4488)),
+        "mmq_q6_K_lds_tiled_x8" => (256, 4 * (8 * 36 + 4490)),
+        "mmq_iq4_xs_lds_tiled_x8" => (256, 4 * (8 * 36 + 4688)),
+        "mmq_q4_K_lds_tiled_y64_x8" => (256, 4 * (8 * 36 + 2440)),
+        "mmq_q3_K_lds_tiled_x8" => (256, 4 * (8 * 36 + 4488)),
+        "mmq_iq4_nl_lds_tiled_x8" => (32, 4 * (8 * 36 + 4688)),
         other => bail!("mmq_lds_x64_params: no entry for stem {other}"),
     })
 }
@@ -2494,6 +2500,54 @@ impl Recipe {
                 threads: 0,
                 rows_per_block: 0,
                 mmq_tile: (64, 64),
+            },
+            "qmatmul_q5_K_mmq_lds_tiled_x8_gfx906" => Self {
+                kind: RecipeKind::MmqLdsX64,
+                stem: "mmq_q5_K_lds_tiled_x8",
+                entry: "flambeau_mmq_q5_K_lds_tiled_x8_q8_1",
+                threads: 0,
+                rows_per_block: 0,
+                mmq_tile: (64, 8),
+            },
+            "qmatmul_q6_K_mmq_lds_tiled_x8_gfx906" => Self {
+                kind: RecipeKind::MmqLdsX64,
+                stem: "mmq_q6_K_lds_tiled_x8",
+                entry: "flambeau_mmq_q6_K_lds_tiled_x8_q8_1",
+                threads: 0,
+                rows_per_block: 0,
+                mmq_tile: (64, 8),
+            },
+            "qmatmul_iq4_xs_mmq_lds_tiled_x8_gfx906" => Self {
+                kind: RecipeKind::MmqLdsX64,
+                stem: "mmq_iq4_xs_lds_tiled_x8",
+                entry: "flambeau_mmq_iq4_xs_lds_tiled_x8_q8_1",
+                threads: 0,
+                rows_per_block: 0,
+                mmq_tile: (64, 8),
+            },
+            "qmatmul_q4_K_mmq_lds_tiled_y64_x8_gfx906" => Self {
+                kind: RecipeKind::MmqLdsX64,
+                stem: "mmq_q4_K_lds_tiled_y64_x8",
+                entry: "flambeau_mmq_q4_K_lds_tiled_y64_x8_q8_1",
+                threads: 0,
+                rows_per_block: 0,
+                mmq_tile: (64, 8),
+            },
+            "qmatmul_q3_K_mmq_lds_tiled_x8_gfx906" => Self {
+                kind: RecipeKind::MmqLdsX64,
+                stem: "mmq_q3_K_lds_tiled_x8",
+                entry: "flambeau_mmq_q3_K_lds_tiled_x8_q8_1",
+                threads: 0,
+                rows_per_block: 0,
+                mmq_tile: (64, 8),
+            },
+            "qmatmul_iq4_nl_mmq_lds_tiled_x8_gfx906" => Self {
+                kind: RecipeKind::MmqLdsX64,
+                stem: "mmq_iq4_nl_lds_tiled_x8",
+                entry: "flambeau_mmq_iq4_nl_lds_tiled_x8_q8_1",
+                threads: 0,
+                rows_per_block: 0,
+                mmq_tile: (64, 8),
             },
             "qmatmul_q4_K_mmq_wave64_gfx906" => Self {
                 kind: RecipeKind::MmqWave64,

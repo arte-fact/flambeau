@@ -479,9 +479,19 @@ mod tests {
     }
 
     #[test]
-    fn mmq_tile16_at_m_64() {
-        let d = dispatch_qmatmul(&cfg(QDtype::Q8_0, QDtype::Q8_1, 64)).unwrap();
-        assert_eq!(d.impl_id, "qmatmul_q8_0_mmq_wave64_tile16_gfx906");
+    fn mmq_lds_tiled_at_m_32() {
+        let d = dispatch_qmatmul(&cfg(QDtype::Q8_0, QDtype::Q8_1, 32)).unwrap();
+        assert_eq!(d.impl_id, "qmatmul_q8_0_mmq_lds_tiled_gfx906");
+    }
+
+    #[test]
+    fn small_batch_tile_owns_m_3_to_32() {
+        for m in [3, 8, 32] {
+            let d = dispatch_qmatmul(&cfg(QDtype::Q5_K, QDtype::Q8_1, m)).unwrap();
+            assert_eq!(d.impl_id, "qmatmul_q5_K_mmq_lds_tiled_x8_gfx906");
+        }
+        let d = dispatch_qmatmul(&cfg(QDtype::Q5_K, QDtype::Q8_1, 33)).unwrap();
+        assert_eq!(d.impl_id, "qmatmul_q5_K_mmq_lds_tiled_gfx906");
     }
 
     #[test]

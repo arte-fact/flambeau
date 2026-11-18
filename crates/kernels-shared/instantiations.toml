@@ -1179,6 +1179,116 @@ params = """
     const int nrows_dst"""
 body = "(void) stride_col_y; mmq_lds_tiled_row<mmq_lds::Q8_0, 64, 64, 4>(vx, vy, dst, ncols_x, nrows_x, ncols_y, stride_row_x, nrows_dst);"
 
+# Small-batch tile of the generic LDS-tiled MMQ: MMQ_Y=64 × MMQ_X=8. One pass
+# over the weights serves up to 8 activation rows (speculative-decode verify).
+[[kernel]]
+stem = "mmq_q5_K_lds_tiled_x8"
+includes = ["quant_traits.cuh", "mmq_lds_tiled.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_q5_K_lds_tiled_x8_q8_1"
+launch_bounds = "256, 2"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int stride_col_y,
+    const int stride_row_x,
+    const int nrows_dst"""
+body = "(void) stride_col_y; mmq_lds_tiled_row<mmq_lds::Q5K, 8, 64, 4>(vx, vy, dst, ncols_x, nrows_x, ncols_y, stride_row_x, nrows_dst);"
+
+[[kernel]]
+stem = "mmq_q6_K_lds_tiled_x8"
+includes = ["quant_traits.cuh", "mmq_lds_tiled.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_q6_K_lds_tiled_x8_q8_1"
+launch_bounds = "256, 2"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int stride_col_y,
+    const int stride_row_x,
+    const int nrows_dst"""
+body = "(void) stride_col_y; mmq_lds_tiled_row<mmq_lds::Q6K, 8, 64, 4>(vx, vy, dst, ncols_x, nrows_x, ncols_y, stride_row_x, nrows_dst);"
+
+[[kernel]]
+stem = "mmq_iq4_xs_lds_tiled_x8"
+includes = ["quant_traits.cuh", "mmq_lds_tiled.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_iq4_xs_lds_tiled_x8_q8_1"
+launch_bounds = "256, 2"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int stride_col_y,
+    const int stride_row_x,
+    const int nrows_dst"""
+body = "(void) stride_col_y; mmq_lds_tiled_row<mmq_lds::IQ4XS, 8, 64, 4>(vx, vy, dst, ncols_x, nrows_x, ncols_y, stride_row_x, nrows_dst);"
+
+[[kernel]]
+stem = "mmq_q4_K_lds_tiled_y64_x8"
+includes = ["quant_traits.cuh", "mmq_lds_tiled.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_q4_K_lds_tiled_y64_x8_q8_1"
+launch_bounds = "256, 2"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int stride_col_y,
+    const int stride_row_x,
+    const int nrows_dst"""
+body = "(void) stride_col_y; mmq_lds_tiled_row<mmq_lds::Q4K, 8, 64, 4>(vx, vy, dst, ncols_x, nrows_x, ncols_y, stride_row_x, nrows_dst);"
+
+[[kernel]]
+stem = "mmq_q3_K_lds_tiled_x8"
+includes = ["quant_traits.cuh", "mmq_lds_tiled.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_q3_K_lds_tiled_x8_q8_1"
+launch_bounds = "256, 2"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int stride_col_y,
+    const int stride_row_x,
+    const int nrows_dst"""
+body = "(void) stride_col_y; mmq_lds_tiled_row<mmq_lds::Q3K, 8, 64, 4>(vx, vy, dst, ncols_x, nrows_x, ncols_y, stride_row_x, nrows_dst);"
+
+[[kernel]]
+stem = "mmq_iq4_nl_lds_tiled_x8"
+includes = ["quant_traits.cuh", "mmq_lds_tiled.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_iq4_nl_lds_tiled_x8_q8_1"
+launch_bounds = "256, 2"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int stride_col_y,
+    const int stride_row_x,
+    const int nrows_dst"""
+body = "(void) stride_col_y; mmq_lds_tiled_row<mmq_lds::IQ4NL, 8, 64, 4>(vx, vy, dst, ncols_x, nrows_x, ncols_y, stride_row_x, nrows_dst);"
+
 # Q4_K 4-warp LDS-tiled MMQ (prefill GEMM), F32-tile variant — MMQ_Y=16 × MMQ_X=8,
 # 128 threads, dequant super-block into LDS then F32 dot. Same stem/entry as the
 # retired hand kernel.

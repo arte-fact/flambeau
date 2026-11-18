@@ -264,8 +264,10 @@ impl<A: Arch> Session<A> {
         ) {
             return Ok(None);
         }
-        let mut first: Option<(Vec<u32>, Vec<f32>)> = None;
-        for (i, handle) in self.handles.iter().enumerate() {
+        // Dispatch to every rank before collecting any reply: TP ranks block on
+        // each other's AllReduce, so a send-then-wait per rank deadlocks.
+        let mut replies = Vec::with_capacity(self.handles.len());
+        for handle in &self.handles {
             let (tx, rx) = std::sync::mpsc::sync_channel(1);
             handle
                 .cmd_tx
@@ -279,6 +281,12 @@ impl<A: Arch> Session<A> {
                     reply: tx,
                 })
                 .map_err(|e| anyhow::anyhow!("mtp_step send: {e}"))?;
+            replies.push(rx);
+        }
+        let mut first: Option<(Vec<u32>, Vec<f32>)> = None;
+        let mut unsupported = false;
+        let mut failure: Option<anyhow::Error> = None;
+        for (i, rx) in replies.into_iter().enumerate() {
             match rx.recv().map_err(|e| anyhow::anyhow!("mtp_step recv: {e}"))? {
                 Ok(v) => {
                     if i == 0 {
@@ -288,11 +296,18 @@ impl<A: Arch> Session<A> {
                 Err(e) => {
                     let msg = format!("{e:#}");
                     if msg.contains("no MTP") || msg.contains("not supported") {
-                        return Ok(None);
+                        unsupported = true;
+                    } else if failure.is_none() {
+                        failure = Some(e);
                     }
-                    return Err(e);
                 }
             }
+        }
+        if let Some(e) = failure {
+            return Err(e);
+        }
+        if unsupported {
+            return Ok(None);
         }
         Ok(first)
     }
