@@ -618,7 +618,7 @@ fn run_completion_scheduler_pp_blocking(
                 .decode_via_scheduler_into(
                     slot_idx,
                     last_token,
-                    prompt_ids.len() + step,
+                    prompt_ids.len() + step - 1,
                     &mut logits,
                 )
                 .context("scheduler-path decode step")?;
@@ -823,7 +823,7 @@ fn run_completion_streaming_scheduler_pp_blocking(
                 .decode_via_scheduler_into(
                     slot_idx,
                     last_token,
-                    prompt_ids.len() + step,
+                    prompt_ids.len() + step - 1,
                     &mut logits,
                 )
                 .context("scheduler-path decode step")?;
@@ -1208,7 +1208,7 @@ fn run_completion_blocking_ids(
         // decode/batched collapse (see `use_gpu_sampler` initialiser).
         let mut mtp_emitted: Option<Vec<u32>> = None;
         let next = {
-            let pos = prompt_ids.len() + step + mtp_offset;
+            let pos = prompt_ids.len() + step - 1 + mtp_offset;
             // Every token a cycle can emit lies past the stop-mask window,
             // so only the constant stop bias needs replicating inside it.
             let in_stop_window = generated.len() < min_response_tokens && !relax_stop_mask;
@@ -1724,7 +1724,7 @@ pub(crate) fn run_completion_blocking_streaming(
             .dispatch_decode_one(
                 &mut *inflight,
                 last_token,
-                prompt_ids.len() + step,
+                prompt_ids.len() + step - 1,
                 &mut logits_buf,
             )
             .context("decode step logits")?;
