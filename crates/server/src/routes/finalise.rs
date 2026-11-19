@@ -31,7 +31,8 @@ pub(super) type CompletionOutput = (
 /// `flambeau_runtime::sampling::build_distribution` to reproduce the
 /// same penalty + temperature + top-k/top-p/min-p transforms the sampler
 /// applied, then extracts the chosen token's log-probability and the
-/// top-`top_n` alternatives.
+/// `top_n` most likely tokens (the chosen one included, as OpenAI does).
+/// Under greedy sampling the distribution is the unfiltered softmax.
 ///
 /// Returns `None` if the chosen token is outside the post-filter
 /// distribution (defensive — shouldn't happen because the sampler drew
@@ -45,6 +46,21 @@ pub(super) fn build_logprob_entry(
     top_n: usize,
 ) -> Option<ChatLogProbContent> {
     use flambeau_runtime::sampling::build_distribution;
+    // Greedy sampling reduces the distribution to its argmax; logprobs must
+    // still report the model's softmax (penalties and bias applied).
+    let unfiltered;
+    let sampling = if sampling.is_greedy() {
+        unfiltered = flambeau_runtime::Sampling {
+            temperature: 1.0,
+            top_p: None,
+            top_k: None,
+            min_p: None,
+            ..sampling.clone()
+        };
+        &unfiltered
+    } else {
+        sampling
+    };
     let dist = build_distribution(logits, sampling, history);
     if dist.is_empty() {
         return None;
@@ -52,11 +68,7 @@ pub(super) fn build_logprob_entry(
     let chosen_prob = dist.iter().find(|(id, _)| *id == chosen).map(|(_, p)| *p)?;
     let chosen_logprob = log_clamped(chosen_prob);
 
-    let mut alts: Vec<(u32, f32)> = dist
-        .iter()
-        .filter(|(id, _)| *id != chosen)
-        .copied()
-        .collect();
+    let mut alts: Vec<(u32, f32)> = dist.clone();
     if alts.len() > top_n {
         alts.select_nth_unstable_by(top_n, |a, b| {
             b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)

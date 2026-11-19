@@ -1191,9 +1191,10 @@ fn run_completion_blocking_ids(
     // Qwen3.6 doesn't show that failure at this bias on chat tests.
     let stop_bias = crate::v2_handle::stop_bias_for(&state.cfg.arch);
     let mut reasoning_closer = ReasoningCloser::new(reasoning_close_ids(&state, &params));
-    // MTP (greedy only): draft+verify cycles through the session's nextn
-    // head. Disabled for JSON mode, logprobs, stochastic sampling, and
-    // reasoning budgets (forced tokens would desync the draft chain).
+    // MTP: draft+verify cycles through the session's nextn head, with the
+    // same stop-token bias as the plain path. Disabled for JSON mode,
+    // logprobs and reasoning budgets (forced tokens would desync the draft
+    // chain), and inside the stop-mask window.
     let mtp_on = state.mtp_max_draft > 0
         && json_state.is_none()
         && logprobs_acc.is_none()
@@ -1208,16 +1209,39 @@ fn run_completion_blocking_ids(
         let mut mtp_emitted: Option<Vec<u32>> = None;
         let next = {
             let pos = prompt_ids.len() + step + mtp_offset;
-            if mtp_on {
+            // Every token a cycle can emit lies past the stop-mask window,
+            // so only the constant stop bias needs replicating inside it.
+            let in_stop_window = generated.len() < min_response_tokens && !relax_stop_mask;
+            if mtp_on && !in_stop_window {
                 let sampling2 = sampling.clone();
                 let history2 = generated.clone();
+                let stop_adjust: std::sync::Arc<Vec<(u32, f32)>> = std::sync::Arc::new(if relax_stop_mask {
+                    Vec::new()
+                } else {
+                    stop_ids
+                        .iter()
+                        .map(|&sid| {
+                            let delta = if always_stop_ids.contains(&sid) { f32::NEG_INFINITY } else { -stop_bias };
+                            (sid, delta)
+                        })
+                        .collect()
+                });
                 let factory: std::sync::Arc<dyn Fn(u64) -> flambeau_server_core::MtpSampleFn + Send + Sync> =
                     std::sync::Arc::new(move |seed: u64| {
                         let sampling = sampling2.clone();
                         let history = history2.clone();
+                        let stop_adjust = std::sync::Arc::clone(&stop_adjust);
+                        let mut adjusted: Vec<f32> = Vec::new();
                         let mut rng = flambeau_runtime::Rng::from_seed(seed);
                         Box::new(move |logits: &[f32]| -> (u32, Vec<(u32, f32)>) {
-                            let dist = flambeau_runtime::build_distribution(logits, &sampling, &history);
+                            adjusted.clear();
+                            adjusted.extend_from_slice(logits);
+                            for &(sid, delta) in stop_adjust.iter() {
+                                if let Some(l) = adjusted.get_mut(sid as usize) {
+                                    *l += delta;
+                                }
+                            }
+                            let dist = flambeau_runtime::build_distribution(&adjusted, &sampling, &history);
                             let r = rng.next_f32();
                             let mut acc = 0.0f32;
                             let mut tok = dist.last().map(|(t, _)| *t).unwrap_or(0);
