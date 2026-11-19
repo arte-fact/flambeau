@@ -13,7 +13,7 @@
       "k": 256,
       "n": 256,
       "seed": 2016268,
-      "max_rel_err": 0.008009234,
+      "max_rel_err": 0.0080099795,
       "tolerance": 0.03,
       "pass": true
     },
@@ -31,13 +31,13 @@
       "k": 5120,
       "n": 6144,
       "seed": 48349708,
-      "max_rel_err": 0.005889227,
+      "max_rel_err": 0.0058878944,
       "tolerance": 0.03,
       "pass": true
     }
   ],
   "pass": true,
-  "emitted_at": "2026-04-23T08:44:52Z",
+  "emitted_at": "2026-11-19T22:37:10Z",
   "rig": "threadreaper-gfx906",
   "pmc": {
     "vgpr_count": 23,

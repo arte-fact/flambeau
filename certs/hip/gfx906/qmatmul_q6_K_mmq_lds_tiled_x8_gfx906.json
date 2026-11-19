@@ -91,7 +91,7 @@
     }
   ],
   "pass": true,
-  "emitted_at": "2026-11-18T21:15:13Z",
+  "emitted_at": "2026-11-19T22:57:03Z",
   "rig": "threadreaper-gfx906",
   "pmc": {
     "vgpr_count": 79,
