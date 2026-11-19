@@ -57,6 +57,8 @@ fn run<B: Backend>(
         1,
         None,
         KvLayout::F16Contig,
+
+        0,
     );
     let mut pool = ScratchPool::new(device, cfg)?;
     let stream = device.default_stream();

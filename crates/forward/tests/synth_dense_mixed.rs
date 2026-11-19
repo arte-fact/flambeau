@@ -64,6 +64,7 @@ fn build_scratch_cfg() -> ScratchConfig {
     let q_width = N_HEADS * HEAD_DIM;
     let kv_width = N_KV_HEADS * HEAD_DIM;
     ScratchConfig {
+        mtp: None,
         hidden: HIDDEN,
         intermediate: 256,
         q_width,

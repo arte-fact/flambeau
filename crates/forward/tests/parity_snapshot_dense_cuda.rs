@@ -109,6 +109,7 @@ fn parity_snapshot_dense_single_token_cuda() {
     };
 
     let cfg = ScratchConfig {
+        mtp: None,
         hidden: HIDDEN,
         intermediate: INTERMEDIATE,
         q_width,

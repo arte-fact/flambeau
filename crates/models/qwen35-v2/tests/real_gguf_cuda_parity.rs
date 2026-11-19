@@ -44,7 +44,7 @@ fn run<B: Backend>(
     n_gen: usize,
 ) -> anyhow::Result<RunOut> {
     let mut model = Qwen35V2::load(file, device, ShardMode::Replicated, None, Some(CTX_CAP))?;
-    let cfg = Qwen35V2::scratch_config(&model, ShardMode::Replicated, prompt.len(), 1, None, KvLayout::F16Contig);
+    let cfg = Qwen35V2::scratch_config(&model, ShardMode::Replicated, prompt.len(), 1, None, KvLayout::F16Contig, 0);
     let mut pool = ScratchPool::new(device, cfg)?;
     let stream = device.default_stream();
 

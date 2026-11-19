@@ -98,6 +98,7 @@ fn parity_snapshot_attn_gated_single_token() {
     };
 
     let cfg = ScratchConfig {
+        mtp: None,
         hidden: HIDDEN,
         intermediate: 0,
         q_width,

@@ -147,6 +147,7 @@ fn kv_parity(layout: KvLayout, swa: bool) {
     }
 
     let cfg = ScratchConfig {
+        mtp: None,
         hidden: HIDDEN,
         intermediate: INTERMEDIATE,
         q_width,
@@ -343,6 +344,7 @@ fn gdn_snapshot_restore_decode_parity() {
     }
 
     let cfg = ScratchConfig {
+        mtp: None,
         hidden: HIDDEN,
         intermediate: 0,
         q_width: 0,

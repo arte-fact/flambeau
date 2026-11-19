@@ -135,6 +135,7 @@ fn synth_moe_one_token_forward() {
     }
 
     let cfg = ScratchConfig {
+        mtp: None,
         hidden: HIDDEN,
         intermediate: INTERMEDIATE,
         q_width,

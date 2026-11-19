@@ -48,7 +48,7 @@ fn gemma_cuda_decode_benchmark() {
     let mut model =
         Gemma4V2::load(&file, &dev, ShardMode::Replicated, None, Some(ctx_cap)).expect("load");
     let cfg =
-        Gemma4V2::scratch_config(&model, ShardMode::Replicated, pp, 1, None, KvLayout::F16Contig);
+        Gemma4V2::scratch_config(&model, ShardMode::Replicated, pp, 1, None, KvLayout::F16Contig, 0);
     let mut pool = ScratchPool::new(&dev, cfg).expect("pool");
     let stream = dev.default_stream();
 

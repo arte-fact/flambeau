@@ -1656,6 +1656,7 @@ fn mmq_gemm_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::MmqGemmDtyp
     }
 }
 
+#[cfg(any(feature = "hip_sweep", feature = "cuda_sweep"))]
 fn mmq_4warp_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::Mmq4WarpDtype> {
     use flambeau_bench::sweep_mmvq::Mmq4WarpDtype;
     match dtype {
@@ -1666,6 +1667,7 @@ fn mmq_4warp_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::Mmq4WarpDt
     }
 }
 
+#[cfg(any(feature = "hip_sweep", feature = "cuda_sweep"))]
 fn mmq_4warp_lds_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::Mmq4WarpLdsDtype> {
     use flambeau_bench::sweep_mmvq::Mmq4WarpLdsDtype;
     match dtype {
@@ -1676,6 +1678,7 @@ fn mmq_4warp_lds_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::Mmq4Wa
     }
 }
 
+#[cfg(any(feature = "hip_sweep", feature = "cuda_sweep"))]
 fn moe_mmvq_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::MoeMmvqDtype> {
     use flambeau_bench::sweep_mmvq::MoeMmvqDtype;
     match dtype {
@@ -1703,6 +1706,7 @@ fn moe_mmvq_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::MoeMmvqDtyp
     }
 }
 
+#[cfg(any(feature = "hip_sweep", feature = "cuda_sweep"))]
 fn moe_mmq_lds_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::MoeMmqLdsDtype> {
     use flambeau_bench::sweep_mmvq::MoeMmqLdsDtype;
     match dtype {
@@ -1712,6 +1716,7 @@ fn moe_mmq_lds_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::MoeMmqLd
     }
 }
 
+#[cfg(any(feature = "hip_sweep", feature = "cuda_sweep"))]
 fn moe_mmq_tile8_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::MoeMmqTile8Dtype> {
     use flambeau_bench::sweep_mmvq::MoeMmqTile8Dtype;
     match dtype {
@@ -1757,6 +1762,7 @@ fn moe_mmq_tile8_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::MoeMmq
     }
 }
 
+#[cfg(any(feature = "hip_sweep", feature = "cuda_sweep"))]
 fn moe_gate_up_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::MoeGateUpDtype> {
     use flambeau_bench::sweep_mmvq::MoeGateUpDtype;
     match dtype {
@@ -1769,6 +1775,7 @@ fn moe_gate_up_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::MoeGateU
     }
 }
 
+#[cfg(any(feature = "hip_sweep", feature = "cuda_sweep"))]
 fn f16_sweep_kind(dtype: &str) -> Option<flambeau_bench::sweep_mmvq_f16::F16SweepKind> {
     use flambeau_bench::sweep_mmvq_f16::F16SweepKind;
     match dtype {

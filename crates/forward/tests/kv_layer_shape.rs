@@ -459,7 +459,7 @@ fn scratch_config_for_gemma4_per_layer_head_dim_alternation() {
         moe: None,
         per_layer_embd: 0,
     };
-    let cfg = scratch_config_for(&shape, ShardMode::Replicated, 512, 1, None, KvLayout::F16Contig, 0, 0);
+    let cfg = scratch_config_for(&shape, ShardMode::Replicated, 512, 1, None, KvLayout::F16Contig, 0);
     // q_width = max over layers = num_heads * max(head_dim) = 8 * 256
     assert_eq!(cfg.q_width, 8 * 256);
     // kv_width = max over per_layer_kv = max(num_kv_heads[li] * head_dim[li])

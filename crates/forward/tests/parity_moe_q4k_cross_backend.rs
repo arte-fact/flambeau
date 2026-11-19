@@ -116,6 +116,7 @@ fn run<B: Backend>(eng_dev: &B::Device, reg: &B::Registry, allocs: &mut DeviceAl
     }
 
     let cfg = ScratchConfig {
+        mtp: None,
         hidden: HIDDEN,
         intermediate: INTERMEDIATE,
         q_width,

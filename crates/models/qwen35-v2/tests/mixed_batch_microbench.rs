@@ -61,6 +61,8 @@ fn bench_one(
         max_slots,
         None,
         flambeau_forward::KvLayout::F16Contig,
+
+        0,
     );
     let max_seq_len = cfg.max_seq_len;
     let mut pool = ScratchPool::new(device, cfg).expect("ScratchPool::new");
