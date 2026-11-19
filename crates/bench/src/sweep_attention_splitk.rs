@@ -30,14 +30,13 @@ const SHAPES: &[(usize, usize, usize)] = &[
     (256, 16, 2), // Qwen3.6 / GQA-8
 ];
 
+// Duplicate of `flambeau_ops::hip::attention::splitk_chunk_size(n_tokens, 32)`
+// (the bench crate does not depend on flambeau-ops). Keep in sync.
 fn pick_chunk(n_tokens: usize) -> usize {
-    if n_tokens <= 1024 {
-        128
-    } else if n_tokens <= 2048 {
-        256
-    } else {
-        512
+    if n_tokens <= 32 {
+        return n_tokens;
     }
+    n_tokens.div_ceil(32).max(32).next_multiple_of(4)
 }
 
 pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
@@ -55,7 +54,7 @@ pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
 
     // Split-K targets the long-context decode sweet spot. 16 is there to
     // cover the fallback path (single chunk).
-    let contexts = [16usize, 128, 1024, 4096];
+    let contexts = [16usize, 40, 100, 128, 256, 1024, 4096];
     let mut results = Vec::new();
     for &(head_dim, n_heads_q, n_heads_kv) in SHAPES {
         for n_tokens in contexts {

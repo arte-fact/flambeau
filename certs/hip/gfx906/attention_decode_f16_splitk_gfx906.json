@@ -19,10 +19,37 @@
     },
     {
       "m": 4,
+      "k": 40,
+      "n": 64,
+      "seed": 14253782,
+      "max_rel_err": 0.0,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 4,
+      "k": 100,
+      "n": 64,
+      "seed": 14243434,
+      "max_rel_err": 0.0,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 4,
       "k": 128,
       "n": 64,
       "seed": 14238622,
       "max_rel_err": 0.0,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 4,
+      "k": 256,
+      "n": 64,
+      "seed": 14226462,
+      "max_rel_err": 7.4505806e-7,
       "tolerance": 0.02,
       "pass": true
     },
@@ -40,7 +67,7 @@
       "k": 4096,
       "n": 64,
       "seed": 14623006,
-      "max_rel_err": 0.0,
+      "max_rel_err": 0.000047683716,
       "tolerance": 0.02,
       "pass": true
     },
@@ -55,10 +82,37 @@
     },
     {
       "m": 32,
+      "k": 40,
+      "n": 128,
+      "seed": 13742742,
+      "max_rel_err": 0.00026973983,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 32,
+      "k": 100,
+      "n": 128,
+      "seed": 13736490,
+      "max_rel_err": 0.00001685874,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 32,
       "k": 128,
       "n": 128,
       "seed": 13733854,
-      "max_rel_err": 0.00026973983,
+      "max_rel_err": 0.00006743496,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 32,
+      "k": 256,
+      "n": 128,
+      "seed": 13752414,
+      "max_rel_err": 0.0000021073424,
       "tolerance": 0.02,
       "pass": true
     },
@@ -76,7 +130,7 @@
       "k": 4096,
       "n": 128,
       "seed": 14151006,
-      "max_rel_err": 0.00001685874,
+      "max_rel_err": 0.0000021073424,
       "tolerance": 0.02,
       "pass": true
     },
@@ -91,10 +145,37 @@
     },
     {
       "m": 16,
+      "k": 40,
+      "n": 256,
+      "seed": 12593686,
+      "max_rel_err": 7.4505806e-7,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 16,
+      "k": 100,
+      "n": 256,
+      "seed": 12583594,
+      "max_rel_err": 0.0000014901161,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 16,
       "k": 128,
       "n": 256,
       "seed": 12588894,
-      "max_rel_err": 0.000011920929,
+      "max_rel_err": 0.00009536743,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 16,
+      "k": 256,
+      "n": 256,
+      "seed": 12599518,
+      "max_rel_err": 0.00009536743,
       "tolerance": 0.02,
       "pass": true
     },
@@ -103,7 +184,7 @@
       "k": 1024,
       "n": 256,
       "seed": 12693982,
-      "max_rel_err": 0.0000059604645,
+      "max_rel_err": 0.000011920929,
       "tolerance": 0.02,
       "pass": true
     },
@@ -118,12 +199,12 @@
     }
   ],
   "pass": true,
-  "emitted_at": "2026-06-05T20:51:44Z",
+  "emitted_at": "2026-11-19T15:04:36Z",
   "rig": "threadreaper-gfx906",
   "pmc": {
-    "vgpr_count": 30,
+    "vgpr_count": 41,
     "sgpr_count": null,
-    "waves_per_simd": 8,
+    "waves_per_simd": 6,
     "mem_busy_pct": null,
     "valu_busy_pct": null
   }

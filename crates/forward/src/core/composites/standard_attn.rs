@@ -767,8 +767,7 @@ pub fn standard_attn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
                     crate::core::scratch::MAX_SPLITK_CHUNKS,
                 );
                 let n_chunks = chunk_len.div_ceil(chunk_size);
-                let use_splitk = eff_n_tokens_kv > 256
-                    && n_chunks > 1
+                let use_splitk = n_chunks > 1
                     && n_chunks <= crate::core::scratch::MAX_SPLITK_CHUNKS
                     && state.pool.splitk_partials_m.as_usize() != 0;
                 if use_splitk {
@@ -933,8 +932,7 @@ pub fn standard_attn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
             let n_chunks = chunk_len.div_ceil(chunk_size);
             // Ring decode also splits-K (see the Q8 branch); single-block
             // fallback only above the MAX_SPLITK_CHUNKS cap (ctx > 16384).
-            let use_splitk = eff_n_tokens_kv > 256
-                && n_chunks > 1
+            let use_splitk = n_chunks > 1
                 && n_chunks <= crate::core::scratch::MAX_SPLITK_CHUNKS
                 && state.pool.splitk_partials_m.as_usize() != 0;
             if use_splitk {

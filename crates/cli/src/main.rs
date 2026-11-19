@@ -779,7 +779,9 @@ const SIMPLE_SWEEPS: &[(&str, SweepFn)] = &[
         flambeau_bench::sweep_attention_splitk::run_sweep,
     ),
     (
-        "attention_decode_q8_kv_splitk",
+        // The bare `attention_decode_q8_kv_splitk` op resolves to the
+        // cross-backend sweep first; this one emits the gfx906 cert.
+        "attention_decode_q8_kv_splitk_gfx906",
         flambeau_bench::sweep_attention_q8_kv_splitk::run_sweep,
     ),
     (

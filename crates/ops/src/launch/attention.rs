@@ -1070,6 +1070,11 @@ pub fn attention_decode_f16_splitk_h2<B: flambeau_core::KernelBackend>(
     Ok(())
 }
 
+/// Decode contexts up to this many KV rows run the single-pass kernel. Longer
+/// ones split K: the single-pass grid is one workgroup per Q head (12 on a
+/// qwen35 27B TP rank), which leaves most CUs idle even at short context.
+pub const SPLITK_MIN_TOKENS_KV: usize = 32;
+
 /// Pick a split-K chunk size that partitions `n_tokens_kv` into at most
 /// `max_chunks` chunks of >= 32 tokens each. The chunk kernel launches
 /// `n_heads * n_slots * n_chunks` blocks, so the caller sizes `max_chunks` to
@@ -1077,11 +1082,10 @@ pub fn attention_decode_f16_splitk_h2<B: flambeau_core::KernelBackend>(
 /// `MAX_SPLITK_CHUNKS` (n_heads * 32 blocks saturates the target GPUs at
 /// n_heads=16); batched decode passes `MAX_SPLITK_CHUNKS / n_slots` so the
 /// block count stays at that budget instead of over-subscribing by the slot
-/// count. Returns the single-pass fallback `chunk_size = n_tokens_kv` below
-/// 257 tokens, where split-K overhead (the combine kernel + partials
-/// write/read) exceeds the occupancy win.
+/// count. Returns the single-pass fallback `chunk_size = n_tokens_kv` up to
+/// [`SPLITK_MIN_TOKENS_KV`] tokens.
 pub fn splitk_chunk_size(n_tokens_kv: usize, max_chunks: usize) -> usize {
-    if n_tokens_kv <= 256 {
+    if n_tokens_kv <= SPLITK_MIN_TOKENS_KV {
         return n_tokens_kv;
     }
     n_tokens_kv.div_ceil(max_chunks.max(1)).max(32).next_multiple_of(4)
