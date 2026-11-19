@@ -23,7 +23,138 @@ Scripts, traces et données brutes : `~/Workspace/flambeau-exp/analyse-ecarts/`.
 
 ---
 
-## 0. Résumé
+## 1. Priorité 1 — bug de répartition des têtes GDN en TP-2
+
+En TP-2, flambeau calcule un modèle **faux** pour Qwen3.5/3.8-27B : un tiers des têtes V de chaque couche GDN lisent la mauvaise tête Q/K. Ce bug dégrade la qualité du modèle en TP et fausse l'état caché fourni à la tête MTP, d'où la plus grande part de l'écart d'acceptation (49,3 % contre 58,8 %). Il passe avant tout travail de performance : toute mesure TP-2 sur ce modèle porte sur un calcul incorrect.
+
+### 1.1 Preuves
+
+Preuve 1 — lecture du code :
+- `gdn_tp_mode_for` (`forward/src/loader/gdn_layer.rs:46-56`) choisit `FullShard`
+  parce que 24 % 16 ≠ 0.
+- Sa propre documentation (`:24-25`) indique « FullShard pairs with
+  `rep_inner_layout = true` (qwen3-Next) ». Or qwen35 charge `rep_inner_layout: false`
+  (`qwen35-v2/src/loader.rs:144`).
+- Avec `false`, le noyau calcule `h_kv = h_idx % H_kv`
+  (`kernels-shared/include/gdn_state_step_alphabeta.cuh:34,125`), comme llama.cpp
+  (`gated_delta_net.cu:52`, `iq1 = h_idx % neqk1`).
+- `pack_gdn_qkv_slab` (`forward/src/loader/gdn_shard.rs:76-89`) découpe ainsi :
+  rang r ← têtes K `[8r, 8r+8)` et têtes V `[24r, 24r+24)`.
+- Au rang 0, la tête V globale j ∈ 8..15 utilise la tête K j−8 au lieu de j. Au rang 1,
+  les têtes j ∈ 32..39 utilisent la tête K 8+(j−32) au lieu de j−32.
+- Bilan : **16 têtes V sur 48 (un tiers) sont fausses, dans les 48 couches GDN.**
+
+La preuve 2 isole l'effet du TP : le token t0 sort du préremplissage, il ne dépend donc
+ni du MTP ni du décalage de position (§4.8). Le mode PP de flambeau, qui n'a pas de
+découpage GDN, colle à llama.cpp ; le mode TP s'en écarte d'un ordre de grandeur de plus
+que le bruit de quantification du KV.
+
+Preuve 2 — log-probabilités du premier token t0. Écart maximal sur le top-5 commun, en
+nats (`cmp_lp.py`) :
+
+| Invite | flambeau TP q8 / llama.cpp q8 | flambeau TP f16 / llama.cpp f16 | llama.cpp q8 / f16 | **flambeau PP f16 / llama.cpp f16** |
+|---|---|---|---|---|
+| code | 0,79 | 0,38 | 0,20 | 0,56 |
+| math | 1,51 | 1,42 | 0,10 | **0,19** |
+| chat | 1,56 | 1,53 | 0,06 | **0,13** |
+| story | 0,51 | 0,33 | 0,08 | 0,36 |
+| list | 1,22 | 2,68 | 0,10 | 0,53 |
+
+Exemple « math », t0 : log p(« To ») vaut −0,85 chez flambeau TP contre −2,16 chez
+llama.cpp.
+
+Preuve 3 — longueur du préfixe commun avec le texte glouton de llama.cpp, en
+caractères :
+
+| Invite | code | math | chat | story | list |
+|---|---|---|---|---|---|
+| flambeau TP | 68 | 67 | 48 | 4 | 9 |
+| flambeau PP | 522 | 67 | 307 | 215 | 200 |
+
+Preuve 4 — pourquoi ce bug fait chuter l'acceptation MTP. Le reste du pipeline MTP est
+identique dans les deux moteurs, qui utilisent :
+- l'état caché pris **après** `output_norm` (llama.cpp `qwen35.cpp:213-217` ;
+  flambeau `mtp.rs:73-83`) ;
+- la concaténation `[enorm(emb), hnorm(h)]` puis `eh_proj` ;
+- un bloc d'attention complète ;
+- `shared_head_norm` puis la lm_head partagée ;
+- des brouillons 2 à 4 enchaînés sur l'état caché de sortie MTP (après norme) ;
+- la paire (emb(x_p), h_{p−1}) ;
+- une acceptation gloutonne par correspondance exacte, avec token bonus ;
+- un retour arrière de l'état GDN exact (instantané plus rejeu chez flambeau,
+  instantané par token chez llama.cpp) ;
+- un KV MTP en q8_0.
+
+Le GGUF ne contient ni `nextn.embed_tokens` ni `nextn.shared_head_head`, donc aucune
+divergence de ce côté.
+
+Ce qui diffère, c'est **l'état caché lui-même**, produit par les couches GDN faussées.
+La tête MTP, entraînée sur les états cachés du vrai modèle, propose donc moins souvent
+le token que le modèle cible (faussé lui aussi) retient.
+
+Gain estimé :
+- l'acceptation devrait remonter vers celle de llama.cpp (58,8 %), soit 3,3 à 3,37
+  tokens par cycle au lieu de 2,97, **+11 à 13 % en MTP : 26,5 → ≈ 29,5 t/s (+3 t/s)** ;
+- la qualité du modèle en TP est corrigée.
+
+Cette estimation n'a pas pu être mesurée directement : flambeau refuse le MTP en mode
+PP (`token_embd has 0 F16 elems`).
+
+Difficulté : faible à moyenne.
+
+### 1.2 Pourquoi les tests ne l'ont pas vu
+
+- `qwen35-v2/tests/session_tp2_27b.rs` vérifie seulement que les logits sont finis et non constants.
+- `qwen35-v2/tests/session_tp_parity.rs` compare TP et mono-GPU sur le 9B, dont la géométrie (têtes V par rang multiples de 16) passe par `KReplicated`, un mode correct. Le chemin `FullShard` + `rep_inner_layout = false` n'a jamais été validé.
+
+### 1.3 Correctif recommandé (pour flambeau@threadripper)
+
+Fichiers :
+- `crates/forward/src/loader/gdn_layer.rs` (`gdn_tp_mode_for`, `load_gdn_layer`) ;
+- `crates/forward/src/loader/gdn_shard.rs` (`pack_gdn_qkv_slab`,
+  `upload_gdn_fused_qkv_quant`, `upload_f32_array_sharded`) ;
+- les appels `upload_col_sharded_quant` / `upload_row_sharded_quant` pour `attn_gate`,
+  `ssm_alpha`, `ssm_beta`, `ssm_out`, `ssm_dt.bias`, `ssm_a`, `ssm_conv1d`.
+
+Approche recommandée : « FullShard permuté », sans surcoût de lecture.
+- Quand `rep_inner_layout == false`, le rang r prend les têtes K `[r·nk/R, (r+1)·nk/R)`
+  et les têtes V `{ j : (j % nk) ∈ [r·nk/R, (r+1)·nk/R) }`, dans l'ordre croissant de j.
+- Pour le 27B :
+  - rang 0 : têtes V 0..7, 16..23, 32..39 ;
+  - rang 1 : têtes V 8..15, 24..31, 40..47.
+- Le noyau garde `h_local % H_kv_local`. Avec cet ordre, la tête V locale h retrouve sa
+  bonne tête K locale.
+- Appliquer **la même permutation des têtes V** partout :
+  - aux lignes V du bloc QKV fusionné ;
+  - aux canaux V de `ssm_conv1d` ;
+  - aux lignes de `attn_gate` (z) ;
+  - à `ssm_alpha`, `ssm_beta`, `ssm_dt.bias` et `ssm_a` ;
+  - aux **colonnes** de `ssm_out` (sa dimension d'entrée `d_inner`, découpée par têtes V).
+
+  `ssm_norm` est partagé entre têtes : rien à faire.
+- Alternative moins bonne : `KReplicated` avec un décalage de tête V passé au noyau,
+  `h_kv = (h_local + v_off) % H_kv`. Elle réplique Q et K et coûte environ 346 Mo lus
+  en plus par token et par GPU.
+
+Validation :
+1. Nouveau test `qwen35-v2/tests/session_tp2_27b_parity.rs`. Il compare, sur le
+   Q4_K_M, la `Session` TP-2 à la `Session` PP-2 sur les 5 invites de `lp.py`.
+   Critères : écart maximal de log-probabilité ≤ 0,3 nat sur le top-5 de t0, et préfixe
+   glouton commun ≥ 32 tokens. Il doit **échouer avant** le correctif (aujourd'hui :
+   jusqu'à 2,7 nats à t0, divergence dès le 1er-2e token sur story et list).
+2. `cmp_lp.py` sur les 5 invites : l'écart t0 « flambeau TP f16 / llama.cpp f16 » doit
+   descendre au niveau de « flambeau PP » (≤ 0,6 nat, ≤ 0,2 sur math et chat).
+3. Banc `bench_step4d.sh` (MTP-4 avec `mtp.cycle=debug`), GPU à moins de 60 °C au
+   départ.
+
+Mesure attendue : acceptation ≥ 55 %, plus de 3,25 tokens par cycle, MTP ≥ 29 t/s à
+chaud.
+
+Contrôle d'architecture (CLAUDE.md) : le correctif reste dans le chargeur générique (`crates/forward/src/loader`) et se déclenche sur `rep_inner_layout` et la géométrie, pas sur le nom de l'architecture (règles 12 et 13). Aucun flag d'environnement (règle 1). Aucun noyau modifié, donc pas de nouveau certificat de noyau ; le test de parité TP/PP du 27B tient lieu de preuve de correction.
+
+---
+
+## 2. Résumé
 
 Quatre constats expliquent l'essentiel des deux écarts.
 
@@ -67,7 +198,7 @@ S'y ajoutent :
 
 ---
 
-## 1. Méthode et précautions
+## 3. Méthode et précautions
 
 - **Profilage.**
   - flambeau : `rocprofv3 --kernel-trace` sur `flambeau serve`, une requête « math »
@@ -85,15 +216,15 @@ S'y ajoutent :
   pas. L'inactivité réelle est estimée par la formule : temps réel par token − somme
   des durées de kernels.
 - **Thermique.** Tous les chiffres « à froid » sont pris avec une jonction ≤ 61 °C au
-  départ. Voir §2.6.
+  départ. Voir §4.6.
 - **Tokens par fenêtre.** Comptés par les kernels à fréquence connue : 48 pas GDN et
   16 attentions par token.
 
 ---
 
-## 2. Débit de base (sans MTP)
+## 4. Débit de base (sans MTP)
 
-### 2.1 Bilan par token (à froid)
+### 4.1 Bilan par token (à froid)
 
 | | flambeau TP-2 (par GPU, en parallèle) | llama.cpp `-sm layer` (2 GPU en série) |
 |---|---|---|
@@ -114,7 +245,7 @@ poids (moitié des 15,4 Go, plus la lm_head répliquée). llama.cpp met environ 
 GPU, en série, pour en lire 16,4. **Le parallélisme TP n'apporte rien parce que chaque
 octet coûte deux fois plus cher.**
 
-### 2.2 Cause B1 — efficacité des MMVQ (le levier dominant)
+### 4.2 Cause B1 — efficacité des MMVQ (le levier dominant)
 
 Preuve : temps MMVQ par type, sur l'ensemble des deux GPU, comparé aux octets du GGUF
 (fichiers `traces/*`, script `an_type.py`).
@@ -155,7 +286,7 @@ Difficulté :
   256 threads) ;
 - tous types : élevée, sur plusieurs sessions.
 
-### 2.3 Cause B2 — attention de décodage sous-occupée
+### 4.3 Cause B2 — attention de décodage sous-occupée
 
 Preuve :
 - `flambeau_attention_decode_q8_kv` : grille de 768 threads, soit **12 workgroups**
@@ -170,7 +301,7 @@ Gain estimé : −2,6 ms par token, **+1,4 t/s** en base.
 
 Difficulté : faible.
 
-### 2.4 Cause B3 — rmsnorm+quantification fusionné, mono-workgroup
+### 4.4 Cause B3 — rmsnorm+quantification fusionné, mono-workgroup
 
 Preuve :
 - `flambeau_rmsnorm_q8_1_fused` : grille de 256 threads, 27,4 µs par appel, 65 appels
@@ -182,7 +313,7 @@ Gain estimé : −1,3 ms, **+0,7 t/s**.
 
 Difficulté : faible.
 
-### 2.5 Cause B4 — lm_head répliquée, logits copiés vers l'hôte sur chaque rang
+### 4.5 Cause B4 — lm_head répliquée, logits copiés vers l'hôte sur chaque rang
 
 Preuve :
 - La lm_head en Q6_K, grille de 15 892 480 threads (vocabulaire complet de 248 320),
@@ -194,11 +325,11 @@ Preuve :
 Gain estimé :
 - découpe du vocabulaire en deux : −0,9 ms ;
 - argmax sur GPU en glouton : −0,3 à 0,5 ms de bulle ;
-- total **+0,6 t/s** en base. L'effet est bien plus fort en MTP (§3.3).
+- total **+0,6 t/s** en base. L'effet est bien plus fort en MTP (§5.3).
 
 Difficulté : moyenne.
 
-### 2.6 Cause B5 — thermique et méthode de mesure
+### 4.6 Cause B5 — thermique et méthode de mesure
 
 Preuve :
 - **flambeau sans MTP**, ordre inversé
@@ -220,7 +351,7 @@ Gain : aucun sur le code, mais indispensable pour juger les autres leviers.
 
 Difficulté : nulle.
 
-### 2.7 Cause B6 — communications TP, copies, synchronisations, lancements
+### 4.7 Cause B6 — communications TP, copies, synchronisations, lancements
 
 Preuve, trace `--runtime-trace` (appels d'API HIP sur les deux threads hôtes, par
 token) :
@@ -245,7 +376,7 @@ Difficulté : moyenne à élevée. La capture de graphes HIP est nulle sur gfx90
 CLAUDE.md, donc **ne pas la proposer**. Il faut réduire le nombre de kernels et de
 copies.
 
-### 2.8 Cause B7 (correction) — décalage d'une position au premier token décodé
+### 4.8 Cause B7 (correction) — décalage d'une position au premier token décodé
 
 Preuve, côté code :
 - Le préremplissage écrit les positions `0..L-1` (`forward/src/runtime/mod.rs:382-400`).
@@ -272,9 +403,9 @@ Difficulté : faible.
 
 ---
 
-## 3. Acceptation MTP et débit MTP
+## 5. Acceptation MTP et débit MTP
 
-### 3.1 Décomposition de l'écart MTP-4 (26,5 contre 33,1)
+### 5.1 Décomposition de l'écart MTP-4 (26,5 contre 33,1)
 
 À partir de `fl_b4d.log` (une ligne `mtp.cycle` par rang, dédoublonnée) et de
 `lc_mtp2.log` :
@@ -303,82 +434,14 @@ décompose ainsi :**
 1. moins de tokens par cycle : 2,97 contre 3,37, soit −12 % ;
 2. une base plus lente, dont la vérification paie toute l'inefficacité des MMVQ
    (≈ 43 ms de matmul par cycle et par GPU) ;
-3. 19 à 23 tokens par requête en décodage simple, à cause de la fenêtre d'arrêt (§3.5) ;
+3. 19 à 23 tokens par requête en décodage simple, à cause de la fenêtre d'arrêt (§5.5) ;
 4. l'état thermique (b4 tourne juste après b0, à chaud).
 
-### 3.2 Cause M1 — le bogue GDN en TP-2 dégrade l'état caché fourni à la tête MTP
+### 5.2 Cause M1 — bug de répartition des têtes GDN en TP-2
 
-Points vérifiés identiques des deux côtés : le format d'entrée de la tête MTP. Les deux
-moteurs utilisent :
-- l'état caché pris **après** `output_norm` (llama.cpp `qwen35.cpp:213-217` ;
-  flambeau `mtp.rs:73-83`) ;
-- la concaténation `[enorm(emb), hnorm(h)]` puis `eh_proj` ;
-- un bloc d'attention complète ;
-- `shared_head_norm` puis la lm_head partagée ;
-- des brouillons 2 à 4 enchaînés sur l'état caché de sortie MTP (après norme) ;
-- le paire (emb(x_p), h_{p−1}) ;
-- une acceptation gloutonne par correspondance exacte, avec token bonus ;
-- un retour arrière de l'état GDN exact (instantané plus rejeu chez flambeau,
-  instantané par token chez llama.cpp) ;
-- un KV MTP en q8_0.
+Voir §1 (preuve complète et correctif). C'est la cause principale de l'écart d'acceptation.
 
-Le GGUF ne contient ni `nextn.embed_tokens` ni `nextn.shared_head_head`, donc aucune
-divergence de ce côté.
-
-Ce qui diffère, c'est **l'état caché lui-même**.
-
-Preuve 1 — log-probabilités du premier token t0. Ce token sort du préremplissage : il
-ne dépend ni du MTP ni du décalage de position. Écart maximal sur le top-5 commun, en
-nats (`cmp_lp.py`) :
-
-| Invite | flambeau TP q8 / llama.cpp q8 | flambeau TP f16 / llama.cpp f16 | llama.cpp q8 / f16 | **flambeau PP f16 / llama.cpp f16** |
-|---|---|---|---|---|
-| code | 0,79 | 0,38 | 0,20 | 0,56 |
-| math | 1,51 | 1,42 | 0,10 | **0,19** |
-| chat | 1,56 | 1,53 | 0,06 | **0,13** |
-| story | 0,51 | 0,33 | 0,08 | 0,36 |
-| list | 1,22 | 2,68 | 0,10 | 0,53 |
-
-Exemple « math », t0 : log p(« To ») vaut −0,85 chez flambeau TP contre −2,16 chez
-llama.cpp.
-
-Preuve 2 — longueur du préfixe commun avec le texte glouton de llama.cpp, en
-caractères :
-
-| Invite | code | math | chat | story | list |
-|---|---|---|---|---|---|
-| flambeau TP | 68 | 67 | 48 | 4 | 9 |
-| flambeau PP | 522 | 67 | 307 | 215 | 200 |
-
-Preuve 3 — code :
-- `gdn_tp_mode_for` (`forward/src/loader/gdn_layer.rs:46-56`) choisit `FullShard`
-  parce que 24 % 16 ≠ 0.
-- Sa propre documentation (`:24-25`) indique « FullShard pairs with
-  `rep_inner_layout = true` (qwen3-Next) ». Or qwen35 charge `rep_inner_layout: false`
-  (`qwen35-v2/src/loader.rs:144`).
-- Avec `false`, le noyau calcule `h_kv = h_idx % H_kv`
-  (`kernels-shared/include/gdn_state_step_alphabeta.cuh:34,125`), comme llama.cpp
-  (`gated_delta_net.cu:52`, `iq1 = h_idx % neqk1`).
-- `pack_gdn_qkv_slab` (`forward/src/loader/gdn_shard.rs:76-89`) découpe ainsi :
-  rang r ← têtes K `[8r, 8r+8)` et têtes V `[24r, 24r+24)`.
-- Au rang 0, la tête V globale j ∈ 8..15 utilise la tête K j−8 au lieu de j. Au rang 1,
-  les têtes j ∈ 32..39 utilisent la tête K 8+(j−32) au lieu de j−32.
-- Bilan : **16 têtes V sur 48 (un tiers) sont fausses, dans les 48 couches GDN.**
-- Le seul test TP du 27B (`qwen35-v2/tests/session_tp2_27b.rs`) vérifie uniquement que
-  les logits sont finis. Le test de parité (`session_tp_parity.rs`) tourne sur le 9B,
-  qui passe par `KReplicated`.
-
-Gain estimé :
-- l'acceptation devrait remonter vers celle de llama.cpp (58,8 %), soit 3,3 à 3,37
-  tokens par cycle au lieu de 2,97, **+11 à 13 % en MTP : 26,5 → ≈ 29,5 t/s (+3 t/s)** ;
-- la qualité du modèle en TP est corrigée.
-
-Cette estimation n'a pas pu être mesurée directement : flambeau refuse le MTP en mode
-PP (`token_embd has 0 F16 elems`).
-
-Difficulté : faible à moyenne.
-
-### 3.3 Cause M2 — lm_head ligne par ligne et allers-retours vers l'hôte dans le cycle
+### 5.3 Cause M2 — lm_head ligne par ligne et allers-retours vers l'hôte dans le cycle
 
 Preuve, trace MTP-4 (`traces/fl_tp2_mtp4_*`, 75 cycles, 300 tokens) :
 - **603 appels de lm_head par GPU**, soit 23 tokens simples plus 75 cycles × 7,72 (4
@@ -403,9 +466,9 @@ Gain estimé :
 
 Difficulté : moyenne.
 
-### 3.4 Cause M3 — décalage de position : état caché nul et ligne périmée dans le KV MTP
+### 5.4 Cause M3 — décalage de position : état caché nul et ligne périmée dans le KV MTP
 
-Voir §2.8. Les lignes `L` (périmée) et `L+1` (état caché nul) du KV MTP sont lues par
+Voir §4.8. Les lignes `L` (périmée) et `L+1` (état caché nul) du KV MTP sont lues par
 chaque brouillon de la requête.
 
 Gain : non chiffrable sans correctif. C'est probablement un effet secondaire
@@ -413,7 +476,7 @@ comparé à M1.
 
 Difficulté : faible, car c'est le même correctif que B7.
 
-### 3.5 Cause M4 — MTP coupé sur les 24 premiers tokens, et sur tout le chemin streamé
+### 5.5 Cause M4 — MTP coupé sur les 24 premiers tokens, et sur tout le chemin streamé
 
 Preuve :
 - `in_stop_window` (`decode_loop.rs:1214-1215`) force le décodage simple tant que
@@ -435,7 +498,7 @@ Difficulté : faible à moyenne.
 
 ---
 
-## 4. Recommandations classées par rapport gain / effort
+## 6. Recommandations classées par rapport gain / effort
 
 Base de calcul :
 - sans MTP : 22,6 t/s à froid (44,2 ms par token) ;
@@ -462,47 +525,9 @@ Projection, à valider levier par levier :
   26 ms, **≈ 35-38 t/s, au-dessus des 26 t/s de llama.cpp** ;
 - avec MTP, R1 + R6 + R8 donnent **≈ 35 t/s** avant même les leviers de base.
 
-### R1 — Découpage GDN en TP pour la correspondance `h % H_kv` (priorité absolue)
+### R1 — Découpage GDN en TP pour qwen35
 
-Fichiers :
-- `crates/forward/src/loader/gdn_layer.rs` (`gdn_tp_mode_for`, `load_gdn_layer`) ;
-- `crates/forward/src/loader/gdn_shard.rs` (`pack_gdn_qkv_slab`,
-  `upload_gdn_fused_qkv_quant`, `upload_f32_array_sharded`) ;
-- les appels `upload_col_sharded_quant` / `upload_row_sharded_quant` pour `attn_gate`,
-  `ssm_alpha`, `ssm_beta`, `ssm_out`, `ssm_dt.bias`, `ssm_a`, `ssm_conv1d`.
-
-Approche recommandée : « FullShard permuté », sans surcoût de lecture.
-- Quand `rep_inner_layout == false`, le rang r prend les têtes K `[r·nk/R, (r+1)·nk/R)`
-  et les têtes V `{ j : (j % nk) ∈ [r·nk/R, (r+1)·nk/R) }`, dans l'ordre croissant de j.
-- Pour le 27B :
-  - rang 0 : têtes V 0..7, 16..23, 32..39 ;
-  - rang 1 : têtes V 8..15, 24..31, 40..47.
-- Le noyau garde `h_local % H_kv_local`. Avec cet ordre, la tête V locale h retrouve sa
-  bonne tête K locale.
-- Appliquer **la même permutation des têtes V** partout :
-  - aux lignes V du bloc QKV fusionné ;
-  - aux canaux V de `ssm_conv1d` ;
-  - aux lignes de `attn_gate` (z) ;
-  - à `ssm_alpha`, `ssm_beta`, `ssm_dt.bias` et `ssm_a` ;
-  - aux **colonnes** de `ssm_out`, qui est découpé par lignes du côté K.
-
-  `ssm_norm` est partagé entre têtes : rien à faire.
-- Alternative moins bonne : `KReplicated` avec un décalage de tête V passé au noyau,
-  `h_kv = (h_local + v_off) % H_kv`. Elle réplique Q et K et coûte environ 346 Mo lus
-  en plus par token et par GPU.
-
-Validation :
-1. Nouveau test `qwen35-v2/tests/session_tp2_27b_parity.rs`. Il compare, sur le
-   Q4_K_M, la `Session` TP-2 à la `Session` PP-2 sur 64 tokens gloutons. Critères :
-   argmax identiques, et écart maximal de log-probabilité ≤ 0,3 nat sur le top-5 à
-   chaque position. Il doit **échouer avant** le correctif.
-2. `cmp_lp.py` sur les 5 invites : l'écart t0 « flambeau TP f16 / llama.cpp f16 » doit
-   descendre au niveau de « flambeau PP » (≤ 0,6 nat, ≤ 0,2 sur math et chat).
-3. Banc `bench_step4d.sh` (MTP-4 avec `mtp.cycle=debug`), GPU à moins de 60 °C au
-   départ.
-
-Mesure attendue : acceptation ≥ 55 %, plus de 3,25 tokens par cycle, MTP ≥ 29 t/s à
-chaud.
+Voir §1.3.
 
 ### R2 — Protocole thermique du banc
 
@@ -708,10 +733,10 @@ Mesure attendue :
 
 ---
 
-## 5. Limites de l'analyse
+## 7. Limites de l'analyse
 
 - Le gain d'acceptation de R1 est **estimé** : le mode PP de flambeau ne gère pas le
-  MTP. Les preuves sont la fidélité des logits (§3.2) et l'identité du reste du
+  MTP. Les preuves sont la fidélité des logits (§1.1) et l'identité du reste du
   pipeline MTP.
 - La trace llama.cpp est prise sans graphes HIP et via `llama-bench`. Les durées de
   kernels sont comparables ; l'inactivité de llama.cpp en production est plus faible
