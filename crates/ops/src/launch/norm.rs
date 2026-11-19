@@ -130,7 +130,9 @@ pub fn rmsnorm_quant_q8_1<B: flambeau_core::KernelBackend>(
     args.push_arg(&m_i);
     args.push_arg(&k_i);
     args.push_arg(&eps);
-    let cfg = LaunchCfg::one_d(shape.m as u32, 256);
+    // One block per row: at decode (m = 1) the block is the whole launch, so
+    // it takes the widest block to keep the row's loads in flight.
+    let cfg = LaunchCfg::one_d(shape.m as u32, 1024);
     B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }

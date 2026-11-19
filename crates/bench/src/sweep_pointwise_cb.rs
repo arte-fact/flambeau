@@ -888,7 +888,7 @@ pub fn run_rmsnorm_q8_1_fused_sweep<B: BenchBackend>(repo_root: &Path, arch: &st
             args.push_arg(&m_i);
             args.push_arg(&k_i);
             args.push_arg(&eps);
-            B::launch(&kernel, stream, LaunchCfg::one_d(m as u32, 256), args)?;
+            B::launch(&kernel, stream, LaunchCfg::one_d(m as u32, 1024), args)?;
             stream.synchronize()?;
         }
         let mut got = vec![0u8; out_bytes];

@@ -3850,7 +3850,7 @@ params = """
     const int n_rows,
     const int k,
     const float eps"""
-body = "rmsnorm_q8_1_fused_row<256>(x, weight, y, n_rows, k, eps);"
+body = "rmsnorm_q8_1_fused_row<1024>(x, weight, y, n_rows, k, eps);"
 
 # MoE-decode glue — shared-expert gate (block-reduce dot + sigmoid scale).
 
