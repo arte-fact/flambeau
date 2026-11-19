@@ -20,7 +20,7 @@ use flambeau_forward::{Arch, ForwardEngine, KvLayout, ScratchPool};
 use flambeau_gemma4_v2::Gemma4V2;
 use flambeau_quant::GgufFile;
 
-const DEFAULT_MODEL: &str = "/home/artefact/models/gemma-4-12B-it-qat-UD-Q4_K_XL.gguf";
+const DEFAULT_MODEL: &str = "gemma-4-12B-it-qat-UD-Q4_K_XL.gguf";
 const CTX_CAP: usize = 96;
 
 fn argmax(v: &[f32]) -> usize {
@@ -92,11 +92,9 @@ fn run<B: Backend>(
 
 #[test]
 fn gemma4_q4k_cuda_matches_hip() {
-    let path = std::env::var("FLAMBEAU_TEST_GEMMA4_Q4K").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
-    if !std::path::Path::new(&path).exists() {
-        eprintln!("SKIP: model {path} not found (set FLAMBEAU_TEST_GEMMA4_Q4K)");
+    let Some(path) = flambeau_test_models::model_from_env("gemma4_q4k_cuda_matches_hip", "FLAMBEAU_TEST_GEMMA4_Q4K", DEFAULT_MODEL) else {
         return;
-    }
+    };
     let file = GgufFile::open(&path).expect("open gguf");
 
     // Chat-templated "What is the capital of France?" tokenized by llama.cpp's

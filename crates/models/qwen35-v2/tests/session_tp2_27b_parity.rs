@@ -11,12 +11,11 @@
 //! inside these bounds (same spread as PP q8 KV against PP f16 KV); the
 //! mis-sharded V heads fail all three from the first position.
 //!
-//! Model path: `$FLAMBEAU_27B_GGUF`, default
-//! `~/models/Qwen3.8-27B-UD-Q4_K_M.gguf`. Skips when absent.
+//! Model path: `$FLAMBEAU_27B_GGUF`, default `Qwen3.8-27B-UD-Q4_K_M.gguf` in
+//! the test models directory (`flambeau_test_models::models_dir`). Skips when
+//! absent.
 
 #![cfg(feature = "hip")]
-
-use std::path::PathBuf;
 
 use flambeau_forward::{KvLayout, LaunchParams, Session, Topology};
 use flambeau_quant::GgufFile;
@@ -35,12 +34,6 @@ const MAX_LOGPROB_GAP: f32 = 0.6;
 const MIN_P: f32 = 0.01;
 const MIN_MARGIN: f32 = 0.5;
 
-fn model_path() -> PathBuf {
-    std::env::var_os("FLAMBEAU_27B_GGUF").map(PathBuf::from).unwrap_or_else(|| {
-        let home = std::env::var_os("HOME").expect("HOME");
-        PathBuf::from(home).join("models/Qwen3.8-27B-UD-Q4_K_M.gguf")
-    })
-}
 
 fn argmax(row: &[f32]) -> u32 {
     let mut best = 0usize;
@@ -62,11 +55,12 @@ fn log_softmax(row: &[f32]) -> Vec<f32> {
 /// the tokens fed back. `forced` replays a reference trajectory instead of
 /// the session's own greedy picks.
 fn run(
+    path: &std::path::Path,
     topology: Topology,
     prompts: &[Vec<u32>],
     forced: Option<&[Vec<u32>]>,
 ) -> (Vec<Vec<Vec<f32>>>, Vec<Vec<u32>>) {
-    let file = GgufFile::open(model_path()).expect("open gguf");
+    let file = GgufFile::open(path).expect("open gguf");
     let mut session = Session::<Qwen35V2>::new(
         file,
         topology,
@@ -141,11 +135,13 @@ fn check(pp: &[f32], tp: &[f32]) -> Vec<String> {
 
 #[test]
 fn qwen38_27b_tp2_matches_pp2() {
-    let path = model_path();
-    if !path.exists() {
-        eprintln!("SKIP: {} not present", path.display());
+    let Some(path) = flambeau_test_models::model_from_env(
+        "qwen38_27b_tp2_matches_pp2",
+        "FLAMBEAU_27B_GGUF",
+        "Qwen3.8-27B-UD-Q4_K_M.gguf",
+    ) else {
         return;
-    }
+    };
     let file = GgufFile::open(&path).expect("open gguf");
     let tokenizer = flambeau_quant::tokenizer::load_from_gguf(&file).expect("tokenizer");
     let prompts: Vec<Vec<u32>> = PROMPTS
@@ -156,6 +152,7 @@ fn qwen38_27b_tp2_matches_pp2() {
 
     let n_layers = 64usize;
     let (pp, trajectory) = run(
+        &path,
         Topology::Pp {
             devices: vec![0, 1],
             layer_split: Some(vec![n_layers / 2, n_layers / 2]),
@@ -163,7 +160,7 @@ fn qwen38_27b_tp2_matches_pp2() {
         &prompts,
         None,
     );
-    let (tp, _) = run(Topology::Tp { devices: vec![0, 1] }, &prompts, Some(&trajectory));
+    let (tp, _) = run(&path, Topology::Tp { devices: vec![0, 1] }, &prompts, Some(&trajectory));
 
     let mut failures = Vec::new();
     for (i, (pp_rows, tp_rows)) in pp.iter().zip(&tp).enumerate() {

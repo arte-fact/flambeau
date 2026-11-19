@@ -10,13 +10,12 @@
 
 #![cfg(feature = "hip")]
 
-use std::path::PathBuf;
 
 use flambeau_forward::{Session, Topology};
 use flambeau_quant::GgufFile;
 use flambeau_qwen35_v2::Qwen35V2;
 
-const MODEL_PATH: &str = "/artefact/models/Qwen3.5-9B-Q4_1.gguf";
+const MODEL_FILE: &str = "Qwen3.5-9B-Q4_1.gguf";
 
 /// argmax predicted by the qwen35-v2 SD smoke at token=1, position=0
 /// — Q-gate-correct, GDN-state-zeroed. Stable across processes.
@@ -24,11 +23,9 @@ const EXPECTED_ARGMAX: usize = 5328;
 
 #[test]
 fn session_qwen35_9b_tp_size_2_argmax_matches_sd() {
-    let path = PathBuf::from(MODEL_PATH);
-    if !path.exists() {
-        eprintln!("SKIP: {MODEL_PATH} not present");
+    let Some(path) = flambeau_test_models::model("session_qwen35_9b_tp_size_2_argmax_matches_sd", MODEL_FILE) else {
         return;
-    }
+    };
 
     let file = GgufFile::open(&path).expect("open gguf");
     let mut session = Session::<Qwen35V2>::new(

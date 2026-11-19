@@ -78,6 +78,7 @@ cuda = [
 dev_trace = ["flambeau-quant/dev_trace"]
 
 [dev-dependencies]
+flambeau-test-models = { path = "../test-models" }
 axum.workspace = true
 tokio-util = "0.7"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

@@ -19,7 +19,7 @@ use flambeau_forward::{Arch, ForwardEngine, KvLayout, ScratchPool};
 use flambeau_gemma4_v2::Gemma4V2;
 use flambeau_quant::GgufFile;
 
-const DEFAULT_MODEL: &str = "/home/artefact/models/gemma-4-31B-it-qat-UD-Q4_K_XL.gguf";
+const DEFAULT_MODEL: &str = "gemma-4-31B-it-qat-UD-Q4_K_XL.gguf";
 
 fn argmax(v: &[f32]) -> u32 {
     v.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0 as u32
@@ -28,11 +28,9 @@ fn argmax(v: &[f32]) -> u32 {
 #[test]
 #[ignore = "perf/bench — needs the GGUF + the RTX; run explicitly"]
 fn gemma_cuda_decode_benchmark() {
-    let path = std::env::var("FLAMBEAU_TEST_GEMMA4_Q4K").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
-    if !std::path::Path::new(&path).exists() {
-        eprintln!("SKIP: model {path} not found (set FLAMBEAU_TEST_GEMMA4_Q4K)");
+    let Some(path) = flambeau_test_models::model_from_env("gemma_cuda_decode_benchmark", "FLAMBEAU_TEST_GEMMA4_Q4K", DEFAULT_MODEL) else {
         return;
-    }
+    };
     let file = GgufFile::open(&path).expect("open gguf");
 
     // pp = n_tokens prefill, tg = n_tokens decode. Synthetic prompt — throughput

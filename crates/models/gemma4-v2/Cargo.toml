@@ -42,5 +42,8 @@ half.workspace = true
 bytemuck.workspace = true
 tracing.workspace = true
 
+[dev-dependencies]
+flambeau-test-models = { path = "../../test-models" }
+
 [lints]
 workspace = true

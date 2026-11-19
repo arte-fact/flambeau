@@ -29,6 +29,7 @@ bytemuck.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+flambeau-test-models = { path = "../../test-models" }
 serde_json.workspace = true
 
 [lints]

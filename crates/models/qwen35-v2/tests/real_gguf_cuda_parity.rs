@@ -24,7 +24,7 @@ use flambeau_forward::{Arch, ForwardEngine, KvLayout, ScratchPool};
 use flambeau_qwen35_v2::Qwen35V2;
 use flambeau_quant::GgufFile;
 
-const DEFAULT_MODEL: &str = "/home/artefact/models/Qwen3.6-27B-UD-IQ2_XXS.gguf";
+const DEFAULT_MODEL: &str = "Qwen3.6-27B-UD-IQ2_XXS.gguf";
 const CTX_CAP: usize = 96;
 
 fn argmax(v: &[f32]) -> usize {
@@ -75,11 +75,9 @@ fn run<B: Backend>(
 
 #[test]
 fn qwen35_iq2xxs_cuda_matches_llamacpp() {
-    let path = std::env::var("FLAMBEAU_TEST_QWEN_IQ").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
-    if !std::path::Path::new(&path).exists() {
-        eprintln!("SKIP: model {path} not found (set FLAMBEAU_TEST_QWEN_IQ)");
+    let Some(path) = flambeau_test_models::model_from_env("qwen35_iq2xxs_cuda_matches_llamacpp", "FLAMBEAU_TEST_QWEN_IQ", DEFAULT_MODEL) else {
         return;
-    }
+    };
     let file = GgufFile::open(&path).expect("open gguf");
 
     // Chat-templated "What is the capital of France?" via the qwen tokenizer

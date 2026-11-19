@@ -8,7 +8,7 @@
 //! v1's 1.06-1.17x ceiling.
 //!
 //! Run:
-//!   FLAMBEAU_MIXED_MICROBENCH_GGUF=/artefact/models/Qwen3.5-9B-Q4_1.gguf \
+//!   FLAMBEAU_MIXED_MICROBENCH_GGUF=~/models/Qwen3.5-9B-Q4_1.gguf \
 //!     cargo test --release -p flambeau-qwen35-v2 --test mixed_batch_microbench -- --nocapture
 
 #![cfg(feature = "hip")]

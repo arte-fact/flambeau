@@ -563,6 +563,7 @@ dependencies = [
  "flambeau-model-ops",
  "flambeau-ops",
  "flambeau-quant",
+ "flambeau-test-models",
  "half",
  "thiserror 2.0.18",
  "tracing",
@@ -634,6 +635,7 @@ dependencies = [
  "bytemuck",
  "byteorder",
  "flambeau-core",
+ "flambeau-test-models",
  "half",
  "libc",
  "memmap2",
@@ -661,6 +663,7 @@ dependencies = [
  "flambeau-ops",
  "flambeau-quant",
  "flambeau-runtime",
+ "flambeau-test-models",
  "half",
  "serde_json",
  "thiserror 2.0.18",
@@ -680,6 +683,7 @@ dependencies = [
  "flambeau-model-ops",
  "flambeau-ops",
  "flambeau-quant",
+ "flambeau-test-models",
  "half",
  "thiserror 2.0.18",
  "tracing",
@@ -720,6 +724,7 @@ dependencies = [
  "flambeau-qwen35moe-v2",
  "flambeau-runtime",
  "flambeau-server-core",
+ "flambeau-test-models",
  "half",
  "serde",
  "serde_json",
@@ -738,6 +743,10 @@ dependencies = [
  "flambeau-model-ops",
  "flambeau-runtime",
 ]
+
+[[package]]
+name = "flambeau-test-models"
+version = "0.1.0-dev"
 
 [[package]]
 name = "fnv"

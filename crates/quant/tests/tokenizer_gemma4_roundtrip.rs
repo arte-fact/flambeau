@@ -2,24 +2,18 @@
 //! corpus from the on-disk E4B-Q4_0 GGUF. Skips when the file is
 //! absent (CI / sandbox).
 
-use std::path::Path;
-
 use flambeau_quant::{load_from_gguf, GgufFile};
 
-const MODELS_DIR: &str = "/artefact/models";
+const E4B: &str = "gemma-4-E4B-it-Q4_0.gguf";
 
-fn open_e4b() -> Option<GgufFile> {
-    let p = Path::new(MODELS_DIR).join("gemma-4-E4B-it-Q4_0.gguf");
-    if !p.exists() {
-        eprintln!("skipping — E4B GGUF not present at {MODELS_DIR}");
-        return None;
-    }
+fn open_e4b(test: &str) -> Option<GgufFile> {
+    let p = flambeau_test_models::model(test, E4B)?;
     GgufFile::open(&p).ok()
 }
 
 #[test]
 fn gemma4_tokenizer_loads_and_advertises_overrides() {
-    let Some(file) = open_e4b() else {
+    let Some(file) = open_e4b("gemma4_tokenizer_loads_and_advertises_overrides") else {
         return;
     };
     let tok = load_from_gguf(&file).expect("load_from_gguf gemma4");
@@ -43,7 +37,7 @@ fn gemma4_tokenizer_loads_and_advertises_overrides() {
 }
 
 fn roundtrip(text: &str) {
-    let Some(file) = open_e4b() else {
+    let Some(file) = open_e4b(&format!("gemma4 roundtrip {text:?}")) else {
         return;
     };
     let tok = load_from_gguf(&file).expect("load");
@@ -96,10 +90,9 @@ fn gemma4_qwen_gguf_still_loads_with_byte_level() {
     // Regression guard: the gemma4 path is conditional on
     // `tokenizer.ggml.model == "gemma4"`. A qwen3 GGUF (or anything
     // else with `gpt2` model) must still load via the byte-level path.
-    let p = Path::new("/artefact/models").join("gemma-4-E4B-it-Q4_0.gguf");
-    if !p.exists() {
+    let Some(p) = flambeau_test_models::model("gemma4_qwen_gguf_still_loads_with_byte_level", E4B) else {
         return;
-    }
+    };
     // We don't have a qwen3 GGUF on disk in this test — the gemma4
     // load itself is the regression test for "no panic on unknown
     // tokens, no fallback to gpt2 path".

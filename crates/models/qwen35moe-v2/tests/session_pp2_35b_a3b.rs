@@ -5,21 +5,18 @@
 
 #![cfg(feature = "hip")]
 
-use std::path::PathBuf;
 
 use flambeau_forward::{Session, Topology};
 use flambeau_quant::GgufFile;
 use flambeau_qwen35moe_v2::Qwen35MoeV2;
 
-const MODEL_PATH: &str = "/artefact/models/Qwen3.6-35B-A3B-Q3_K_S.gguf";
+const MODEL_FILE: &str = "Qwen3.6-35B-A3B-Q3_K_S.gguf";
 
 #[test]
 fn session_qwen36_a3b_q3_k_s_pp_size_2_runs() {
-    let path = PathBuf::from(MODEL_PATH);
-    if !path.exists() {
-        eprintln!("SKIP: {MODEL_PATH} not present");
+    let Some(path) = flambeau_test_models::model("session_qwen36_a3b_q3_k_s_pp_size_2_runs", MODEL_FILE) else {
         return;
-    }
+    };
 
     let file = GgufFile::open(&path).expect("open gguf");
     let num_layers = file

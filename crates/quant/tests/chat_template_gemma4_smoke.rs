@@ -6,22 +6,14 @@
 use flambeau_quant::{ChatMessage, ChatTemplate, GgufFile};
 
 const MODELS: &[&str] = &[
-    "/artefact/models/gemma-4-E4B-it-Q4_0.gguf",
-    "/artefact/models/gemma-4-31B-it-Q4_0.gguf",
-    "/artefact/models/gemma-4-26B-A4B-it-Q8_0.gguf",
+    "gemma-4-E4B-it-Q4_0.gguf",
+    "gemma-4-31B-it-Q4_0.gguf",
+    "gemma-4-26B-A4B-it-Q8_0.gguf",
 ];
-
-fn first_present() -> Option<std::path::PathBuf> {
-    MODELS
-        .iter()
-        .map(std::path::PathBuf::from)
-        .find(|p| p.exists())
-}
 
 #[test]
 fn render_with_tools_emits_tool_block() {
-    let Some(path) = first_present() else {
-        eprintln!("skipping — no gemma4 GGUF found in /artefact/models");
+    let Some(path) = flambeau_test_models::first_model("render_with_tools_emits_tool_block", MODELS) else {
         return;
     };
     let gguf = GgufFile::open(&path).expect("open GGUF");
@@ -72,8 +64,7 @@ fn render_with_tools_emits_tool_block() {
 
 #[test]
 fn render_assistant_tool_call_then_tool_response() {
-    let Some(path) = first_present() else {
-        eprintln!("skipping — no gemma4 GGUF found in /artefact/models");
+    let Some(path) = flambeau_test_models::first_model("render_assistant_tool_call_then_tool_response", MODELS) else {
         return;
     };
     let gguf = GgufFile::open(&path).expect("open GGUF");
@@ -122,8 +113,7 @@ fn render_assistant_tool_call_then_tool_response() {
 
 #[test]
 fn render_system_user_assistant_turn() {
-    let Some(path) = first_present() else {
-        eprintln!("skipping — no gemma4 GGUF found in /artefact/models");
+    let Some(path) = flambeau_test_models::first_model("render_system_user_assistant_turn", MODELS) else {
         return;
     };
     let gguf = GgufFile::open(&path).expect("open GGUF");

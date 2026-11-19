@@ -33,7 +33,7 @@ use flambeau_forward::{Arch, ForwardEngine, KvLayout, ScratchPool};
 use flambeau_gemma4_v2::Gemma4V2;
 use flambeau_quant::GgufFile;
 
-const DEFAULT_MODEL: &str = "/home/artefact/models/gemma-4-12b-it-Q8_0.gguf";
+const DEFAULT_MODEL: &str = "gemma-4-12b-it-Q8_0.gguf";
 
 fn argmax(v: &[f32]) -> u32 {
     v.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0 as u32
@@ -42,11 +42,9 @@ fn argmax(v: &[f32]) -> u32 {
 #[test]
 #[ignore = "perf harness — needs the GGUF + a quiet GPU; run explicitly"]
 fn gemma_q8_0_prefill_decode_throughput() {
-    let path = std::env::var("FLAMBEAU_Q8_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
-    if !std::path::Path::new(&path).exists() {
-        eprintln!("SKIP: model {path} not found (set FLAMBEAU_Q8_MODEL)");
+    let Some(path) = flambeau_test_models::model_from_env("gemma_q8_0_prefill_decode_throughput", "FLAMBEAU_Q8_MODEL", DEFAULT_MODEL) else {
         return;
-    }
+    };
     let pp: usize = std::env::var("FLAMBEAU_PP").ok().and_then(|s| s.parse().ok()).unwrap_or(512);
     let tg: usize = std::env::var("FLAMBEAU_TG").ok().and_then(|s| s.parse().ok()).unwrap_or(64);
     let ctx_cap = pp + tg + 16;

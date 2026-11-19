@@ -1,0 +1,12 @@
+[package]
+name = "flambeau-test-models"
+description = "Locates the GGUF files integration tests load"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true

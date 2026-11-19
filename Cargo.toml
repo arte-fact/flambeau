@@ -20,6 +20,7 @@ members = [
   "crates/server-core",
   "crates/server",
   "crates/cli",
+  "crates/test-models",
 ]
 
 [workspace.package]
