@@ -175,6 +175,7 @@ fn run_shape(
         let q_off_i = q_offset as i32;
         let scale_f = scale;
         let window_i: i32 = 0;
+        let ring_depth_i: i32 = 0;
         let d_q_ptr: u64 = d_q.as_usize() as u64;
         let d_k_ptr: u64 = d_k.as_usize() as u64;
         let d_v_ptr: u64 = d_v.as_usize() as u64;
@@ -192,6 +193,7 @@ fn run_shape(
         args.push(&q_off_i);
         args.push(&scale_f);
         args.push(&window_i);
+        args.push(&ring_depth_i);
         let cfg = LaunchCfg {
             grid: (n_q_tokens as u32, n_heads_q as u32, 1),
             block: (head_dim as u32, 1, 1),
@@ -422,6 +424,7 @@ fn run_shape_flash_tile(
         let q_off_i = q_offset as i32;
         let scale_f = scale;
         let window_i: i32 = 0;
+        let ring_depth_i: i32 = 0;
         let d_q_ptr: u64 = d_q.as_usize() as u64;
         let d_k_ptr: u64 = d_k.as_usize() as u64;
         let d_v_ptr: u64 = d_v.as_usize() as u64;
@@ -438,6 +441,7 @@ fn run_shape_flash_tile(
         args.push(&q_off_i);
         args.push(&scale_f);
         args.push(&window_i);
+        args.push(&ring_depth_i);
         // Grid = (ceil(n_q / BR=4), H_q, 1); Block = (WARP_SIZE=64, BR=4, 1).
         const BR: u32 = 4;
         const WARP: u32 = 64;

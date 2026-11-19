@@ -444,7 +444,9 @@ pub fn run_gdn_alpha_beta_sweep(repo_root: &Path) -> Result<Cert> {
             args.push(&g_ptr);
             args.push(&bo_ptr);
             args.push(&n_i);
-            let cfg = LaunchCfg::one_d((n as u32).div_ceil(64), 64);
+            let n_tokens_i: i32 = 1;
+            args.push(&n_tokens_i);
+            let cfg = LaunchCfg::one_d(1, n as u32);
             unsafe { kernel.launch(dev.default_stream(), cfg, args)? };
             dev.default_stream().synchronize()?;
         }

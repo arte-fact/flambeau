@@ -144,6 +144,7 @@ fn run_shape(
         let d_out_ptr: u64 = d_out.as_usize() as u64;
         let scale_f = scale;
         let window_i: i32 = 0;
+        let ring_depth_i: i32 = 0;
         let mut args = KernelArgs::new();
         args.push(&d_q_ptr);
         args.push(&d_k_ptr);
@@ -155,6 +156,7 @@ fn run_shape(
         args.push(&n_tokens_i);
         args.push(&scale_f);
         args.push(&window_i);
+        args.push(&ring_depth_i);
         let cfg = LaunchCfg::one_d(n_heads_q as u32, head_dim as u32);
         unsafe { kernel.launch(stream, cfg, args)? };
         stream.synchronize()?;

@@ -199,7 +199,11 @@ fn run_shape(
         args.push(&head_dim_i);
         args.push(&n_tokens_i);
         args.push(&scale_f);
-        let cfg = LaunchCfg::one_d(n_heads_q as u32, head_dim as u32);
+        let window_i: i32 = 0;
+        let ring_depth_i: i32 = 0;
+        args.push(&window_i);
+        args.push(&ring_depth_i);
+        let cfg = LaunchCfg::one_d(n_heads_q as u32, (head_dim / 4) as u32);
         unsafe { kernel.launch(stream, cfg, args)? };
         stream.synchronize()?;
     }
