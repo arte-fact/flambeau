@@ -21,12 +21,24 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
     },
     KernelDescriptor {
         op_name: "QMatMul",
-        impl_id: "qmatmul_q4_k_mmvq_dp4a",
+        impl_id: "qmatmul_q4_k_mmvq_dp4a_t256",
         backend: "hip",
         arch: "gfx906",
         dtype_weight: QDtype::Q4_K,
         dtype_activation: QDtype::Q8_1,
         m_range: (1, 2),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q4_k_mmvq_dp4a_t256.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul",
+        // r2 (64 threads, 2 rows per block): superseded by the t256 row;
+        // kept as the regression reference.
+        impl_id: "qmatmul_q4_k_mmvq_dp4a",
+        backend: "hip",
+        arch: "gfx906",
+        dtype_weight: QDtype::Q4_K,
+        dtype_activation: QDtype::Q8_1,
+        m_range: (usize::MAX, usize::MAX),
         cert_rel_path: "certs/hip/gfx906/qmatmul_q4_k_mmvq_dp4a.json",
     },
     // native IQ4 MMVQ. r2 multi-row is the decode default

@@ -66,3 +66,56 @@ static __device__ __forceinline__ void mmvq_q4_k_r2_dp4a_row(
 
     mmvq_reduce_store_2row<OutT>(acc, dst, row, lane_lo);
 }
+
+// Single-row Q4_K MMVQ, 256 threads: 32 lanes per super-block (4 lanes × 8
+// sub-blocks, two ints each), 8 super-blocks in flight per block. Same lane
+// layout as `mmvq_q5_k_dp4a_row` without the fifth bit. The r2 layout above
+// walks a row's super-blocks one at a time with one int per lane, which
+// leaves too few loads in flight at decode. y = d·sc·q − dmin·m; the
+// −dmin·m·Σu term folds through the Q8_1 header `s`, quartered across the 4
+// lanes of a sub-block.
+template<class OutT>
+static __device__ __forceinline__ void mmvq_q4_k_dp4a_row(
+    const flambeau_block_q4_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    OutT* __restrict__ dst,
+    int n_rows, int n_superblocks_per_row)
+{
+    constexpr int THREADS     = 256;
+    constexpr int SB_PER_ITER = THREADS / 32;
+
+    const int row = blockIdx.x;
+    if (row >= n_rows) return;
+
+    const int tid        = threadIdx.x;
+    const int sb_in_iter = tid >> 5;
+    const int lane_in_sb = tid & 31;
+    const int sub        = lane_in_sb >> 2;
+    const int lane4      = lane_in_sb & 3;
+
+    const flambeau_block_q4_K* xrow = x + (size_t) row * n_superblocks_per_row;
+
+    float acc = 0.0f;
+    for (int sb = sb_in_iter; sb < n_superblocks_per_row; sb += SB_PER_ITER) {
+        const flambeau_block_q4_K* bk = xrow + sb;
+
+        uint8_t sc_u8 = 0, m_u8 = 0;
+        flambeau_q4k_scale_min(sub, bk->scales, &sc_u8, &m_u8);
+
+        const int8_t* qs_pair = (const int8_t*) &bk->qs[(sub >> 1) * 32];
+        const int vl_lo = load_int_b2(qs_pair, lane4);
+        const int vl_hi = load_int_b2(qs_pair, lane4 + 4);
+        const int v_lo = (sub & 1) ? ((vl_lo >> 4) & 0x0F0F0F0F) : (vl_lo & 0x0F0F0F0F);
+        const int v_hi = (sub & 1) ? ((vl_hi >> 4) & 0x0F0F0F0F) : (vl_hi & 0x0F0F0F0F);
+
+        const flambeau_block_q8_1* ya = y + (size_t) sb * 8 + sub;
+        const int u_lo = load_int_b2(ya->qs, lane4);
+        const int u_hi = load_int_b2(ya->qs, lane4 + 4);
+
+        const int sumi = dp4a(v_hi, u_hi, dp4a(v_lo, u_lo, 0));
+        acc += (float) bk->d * (float) sc_u8 * (float) ya->d * (float) sumi
+             - (float) bk->dmin * (float) m_u8 * (float) ya->s * 0.25f;
+    }
+
+    mmvq_reduce_store<THREADS, OutT>(acc, dst, row);
+}

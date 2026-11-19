@@ -63,9 +63,9 @@ notes   = "Runtime intercept: DP4A VDR=2 variant (mmvq_q8_0_dp4a_vdr2, +19% deco
 dtype   = "Q4_K"
 dtype_q = "Q8_1"
 shape   = { m = "1..2", k = "any", n = "any" }
-impl    = "qmatmul_q4_k_mmvq_dp4a"
-cert    = "certs/hip/gfx906/qmatmul_q4_k_mmvq_dp4a.json"
-notes   = "Phase 3a — DP4A r2 multi-row port of llama.cpp vec_dot_q4_K_q8_1_impl_vmmq. 64 threads, 2 rows per block, half-warp reduce. Replaces nw1_r2 which did per-element scalar FP32 multiplies (rocprofv3 on Qwen3.6-27B UD-Q4_K_XL pp2: 384 us/call → expected ~100 us/call, the Q5_K/Q6_K dp4a regime). Prior scalar r2 cert kept at certs/hip/gfx906/qmatmul_q4_K_mmvq_nw1_r2_gfx906.json for regression cross-check."
+impl    = "qmatmul_q4_k_mmvq_dp4a_t256"
+cert    = "certs/hip/gfx906/qmatmul_q4_k_mmvq_dp4a_t256.json"
+notes   = "Single-row dp4a, 256 threads: 32 lanes per super-block, 8 super-blocks in flight per block (Q5_K dp4a layout without the fifth bit). Replaces the r2 64-thread kernel (qmatmul_q4_k_mmvq_dp4a, cert kept), which walked a row's super-blocks one at a time: 194 GB/s on Qwen3.8-27B TP-2 decode against 300+ for the 256-thread Q5_K / IQ4_XS kernels."
 
 [[qmatmul]]
 dtype   = "IQ4_XS"
