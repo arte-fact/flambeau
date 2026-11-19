@@ -135,12 +135,28 @@ fn backend_of(arch: &str) -> Result<&'static str> {
     }
 }
 
-fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
-    payload
-        .downcast_ref::<&str>()
-        .map(|s| (*s).to_string())
-        .or_else(|| payload.downcast_ref::<String>().cloned())
-        .unwrap_or_else(|| "non-string panic payload".to_string())
+/// Runs one sweep invocation in a child `flambeau` process. A kernel or
+/// launch fault (SIGSEGV inside the HIP runtime, GPU memory abort) kills
+/// the process it happens in; isolating each invocation keeps the remaining
+/// sweeps and the final verdict table alive.
+fn sweep_in_child(arch: &str, op: &str, dtype: &str, out: &Path) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| format!("locating own executable: {e}"))?;
+    let status = std::process::Command::new(exe)
+        .args(["sweep", "--arch", arch, "--op", op, "--dtype", dtype, "--out"])
+        .arg(out)
+        .status()
+        .map_err(|e| format!("spawning sweep: {e}"))?;
+    if status.success() {
+        return Ok(());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal() {
+            return Err(format!("crashed (signal {sig})"));
+        }
+    }
+    Err(format!("exited with {status}"))
 }
 
 pub(crate) fn run(arch: &str, out: &Path, dispatch: Option<&Path>) -> Result<()> {
@@ -178,14 +194,7 @@ pub(crate) fn run(arch: &str, out: &Path, dispatch: Option<&Path>) -> Result<()>
             continue;
         }
         println!("=== sweep --arch {arch} --op {op} --dtype {dtype}");
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            crate::sweep(out, arch, Some(op), dtype)
-        }));
-        let outcome = match outcome {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(e)) => Err(format!("{e:#}")),
-            Err(payload) => Err(format!("panic: {}", panic_message(&*payload))),
-        };
+        let outcome = sweep_in_child(arch, op, dtype, out);
         if let Err(e) = &outcome {
             println!("    error: {e}");
         }
