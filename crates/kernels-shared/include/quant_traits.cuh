@@ -15,6 +15,13 @@ static __device__ __forceinline__ int load_int_b2(const int8_t* p, int i) {
     return (int) u[2 * i] | ((int) u[2 * i + 1] << 16);
 }
 
+// Load int32 `i` with one 4-byte load, for fields whose offset in a block
+// whose size is a multiple of 4 is itself a multiple of 4: Q4_K / Q5_K `qs`
+// and `qh`, IQ4_XS `qs`, Q8_1 `qs`. Use load_int_b2 for 2-aligned fields.
+static __device__ __forceinline__ int load_int_b4(const void* p, int i) {
+    return ((const int*) p)[i];
+}
+
 // Load `VDR` consecutive int32 lanes of activation group `grp` from a Q8_1
 // block into `yi`. The activation is always Q8_1 regardless of weight dtype, so
 // this is dtype-independent — fused kernels (gate+up) load it once and reuse it

@@ -119,3 +119,62 @@ static __device__ __forceinline__ void mmvq_q4_k_dp4a_row(
 
     mmvq_reduce_store<THREADS, OutT>(acc, dst, row);
 }
+
+// Single-row Q4_K MMVQ in llama.cpp's VDR 2 layout: 16 threads per
+// super-block, THREADS / 16 super-blocks per pass. A thread loads ints k and
+// k + 4 of one sub-block pair's 32-byte `qs` slice once and dots both
+// nibbles: the pair's low sub-block (low nibbles) and high sub-block (high
+// nibbles), 16 weights. The min term uses dp4a against 0x01010101 (exact
+// Σu) instead of the Q8_1 header sum.
+template<class OutT, int THREADS = 128>
+static __device__ __forceinline__ void mmvq_q4_k_vdr2_row(
+    const flambeau_block_q4_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    OutT* __restrict__ dst,
+    int n_rows, int n_superblocks_per_row)
+{
+    constexpr int THREADS_PER_SB = 16;
+    constexpr int SB_PER_ITER    = THREADS / THREADS_PER_SB;
+
+    const int row = blockIdx.x;
+    if (row >= n_rows) return;
+
+    const int tid        = threadIdx.x;
+    const int sb_in_iter = tid / THREADS_PER_SB;
+    const int lane       = tid % THREADS_PER_SB;
+    const int pair       = lane >> 2;
+    const int k          = lane & 3;
+    const int sub_lo     = 2 * pair;
+
+    const flambeau_block_q4_K* xrow = x + (size_t) row * n_superblocks_per_row;
+
+    float acc = 0.0f;
+    for (int sb = sb_in_iter; sb < n_superblocks_per_row; sb += SB_PER_ITER) {
+        const flambeau_block_q4_K* bk = xrow + sb;
+        const int v0 = load_int_b4(bk->qs + 32 * pair, k);
+        const int v1 = load_int_b4(bk->qs + 32 * pair, k + 4);
+
+        uint8_t sc[2], mn[2];
+        flambeau_q4k_scale_min(sub_lo,     bk->scales, &sc[0], &mn[0]);
+        flambeau_q4k_scale_min(sub_lo + 1, bk->scales, &sc[1], &mn[1]);
+
+        float sumf_d = 0.0f;
+        float sumf_m = 0.0f;
+        #pragma unroll
+        for (int i = 0; i < 2; ++i) {
+            const flambeau_block_q8_1* ya = y + (size_t) sb * 8 + sub_lo + i;
+            const int u0 = load_int_b4(ya->qs, k);
+            const int u1 = load_int_b4(ya->qs, k + 4);
+            const int v0i = (v0 >> (4 * i)) & 0x0F0F0F0F;
+            const int v1i = (v1 >> (4 * i)) & 0x0F0F0F0F;
+            const int dot_q = dp4a(v1i, u1, dp4a(v0i, u0, 0));
+            const int dot_1 = dp4a(0x01010101, u1, dp4a(0x01010101, u0, 0));
+            const float d8 = (float) ya->d;
+            sumf_d += d8 * (float) (dot_q * sc[i]);
+            sumf_m += d8 * (float) (dot_1 * mn[i]);
+        }
+        acc += (float) bk->d * sumf_d - (float) bk->dmin * sumf_m;
+    }
+
+    mmvq_reduce_store<THREADS, OutT>(acc, dst, row);
+}

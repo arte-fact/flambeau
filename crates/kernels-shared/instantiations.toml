@@ -2226,6 +2226,53 @@ params = """
     const int n_superblocks_per_row"""
 body = "mmvq_q4_k_dp4a_row<fb_fp16_t>(x, y, dst, n_rows, n_superblocks_per_row);"
 
+# Single-row dp4a MMVQ in llama.cpp's GCN layout: 128 threads per row, VDR 2
+# (Q4_K / Q5_K, 16 threads per super-block) or VDR 4 (IQ4_XS, 8 threads).
+[[kernel]]
+stem = "mmvq_q4_k_dp4a_t128_vdr2"
+includes = ["mmvq_q4_k.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_k_dp4a_t128_vdr2_q8_1"
+launch_bounds = "128"
+params = """
+    const flambeau_block_q4_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_q4_k_vdr2_row<float, 128>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel]]
+stem = "mmvq_q5_k_dp4a_t128_vdr2"
+includes = ["mmvq_q5_k.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q5_k_dp4a_t128_vdr2_q8_1"
+launch_bounds = "128"
+params = """
+    const flambeau_block_q5_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_q5_k_vdr2_row<float, 128>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel]]
+stem = "mmvq_iq4_xs_dp4a_t128_vdr4"
+includes = ["mmvq_iq4_xs.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq4_xs_dp4a_t128_vdr4_q8_1"
+launch_bounds = "128"
+params = """
+    const flambeau_block_iq4_xs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_iq4_xs_vdr4_row<float, 128>(x, y, dst, n_rows, n_superblocks_per_row);"
+
 # Q8_K single-row MMVQ — simplest K-quant (f32 d, no sub-block scales). 256
 # threads, dp4a per Q8_1 sub-block. Used by UD-Q8_K_XL GGUFs.
 [[kernel]]

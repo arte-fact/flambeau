@@ -21,12 +21,24 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
     },
     KernelDescriptor {
         op_name: "QMatMul",
-        impl_id: "qmatmul_q4_k_mmvq_dp4a_t256",
+        // Single-row dp4a, 128 threads, llama.cpp's GCN layout (vdr2); the
+        // 256-thread row below is kept as the reference.
+        impl_id: "qmatmul_q4_k_mmvq_dp4a_t128_vdr2",
         backend: "hip",
         arch: "gfx906",
         dtype_weight: QDtype::Q4_K,
         dtype_activation: QDtype::Q8_1,
         m_range: (1, 2),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q4_k_mmvq_dp4a_t128_vdr2.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul",
+        impl_id: "qmatmul_q4_k_mmvq_dp4a_t256",
+        backend: "hip",
+        arch: "gfx906",
+        dtype_weight: QDtype::Q4_K,
+        dtype_activation: QDtype::Q8_1,
+        m_range: (usize::MAX, usize::MAX),
         cert_rel_path: "certs/hip/gfx906/qmatmul_q4_k_mmvq_dp4a_t256.json",
     },
     KernelDescriptor {
@@ -47,12 +59,24 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
     // dp4a-with-LUT deferred until a measured bottleneck appears.
     KernelDescriptor {
         op_name: "QMatMul",
-        impl_id: "qmatmul_iq4_xs_mmvq_dp4a",
+        // Single-row dp4a, 128 threads, llama.cpp's GCN layout (vdr4); the
+        // 256-thread row below is kept as the reference.
+        impl_id: "qmatmul_iq4_xs_mmvq_dp4a_t128_vdr4",
         backend: "hip",
         arch: "gfx906",
         dtype_weight: QDtype::IQ4_XS,
         dtype_activation: QDtype::Q8_1,
         m_range: (1, 2),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_iq4_xs_mmvq_dp4a_t128_vdr4.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul",
+        impl_id: "qmatmul_iq4_xs_mmvq_dp4a",
+        backend: "hip",
+        arch: "gfx906",
+        dtype_weight: QDtype::IQ4_XS,
+        dtype_activation: QDtype::Q8_1,
+        m_range: (usize::MAX, usize::MAX),
         cert_rel_path: "certs/hip/gfx906/qmatmul_iq4_xs_mmvq_dp4a.json",
     },
     KernelDescriptor {
@@ -198,6 +222,18 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
     },
     KernelDescriptor {
         op_name: "QMatMul",
+        // Single-row dp4a, 128 threads, llama.cpp's GCN layout (vdr2); the
+        // 256-thread row below is kept as the reference.
+        impl_id: "qmatmul_q5_k_mmvq_dp4a_t128_vdr2",
+        backend: "hip",
+        arch: "gfx906",
+        dtype_weight: QDtype::Q5_K,
+        dtype_activation: QDtype::Q8_1,
+        m_range: (1, 2),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q5_k_mmvq_dp4a_t128_vdr2.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul",
         impl_id: "qmatmul_q5_k_mmvq_dp4a",
         backend: "hip",
         arch: "gfx906",
@@ -208,7 +244,7 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         // t/s, 200-token greedy), microbench shows 2.48× per-call vs
         // the prior nw1_r2 at the production shape. m>=128 hits the
         // wave64 MMQ kernel below.
-        m_range: (1, 2),
+        m_range: (usize::MAX, usize::MAX),
         cert_rel_path: "certs/hip/gfx906/qmatmul_q5_k_mmvq_dp4a.json",
     },
     // Dormant nw1_r2 baseline — preserved for A/B regression checks.

@@ -58,3 +58,46 @@ static __device__ __forceinline__ void mmvq_iq4_xs_dp4a_row(
 
     mmvq_reduce_store<THREADS, OutT>(acc, dst, row);
 }
+
+// Single-row IQ4_XS MMVQ in llama.cpp's VDR 4 layout: 8 threads per
+// super-block (one sub-block each, 32 weights, 8 dp4a), THREADS / 8
+// super-blocks per pass. The sub-block scale is decoded once per thread.
+template<class OutT, int THREADS = 128>
+static __device__ __forceinline__ void mmvq_iq4_xs_vdr4_row(
+    const flambeau_block_iq4_xs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    OutT* __restrict__ dst,
+    int n_rows, int n_superblocks_per_row)
+{
+    constexpr int THREADS_PER_SB = 8;
+    constexpr int SB_PER_ITER    = THREADS / THREADS_PER_SB;
+
+    const int row = blockIdx.x;
+    if (row >= n_rows) return;
+
+    const int tid        = threadIdx.x;
+    const int sb_in_iter = tid / THREADS_PER_SB;
+    const int sub        = tid % THREADS_PER_SB;
+
+    const flambeau_block_iq4_xs* xrow = x + (size_t) row * n_superblocks_per_row;
+
+    float acc = 0.0f;
+    for (int sb = sb_in_iter; sb < n_superblocks_per_row; sb += SB_PER_ITER) {
+        const flambeau_block_iq4_xs* bk = xrow + sb;
+        const flambeau_block_q8_1* ya = y + (size_t) sb * 8 + sub;
+
+        int sumi = 0;
+        #pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            const unsigned int aux = (unsigned int) load_int_b4(bk->qs, 4 * sub + j);
+            const int v_lo = (int) iq4_nl_table_4(aux & 0x0F0F0F0Fu);
+            const int v_hi = (int) iq4_nl_table_4((aux >> 4) & 0x0F0F0F0Fu);
+            sumi = dp4a(v_lo, load_int_b4(ya->qs, j), sumi);
+            sumi = dp4a(v_hi, load_int_b4(ya->qs, j + 4), sumi);
+        }
+        const int ls = flambeau_iq4_xs_scale(sub, bk->scales_h, bk->scales_l);
+        acc += (float) bk->d * (float) ls * (float) ya->d * (float) sumi;
+    }
+
+    mmvq_reduce_store<THREADS, OutT>(acc, dst, row);
+}
