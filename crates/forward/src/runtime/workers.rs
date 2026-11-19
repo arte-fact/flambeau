@@ -276,6 +276,7 @@ impl<A: Arch> WorkerHandle<A> {
                                     slot_id,
                                     n_draft,
                                     &mut sample,
+                                    seed,
                                     &mut out_logits,
                                 )
                                 .map(|emitted| (emitted, out_logits))
@@ -313,6 +314,7 @@ impl<A: Arch> WorkerHandle<A> {
                                     slot_id,
                                     n_draft,
                                     &mut sample,
+                                    seed,
                                     &mut out_logits,
                                 )
                                 .map(|emitted| (emitted, out_logits))

@@ -660,6 +660,7 @@ dependencies = [
  "flambeau-model-ops",
  "flambeau-ops",
  "flambeau-quant",
+ "flambeau-runtime",
  "half",
  "serde_json",
  "thiserror 2.0.18",

@@ -136,8 +136,9 @@ pub trait Arch: Send + Sync + 'static {
     /// hidden as the next anchor), draft up to `n_draft` tokens with the
     /// nextn head, verify them in one batched forward, accept/reject via
     /// `sample` (greedy = one-hot dists), and return the tokens to emit
-    /// (accepted drafts + bonus token). `out_logits` receives the target
-    /// logits row the bonus token was drawn from.
+    /// (accepted drafts + bonus token). `seed` drives the accept / residual
+    /// draws, so every TP rank reaches the same verdicts. `out_logits`
+    /// receives the target logits row the bonus token was drawn from.
     /// Default impl bails (arch has no MTP).
     fn mtp_cycle<C: ForwardCtx>(
         _model: &Self::Model,
@@ -147,6 +148,7 @@ pub trait Arch: Send + Sync + 'static {
         _slot_id: usize,
         _n_draft: usize,
         _sample: &mut dyn FnMut(&[f32]) -> (u32, Vec<(u32, f32)>),
+        _seed: u64,
         _out_logits: &mut Vec<f32>,
     ) -> Result<Vec<u32>> {
         anyhow::bail!("mtp_cycle: arch has no MTP support")
@@ -284,15 +286,16 @@ impl<A: Arch> Session<A> {
             replies.push(rx);
         }
         let mut first: Option<(Vec<u32>, Vec<f32>)> = None;
+        let mut ranks_agree = true;
         let mut unsupported = false;
         let mut failure: Option<anyhow::Error> = None;
         for (i, rx) in replies.into_iter().enumerate() {
             match rx.recv().map_err(|e| anyhow::anyhow!("mtp_step recv: {e}"))? {
-                Ok(v) => {
-                    if i == 0 {
-                        first = Some(v);
-                    }
-                }
+                Ok(v) => match &first {
+                    None if i == 0 => first = Some(v),
+                    Some((tokens, _)) => ranks_agree &= *tokens == v.0,
+                    None => {}
+                },
                 Err(e) => {
                     let msg = format!("{e:#}");
                     if msg.contains("no MTP") || msg.contains("not supported") {
@@ -308,6 +311,11 @@ impl<A: Arch> Session<A> {
         }
         if unsupported {
             return Ok(None);
+        }
+        if !ranks_agree {
+            anyhow::bail!(
+                "mtp_step: ranks emitted different tokens; their recurrent state and KV have diverged"
+            );
         }
         Ok(first)
     }

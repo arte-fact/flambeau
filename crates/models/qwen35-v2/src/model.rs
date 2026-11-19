@@ -148,6 +148,9 @@ fn head_row<C: ForwardCtx>(
 /// Row `i` of that forward verifies draft `i + 1`, and the row after the
 /// last accepted draft yields the bonus token.
 ///
+/// `seed` drives the accept / residual draws: every TP rank runs this cycle
+/// on identical logits and must reach identical verdicts.
+///
 /// Returns the tokens to emit: accepted drafts followed by the bonus
 /// token (itself not yet forwarded). `out_logits` receives the target
 /// logits row the bonus token was sampled from.
@@ -159,8 +162,10 @@ pub fn mtp_cycle<C: ForwardCtx>(
     slot_id: usize,
     n_draft: usize,
     sample: &mut dyn FnMut(&[f32]) -> (u32, Vec<(u32, f32)>),
+    seed: u64,
     out_logits: &mut Vec<f32>,
 ) -> Result<Vec<u32>> {
+    let mut verdict_rng = flambeau_runtime::Rng::from_seed(seed ^ 0xA076_1D64_78BD_642F);
     let Some(mtp) = model.mtp.as_ref() else {
         anyhow::bail!("mtp_cycle: model has no MTP head loaded");
     };
@@ -228,8 +233,8 @@ pub fn mtp_cycle<C: ForwardCtx>(
         let p_d = p_dist.iter().find(|(t, _)| *t == d.token).map(|(_, p)| *p).unwrap_or(0.0);
         // accept with prob min(1, p(d)/q(d)); greedy dists are one-hot, so
         // this reduces to argmax-match.
-        if !(d.q > 0.0 && uniform01() < (p_d / d.q).min(1.0)) {
-            bonus = Some(sample_residual(&p_dist, &d.dist));
+        if !(d.q > 0.0 && verdict_rng.next_f32() < (p_d / d.q).min(1.0)) {
+            bonus = Some(sample_residual(&p_dist, &d.dist, &mut verdict_rng));
             break;
         }
         emitted.push(d.token);
@@ -255,27 +260,14 @@ pub fn mtp_cycle<C: ForwardCtx>(
     Ok(emitted)
 }
 
-/// Thread-local uniform draw (rejection sampling). Deterministic enough for
-/// spec-decode (each call advances a simple LCG seeded per call site).
-fn uniform01() -> f32 {
-    use std::cell::Cell;
-    thread_local! {
-        static STATE: Cell<u64> = const { Cell::new(0x9E3779B97F4A7C15) };
-    }
-    STATE.with(|s| {
-        let mut x = s.get();
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        s.set(x);
-        (x >> 11) as f32 / (1u64 << 53) as f32
-    })
-}
-
 /// Bonus-token distribution on rejection: normalize(max(p - q, 0)) over
 /// the union of both supports, sampled with a uniform draw; falls back to
 /// sampling from p when the residual is empty (p and q identical).
-fn sample_residual(p_dist: &[(u32, f32)], q_dist: &[(u32, f32)]) -> u32 {
+fn sample_residual(
+    p_dist: &[(u32, f32)],
+    q_dist: &[(u32, f32)],
+    rng: &mut flambeau_runtime::Rng,
+) -> u32 {
     let qmap: std::collections::HashMap<u32, f32> = q_dist.iter().cloned().collect();
     let mut resid: Vec<(u32, f32)> = Vec::new();
     for &(t, p) in p_dist {
@@ -289,7 +281,7 @@ fn sample_residual(p_dist: &[(u32, f32)], q_dist: &[(u32, f32)]) -> u32 {
     if resid.is_empty() || total <= 0.0 {
         // fall back to p
         let mut acc = 0.0;
-        let r = uniform01();
+        let r = rng.next_f32();
         for &(t, p) in p_dist {
             acc += p;
             if r <= acc {
@@ -299,7 +291,7 @@ fn sample_residual(p_dist: &[(u32, f32)], q_dist: &[(u32, f32)]) -> u32 {
         return p_dist.last().map(|(t, _)| *t).unwrap_or(0);
     }
     let mut acc = 0.0;
-    let r = uniform01() * total;
+    let r = rng.next_f32() * total;
     for &(t, p) in &resid {
         acc += p;
         if r <= acc {

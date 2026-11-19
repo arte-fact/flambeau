@@ -356,6 +356,7 @@ impl<B: Backend, A: Arch> SoloSession<B, A> {
             slot_id,
             n_draft,
             &mut (sample_factory)(seed),
+            seed,
             &mut out_logits,
         )?;
         self.last_logits = out_logits.clone();

@@ -136,22 +136,25 @@ pub fn mtp_draft_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
             &ops,
         )
         .context("mtp lm_head")?;
-        // DtoH + argmax on host
-        let mut row = vec![0.0f32; vocab];
+        // The persistent logits buffer is the copy target: a per-step Vec
+        // would hand the runtime a fresh pageable range to pin every draft.
+        if state.logits_host.len() < vocab {
+            state.logits_host = vec![0.0_f32; vocab];
+        }
         unsafe {
             state
                 .device
                 .memcpy_async(
                     state.stream,
                     CopyDirection::DeviceToHost,
-                    DevicePtr(row.as_mut_ptr() as usize),
+                    DevicePtr(state.logits_host.as_mut_ptr() as usize),
                     state.pool.logits_f32_dev,
                     vocab * 4,
                 )
                 .context("mtp logits DtoH")?;
         }
         flambeau_core::Stream::synchronize(state.stream)?;
-        let (d, dist) = sample(&row);
+        let (d, dist) = sample(&state.logits_host[..vocab]);
         let q = dist.iter().find(|(t, _)| *t == d).map(|(_, p)| *p).unwrap_or(0.0);
         drafts.push(MtpDraft { token: d, q, dist });
         tok = d;

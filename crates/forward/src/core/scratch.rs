@@ -1001,6 +1001,9 @@ pub struct ScratchPool {
     /// Per-owned-layer recurrent state + conv history. Empty when
     /// `config.gdn` is None.
     pub gdn_state: Vec<GdnLayerState>,
+    /// One slot's worth of zeros (`max(state, conv_history)` bytes), the
+    /// device-side source for GDN resets. NULL when `config.gdn` is None.
+    pub gdn_zero_slot: DevicePtr,
     /// Shared GDN per-decode scratch wrapping blocks's owned scratch.
     /// `None` when `config.gdn` is None.
     pub gdn_decode_scratch: Option<flambeau_model_ops::OwnedDeltaNetLayerDecodeScratch>,
@@ -1490,7 +1493,7 @@ impl ScratchPool {
             (None, Vec::new())
         };
 
-        let (gdn_state, gdn_decode_scratch, gdn_decode_batched_scratch, gdn_prefill_scratch) = if let Some(g) = config.gdn {
+        let (gdn_state, gdn_zero_slot, gdn_decode_scratch, gdn_decode_batched_scratch, gdn_prefill_scratch) = if let Some(g) = config.gdn {
             let mut state_vec = Vec::with_capacity(config.num_layers);
             let state_bytes = n_slots * g.num_v_heads * g.head_k_dim * g.head_v_dim * f32;
             let hist_bytes = n_slots * (g.conv_kernel - 1) * g.conv_channels * f32;
@@ -1528,6 +1531,20 @@ impl ScratchPool {
                     state,
                     conv_history,
                 });
+            }
+            let zero_slot_bytes = state_bytes.max(hist_bytes) / n_slots;
+            let gdn_zero_slot = alloc_bytes(zero_slot_bytes)?;
+            // SAFETY: gdn_zero_slot owns zero_slot_bytes <= zero_buf.len().
+            unsafe {
+                device
+                    .memcpy_async(
+                        stream,
+                        CopyDirection::HostToDevice,
+                        gdn_zero_slot,
+                        DevicePtr(zero_buf.as_ptr() as usize),
+                        zero_slot_bytes,
+                    )
+                    .context("zero gdn reset source")?;
             }
             flambeau_core::Stream::synchronize(stream).context("sync gdn zero")?;
             // Drain the blocks-owned RawAllocTracker into our list
@@ -1575,9 +1592,9 @@ impl ScratchPool {
             } else {
                 None
             };
-            (state_vec, Some(owned), batched_owned, prefill_owned)
+            (state_vec, gdn_zero_slot, Some(owned), batched_owned, prefill_owned)
         } else {
-            (Vec::new(), None, None, None)
+            (Vec::new(), DevicePtr::NULL, None, None, None)
         };
 
         // MoE prefill scratch — must happen AFTER the `alloc_bytes`
@@ -1678,6 +1695,7 @@ impl ScratchPool {
             paged_kv_caches,
             page_pools,
             gdn_state,
+            gdn_zero_slot,
             gdn_decode_scratch,
             gdn_decode_batched_scratch,
             gdn_slot_state_ptrs,
@@ -1718,89 +1736,63 @@ impl ScratchPool {
     /// KV-cache positions are caller-supplied (no counter on the
     /// pool), so this is the only stateful slot that needs reset.
     pub fn reset_gdn_state(&self, device: &impl Device) -> Result<()> {
-        let Some(g) = self.config.gdn else {
-            return Ok(());
-        };
-        if self.gdn_state.is_empty() {
-            return Ok(());
+        for slot_id in 0..self.config.max_slots.max(1) {
+            self.queue_gdn_slot_reset(slot_id, device)?;
         }
-        let f32 = 4;
-        let n_slots = self.config.max_slots.max(1);
-        let state_bytes = n_slots * g.num_v_heads * g.head_k_dim * g.head_v_dim * f32;
-        let hist_bytes = n_slots * (g.conv_kernel - 1) * g.conv_channels * f32;
-        let zero_buf = vec![0u8; state_bytes.max(hist_bytes)];
-        let stream = device.default_stream();
-        for ls in &self.gdn_state {
-            unsafe {
-                device
-                    .memcpy_async(
-                        stream,
-                        CopyDirection::HostToDevice,
-                        ls.state,
-                        DevicePtr(zero_buf.as_ptr() as usize),
-                        state_bytes,
-                    )
-                    .context("reset gdn state")?;
-                device
-                    .memcpy_async(
-                        stream,
-                        CopyDirection::HostToDevice,
-                        ls.conv_history,
-                        DevicePtr(zero_buf.as_ptr() as usize),
-                        hist_bytes,
-                    )
-                    .context("reset gdn conv_history")?;
-            }
-        }
-        flambeau_core::Stream::synchronize(stream).context("sync gdn reset")?;
-        Ok(())
+        flambeau_core::Stream::synchronize(device.default_stream()).context("sync gdn reset")
     }
 
     /// Zero one slot's GDN state + conv-history across every layer.
     /// Used by the server's shared-Session pool to reset a single
     /// conversation slot without touching others. No-op for non-GDN
-    /// archs or when the slot index is out of range.
+    /// archs.
     pub fn reset_gdn_state_slot(&self, slot_id: usize, device: &impl Device) -> Result<()> {
+        let n_slots = self.config.max_slots.max(1);
+        if slot_id >= n_slots {
+            anyhow::bail!("reset_gdn_state_slot: slot_id {slot_id} >= max_slots {n_slots}");
+        }
+        self.queue_gdn_slot_reset(slot_id, device)?;
+        flambeau_core::Stream::synchronize(device.default_stream()).context("sync gdn reset slot")
+    }
+
+    /// Queue device-to-device copies of `gdn_zero_slot` over one slot's GDN
+    /// state. The source stays on the device: a pageable host buffer here
+    /// gets pinned by the HIP runtime for the transfer, and a transient one
+    /// has faulted the GPU (page fault inside the host heap).
+    fn queue_gdn_slot_reset(&self, slot_id: usize, device: &impl Device) -> Result<()> {
         let Some(g) = self.config.gdn else {
             return Ok(());
         };
         if self.gdn_state.is_empty() {
             return Ok(());
         }
-        let n_slots = self.config.max_slots.max(1);
-        if slot_id >= n_slots {
-            anyhow::bail!("reset_gdn_state_slot: slot_id {slot_id} >= max_slots {n_slots}");
-        }
-        let f32 = 4;
-        let state_bytes_per_slot = g.num_v_heads * g.head_k_dim * g.head_v_dim * f32;
-        let hist_bytes_per_slot = (g.conv_kernel - 1) * g.conv_channels * f32;
-        let zero_buf = vec![0u8; state_bytes_per_slot.max(hist_bytes_per_slot)];
+        let state_bytes = g.num_v_heads * g.head_k_dim * g.head_v_dim * 4;
+        let hist_bytes = (g.conv_kernel - 1) * g.conv_channels * 4;
         let stream = device.default_stream();
         for ls in &self.gdn_state {
-            let state_off = ls.state.offset_bytes(slot_id * state_bytes_per_slot);
-            let hist_off = ls.conv_history.offset_bytes(slot_id * hist_bytes_per_slot);
+            // SAFETY: each slab holds max_slots slots of these sizes and
+            // gdn_zero_slot holds max(state_bytes, hist_bytes).
             unsafe {
                 device
                     .memcpy_async(
                         stream,
-                        CopyDirection::HostToDevice,
-                        state_off,
-                        DevicePtr(zero_buf.as_ptr() as usize),
-                        state_bytes_per_slot,
+                        CopyDirection::DeviceToDevice,
+                        ls.state.offset_bytes(slot_id * state_bytes),
+                        self.gdn_zero_slot,
+                        state_bytes,
                     )
                     .context("reset gdn state slot")?;
                 device
                     .memcpy_async(
                         stream,
-                        CopyDirection::HostToDevice,
-                        hist_off,
-                        DevicePtr(zero_buf.as_ptr() as usize),
-                        hist_bytes_per_slot,
+                        CopyDirection::DeviceToDevice,
+                        ls.conv_history.offset_bytes(slot_id * hist_bytes),
+                        self.gdn_zero_slot,
+                        hist_bytes,
                     )
                     .context("reset gdn conv_history slot")?;
             }
         }
-        flambeau_core::Stream::synchronize(stream).context("sync gdn reset slot")?;
         Ok(())
     }
 

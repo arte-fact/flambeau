@@ -18,6 +18,7 @@ flambeau-quant = { path = "../../quant" }
 flambeau-model-ops = { path = "../../model-ops" }
 flambeau-ops = { path = "../../ops" }
 flambeau-forward = { path = "../../forward" }
+flambeau-runtime = { path = "../../runtime" }
 flambeau-backend = { path = "../../backend", optional = true }
 flambeau-backend-hip = { path = "../../backend-hip", optional = true }
 flambeau-backend-cuda = { path = "../../backend-cuda", optional = true }

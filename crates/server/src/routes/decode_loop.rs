@@ -1215,9 +1215,9 @@ fn run_completion_blocking_ids(
                     std::sync::Arc::new(move |seed: u64| {
                         let sampling = sampling2.clone();
                         let history = history2.clone();
+                        let mut rng = flambeau_runtime::Rng::from_seed(seed);
                         Box::new(move |logits: &[f32]| -> (u32, Vec<(u32, f32)>) {
                             let dist = flambeau_runtime::build_distribution(logits, &sampling, &history);
-                            let mut rng = flambeau_runtime::Rng::from_seed(seed);
                             let r = rng.next_f32();
                             let mut acc = 0.0f32;
                             let mut tok = dist.last().map(|(t, _)| *t).unwrap_or(0);

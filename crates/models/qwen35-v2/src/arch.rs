@@ -97,9 +97,20 @@ impl Arch for Qwen35V2 {
         slot_id: usize,
         n_draft: usize,
         sample: &mut dyn FnMut(&[f32]) -> (u32, Vec<(u32, f32)>),
+        seed: u64,
         out_logits: &mut Vec<f32>,
     ) -> Result<Vec<u32>> {
-        crate::model::mtp_cycle(model, ctx, anchor_token, anchor_pos, slot_id, n_draft, sample, out_logits)
+        crate::model::mtp_cycle(
+            model,
+            ctx,
+            anchor_token,
+            anchor_pos,
+            slot_id,
+            n_draft,
+            sample,
+            seed,
+            out_logits,
+        )
     }
 }
 
