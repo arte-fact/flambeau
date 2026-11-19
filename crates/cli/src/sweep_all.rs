@@ -84,6 +84,9 @@ const DISPATCH_SWEEPS: &[(&str, &str, &str, &str)] = &[
     ("gfx906", "qmatmul_q8_0_mmvq_single_row_gfx906", "qmatmul", "Q8_0"),
     ("gfx906", "qmatmul_q8_K_mmq_wave64_gfx906", "qmatmul_mmq", "Q8_K_wave64"),
     ("gfx906", "qmatmul_q8_k_mmvq_single_row", "qmatmul", "Q8_K"),
+    ("gfx906", "qmatmul_f16_mmq", "qmatmul", "F16_mmq"),
+    ("gfx906", "qmatmul_f16_mmq_tile", "qmatmul", "F16_mmq_tile"),
+    ("gfx906", "qmatmul_f16_mmvq", "qmatmul", "F16_mmvq"),
     ("gfx906", "quantize_f16_q8_1_gfx906", "quantize_f16_q8_1_gfx906", "all"),
     ("gfx906", "rmsnorm_f16_gfx906", "rmsnorm", "all"),
     ("gfx906", "rmsnorm_f32_gfx906", "rmsnorm_f32_gfx906", "all"),
@@ -248,14 +251,6 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
 
-    /// Dispatch rows whose cert no current sweep writes: the F16-weight
-    /// sweeps emit `qmatmul_f16_*` impl ids instead.
-    const WITHOUT_SWEEP: &[(&str, &str)] = &[
-        ("gfx906", "mmq_f16_q8_1_gfx906"),
-        ("gfx906", "mmq_f16_tile_gfx906"),
-        ("gfx906", "mmvq_f16_q8_1_gfx906"),
-    ];
-
     fn dispatched(backend: &str, arch: &str) -> BTreeSet<String> {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
@@ -273,7 +268,6 @@ mod tests {
             let missing: Vec<String> = dispatched(backend, arch)
                 .into_iter()
                 .filter(|i| sweep_for(arch, i).is_none())
-                .filter(|i| !WITHOUT_SWEEP.contains(&(arch, i.as_str())))
                 .collect();
             assert!(missing.is_empty(), "{arch}: rows without a sweep entry: {missing:?}");
         }
@@ -283,11 +277,10 @@ mod tests {
     fn every_sweep_entry_is_dispatched() {
         for (backend, arch) in [("hip", "gfx906"), ("cuda", "sm_86")] {
             let rows = dispatched(backend, arch);
-            let listed = DISPATCH_SWEEPS.iter().map(|&(a, i, _, _)| (a, i));
-            let stale: Vec<&str> = listed
-                .chain(WITHOUT_SWEEP.iter().copied())
-                .filter(|&(a, i)| a == arch && !rows.contains(i))
-                .map(|(_, i)| i)
+            let stale: Vec<&str> = DISPATCH_SWEEPS
+                .iter()
+                .filter(|&&(a, i, _, _)| a == arch && !rows.contains(i))
+                .map(|&(_, i, _, _)| i)
                 .collect();
             assert!(stale.is_empty(), "{arch}: entries for impls not in the dispatch table: {stale:?}");
         }

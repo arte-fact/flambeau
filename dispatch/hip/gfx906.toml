@@ -641,24 +641,24 @@ notes   = "GQA fused decode, online softmax, head_dim=128. One block per Q head,
 dtype   = "F16"
 dtype_q = "Q8_1"
 shape   = { m = "any", k = "any", n = "any" }
-impl    = "mmvq_f16_q8_1_gfx906"
-cert    = "certs/hip/gfx906/mmvq_f16_q8_1_gfx906.json"
+impl    = "qmatmul_f16_mmvq"
+cert    = "certs/hip/gfx906/qmatmul_f16_mmvq.json"
 notes   = "V2.21.b — F16 weight × Q8_1 activation MMVQ. Unblocks Unsloth UD-Q8_K_XL GGUFs (i-matrix-flagged layers kept in F16). 256 threads × n_rows blocks, 8 elements/thread F32 FMA. No DP4A (weight is F16). HBM-bound at ~30 µs/call for 6144×5120."
 
 [[qmatmul]]
 dtype   = "F16"
 dtype_q = "Q8_1"
 shape   = { m = "1..7", k = "any", n = "any" }
-impl    = "mmq_f16_q8_1_gfx906"
-cert    = "certs/hip/gfx906/mmq_f16_q8_1_gfx906.json"
+impl    = "qmatmul_f16_mmq"
+cert    = "certs/hip/gfx906/qmatmul_f16_mmq.json"
 notes   = "V2.25.a — multi-row F16 × Q8_1. Same per-block math as `mmvq_f16_q8_1`, grid.y = n_tokens. Default for small m where tile partial-fill hurts; V2.29.a tile kernel covers m >= 8."
 
 [[qmatmul]]
 dtype   = "F16"
 dtype_q = "Q8_1"
 shape   = { m = ">=8", k = "any", n = "any" }
-impl    = "mmq_f16_tile_gfx906"
-cert    = "certs/hip/gfx906/mmq_f16_tile_gfx906.json"
+impl    = "qmatmul_f16_mmq_tile"
+cert    = "certs/hip/gfx906/qmatmul_f16_mmq_tile.json"
 notes   = "V2.29.a — tile-M F16 × Q8_1 MMQ. 64 threads/block wave64, MMQ_Y=64 output rows × MMQ_X=8 activation rows per block (512 outputs/block). Each thread loads 32 F16 weights per K-sub-block once into registers and reuses 8× across activation rows; activation tile reads from L1-hot line across the 64 threads per sub-block. Measured Qwen3.6-27B-UD-Q8_K_XL Mesh<4> prefill L=512: 56.2 → 95.0 tok/s (+69 %, ratio vs llama.cpp 0.40 → 0.67). Under-fill (n_tokens < 8) early-exits per-slot via the slot_token[c] < 0 guard."
 
 [[attention_decode]]

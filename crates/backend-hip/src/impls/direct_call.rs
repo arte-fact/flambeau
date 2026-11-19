@@ -40,23 +40,9 @@ pub const DIRECT_CALL_KERNELS_GFX906: &[DirectCallKernel] = &[
         impl_id: "mmvq_q5_1_gfx906",
         cert_rel_path: "certs/hip/gfx906/mmvq_q5_1_gfx906.json",
     },
-    // F16 × Q8_1 MMVQ + MMQ (Unsloth UD-Q8_K_XL F16 layers).
-    DirectCallKernel {
-        impl_id: "mmvq_f16_q8_1_gfx906",
-        cert_rel_path: "certs/hip/gfx906/mmvq_f16_q8_1_gfx906.json",
-    },
-    DirectCallKernel {
-        impl_id: "mmq_f16_q8_1_gfx906",
-        cert_rel_path: "certs/hip/gfx906/mmq_f16_q8_1_gfx906.json",
-    },
-    // Tile-M F16 × Q8_1 MMQ for m >= 8. Call-site dispatched
-    // alongside mmq_f16_q8_1 inside qmatmul.rs::dispatch_qmatmul.
-    DirectCallKernel {
-        impl_id: "mmq_f16_tile_gfx906",
-        cert_rel_path: "certs/hip/gfx906/mmq_f16_tile_gfx906.json",
-    },
-    // Templated cross-backend F16 certs (neutral impl_ids; same kernels as the
-    // _gfx906 dispatch rows above, registered as bench-references).
+    // F16 × Q8_1 MMVQ, multi-row MMQ (m < 8) and tile-M MMQ (m >= 8), for the
+    // F16 layers of Unsloth UD-Q8_K_XL GGUFs. Call-site dispatched in
+    // qmatmul.rs::dispatch_qmatmul.
     DirectCallKernel {
         impl_id: "qmatmul_f16_mmvq",
         cert_rel_path: "certs/hip/gfx906/qmatmul_f16_mmvq.json",
