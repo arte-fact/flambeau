@@ -7,10 +7,11 @@ use flambeau_quant::GgufFile;
 use crate::ctx::{GdnDims, GdnWeights};
 
 use super::gdn_shard::{
-    upload_f32_array_sharded, upload_gdn_fused_qkv_f32, upload_gdn_fused_qkv_quant,
+    gdn_v_head_runs, upload_f32_heads, upload_gdn_fused_qkv_f32, upload_gdn_fused_qkv_quant,
+    upload_head_cols_quant, upload_head_rows_quant,
 };
 use super::primitives::{upload_dequant_to_f16, upload_f32_tensor};
-use super::shard::{upload_col_sharded_quant, upload_quant_weight, upload_row_sharded_quant};
+use super::shard::upload_quant_weight;
 use super::ShardMode;
 
 /// How the loader shards a GDN layer's K vs V heads across TP ranks.
@@ -18,11 +19,13 @@ use super::ShardMode;
 /// repeat math); this enum only controls upload-time tensor slicing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GdnTpMode {
-    /// Shard both K and V heads uniformly along the head axis.
+    /// Shard both K and V heads along the head axis. The V heads each
+    /// rank owns follow the kernel's K pairing (see
+    /// `gdn_shard::gdn_v_head_runs`): a contiguous slice under
+    /// `rep_inner_layout = true`, interleaved runs under the modulo
+    /// pairing of qwen35 (27B: 48 V / 16 K heads).
     /// Geometry gate: `num_k_heads % n_ranks == 0`
     ///   ∧ `num_v_heads % n_ranks == 0`.
-    /// Pairs with `rep_inner_layout = true` on qwen3-Next-family
-    /// arches.
     FullShard,
     /// Replicate the full `num_k_heads × head_k_dim` slab of Q and K
     /// channels on every rank; shard only the V slab.
@@ -168,6 +171,14 @@ pub fn load_gdn_layer(
         g.num_k_heads * n_ranks
     };
     let global_num_v_heads = g.num_v_heads * n_ranks;
+    let v_runs = gdn_v_head_runs(
+        global_num_v_heads,
+        global_num_k_heads,
+        kq_replicated,
+        spec.rep_inner_layout,
+        rank,
+        n_ranks,
+    )?;
 
     let (attn_qkv, attn_gate, ssm_alpha, ssm_beta, ssm_out, ssm_dt_bias, ssm_a, ssm_conv1d) =
         if matches!(shard, ShardMode::Replicated) {
@@ -234,78 +245,35 @@ pub fn load_gdn_layer(
                         kq_replicated,
                         rank,
                         n_ranks,
+                        v_runs: &v_runs,
                     },
                     allocs,
                 )?,
-                upload_col_sharded_quant(
+                upload_head_rows_quant(
                     file,
                     device,
                     spec.attn_gate_name,
-                    crate::loader::shard::ShardSpec {
-                        n_rows: g.d_inner * n_ranks,
-                        n_cols: spec.hidden,
-                        rank,
-                        n_ranks,
-                    },
+                    spec.hidden,
+                    g.head_v_dim,
+                    &v_runs,
                     allocs,
                 )?,
-                upload_col_sharded_quant(
-                    file,
-                    device,
-                    spec.ssm_alpha_name,
-                    crate::loader::shard::ShardSpec {
-                        n_rows: global_num_v_heads,
-                        n_cols: spec.hidden,
-                        rank,
-                        n_ranks,
-                    },
-                    allocs,
-                )?,
-                upload_col_sharded_quant(
-                    file,
-                    device,
-                    spec.ssm_beta_name,
-                    crate::loader::shard::ShardSpec {
-                        n_rows: global_num_v_heads,
-                        n_cols: spec.hidden,
-                        rank,
-                        n_ranks,
-                    },
-                    allocs,
-                )?,
-                // ssm_out [hidden, d_inner] — row-shard along d_inner;
-                // the partial-hidden output is AR-summed via the
-                // composite's hook.
-                upload_row_sharded_quant(
+                upload_head_rows_quant(file, device, spec.ssm_alpha_name, spec.hidden, 1, &v_runs, allocs)?,
+                upload_head_rows_quant(file, device, spec.ssm_beta_name, spec.hidden, 1, &v_runs, allocs)?,
+                // ssm_out [hidden, d_inner]: row-parallel along d_inner, the
+                // partial-hidden output is AR-summed by the composite.
+                upload_head_cols_quant(
                     file,
                     device,
                     spec.ssm_out_name,
-                    crate::loader::shard::ShardSpec {
-                        n_rows: spec.hidden,
-                        n_cols: g.d_inner * n_ranks,
-                        rank,
-                        n_ranks,
-                    },
+                    spec.hidden,
+                    g.d_inner * n_ranks,
+                    g.head_v_dim,
+                    &v_runs,
                     allocs,
                 )?,
-                upload_f32_array_sharded(
-                    file,
-                    device,
-                    spec.ssm_dt_bias_name,
-                    global_num_v_heads,
-                    rank,
-                    n_ranks,
-                    allocs,
-                )?,
-                upload_f32_array_sharded(
-                    file,
-                    device,
-                    spec.ssm_a_name,
-                    global_num_v_heads,
-                    rank,
-                    n_ranks,
-                    allocs,
-                )?,
+                upload_f32_heads(file, device, spec.ssm_dt_bias_name, global_num_v_heads, &v_runs, allocs)?,
+                upload_f32_heads(file, device, spec.ssm_a_name, global_num_v_heads, &v_runs, allocs)?,
                 upload_gdn_fused_qkv_f32(
                     file,
                     device,
@@ -321,6 +289,7 @@ pub fn load_gdn_layer(
                         kq_replicated,
                         rank,
                         n_ranks,
+                        v_runs: &v_runs,
                     },
                     allocs,
                 )?,

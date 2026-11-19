@@ -103,3 +103,26 @@ fn per_rank_gdn_dims_fullshard_divides_both() {
     assert_eq!(out.d_inner, 12 * 128);
     assert_eq!(out.conv_channels, 2 * 8 * 128 + 12 * 128);
 }
+
+#[test]
+fn modulo_pairing_interleaves_v_heads_under_full_shard() {
+    use flambeau_forward::loader::gdn_v_head_runs;
+    let r0 = gdn_v_head_runs(48, 16, false, false, 0, 2).unwrap();
+    let r1 = gdn_v_head_runs(48, 16, false, false, 1, 2).unwrap();
+    assert_eq!(r0, vec![(0, 8), (16, 8), (32, 8)]);
+    assert_eq!(r1, vec![(8, 8), (24, 8), (40, 8)]);
+    for (rank, runs) in [(0usize, &r0), (1, &r1)] {
+        let heads: Vec<usize> = runs.iter().flat_map(|&(s, n)| s..s + n).collect();
+        for (h_local, &j) in heads.iter().enumerate() {
+            assert_eq!(h_local % 8, j % 16 - rank * 8, "local V {h_local} -> global {j}");
+        }
+    }
+}
+
+#[test]
+fn contiguous_v_heads_when_k_replicated_or_inner_layout() {
+    use flambeau_forward::loader::gdn_v_head_runs;
+    assert_eq!(gdn_v_head_runs(48, 16, true, false, 1, 2).unwrap(), vec![(24, 24)]);
+    assert_eq!(gdn_v_head_runs(32, 16, false, true, 1, 2).unwrap(), vec![(16, 16)]);
+    assert_eq!(gdn_v_head_runs(48, 16, false, false, 0, 1).unwrap(), vec![(0, 48)]);
+}
