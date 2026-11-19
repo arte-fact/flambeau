@@ -20,19 +20,6 @@ fn dev_flag(_name: &str) -> bool {
     false
 }
 
-#[cfg(feature = "dev_trace")]
-fn dev_usize(name: &str, default: usize) -> usize {
-    std::env::var(name)
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(default)
-}
-#[cfg(not(feature = "dev_trace"))]
-#[inline(always)]
-fn dev_usize(_name: &str, default: usize) -> usize {
-    default
-}
-
 /// Outcome of `ServerState::prefix_cache_try_restore` — drives the
 /// caller's prefill branch.
 #[derive(Debug)]
@@ -956,6 +943,7 @@ pub mod messages;
 pub use messages::messages_anthropic;
 
 pub mod decode_loop;
+mod token_emit;
 pub(crate) use decode_loop::{
     run_completion, run_completion_blocking_streaming, run_completion_ids, stream_completion_sse,
 };

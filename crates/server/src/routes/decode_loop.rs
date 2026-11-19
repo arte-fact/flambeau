@@ -16,11 +16,12 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::api::*;
-use crate::gpu_sampler::{self, GpuSamplerScratch};
-use crate::routes::{dev_flag, dev_usize, now_unix, request_id, ServerState, SharedState};
+use crate::gpu_sampler;
+use crate::routes::{now_unix, request_id, ServerState, SharedState};
 use crate::state::SamplingParams;
 
 use super::finalise::{build_logprob_entry, finalise, preview_text, CompletionOutput};
+use super::token_emit::{Discard, Emitter, Finish, Forward, TokenSink};
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn stream_completion_sse(
@@ -954,103 +955,195 @@ fn run_completion_blocking_ids(
     params: SamplingParams,
     relax_stop_mask: bool,
 ) -> Result<CompletionOutput> {
-    // Opt into the scheduler path when
-    // conditions allow. Greedy + PP + no MTP + no JSON + no logprobs.
     if scheduler_can_engage(&state, &params) {
         return run_completion_scheduler_pp_blocking(state, prompt_ids, params, relax_stop_mask);
     }
+    let out = decode_tokens(
+        &state,
+        &prompt_ids,
+        &params,
+        relax_stop_mask,
+        DecodeFeatures { structured: true, stream: false },
+        &mut Discard,
+    )?;
+    let result = finalise(
+        &state,
+        out.prompt_tokens,
+        out.generated,
+        out.finish.reason(),
+        &params.stop_strings,
+        out.logprobs,
+        params.enable_thinking,
+    )?;
+    tracing::info!(
+        target: "server.resp",
+        completion_tokens = result.2,
+        finish_reason = %result.3,
+        resp = %preview_text(&result.0, 240),
+        "chat_completions response"
+    );
+    Ok(result)
+}
 
-    let request_start = Instant::now();
-
+/// Streaming variant of the decode loop. Pushes text deltas through
+/// `emit` as each token is produced; returns `(finish_reason,
+/// prompt_tokens, completion_tokens)` so the SSE producer can emit a
+/// final usage chunk.
+pub(crate) fn run_completion_blocking_streaming(
+    state: SharedState,
+    prompt: String,
+    params: SamplingParams,
+    relax_stop_mask: bool,
+    emit: &mut dyn FnMut(&str) -> bool,
+) -> Result<(String, u32, u32)> {
+    let prompt_ids = state
+        .tokenizer
+        .encode_for_inference(&prompt)
+        .context("tokenize prompt")?;
     if prompt_ids.is_empty() {
         bail!("prompt tokenized to 0 tokens");
     }
+    if scheduler_can_engage(&state, &params) {
+        return run_completion_streaming_scheduler_pp_blocking(
+            state,
+            prompt_ids,
+            params,
+            relax_stop_mask,
+            emit,
+        );
+    }
+    let out = decode_tokens(
+        &state,
+        &prompt_ids,
+        &params,
+        relax_stop_mask,
+        DecodeFeatures { structured: false, stream: true },
+        &mut Forward { emit },
+    )?;
+    tracing::info!(
+        target: "server.resp",
+        completion_tokens = out.generated.len() as u32,
+        finish_reason = %out.finish.reason(),
+        resp = %preview_text(&out.text, 240),
+        "streaming chat_completions response"
+    );
+    Ok((out.finish.reason().to_owned(), out.prompt_tokens, out.generated.len() as u32))
+}
 
+/// Which request surfaces a decode-loop caller serves. The SSE path has no
+/// JSON-constraint or logprobs output yet, so it decodes without them.
+#[derive(Clone, Copy)]
+struct DecodeFeatures {
+    structured: bool,
+    stream: bool,
+}
+
+struct DecodeOutcome {
+    prompt_tokens: u32,
+    generated: Vec<u32>,
+    finish: Finish,
+    logprobs: Option<Vec<ChatLogProbContent>>,
+    mtp_cycles: u32,
+    text: String,
+}
+
+/// The mutex-held single-request decode loop behind both legacy paths:
+/// prefill, first token, then plain steps or MTP cycles until a stop rule
+/// fires. Every token, including each token of an MTP cycle, goes through
+/// `Emitter::accept`, so stop tokens, stop sequences, `max_tokens` and a
+/// gone client end generation at the exact token on both paths.
+fn decode_tokens(
+    state: &SharedState,
+    prompt_ids: &[u32],
+    params: &SamplingParams,
+    relax_stop_mask: bool,
+    features: DecodeFeatures,
+    sink: &mut dyn TokenSink,
+) -> Result<DecodeOutcome> {
+    if prompt_ids.is_empty() {
+        bail!("prompt tokenized to 0 tokens");
+    }
+    let request_start = Instant::now();
     let slot_idx = state.claim_slot_blocking();
-    let result = (|| -> Result<CompletionOutput> {
-    let prompt_tokens = prompt_ids.len() as u32;
+    let out = decode_in_slot(state, slot_idx, prompt_ids, params, relax_stop_mask, features, sink);
+    state.release_slot(slot_idx);
+    let out = out?;
+    tracing::info!(
+        target: "server.completion.finish",
+        prompt_tokens = out.prompt_tokens,
+        completion_tokens = out.generated.len() as u32,
+        finish_reason = out.finish.reason(),
+        total_ms = request_start.elapsed().as_secs_f64() * 1000.0,
+        mtp_cycles = out.mtp_cycles,
+        stream = features.stream,
+        "completion request finished"
+    );
+    Ok(out)
+}
 
+/// Stop sequences checked on the decoded text: leaked reasoning markers
+/// (unless thinking is enabled or the stop mask is relaxed), the arch's
+/// chat-turn markers, and the request's stop strings.
+fn stop_patterns(state: &ServerState, params: &SamplingParams, relax_stop_mask: bool) -> Vec<String> {
+    let mut patterns: Vec<String> = Vec::new();
+    if !relax_stop_mask && !params.enable_thinking {
+        patterns.extend(
+            ["</think>", "<end_thought>", "<end_think>", "</thought>"]
+                .iter()
+                .map(|s| (*s).to_owned()),
+        );
+    }
+    patterns.extend(state.model.chat_stop_markers().iter().map(|s| (*s).to_owned()));
+    patterns.extend(params.stop_strings.iter().filter(|s| !s.is_empty()).cloned());
+    patterns
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decode_in_slot(
+    state: &SharedState,
+    slot_idx: usize,
+    prompt_ids: &[u32],
+    params: &SamplingParams,
+    relax_stop_mask: bool,
+    features: DecodeFeatures,
+    sink: &mut dyn TokenSink,
+) -> Result<DecodeOutcome> {
+    let prompt_tokens = prompt_ids.len() as u32;
     tracing::info!(
         target: "server.completion.start",
         prompt_tokens,
         max_tokens = params.max_tokens,
+        stream = features.stream,
         slot_idx,
         "completion request accepted after queue wait"
     );
 
-    let model = &state.model;
-
-    // Sampler holds vocab-sized scratch reused across all decode steps
-    // (C2 in RUST-PERF-CORRECTIONS.md). Reserve upfront to avoid the
-    // first-token grow.
     let mut sampler = Sampler::from_seed(params.seed);
     sampler.reserve(state.cfg.vocab_size);
     let sampling = &params.sampling;
     let stop_ids = &state.tokenizer.stop_ids;
     let always_stop_ids = &state.tokenizer.always_stop_ids;
-    let vocab = state.cfg.vocab_size;
-    // Always allocate the logit buffer — we need it for the first-token
-    // EOS mask regardless of sampling mode.
-    let mut logits_buf: Vec<f32> = Vec::with_capacity(vocab);
+    let decode = |ids: &[u32]| -> Result<String> { state.tokenizer.decode(ids).context("decode") };
+    let mut logits_buf: Vec<f32> = Vec::with_capacity(state.cfg.vocab_size);
 
-    // GPU sampler scratch alloc is gated on the keep-logits-on-device
-    // optimisation, which was disabled when decode collapsed onto
-    // `forward_decode_batched_*` (Phase 12.5) — the batched output head
-    // writes to a different scratch buffer than the keep-on-device
-    // kernels read from. Re-wiring `resolve_head_logits` to the batched
-    // scratch is a follow-up; for now scratch stays `None`.
-    let _ = state.gpu_sampler;
-    let use_gpu_sampler = false;
-    let mut gpu_scratch: Option<GpuSamplerScratch> = None;
-
-    // Prefill. Always download logits so we can mask stop tokens on the
-    // first generated token — Qwen3.6 sometimes argmaxes `<|im_end|>` as
-    // the first response token on multi-turn prompts, producing an empty
-    // reply. Suppress it until at least one content token is emitted.
+    // Prefill. The first token's stop ids are always masked: Qwen3.6 can
+    // argmax `<|im_end|>` first on multi-turn prompts, yielding an empty
+    // reply.
     let prefill_start = Instant::now();
-    let _ = model;
-    // **Phase 5 S2** — chunked prefill releases `inflight_pool[slot_idx]`'s
-    // mutex between chunks so concurrent slots' decode steps interleave
-    // (bounds the per-step stall a long prompt inflicts on peers).
-    // Reset for new request happens inside `chunked_prefill_pp` on the
-    // first chunk's lock scope. Decode reacquires the guard below.
-    let full_hit = chunked_prefill_pp(&state, slot_idx, &prompt_ids, &mut logits_buf)?;
+    let full_hit = chunked_prefill_pp(state, slot_idx, prompt_ids, &mut logits_buf)?;
+    // The prefix-cache snapshot (0.1-2.2 s of DtoH) is taken after the first
+    // token is out, from the unmasked prefill logits.
+    let prefill_logits_for_cache = if full_hit { Vec::new() } else { logits_buf.clone() };
     let mut inflight_guard = state.inflight_pool[slot_idx].blocking_lock();
     let inflight: &mut dyn crate::Session = &mut **inflight_guard;
-    if !full_hit {
-        state.prefix_cache_try_capture_full(inflight, &prompt_ids, &logits_buf);
-    }
     for &sid in stop_ids {
         if (sid as usize) < logits_buf.len() {
             logits_buf[sid as usize] = f32::NEG_INFINITY;
         }
     }
-    // First token: ALWAYS goes through the host path. Prefill writes
-    // logits to its own local scratch (disposed at end of prefill); the
-    // decode scratch's `output_head.logits_f32` is uninitialised at
-    // this point. The GPU sampler path activates from the SECOND token
-    // onwards once the decode forward populates the right buffer.
-    // (One-shot first token doesn't matter perf-wise; D3 Phase B's
-    // bigger win is the per-step decode DtoH-skip.)
-    // Phase 12.5 — `inv_temp` was the GPU-sampler entry, retired with
-    // the keep-on-device branch. Re-introduce when `run_gpu_topk` re-
-    // wires onto the batched output buffer.
-    let _inv_temp = if sampling.temperature > 0.0 {
-        1.0 / sampling.temperature
-    } else {
-        1.0
-    };
-    // JSON state primed BEFORE first_next. When the
-    // request is in json_mode AND the chat handler detected an
-    // assistant prefill (last message had `role: "assistant"`),
-    // `params.json_prime_bytes` carries those bytes; the JSON state
-    // machine advances through them before the first decoded token,
-    // so the mask honours the model's actual continuation position.
-    // For non-prefill json_mode requests the prime is empty and the
-    // state starts at `JsonState::new()`. Created here (rather than
-    // post-first_next as before) so the mask can apply to the very
-    // first sampled token.
-    let mut json_state: Option<JsonConstraint> = if params.json_mode {
+    // JSON state is primed with the assistant prefill before the first
+    // token so the mask holds from the model's actual position.
+    let json_state: Option<JsonConstraint> = if features.structured && params.json_mode {
         let mut js = match params.json_schema.as_ref() {
             Some(schema) => JsonConstraint::for_schema(schema),
             None => JsonConstraint::object(),
@@ -1062,45 +1155,22 @@ fn run_completion_blocking_ids(
     } else {
         None
     };
-    // Mask first-token logits when json_mode is
-    // active. Without this the very first sampled token can violate
-    // the grammar (e.g. emit `Hello` before `{`), and the existing
-    // post-sample feed_slice would silently advance into a doomed
-    // state. Top-K=2048 candidate cap keeps this cheap (~1–2 ms) on
-    // a 151 k Qwen vocab.
     if let Some(js) = json_state.as_ref() {
-        gpu_sampler::apply_json_mask_to_logits(
-            js,
-            &state.tokenizer,
-            &mut logits_buf,
-            /*max_candidates=*/ 2048,
-        );
+        gpu_sampler::apply_json_mask_to_logits(js, &state.tokenizer, &mut logits_buf, 2048);
     }
     let first_next = sampler.sample(&logits_buf, sampling, &[]);
-    let is_greedy = sampling.is_greedy();
     tracing::info!(
         target: "server.completion.first_token",
         prompt_tokens,
         ttft_ms = prefill_start.elapsed().as_secs_f64() * 1000.0,
-        greedy = is_greedy,
-        topology = model.topology(),
+        greedy = sampling.is_greedy(),
+        topology = state.model.topology(),
         "first token produced (time-to-first-token)"
     );
-
-    // Accumulate logprobs when the request opted in AND
-    // the path supports it (host sampler only; GPU sampler / spec-
-    // decode silently disable). `top_logprobs` may be 0 → just the
-    // chosen token's logprob.
     let mut logprobs_acc: Option<Vec<ChatLogProbContent>> =
-        if params.collect_logprobs.is_some() && !use_gpu_sampler {
+        if features.structured && params.collect_logprobs.is_some() {
             Some(Vec::with_capacity(params.max_tokens as usize))
         } else {
-            if params.collect_logprobs.is_some() {
-                tracing::warn!(
-                    target: "server.logprobs",
-                    "logprobs requested but path is GPU sampler — returning null logprobs"
-                );
-            }
             None
         };
     if let Some(lp) = logprobs_acc.as_mut() {
@@ -1116,641 +1186,84 @@ fn run_completion_blocking_ids(
         }
     }
 
-    let mut generated: Vec<u32> = Vec::with_capacity(params.max_tokens as usize);
-    let is_stop = |t: u32| stop_ids.contains(&t);
-
-    // Advance JSON state by first_next's bytes (the
-    // pre-sample mask above already filtered candidates that would
-    // invalidate the running JSON, so this should always succeed
-    // when the mask was active).
-    if let Some(js) = json_state.as_mut() {
-        if let Ok(text) = state.tokenizer.decode(&[first_next]) {
-            let _ = js.feed_slice(text.as_bytes());
-        }
-    }
-
-    generated.push(first_next);
-    // First-token stop mask means `is_stop(first_next)` cannot fire here,
-    // but we keep the check as a defensive guard for future logit-mask
-    // changes.
-    if is_stop(first_next) {
-        // Slot stays pooled; mutex releases on function return.
-        return finalise(
-            &state,
-            prompt_tokens,
-            generated,
-            "stop",
-            &params.stop_strings,
-            logprobs_acc,
-            params.enable_thinking,
-        );
-    }
-
-    let mut finish_reason = "length";
-    let mut last_token = first_next;
-    // Mask stop tokens for the first MIN_RESPONSE_TOKENS steps. Qwen3.6
-    // on multi-turn prompts otherwise emits `<|im_end|>` after 0-1 content
-    // tokens, producing unusable one-word replies. MIN is small enough
-    // that short on-topic answers ("Yes.", "42.") are still possible.
-    // Tool-call turns disable this entirely. When the model is
-    // asked to emit a `<tool_call>…</tool_call>` body it may legitimately
-    // take only ~10 tokens; forcing 24 content tokens before allowing
-    // stop injects noise between the body and the `<|im_end|>` and
-    // breaks downstream parsing. `relax_stop_mask` flips both knobs to
-    // no-ops — trust the model on turns where `tools[]` is present.
-    // **Sampler-G (2026-04-30)** — was 24, lowered to 8. With Qwen3.6-27B
-    // at temp=0.7+top_p=0.8 the 24-token floor forced the model to keep
-    // generating 13+ tokens past natural endpoints like
-    // "Hello! How can I help you today?" (~10 tokens), at which point it
-    // wandered into reasoning-marker leaks (`</think>`, `<end_thought>`),
-    // hallucinated chat formats (`<|user|>\n<|assistant|>`), or duplicate-
-    // the-response loops. 8 lets short greetings stop naturally; the
-    // first-token NEG_INFINITY mask still prevents immediate-EOS on
-    // multi-turn prompts.
-    let min_response_tokens = crate::v2_handle::min_response_tokens_for(&state.cfg.arch);
-    // Nats subtracted from every stop-token logit beyond MIN_RESPONSE_TOKENS.
-    // was 0.5 (was 3.0 before that). Even 0.5 is enough to push
-    // EOS below the next-best continuation when the model wants to stop at
-    // the end of a paragraph; under top_k=20 sampling the next-best is
-    // typically "regenerate the paragraph" → whole-block repetition loops
-    // (observed live on Coder-Next acknowledgement responses). The
-    // first-token NEG_INFINITY mask + MIN_RESPONSE_TOKENS=24 hard mask are
-    // sufficient on their own to prevent immediate-EOS failure modes;
-    // beyond that, do not bias the model's natural stopping decision.
-    // **Sampler-G follow-up (2026-04-30)** — non-zero STOP_BIAS subtracts
-    // from every stop-token logit beyond MIN_RESPONSE_TOKENS. Was 0.0;
-    // raised to 3.0 because Qwen3.6-27B at default sampling
-    // (temp=1.0 / top_p=0.95 / top_k=20 — what Open-WebUI sends when
-    // the user hasn't set an override) picks `<|im_end|>` at the
-    // first natural sentence break, e.g. "I will include the full
-    // implementation below." → STOP, instead of actually delivering
-    // the implementation. 1.5 nats was insufficient at temp=1.0;
-    // 3.0 is enough to keep EOS below the next-best continuation at
-    // most natural endpoints. The prior concern about `0.5
-    // → repeat loops` was driven by Coder-Next-80B specifically;
-    // Qwen3.6 doesn't show that failure at this bias on chat tests.
-    let stop_bias = crate::v2_handle::stop_bias_for(&state.cfg.arch);
-    let mut reasoning_closer = ReasoningCloser::new(reasoning_close_ids(&state, &params));
-    // MTP: draft+verify cycles through the session's nextn head, with the
-    // same stop-token mask and bias as the plain path. Disabled for JSON
-    // mode, logprobs and reasoning budgets (forced tokens would desync the
-    // draft chain).
     let mtp_on = state.mtp_max_draft > 0
         && json_state.is_none()
         && logprobs_acc.is_none()
         && params.reasoning_budget.is_none();
-    let mut mtp_offset = 0usize;
-    let mut mtp_cycles = 0u32;
-    for step in 1..params.max_tokens as usize {
-        let force_mask = generated.len() < min_response_tokens && !relax_stop_mask;
-        // Phase 12.5 — decode goes through the host-path DtoH always.
-        // The GPU sampler keep-on-device branch was retired with the
-        // decode/batched collapse (see `use_gpu_sampler` initialiser).
-        let mut mtp_emitted: Option<Vec<u32>> = None;
-        let next = {
-            let pos = prompt_ids.len() + step - 1 + mtp_offset;
-            // The plain path masks stop ids for generated indices below
-            // `min_response_tokens` and biases them after. A cycle emits at
-            // most `n_draft + 1` tokens from index `generated.len()`, so the
-            // draft count is capped to keep a cycle on one side of that
-            // boundary and the matching rule applies to all its tokens.
-            let in_stop_window = !relax_stop_mask && generated.len() < min_response_tokens;
-            let n_draft = if in_stop_window {
-                state
-                    .mtp_max_draft
-                    .min((min_response_tokens - generated.len()).saturating_sub(1))
-            } else {
-                state.mtp_max_draft
-            };
-            if mtp_on && n_draft > 0 {
-                let sampling2 = sampling.clone();
-                let history2 = generated.clone();
-                let stop_adjust: std::sync::Arc<Vec<(u32, f32)>> = std::sync::Arc::new(if relax_stop_mask {
-                    Vec::new()
-                } else {
-                    stop_ids
-                        .iter()
-                        .map(|&sid| {
-                            let delta = if in_stop_window || always_stop_ids.contains(&sid) {
-                                f32::NEG_INFINITY
-                            } else {
-                                -stop_bias
-                            };
-                            (sid, delta)
-                        })
-                        .collect()
-                });
-                let factory: std::sync::Arc<dyn Fn(u64) -> flambeau_server_core::MtpSampleFn + Send + Sync> =
-                    std::sync::Arc::new(move |seed: u64| {
-                        let sampling = sampling2.clone();
-                        let history = history2.clone();
-                        let stop_adjust = std::sync::Arc::clone(&stop_adjust);
-                        let mut adjusted: Vec<f32> = Vec::new();
-                        let mut rng = flambeau_runtime::Rng::from_seed(seed);
-                        Box::new(move |logits: &[f32]| -> (u32, Vec<(u32, f32)>) {
-                            adjusted.clear();
-                            adjusted.extend_from_slice(logits);
-                            for &(sid, delta) in stop_adjust.iter() {
-                                if let Some(l) = adjusted.get_mut(sid as usize) {
-                                    *l += delta;
-                                }
-                            }
-                            let dist = flambeau_runtime::build_distribution(&adjusted, &sampling, &history);
-                            let r = rng.next_f32();
-                            let mut acc = 0.0f32;
-                            let mut tok = dist.last().map(|(t, _)| *t).unwrap_or(0);
-                            for &(t, p) in &dist {
-                                acc += p;
-                                if r <= acc {
-                                    tok = t;
-                                    break;
-                                }
-                            }
-                            (tok, dist)
-                        })
-                    });
-                let seed = params.seed ^ (pos as u64).wrapping_mul(0x9E3779B9);
-                match inflight
-                    .mtp_step(last_token, pos, n_draft, factory, seed, &mut logits_buf)
-                    .context("mtp step")?
-                {
-                    Some(emitted) => {
-                        mtp_cycles += 1;
-                        mtp_emitted = Some(emitted);
-                    }
-                    None => {
-                        state
-                            .dispatch_decode_one(&mut *inflight, last_token, pos, &mut logits_buf)
-                            .context("decode step logits")?;
-                    }
-                }
-            } else {
-                state
-                    .dispatch_decode_one(&mut *inflight, last_token, pos, &mut logits_buf)
-                    .context("decode step logits")?;
-            }
-            if !relax_stop_mask {
-                for &sid in stop_ids {
-                    if (sid as usize) < logits_buf.len() {
-                        if always_stop_ids.contains(&sid) || force_mask {
-                            logits_buf[sid as usize] = f32::NEG_INFINITY;
-                        } else {
-                            logits_buf[sid as usize] -= stop_bias;
-                        }
-                    }
-                }
-            }
-            // Host-path JSON mask. Matches the
-            // GPU-path mask above: set logit of any top-K candidate
-            // that would invalidate the running JSON to NEG_INFINITY
-            // before the sampler picks. Only active when the request
-            // set `response_format=json_object`. Top-K=2048 cap keeps
-            // the per-token cost in the low-ms range.
-            if let Some(js) = json_state.as_ref() {
-                gpu_sampler::apply_json_mask_to_logits(
-                    js,
-                    &state.tokenizer,
-                    &mut logits_buf,
-                    /*max_candidates=*/ 2048,
-                );
-            }
-            // Once the thinking budget is spent, emit the reasoning-close
-            // marker verbatim so the model stops thinking and answers.
-            // Otherwise pass `generated` as history so penalties can fire on
-            // repeats / frequent tokens (without this, Qwen3.5/3.6
-            // agent loops degrade to long-CoT drift).
-            let next = match reasoning_closer.next_forced(&generated, params.reasoning_budget) {
-                Some(forced) => forced,
-                None => sampler.sample(&logits_buf, sampling, &generated),
-            };
-            // Collect per-token logprobs (host path only).
-            if let Some(lp) = logprobs_acc.as_mut() {
-                if let Some(entry) = build_logprob_entry(
-                    &state.tokenizer,
-                    &logits_buf,
-                    sampling,
-                    &generated,
-                    next,
-                    params.collect_logprobs.unwrap_or(0) as usize,
-                ) {
-                    lp.push(entry);
-                }
-            }
-            next
-        };
-        // Advance JSON state with the chosen token's bytes.
-        let mut json_complete = false;
-        if let Some(js) = json_state.as_mut() {
-            if let Ok(text) = state.tokenizer.decode(&[next]) {
-                let _ = js.feed_slice(text.as_bytes());
-            }
-            json_complete = js.is_complete();
-        }
-        // MTP: the cycle already produced the full token run (accepted
-        // drafts + bonus token as the last element). Emit them all.
-        if let Some(em) = mtp_emitted.take() {
-            let mut stopped = false;
-            let em_len = em.len();
-            for t in em {
-                generated.push(t);
-                last_token = t;
-                if is_stop(t) {
-                    finish_reason = "stop";
-                    stopped = true;
-                    break;
-                }
-                if generated.len() >= params.max_tokens as usize {
-                    break;
-                }
-            }
-            mtp_offset += em_len.saturating_sub(1);
-            if stopped || generated.len() >= params.max_tokens as usize {
-                if !stopped {
-                    finish_reason = "length";
-                }
-                break;
-            }
-            continue;
-        }
-        generated.push(next);
-        last_token = next;
-        if is_stop(next) {
-            finish_reason = "stop";
-            break;
-        }
-        // Structured-output: stop once the value is structurally complete so
-        // the model can't drift into trailing prose past a valid JSON value.
-        if json_complete {
-            finish_reason = "stop";
-            break;
-        }
-        // **Sampler-G** — string-level stop on reasoning markers.
-        // The model can route around the single-token `</think>`
-        // mask by emitting the multi-token text form. Detokenize
-        // the recent tail and stop if a leak is present. Final
-        // response cleanup happens in `finalise`.
-        // Same mechanism extended to the per-request
-        // `stop` strings. Tail window grows with the longest
-        // user stop so multi-token caller stops are catchable.
-        let user_stop_max = params
-            .stop_strings
-            .iter()
-            .map(|s| s.len())
-            .max()
-            .unwrap_or(0);
-        let need_user_check = !params.stop_strings.is_empty();
-        if (need_user_check || !relax_stop_mask) && (step % 4 == 0 || step >= min_response_tokens) {
-            let n = generated.len();
-            // 16 tokens covers ≥48 chars typical; widen if a user
-            // stop string is longer than ~32 chars.
-            let token_window = 16.max((user_stop_max / 2).min(64));
-            let from = n.saturating_sub(token_window);
-            if let Ok(tail) = state.tokenizer.decode(&generated[from..]) {
-                let marker_hit = !relax_stop_mask
-                    && !params.enable_thinking
-                    && (tail.contains("</think>")
-                        || tail.contains("<end_thought>")
-                        || tail.contains("<end_think>")
-                        || tail.contains("</thought>"));
-                let arch_hit = state
-                    .model
-                    .chat_stop_markers()
-                    .iter()
-                    .any(|m| tail.contains(*m));
-                let user_hit = params
-                    .stop_strings
-                    .iter()
-                    .any(|s| tail.contains(s.as_str()));
-                if marker_hit || arch_hit || user_hit {
-                    finish_reason = "stop";
-                    break;
-                }
-            }
-        }
-    }
-
-    // gpu_scratch is always None today (see initialiser above); dispose
-    // wiring will land when the keep-logits-on-device path is re-wired
-    // for the batched decode kernels.
-    let _ = gpu_scratch.take();
-
-    // Slot pool: no dispose. The pooled inflight stays
-    // allocated; releasing the mutex returns the slot to the pool
-    // for the next request, which will reset_for_next_request on
-    // claim. Removing per-request dispose saves the ~ms cost of
-    // session/scratch teardown + re-alloc.
-    let _ = inflight; // silence unused-warn after removing dispose
-
-    tracing::info!(
-        target: "server.completion.finish",
+    let mut emitter = Emitter::new(
+        stop_patterns(state, params, relax_stop_mask),
+        json_state,
+        stop_ids,
+        params.max_tokens as usize,
+        sink,
+    );
+    let outcome = |emitter: Emitter<'_>, finish, logprobs, mtp_cycles| DecodeOutcome {
         prompt_tokens,
-        completion_tokens = generated.len() as u32,
-        finish_reason,
-        total_ms = request_start.elapsed().as_secs_f64() * 1000.0,
+        text: emitter.text.text().to_owned(),
+        generated: emitter.generated,
+        finish,
+        logprobs,
         mtp_cycles,
-        "completion request finished"
-    );
-
-    let result = finalise(
-        &state,
-        prompt_tokens,
-        generated,
-        finish_reason,
-        &params.stop_strings,
-        logprobs_acc,
-        params.enable_thinking,
-    )?;
-    // Sampler-G debug — emit the completed response text (head + tail
-    // preview) so we can correlate request shape with what the model
-    // actually produced. Truncated to 240 chars on each end so the
-    // log line stays readable.
-    let resp_preview = preview_text(&result.0, 240);
-    tracing::info!(
-        target: "server.resp",
-        completion_tokens = result.2,
-        finish_reason = %result.3,
-        resp = %resp_preview,
-        "chat_completions response"
-    );
-    Ok(result)
-    })();
-    state.release_slot(slot_idx);
-    result
-}
-
-/// Streaming variant of the decode loop. Pushes text deltas through
-/// `emit` as each token is produced; returns `(finish_reason,
-/// prompt_tokens, completion_tokens)` so the SSE producer can emit a
-/// final usage chunk.
-pub(crate) fn run_completion_blocking_streaming(
-    state: SharedState,
-    prompt: String,
-    params: SamplingParams,
-    relax_stop_mask: bool,
-    emit: &mut dyn FnMut(&str) -> bool,
-) -> Result<(String, u32, u32)> {
-    let request_start = Instant::now();
-
-    let prompt_ids = state
-        .tokenizer
-        .encode_for_inference(&prompt)
-        .context("tokenize prompt")?;
-    if prompt_ids.is_empty() {
-        bail!("prompt tokenized to 0 tokens");
-    }
-
-    // Coalescing streaming path: same gate as the non-streaming handler.
-    // Falls through to the mutex-held N=1 loop for JSON / logprobs / GPU
-    // sampler / non-scheduler archs.
-    if scheduler_can_engage(&state, &params) {
-        return run_completion_streaming_scheduler_pp_blocking(
-            state,
-            prompt_ids,
-            params,
-            relax_stop_mask,
-            emit,
-        );
-    }
-
-    let slot_idx = state.claim_slot_blocking();
-    let result = (|| -> Result<(String, u32, u32)> {
-    let prompt_tokens = prompt_ids.len() as u32;
-
-    tracing::info!(
-        target: "server.completion.start",
-        prompt_tokens,
-        max_tokens = params.max_tokens,
-        stream = true,
-        slot_idx,
-        "streaming completion accepted"
-    );
-
-    let model = &state.model;
-    let stop_ids = &state.tokenizer.stop_ids;
-    let always_stop_ids = &state.tokenizer.always_stop_ids;
-    let is_stop = |t: u32| stop_ids.contains(&t);
-
-    let mut sampler = Sampler::from_seed(params.seed);
-    sampler.reserve(state.cfg.vocab_size);
-    let sampling = &params.sampling;
-    let is_greedy = sampling.is_greedy();
-    let vocab = state.cfg.vocab_size;
-    let mut logits_buf: Vec<f32> = Vec::with_capacity(vocab);
-
-    // First token: always download logits and mask stop ids. See the
-    // non-streaming path for the rationale (multi-turn Qwen3.6 argmaxes
-    // `<|im_end|>` immediately otherwise).
-    let prefill_start = Instant::now();
-    // **Phase 5 S2** — chunked prefill on the streaming path. Same
-    // mutex-release-between-chunks shape as the legacy path; decode
-    // reacquires once below for the SSE-emit loop.
-    let full_hit = chunked_prefill_pp(&state, slot_idx, &prompt_ids, &mut logits_buf)?;
-    // Captured AFTER the first token is emitted (the snapshot DtoH costs
-    // 0.1-2.2 s and would otherwise sit inside TTFT) but BEFORE the first
-    // decode forward (which advances the GDN state past the prompt). The
-    // copy keeps the cached logits unmasked — the stop-mask below mutates
-    // `logits_buf` in place.
-    let prefill_logits_for_cache = if full_hit {
-        Vec::new()
-    } else {
-        logits_buf.clone()
     };
-    let mut inflight_guard = state.inflight_pool[slot_idx].blocking_lock();
-    let inflight: &mut dyn crate::Session = &mut **inflight_guard;
-    for &sid in stop_ids {
-        if (sid as usize) < logits_buf.len() {
-            logits_buf[sid as usize] = f32::NEG_INFINITY;
-        }
-    }
-    let first_next = sampler.sample(&logits_buf, sampling, &[]);
-    tracing::info!(
-        target: "server.completion.first_token",
-        prompt_tokens,
-        ttft_ms = prefill_start.elapsed().as_secs_f64() * 1000.0,
-        greedy = is_greedy,
-        topology = model.topology(),
-        "first token produced (time-to-first-token)"
-    );
-
-    // Rolling decode: re-decode the full generated list each step and emit
-    // the UTF-8 suffix beyond what was already emitted. Handles multi-byte
-    // tokens without surfacing partial codepoints to the client.
-    let mut generated: Vec<u32> = Vec::with_capacity(params.max_tokens as usize);
-    let mut emitted_text = String::new();
-    // incremental detokenize state. `decode_cursor` is the
-    // index of the first token NOT yet decoded into clean emitted bytes.
-    // `pending_emitted_in_segment` tracks how many bytes of the current
-    // open segment (`generated[decode_cursor..]`) we've already streamed
-    // to the client, so a re-decode after a multi-byte boundary doesn't
-    // re-emit safe bytes. When the segment finishes cleanly (no
-    // trailing U+FFFD), `decode_cursor` advances and the segment resets.
-    // Reduces per-step decode cost from O(generated.len()) to ~O(1) —
-    // typical "open segment" is 1-3 tokens, only growing when a multi-
-    // byte glyph straddles a BPE-token boundary.
-    let mut decode_cursor: usize = 0;
-    let mut pending_emitted_in_segment: usize = 0;
-
-    let mut push_and_emit =
-        |tok: u32, generated: &mut Vec<u32>, emitted_text: &mut String| -> Result<bool> {
-            generated.push(tok);
-            let stop_hit = is_stop(tok);
-            // Decode only the still-open segment, not the full sequence.
-            // `end` excludes the trailing stop token so its raw text never leaks.
-            let end = if stop_hit {
-                generated.len() - 1
-            } else {
-                generated.len()
-            };
-            if end <= decode_cursor {
-                return Ok(!stop_hit);
-            }
-            let raw = state
-                .tokenizer
-                .decode(&generated[decode_cursor..end])
-                .context("decode")?;
-            // Trim trailing U+FFFD: the HF BPE+ByteLevel decoder substitutes
-            // it when the byte tail is an incomplete UTF-8 codepoint
-            // (multi-byte glyph straddling two BPE tokens). The trimmed
-            // bytes will resolve once the next token's bytes arrive.
-            let safe = raw.trim_end_matches('\u{FFFD}');
-
-            // Emit anything new within the current open segment.
-            if safe.len() > pending_emitted_in_segment {
-                let delta = &safe[pending_emitted_in_segment..];
-                if !emit(delta) {
-                    return Ok(false);
-                }
-                emitted_text.push_str(delta);
-                pending_emitted_in_segment = safe.len();
-            }
-
-            // If nothing was trimmed, the segment closed cleanly: advance
-            // the cursor and reset segment-local emit accounting.
-            if safe.len() == raw.len() {
-                decode_cursor = end;
-                pending_emitted_in_segment = 0;
-            }
-            Ok(!stop_hit)
-        };
-
-    let alive = push_and_emit(first_next, &mut generated, &mut emitted_text)?;
-    if !alive {
-        // Slot stays pooled; mutex releases on function return.
-        return Ok(("stop".into(), prompt_tokens, generated.len() as u32));
+    if let Some(finish) = emitter.accept(first_next, &decode)? {
+        return Ok(outcome(emitter, finish, logprobs_acc, 0));
     }
     if !full_hit {
-        state.prefix_cache_try_capture_full(inflight, &prompt_ids, &prefill_logits_for_cache);
+        state.prefix_cache_try_capture_full(inflight, prompt_ids, &prefill_logits_for_cache);
     }
 
-    let mut finish_reason: &str = "length";
-    let mut last_token = first_next;
-    // See non-streaming path for the MIN_RESPONSE_TOKENS rationale.
-    // Sampler-G — lowered from 24 to 8 to let short greetings stop
-    // at natural endpoints instead of wandering into leak territory.
     let min_response_tokens = crate::v2_handle::min_response_tokens_for(&state.cfg.arch);
-    // Nats subtracted from every stop-token logit beyond MIN_RESPONSE_TOKENS.
-    // was 0.5 (was 3.0 before that). Even 0.5 is enough to push
-    // EOS below the next-best continuation when the model wants to stop at
-    // the end of a paragraph; under top_k=20 sampling the next-best is
-    // typically "regenerate the paragraph" → whole-block repetition loops
-    // (observed live on Coder-Next acknowledgement responses). The
-    // first-token NEG_INFINITY mask + MIN_RESPONSE_TOKENS=24 hard mask are
-    // sufficient on their own to prevent immediate-EOS failure modes;
-    // beyond that, do not bias the model's natural stopping decision.
-    // **Sampler-G follow-up (2026-04-30)** — non-zero STOP_BIAS subtracts
-    // from every stop-token logit beyond MIN_RESPONSE_TOKENS. Was 0.0;
-    // raised to 3.0 because Qwen3.6-27B at default sampling
-    // (temp=1.0 / top_p=0.95 / top_k=20 — what Open-WebUI sends when
-    // the user hasn't set an override) picks `<|im_end|>` at the
-    // first natural sentence break, e.g. "I will include the full
-    // implementation below." → STOP, instead of actually delivering
-    // the implementation. 1.5 nats was insufficient at temp=1.0;
-    // 3.0 is enough to keep EOS below the next-best continuation at
-    // most natural endpoints. The prior concern about `0.5
-    // → repeat loops` was driven by Coder-Next-80B specifically;
-    // Qwen3.6 doesn't show that failure at this bias on chat tests.
     let stop_bias = crate::v2_handle::stop_bias_for(&state.cfg.arch);
-    let mut reasoning_closer = ReasoningCloser::new(reasoning_close_ids(&state, &params));
-    // env-gated TP-decode profiling. When FLAMBEAU_PROFILE_DECODE
-    // is set, enable HipEvent section recording for `n` warm-up-skipped decode
-    // steps, then flush + dump aggregate per-section ms to stderr. Skips the
-    // first 8 steps (cold-cache effects, allocator warmup).
-    let profile_decode_n: usize = dev_usize("FLAMBEAU_PROFILE_DECODE", 0);
-    let profile_skip: usize = 8;
-
-    // **Lever B (host profile)** — per-section host wall accumulator,
-    // gated by FLAMBEAU_HOST_PROFILE=1. Skips the first 8 decode
-    // steps to dodge cold-cache effects, accumulates ms-per-section
-    // over the rest, dumps a one-line summary at end-of-loop.
-    let host_profile_on = dev_flag("FLAMBEAU_HOST_PROFILE");
-    let mut hp_n: usize = 0;
-    let mut hp_decode_us: u128 = 0;
-    let mut hp_mask_us: u128 = 0;
-    let mut hp_sample_us: u128 = 0;
-    let mut hp_emit_us: u128 = 0;
-    let mut hp_stopstr_us: u128 = 0;
-    let mut hp_step_us: u128 = 0;
-
-    for step in 1..params.max_tokens as usize {
-        if profile_decode_n > 0 {
-            if step == profile_skip + 1 {
-                flambeau_backend_hip::profile::enable();
-                tracing::info!(target: "server.profile", "enabled decode profiling");
-            } else if step == profile_skip + profile_decode_n + 1 {
-                match flambeau_backend_hip::profile::flush() {
-                    Ok(stats) => {
-                        let total: f32 = stats.iter().map(|s| s.total_ms).sum();
-                        let mut msg = String::from(
-                            "\n=== TP decode profile ===\nsection                    total_ms     count    mean_ms  ms/token\n",
-                        );
-                        for s in &stats {
-                            msg.push_str(&format!(
-                                "{:<24}  {:>10.2}  {:>8}  {:>10.4}  {:>9.3}\n",
-                                s.name,
-                                s.total_ms,
-                                s.count,
-                                s.mean_ms,
-                                s.total_ms / profile_decode_n as f32
-                            ));
-                        }
-                        msg.push_str(&format!(
-                            "{:<24}  {:>10.2}  {:>8}  {:>10}  {:>9.3}\n",
-                            "TOTAL_RECORDED",
-                            total,
-                            "-",
-                            "-",
-                            total / profile_decode_n as f32
-                        ));
-                        eprintln!("{}", msg);
+    let mut reasoning_closer = ReasoningCloser::new(reasoning_close_ids(state, params));
+    let mut last_token = first_next;
+    let mut mtp_cycles = 0u32;
+    let finish = 'decode: loop {
+        let generated_len = emitter.generated.len();
+        let pos = prompt_ids.len() + generated_len - 1;
+        // Stop ids are masked while fewer than `min_response_tokens` tokens
+        // exist and biased by `stop_bias` after. A cycle emits at most
+        // `n_draft + 1` tokens from index `generated_len`, so the draft
+        // count is capped to keep a cycle on one side of that boundary.
+        let in_stop_window = !relax_stop_mask && generated_len < min_response_tokens;
+        let n_draft = if in_stop_window {
+            state
+                .mtp_max_draft
+                .min((min_response_tokens - generated_len).saturating_sub(1))
+        } else {
+            state.mtp_max_draft
+        };
+        if mtp_on && n_draft > 0 {
+            let factory = mtp_sample_factory(
+                sampling,
+                &emitter.generated,
+                stop_ids,
+                always_stop_ids,
+                relax_stop_mask,
+                in_stop_window,
+                stop_bias,
+            );
+            let seed = params.seed ^ (pos as u64).wrapping_mul(0x9E3779B9);
+            if let Some(emitted) = inflight
+                .mtp_step(last_token, pos, n_draft, factory, seed, &mut logits_buf)
+                .context("mtp step")?
+            {
+                mtp_cycles += 1;
+                for t in emitted {
+                    last_token = t;
+                    if let Some(finish) = emitter.accept(t, &decode)? {
+                        break 'decode finish;
                     }
-                    Err(e) => tracing::error!(target: "server.profile", "flush: {e}"),
                 }
+                continue;
             }
         }
-        // Same relax-stop-mask behaviour as the non-streaming path.
-        let force_mask = step < min_response_tokens && !relax_stop_mask;
-        let hp_step_t0 = if host_profile_on {
-            Some(Instant::now())
-        } else {
-            None
-        };
         state
-            .dispatch_decode_one(
-                &mut *inflight,
-                last_token,
-                prompt_ids.len() + step - 1,
-                &mut logits_buf,
-            )
+            .dispatch_decode_one(&mut *inflight, last_token, pos, &mut logits_buf)
             .context("decode step logits")?;
-        let hp_after_decode = if host_profile_on {
-            Some(Instant::now())
-        } else {
-            None
-        };
         if !relax_stop_mask {
             for &sid in stop_ids {
                 if (sid as usize) < logits_buf.len() {
-                    if always_stop_ids.contains(&sid) || force_mask {
+                    if always_stop_ids.contains(&sid) || in_stop_window {
                         logits_buf[sid as usize] = f32::NEG_INFINITY;
                     } else {
                         logits_buf[sid as usize] -= stop_bias;
@@ -1758,143 +1271,91 @@ pub(crate) fn run_completion_blocking_streaming(
                 }
             }
         }
-        let hp_after_mask = if host_profile_on {
-            Some(Instant::now())
-        } else {
-            None
-        };
-        // Once the thinking budget is spent, emit the reasoning-close marker
-        // verbatim so the model stops thinking and answers.
-        let next = match reasoning_closer.next_forced(&generated, params.reasoning_budget) {
+        if let Some(js) = emitter.json.as_ref() {
+            gpu_sampler::apply_json_mask_to_logits(js, &state.tokenizer, &mut logits_buf, 2048);
+        }
+        // Once the thinking budget is spent the reasoning-close marker is
+        // forced verbatim; otherwise `generated` is the penalty history.
+        let next = match reasoning_closer.next_forced(&emitter.generated, params.reasoning_budget) {
             Some(forced) => forced,
-            None => sampler.sample(&logits_buf, sampling, &generated),
+            None => sampler.sample(&logits_buf, sampling, &emitter.generated),
         };
-        let hp_after_sample = if host_profile_on {
-            Some(Instant::now())
-        } else {
-            None
-        };
-        let alive = push_and_emit(next, &mut generated, &mut emitted_text)?;
-        let hp_after_emit = if host_profile_on {
-            Some(Instant::now())
-        } else {
-            None
-        };
-        last_token = next;
-        if !alive {
-            finish_reason = "stop";
-            break;
-        }
-        // **Sampler-G** string-level stop. The model can route around
-        // single-token `</think>` masks by emitting the multi-token
-        // text form (`</`, `think`, `>` or `<end`, `_thought`, `>`).
-        // Detect on the running emitted text and cut cleanly. Cheap:
-        // string contains check on the trailing window only. Use a
-        // char-safe slice — `emitted_text.len() - 64` can land inside
-        // a multi-byte UTF-8 codepoint (e.g. `’` at byte 805..808),
-        // which would panic. Walk back to the nearest char boundary.
-        // User-supplied stop sequences also use this tail-window
-        // detector. Window size grows with the longest user stop so
-        // multi-codepoint caller stops are catchable.
-        let user_stop_max = params
-            .stop_strings
-            .iter()
-            .map(|s| s.len())
-            .max()
-            .unwrap_or(0);
-        if !relax_stop_mask || !params.stop_strings.is_empty() {
-            let window_bytes = 64.max(user_stop_max + 16);
-            let tail_window = if emitted_text.len() > window_bytes {
-                let mut start = emitted_text.len() - window_bytes;
-                while start < emitted_text.len() && !emitted_text.is_char_boundary(start) {
-                    start += 1;
-                }
-                &emitted_text[start..]
-            } else {
-                emitted_text.as_str()
-            };
-            let marker_hit = !relax_stop_mask
-                && !params.enable_thinking
-                && (tail_window.contains("</think>")
-                    || tail_window.contains("<end_thought>")
-                    || tail_window.contains("<end_think>")
-                    || tail_window.contains("</thought>"));
-            let user_hit = params
-                .stop_strings
-                .iter()
-                .any(|s| tail_window.contains(s.as_str()));
-            if marker_hit || user_hit {
-                finish_reason = "stop";
-                tracing::info!(
-                    target: "server.completion.string_stop",
-                    user_stop = user_hit,
-                    "string-level stop on reasoning-marker or user-stop leak"
-                );
-                break;
-            }
-        }
-        // **Lever B (host profile)** — accumulate per-section wall.
-        // Skip first 8 steps (cold cache / allocator warmup).
-        if host_profile_on && step > profile_skip {
-            let t_step_end = Instant::now();
-            if let (Some(t0), Some(td), Some(tm), Some(ts), Some(te)) = (
-                hp_step_t0,
-                hp_after_decode,
-                hp_after_mask,
-                hp_after_sample,
-                hp_after_emit,
+        if let Some(lp) = logprobs_acc.as_mut() {
+            if let Some(entry) = build_logprob_entry(
+                &state.tokenizer,
+                &logits_buf,
+                sampling,
+                &emitter.generated,
+                next,
+                params.collect_logprobs.unwrap_or(0) as usize,
             ) {
-                hp_n += 1;
-                hp_decode_us += (td - t0).as_micros();
-                hp_mask_us += (tm - td).as_micros();
-                hp_sample_us += (ts - tm).as_micros();
-                hp_emit_us += (te - ts).as_micros();
-                hp_stopstr_us += (t_step_end - te).as_micros();
-                hp_step_us += (t_step_end - t0).as_micros();
+                lp.push(entry);
             }
         }
-    }
+        last_token = next;
+        if let Some(finish) = emitter.accept(next, &decode)? {
+            break 'decode finish;
+        }
+    };
+    Ok(outcome(emitter, finish, logprobs_acc, mtp_cycles))
+}
 
-    if host_profile_on && hp_n > 0 {
-        let f = hp_n as f64;
-        eprintln!(
-            "\n=== HOST decode profile (n={hp_n}, post-warmup) ===\n  decode_logits  : {:>7.3} ms/tok\n  stop-mask      : {:>7.3} ms/tok\n  sampler.sample : {:>7.3} ms/tok\n  push_and_emit  : {:>7.3} ms/tok\n  stopstr_check  : {:>7.3} ms/tok\n  TOTAL_per_step : {:>7.3} ms/tok\n",
-            hp_decode_us as f64 / f / 1000.0,
-            hp_mask_us as f64 / f / 1000.0,
-            hp_sample_us as f64 / f / 1000.0,
-            hp_emit_us as f64 / f / 1000.0,
-            hp_stopstr_us as f64 / f / 1000.0,
-            hp_step_us as f64 / f / 1000.0,
-        );
-    }
-
-    // Slot stays pooled; mutex releases on function return.
-
-    tracing::info!(
-        target: "server.completion.finish",
-        prompt_tokens,
-        completion_tokens = generated.len() as u32,
-        finish_reason,
-        total_ms = request_start.elapsed().as_secs_f64() * 1000.0,
-        "streaming completion finished"
-    );
-
-    // Sampler-G debug — preview of what we actually streamed.
-    let resp_preview = preview_text(&emitted_text, 240);
-    tracing::info!(
-        target: "server.resp",
-        completion_tokens = generated.len() as u32,
-        finish_reason = %finish_reason,
-        resp = %resp_preview,
-        "streaming chat_completions response"
-    );
-
-    Ok((
-        finish_reason.to_owned(),
-        prompt_tokens,
-        generated.len() as u32,
-    ))
-    })();
-    state.release_slot(slot_idx);
-    result
+/// Sampler handed to an MTP cycle: the plain path's stop-id rule (mask
+/// inside the window, bias after, `always_stop_ids` always masked) applied
+/// to every draft and verify row, then the request's sampling transforms.
+#[allow(clippy::too_many_arguments)]
+fn mtp_sample_factory(
+    sampling: &flambeau_runtime::Sampling,
+    history: &[u32],
+    stop_ids: &[u32],
+    always_stop_ids: &[u32],
+    relax_stop_mask: bool,
+    in_stop_window: bool,
+    stop_bias: f32,
+) -> std::sync::Arc<dyn Fn(u64) -> flambeau_server_core::MtpSampleFn + Send + Sync> {
+    let sampling = sampling.clone();
+    let history = history.to_vec();
+    let stop_adjust: std::sync::Arc<Vec<(u32, f32)>> = std::sync::Arc::new(if relax_stop_mask {
+        Vec::new()
+    } else {
+        stop_ids
+            .iter()
+            .map(|&sid| {
+                let delta = if in_stop_window || always_stop_ids.contains(&sid) {
+                    f32::NEG_INFINITY
+                } else {
+                    -stop_bias
+                };
+                (sid, delta)
+            })
+            .collect()
+    });
+    std::sync::Arc::new(move |seed: u64| {
+        let sampling = sampling.clone();
+        let history = history.clone();
+        let stop_adjust = std::sync::Arc::clone(&stop_adjust);
+        let mut adjusted: Vec<f32> = Vec::new();
+        let mut rng = flambeau_runtime::Rng::from_seed(seed);
+        Box::new(move |logits: &[f32]| -> (u32, Vec<(u32, f32)>) {
+            adjusted.clear();
+            adjusted.extend_from_slice(logits);
+            for &(sid, delta) in stop_adjust.iter() {
+                if let Some(l) = adjusted.get_mut(sid as usize) {
+                    *l += delta;
+                }
+            }
+            let dist = flambeau_runtime::build_distribution(&adjusted, &sampling, &history);
+            let r = rng.next_f32();
+            let mut acc = 0.0f32;
+            let mut tok = dist.last().map(|(t, _)| *t).unwrap_or(0);
+            for &(t, p) in &dist {
+                acc += p;
+                if r <= acc {
+                    tok = t;
+                    break;
+                }
+            }
+            (tok, dist)
+        })
+    })
 }
