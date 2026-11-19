@@ -1094,6 +1094,9 @@ pub enum BatchedDtype {
     Q4KDp4aRowTile,
     Q5KDp4aRowTile,
     Iq4XsDp4aRowTile,
+    Iq3SDp4aRowTile,
+    Iq3XxsDp4aRowTile,
+    Iq2SDp4aRowTile,
 }
 
 impl BatchedDtype {
@@ -1106,6 +1109,9 @@ impl BatchedDtype {
             BatchedDtype::Q6K => "Q6_K",
             BatchedDtype::Q5K | BatchedDtype::Q5KRowTile | BatchedDtype::Q5KDp4aRowTile => "Q5_K",
             BatchedDtype::Iq4XsDp4aRowTile => "IQ4_XS",
+            BatchedDtype::Iq3SDp4aRowTile => "IQ3_S",
+            BatchedDtype::Iq3XxsDp4aRowTile => "IQ3_XXS",
+            BatchedDtype::Iq2SDp4aRowTile => "IQ2_S",
         }
     }
     fn weight_dtype(self) -> Dtype {
@@ -1117,6 +1123,9 @@ impl BatchedDtype {
             BatchedDtype::Q6K => Dtype::Q6K,
             BatchedDtype::Q5K | BatchedDtype::Q5KRowTile | BatchedDtype::Q5KDp4aRowTile => Dtype::Q5K,
             BatchedDtype::Iq4XsDp4aRowTile => Dtype::Iq4XsDp4a,
+            BatchedDtype::Iq3SDp4aRowTile => Dtype::Iq3SDp4a,
+            BatchedDtype::Iq3XxsDp4aRowTile => Dtype::Iq3XxsDp4a,
+            BatchedDtype::Iq2SDp4aRowTile => Dtype::Iq2SDp4a,
         }
     }
     fn impl_id(self) -> &'static str {
@@ -1133,6 +1142,9 @@ impl BatchedDtype {
             BatchedDtype::Q4KDp4aRowTile => "qmatmul_q4_k_mmvq_dp4a_row_tile_batched",
             BatchedDtype::Q5KDp4aRowTile => "qmatmul_q5_k_mmvq_dp4a_row_tile_batched",
             BatchedDtype::Iq4XsDp4aRowTile => "qmatmul_iq4_xs_mmvq_dp4a_row_tile_batched",
+            BatchedDtype::Iq3SDp4aRowTile => "qmatmul_iq3_s_mmvq_dp4a_row_tile_batched",
+            BatchedDtype::Iq3XxsDp4aRowTile => "qmatmul_iq3_xxs_mmvq_dp4a_row_tile_batched",
+            BatchedDtype::Iq2SDp4aRowTile => "qmatmul_iq2_s_mmvq_dp4a_row_tile_batched",
         }
     }
     fn kernel_stem(self) -> &'static str {
@@ -1149,6 +1161,9 @@ impl BatchedDtype {
             BatchedDtype::Q4KDp4aRowTile => "mmvq_q4_k_dp4a_batched",
             BatchedDtype::Q5KDp4aRowTile => "mmvq_q5_k_dp4a_batched",
             BatchedDtype::Iq4XsDp4aRowTile => "mmvq_iq4_xs_dp4a_batched",
+            BatchedDtype::Iq3SDp4aRowTile => "mmvq_iq3_s_dp4a_batched",
+            BatchedDtype::Iq3XxsDp4aRowTile => "mmvq_iq3_xxs_dp4a_batched",
+            BatchedDtype::Iq2SDp4aRowTile => "mmvq_iq2_s_dp4a_batched",
         }
     }
     fn launch_threads(self) -> u32 {
@@ -1161,7 +1176,10 @@ impl BatchedDtype {
             | BatchedDtype::Q5KRowTile
             | BatchedDtype::Q4KDp4aRowTile
             | BatchedDtype::Q5KDp4aRowTile
-            | BatchedDtype::Iq4XsDp4aRowTile => 256,
+            | BatchedDtype::Iq4XsDp4aRowTile
+            | BatchedDtype::Iq3SDp4aRowTile
+            | BatchedDtype::Iq3XxsDp4aRowTile
+            | BatchedDtype::Iq2SDp4aRowTile => 256,
             BatchedDtype::Q4K | BatchedDtype::Q6K | BatchedDtype::Q5K => 64,
         }
     }
@@ -1175,7 +1193,10 @@ impl BatchedDtype {
             BatchedDtype::Q5KRowTile
             | BatchedDtype::Q4KDp4aRowTile
             | BatchedDtype::Q5KDp4aRowTile
-            | BatchedDtype::Iq4XsDp4aRowTile => 8,
+            | BatchedDtype::Iq4XsDp4aRowTile
+            | BatchedDtype::Iq3SDp4aRowTile
+            | BatchedDtype::Iq3XxsDp4aRowTile
+            | BatchedDtype::Iq2SDp4aRowTile => 8,
             _ => 1,
         }
     }
@@ -1184,7 +1205,10 @@ impl BatchedDtype {
         match self {
             BatchedDtype::Q4KDp4aRowTile
             | BatchedDtype::Q5KDp4aRowTile
-            | BatchedDtype::Iq4XsDp4aRowTile => &[2, 3, 4, 5, 6, 7, 8],
+            | BatchedDtype::Iq4XsDp4aRowTile
+            | BatchedDtype::Iq3SDp4aRowTile
+            | BatchedDtype::Iq3XxsDp4aRowTile
+            | BatchedDtype::Iq2SDp4aRowTile => &[2, 3, 4, 5, 6, 7, 8],
             _ => &[2, 3, 4],
         }
     }
@@ -1238,6 +1262,27 @@ impl BatchedDtype {
             (BatchedDtype::Iq4XsDp4aRowTile, 6) => "flambeau_mmvq_iq4_xs_dp4a_q8_1_batched_n6",
             (BatchedDtype::Iq4XsDp4aRowTile, 7) => "flambeau_mmvq_iq4_xs_dp4a_q8_1_batched_n7",
             (BatchedDtype::Iq4XsDp4aRowTile, 8) => "flambeau_mmvq_iq4_xs_dp4a_q8_1_batched_n8",
+            (BatchedDtype::Iq3SDp4aRowTile, 2) => "flambeau_mmvq_iq3_s_dp4a_q8_1_batched_n2",
+            (BatchedDtype::Iq3SDp4aRowTile, 3) => "flambeau_mmvq_iq3_s_dp4a_q8_1_batched_n3",
+            (BatchedDtype::Iq3SDp4aRowTile, 4) => "flambeau_mmvq_iq3_s_dp4a_q8_1_batched_n4",
+            (BatchedDtype::Iq3SDp4aRowTile, 5) => "flambeau_mmvq_iq3_s_dp4a_q8_1_batched_n5",
+            (BatchedDtype::Iq3SDp4aRowTile, 6) => "flambeau_mmvq_iq3_s_dp4a_q8_1_batched_n6",
+            (BatchedDtype::Iq3SDp4aRowTile, 7) => "flambeau_mmvq_iq3_s_dp4a_q8_1_batched_n7",
+            (BatchedDtype::Iq3SDp4aRowTile, 8) => "flambeau_mmvq_iq3_s_dp4a_q8_1_batched_n8",
+            (BatchedDtype::Iq3XxsDp4aRowTile, 2) => "flambeau_mmvq_iq3_xxs_dp4a_q8_1_batched_n2",
+            (BatchedDtype::Iq3XxsDp4aRowTile, 3) => "flambeau_mmvq_iq3_xxs_dp4a_q8_1_batched_n3",
+            (BatchedDtype::Iq3XxsDp4aRowTile, 4) => "flambeau_mmvq_iq3_xxs_dp4a_q8_1_batched_n4",
+            (BatchedDtype::Iq3XxsDp4aRowTile, 5) => "flambeau_mmvq_iq3_xxs_dp4a_q8_1_batched_n5",
+            (BatchedDtype::Iq3XxsDp4aRowTile, 6) => "flambeau_mmvq_iq3_xxs_dp4a_q8_1_batched_n6",
+            (BatchedDtype::Iq3XxsDp4aRowTile, 7) => "flambeau_mmvq_iq3_xxs_dp4a_q8_1_batched_n7",
+            (BatchedDtype::Iq3XxsDp4aRowTile, 8) => "flambeau_mmvq_iq3_xxs_dp4a_q8_1_batched_n8",
+            (BatchedDtype::Iq2SDp4aRowTile, 2) => "flambeau_mmvq_iq2_s_dp4a_q8_1_batched_n2",
+            (BatchedDtype::Iq2SDp4aRowTile, 3) => "flambeau_mmvq_iq2_s_dp4a_q8_1_batched_n3",
+            (BatchedDtype::Iq2SDp4aRowTile, 4) => "flambeau_mmvq_iq2_s_dp4a_q8_1_batched_n4",
+            (BatchedDtype::Iq2SDp4aRowTile, 5) => "flambeau_mmvq_iq2_s_dp4a_q8_1_batched_n5",
+            (BatchedDtype::Iq2SDp4aRowTile, 6) => "flambeau_mmvq_iq2_s_dp4a_q8_1_batched_n6",
+            (BatchedDtype::Iq2SDp4aRowTile, 7) => "flambeau_mmvq_iq2_s_dp4a_q8_1_batched_n7",
+            (BatchedDtype::Iq2SDp4aRowTile, 8) => "flambeau_mmvq_iq2_s_dp4a_q8_1_batched_n8",
             _ => unreachable!("batched n_slots has no kernel entry"),
         }
     }

@@ -275,17 +275,27 @@ recover the last decode kernel. Lower priority than Track A.
     N=6 32.2. llama.cpp on the same GGUF: plain 25.9 → MTP-4 41.2 (50.1 / 42.0
     / 31.6). Same ×1.6 gain; llama accepts 92 / 76 / 53 % of its drafts, we
     accept 76 / 70 / 40 %.
-  - Not covered: UD-Q3_K_XL (mostly IQ3_S / IQ3_XXS / IQ2_*, still on the x8
-    tile or per-row MMVQ), Q6_K / Q3_K / IQ4_NL at m=2..8 (x8 tile, ~5 % of the
-    cycle), sampling at temperature > 0 under TP (ranks sample independently).
+  - UD-Q3_K_XL (IQ3_S / IQ3_XXS / IQ2_S row-tile traits added), same rig and
+    prompts: plain 19.7 → MTP-4 28.9 (32.3 / 33.1 / 21.3). llama.cpp on that
+    file: 20.6 → 39.6.
+  - Sampling: accept / residual draws and the draft sampler are seeded from the
+    request seed, so TP ranks reach identical verdicts and a seed reproduces the
+    text; `Session::mtp_step` fails the request if rank outputs ever differ.
+    Temp 1.0 / top-p 0.95 / top-k 20, Q4_K_M: 21–32 t/s (plain 22).
+  - Not covered: Q6_K / Q3_K / IQ4_NL / IQ2_XS / IQ2_XXS / Q2_K at m=2..8 (x8
+    tile or per-row MMVQ), scheduler + SSE paths, stop-mask rules inside the
+    cycle (MTP stays off for JSON mode, logprobs and reasoning budgets).
   - To do: (1) acceptance — fill the draft layer's KV with `(token, target
     hidden)` pairs for the prompt and for accepted tokens (llama's `process()`
     catch-up; today it only holds its own draft steps), and stop drafting below
-    a confidence floor (`p_min`); (2) row-tile traits for IQ3/IQ2/Q6_K/Q3_K/
-    IQ4_NL; (3) scheduler + SSE paths, stop-mask rules inside the cycle,
-    greedy-only guard; (4) DFlash2 drafter (`dflash` GGUF arch: 5 layers,
-    block 8, target taps at layers 6/20/34/48/62, selector rank 256 / top-k
-    16) — reuses this verify cycle; (5) sm_86.
+    a confidence floor (`p_min`); (2) row-tile traits for the remaining
+    dtypes; (3) scheduler + SSE paths; (4) DFlash2 drafter (`dflash` GGUF arch:
+    5 layers, block 8, target taps at layers 6/20/34/48/62, selector rank 256 /
+    top-k 16) — reuses this verify cycle; (5) sm_86 e2e.
+  - Open stability item: GPU page faults on host↔device copies of transient
+    host buffers (three on 2026-11-18, fault addresses inside the mimalloc
+    arena). The GDN reset no longer uses a host buffer; per-step logits copies
+    still target a per-command Vec (~1 MB). Not reproduced in isolation.
   - **Done when:** speculative decode beats plain decode e2e on at least one backend
     (met for MTP on gfx906 TP2; open for DFlash and for parity with llama.cpp).
 

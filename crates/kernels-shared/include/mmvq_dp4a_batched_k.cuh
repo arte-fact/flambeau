@@ -1,6 +1,6 @@
 #pragma once
 // Row-tiled batched dp4a MMVQ for the 256-element super-block dtypes (Q4_K,
-// Q5_K, IQ4_XS), N activation columns. 256 threads = 8 output rows per block,
+// Q5_K, IQ4_XS, IQ3_S, IQ3_XXS, IQ2_S), N activation columns. 256 threads = 8 output rows per block,
 // each row owned by a 32-lane group. Per weight super-block the block stages
 // the N columns' Q8_1 strip (8 sub-blocks each) into LDS once, then every lane
 // decodes its weight ints in registers once and dots them against the N
@@ -11,6 +11,9 @@
 #include "quant_traits.cuh"
 #include "mmvq_reduce.cuh"
 #include "mmvq_iq4_nl.cuh"
+#include "mmvq_iq3_s.cuh"
+#include "mmvq_iq3_xxs.cuh"
+#include "mmvq_iq2_s.cuh"
 
 namespace mmvq_rt {
 constexpr int THREADS   = 256;
@@ -135,6 +138,138 @@ struct IQ4XS {
             const int u_lo = load_int_b2(ya->qs, lane4);
             const int u_hi = load_int_b2(ya->qs, lane4 + 4);
             acc[c] += dl * (float) ya->d * (float) dp4a(v_hi, u_hi, dp4a(v_lo, u_lo, 0));
+        }
+    }
+};
+// Expand the low / high nibble of a sign byte into per-byte 0xFF masks.
+static __device__ __forceinline__ void sign_packs(
+    unsigned int signs_byte, unsigned int& lo, unsigned int& hi)
+{
+    lo = 0; hi = 0;
+    lo |= (signs_byte & 0x01) ? 0x000000FFu : 0;
+    lo |= (signs_byte & 0x02) ? 0x0000FF00u : 0;
+    lo |= (signs_byte & 0x04) ? 0x00FF0000u : 0;
+    lo |= (signs_byte & 0x08) ? 0xFF000000u : 0;
+    hi |= (signs_byte & 0x10) ? 0x000000FFu : 0;
+    hi |= (signs_byte & 0x20) ? 0x0000FF00u : 0;
+    hi |= (signs_byte & 0x40) ? 0x00FF0000u : 0;
+    hi |= (signs_byte & 0x80) ? 0xFF000000u : 0;
+}
+
+// The grid i-quants share one lane layout: lane = (sub 0..7) × (pair 0..3),
+// covering ints `2·pair` and `2·pair + 1` of the sub-block. `sumi` of column
+// `c` over those two ints, for signed grid words `g0` / `g1`.
+static __device__ __forceinline__ int grid_sumi(
+    const flambeau_block_q8_1* ya, int l0, int g0, int g1)
+{
+    const int u0 = load_int_b2(ya->qs, l0);
+    const int u1 = load_int_b2(ya->qs, l0 + 1);
+    return dp4a(g1, u1, dp4a(g0, u0, 0));
+}
+
+struct IQ3S {
+    typedef flambeau_block_iq3_s block_t;
+    template<int N>
+    static __device__ __forceinline__ void step(
+        const block_t* bk, const flambeau_block_q8_1* s_blk, int lane_lo, float (&acc)[N])
+    {
+        const int sub   = lane_lo >> 2;
+        const int l_grp = lane_lo & 3;
+        const int iqs   = 2 * sub;
+        const int l0    = 2 * l_grp;
+
+        const uint8_t* qs_base = bk->qs + 4 * iqs;
+        const unsigned int qh = bk->qh[sub];
+        const int g_idx0 = (int) qs_base[l0] | (((int) qh << (8 - l0)) & 0x100);
+        const int g_idx1 = (int) qs_base[l0 + 1] | (((int) qh << (7 - l0)) & 0x100);
+
+        unsigned int s0, s1;
+        sign_packs(bk->signs[4 * sub + l_grp], s0, s1);
+        const int g0 = iq2xxs_apply_signs(IQ3S_GRID[g_idx0], s0);
+        const int g1 = iq2xxs_apply_signs(IQ3S_GRID[g_idx1], s1);
+
+        const int sc_byte = bk->scales[iqs >> 2];
+        const int scale   = 1 + 2 * ((sc_byte >> ((iqs << 1) & 0x04)) & 0x0F);
+        const float d_sb  = (float) bk->d;
+
+        #pragma unroll
+        for (int c = 0; c < N; ++c) {
+            const flambeau_block_q8_1* ya = s_blk + c * SUBS + sub;
+            acc[c] += d_sb * (float) ya->d * (float) (grid_sumi(ya, l0, g0, g1) * scale);
+        }
+    }
+};
+
+struct IQ3XXS {
+    typedef flambeau_block_iq3_xxs block_t;
+    template<int N>
+    static __device__ __forceinline__ void step(
+        const block_t* bk, const flambeau_block_q8_1* s_blk, int lane_lo, float (&acc)[N])
+    {
+        const int sub   = lane_lo >> 2;
+        const int l_grp = lane_lo & 3;
+        const int iqs   = 2 * sub;
+        const int l0    = 2 * l_grp;
+
+        const uint8_t* q3_base = bk->qs + 4 * iqs;
+        const unsigned int aux32 =
+            (unsigned int) load_int_b2((const int8_t*) (bk->qs + 64 + 2 * iqs), 0);
+        const int ls = (int) (aux32 >> 28);
+        const unsigned int signs_full = iq2xxs_unpack_ksigns(aux32 >> (7 * l_grp));
+
+        const unsigned int sel_lo = signs_full & 0x08040201u;
+        const unsigned int sel_hi = signs_full & 0x80402010u;
+        unsigned int s0 = 0, s1 = 0;
+        s0 |= ((sel_lo >> 0) & 0xFFu) ? 0x000000FFu : 0;
+        s0 |= ((sel_lo >> 8) & 0xFFu) ? 0x0000FF00u : 0;
+        s0 |= ((sel_lo >> 16) & 0xFFu) ? 0x00FF0000u : 0;
+        s0 |= ((sel_lo >> 24) & 0xFFu) ? 0xFF000000u : 0;
+        s1 |= ((sel_hi >> 0) & 0xFFu) ? 0x000000FFu : 0;
+        s1 |= ((sel_hi >> 8) & 0xFFu) ? 0x0000FF00u : 0;
+        s1 |= ((sel_hi >> 16) & 0xFFu) ? 0x00FF0000u : 0;
+        s1 |= ((sel_hi >> 24) & 0xFFu) ? 0xFF000000u : 0;
+
+        const int g0 = iq2xxs_apply_signs(IQ3XXS_GRID[q3_base[l0]], s0);
+        const int g1 = iq2xxs_apply_signs(IQ3XXS_GRID[q3_base[l0 + 1]], s1);
+        const float d_sb = (float) bk->d;
+
+        #pragma unroll
+        for (int c = 0; c < N; ++c) {
+            const flambeau_block_q8_1* ya = s_blk + c * SUBS + sub;
+            const int sumi = grid_sumi(ya, l0, g0, g1);
+            acc[c] += d_sb * (float) ya->d * (float) ((ls * sumi + sumi / 2) / 2);
+        }
+    }
+};
+
+struct IQ2S {
+    typedef flambeau_block_iq2_s block_t;
+    template<int N>
+    static __device__ __forceinline__ void step(
+        const block_t* bk, const flambeau_block_q8_1* s_blk, int lane_lo, float (&acc)[N])
+    {
+        const int sub   = lane_lo >> 2;
+        const int l_grp = lane_lo & 3;
+        const int iqs   = 2 * sub;
+        const int l0    = 2 * l_grp;
+
+        const int qh = (int) bk->qh[sub];
+        const int grid_idx = (int) bk->qs[2 * iqs + l_grp] | ((qh << (8 - l0)) & 0x300);
+
+        unsigned int s0, s1;
+        sign_packs(bk->qs[32 + 2 * iqs + l_grp], s0, s1);
+        const uint64_t grid_u64 = IQ2S_GRID[grid_idx];
+        const int g0 = iq2xxs_apply_signs((unsigned int) grid_u64, s0);
+        const int g1 = iq2xxs_apply_signs((unsigned int) (grid_u64 >> 32), s1);
+
+        const int sc_byte = (int) bk->scales[sub >> 1];
+        const int ls      = (sub & 1) ? (sc_byte >> 4) : (sc_byte & 0x0F);
+        const float dls   = (float) bk->d * ((float) ls + 0.5f) * 0.25f;
+
+        #pragma unroll
+        for (int c = 0; c < N; ++c) {
+            const flambeau_block_q8_1* ya = s_blk + c * SUBS + sub;
+            acc[c] += dls * (float) ya->d * (float) grid_sumi(ya, l0, g0, g1);
         }
     }
 };

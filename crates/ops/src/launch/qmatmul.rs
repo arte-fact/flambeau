@@ -83,7 +83,7 @@ pub fn qmatmul<B: flambeau_core::KernelBackend>(
         let _ = act_q8_1_mmq;
         return Ok(());
     }
-    // Q4_K / Q5_K / IQ4_XS at m = 2..8: row-tiled batched dp4a MMVQ. The
+    // Super-block dtypes at m = 2..8: row-tiled batched dp4a MMVQ. The
     // LDS-tiled MMQ pays a fixed ~1.6 decode passes to stage the weight tile;
     // here the weights stay in registers and only the activation strip is
     // staged, so a 5-row verify forward costs ~1.5 decode steps, not ~2.9.
@@ -496,13 +496,20 @@ pub fn mmvq_q4_k_batched<B: flambeau_core::KernelBackend>(
 
 /// Shapes the row-tiled batched dp4a MMVQ serves ahead of the dispatch table.
 fn rowtile_batched_k_owns(dtype_weight: QDtype, m: usize, k: usize) -> bool {
-    matches!(dtype_weight, QDtype::Q4_K | QDtype::Q5_K | QDtype::IQ4_XS)
-        && (2..=8).contains(&m)
+    matches!(
+        dtype_weight,
+        QDtype::Q4_K
+            | QDtype::Q5_K
+            | QDtype::IQ4_XS
+            | QDtype::IQ3_S
+            | QDtype::IQ3_XXS
+            | QDtype::IQ2_S
+    ) && (2..=8).contains(&m)
         && k % flambeau_quant::QK_K == 0
 }
 
 /// Row-tiled batched dp4a MMVQ for the 256-element super-block dtypes (Q4_K,
-/// Q5_K, IQ4_XS), `n_slots` ∈ [2, 8]: 8 weight rows per block share one
+/// Q5_K, IQ4_XS, IQ3_S, IQ3_XXS, IQ2_S), `n_slots` ∈ [2, 8]: 8 weight rows per block share one
 /// LDS-staged activation strip and each weight int is decoded once for every
 /// column. Standard Q8_1 activation, slot-major `dst`.
 pub fn mmvq_dp4a_row_tile_batched_k<B: flambeau_core::KernelBackend>(
@@ -552,6 +559,42 @@ pub fn mmvq_dp4a_row_tile_batched_k<B: flambeau_core::KernelBackend>(
                 "flambeau_mmvq_iq4_xs_dp4a_q8_1_batched_n6",
                 "flambeau_mmvq_iq4_xs_dp4a_q8_1_batched_n7",
                 "flambeau_mmvq_iq4_xs_dp4a_q8_1_batched_n8",
+            ],
+        ),
+        QDtype::IQ3_S => (
+            "mmvq_iq3_s_dp4a_batched",
+            [
+                "flambeau_mmvq_iq3_s_dp4a_q8_1_batched_n2",
+                "flambeau_mmvq_iq3_s_dp4a_q8_1_batched_n3",
+                "flambeau_mmvq_iq3_s_dp4a_q8_1_batched_n4",
+                "flambeau_mmvq_iq3_s_dp4a_q8_1_batched_n5",
+                "flambeau_mmvq_iq3_s_dp4a_q8_1_batched_n6",
+                "flambeau_mmvq_iq3_s_dp4a_q8_1_batched_n7",
+                "flambeau_mmvq_iq3_s_dp4a_q8_1_batched_n8",
+            ],
+        ),
+        QDtype::IQ3_XXS => (
+            "mmvq_iq3_xxs_dp4a_batched",
+            [
+                "flambeau_mmvq_iq3_xxs_dp4a_q8_1_batched_n2",
+                "flambeau_mmvq_iq3_xxs_dp4a_q8_1_batched_n3",
+                "flambeau_mmvq_iq3_xxs_dp4a_q8_1_batched_n4",
+                "flambeau_mmvq_iq3_xxs_dp4a_q8_1_batched_n5",
+                "flambeau_mmvq_iq3_xxs_dp4a_q8_1_batched_n6",
+                "flambeau_mmvq_iq3_xxs_dp4a_q8_1_batched_n7",
+                "flambeau_mmvq_iq3_xxs_dp4a_q8_1_batched_n8",
+            ],
+        ),
+        QDtype::IQ2_S => (
+            "mmvq_iq2_s_dp4a_batched",
+            [
+                "flambeau_mmvq_iq2_s_dp4a_q8_1_batched_n2",
+                "flambeau_mmvq_iq2_s_dp4a_q8_1_batched_n3",
+                "flambeau_mmvq_iq2_s_dp4a_q8_1_batched_n4",
+                "flambeau_mmvq_iq2_s_dp4a_q8_1_batched_n5",
+                "flambeau_mmvq_iq2_s_dp4a_q8_1_batched_n6",
+                "flambeau_mmvq_iq2_s_dp4a_q8_1_batched_n7",
+                "flambeau_mmvq_iq2_s_dp4a_q8_1_batched_n8",
             ],
         ),
         other => bail!("mmvq_dp4a_row_tile_batched_k: no kernel for {other:?}"),

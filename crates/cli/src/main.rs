@@ -1592,6 +1592,9 @@ fn batched_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::BatchedDtype
         "Q4_K_dp4a_row_tile_batched" => Some(BatchedDtype::Q4KDp4aRowTile),
         "Q5_K_dp4a_row_tile_batched" => Some(BatchedDtype::Q5KDp4aRowTile),
         "IQ4_XS_dp4a_row_tile_batched" => Some(BatchedDtype::Iq4XsDp4aRowTile),
+        "IQ3_S_dp4a_row_tile_batched" => Some(BatchedDtype::Iq3SDp4aRowTile),
+        "IQ3_XXS_dp4a_row_tile_batched" => Some(BatchedDtype::Iq3XxsDp4aRowTile),
+        "IQ2_S_dp4a_row_tile_batched" => Some(BatchedDtype::Iq2SDp4aRowTile),
         _ => None,
     }
 }
