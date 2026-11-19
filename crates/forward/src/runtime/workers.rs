@@ -211,10 +211,12 @@ impl<A: Arch> WorkerHandle<A> {
                         let _ = reply.send(res);
                     }
                     Command::ResetKv { reply } => {
+                        state.pool.mtp_pending = None;
                         let res = state.pool.reset_gdn_state(&state.device);
                         let _ = reply.send(res);
                     }
                     Command::ResetKvSlot { slot_id, reply } => {
+                        state.pool.mtp_pending = None;
                         let res = state.pool.reset_gdn_state_slot(slot_id, &state.device);
                         let _ = reply.send(res);
                     }
@@ -235,6 +237,7 @@ impl<A: Arch> WorkerHandle<A> {
                         rank,
                         reply,
                     } => {
+                        state.pool.mtp_pending = None;
                         let res = match snaps.get(rank) {
                             Some(bytes) => state.pool.restore_slot_bytes(
                                 slot_id,

@@ -1239,6 +1239,37 @@ impl<B: Backend, H: TopologyHooks<B>, S: StageHooks<B>> ForwardCtx for ForwardEn
         self.core.pool.mtp_anchor_f16
     }
 
+    fn mtp_stage_hidden(
+        &mut self,
+        lm_head: &crate::ctx::LmHeadWeights,
+        resid: &Tensor<F16>,
+        n_rows: usize,
+        lead: composites::MtpLead,
+    ) -> Result<()> {
+        composites::mtp_stage_hidden_local(&mut self.core, lm_head, resid, n_rows, lead)
+    }
+
+    fn mtp_catchup(
+        &mut self,
+        w: &crate::ctx::MtpWeights,
+        embedding: &crate::ctx::EmbeddingWeights,
+        tokens: &[u32],
+        positions: &[usize],
+        slot_id: usize,
+        mtp_layer_idx: usize,
+    ) -> Result<()> {
+        composites::mtp_catchup_local(
+            &mut self.core,
+            &mut self.hooks,
+            w,
+            embedding,
+            tokens,
+            positions,
+            slot_id,
+            mtp_layer_idx,
+        )
+    }
+
     fn mtp_spec_rows(&mut self, on: bool) {
         self.core.pool.mtp_spec_rows = on;
     }

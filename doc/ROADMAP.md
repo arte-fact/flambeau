@@ -285,13 +285,27 @@ recover the last decode kernel. Lower priority than Track A.
   - Not covered: Q6_K / Q3_K / IQ4_NL / IQ2_XS / IQ2_XXS / Q2_K at m=2..8 (x8
     tile or per-row MMVQ), scheduler + SSE paths, stop-mask rules inside the
     cycle (MTP stays off for JSON mode, logprobs and reasoning budgets).
-  - To do: (1) acceptance — fill the draft layer's KV with `(token, target
-    hidden)` pairs for the prompt and for accepted tokens (llama's `process()`
-    catch-up; today it only holds its own draft steps), and stop drafting below
-    a confidence floor (`p_min`); (2) row-tile traits for the remaining
-    dtypes; (3) scheduler + SSE paths; (4) DFlash2 drafter (`dflash` GGUF arch:
-    5 layers, block 8, target taps at layers 6/20/34/48/62, selector rank 256 /
-    top-k 16) — reuses this verify cycle; (5) sm_86 e2e.
+  - Draft-layer KV catch-up (llama's `process()`): every target forward
+    rewrites the draft layer's KV rows from `(token, target hidden)` pairs —
+    the prompt during prefill, accepted drafts after each verify. Greedy,
+    MTP-4, 2×MI50 TP2, acceptance code / math / prose and mean t/s (same
+    session, cards at 77 °C):
+    Q4_K_M 79 / 65 / 37 % → 86 / 67 / 39 %, 34.0 → 37.0 t/s (plain 20.0);
+    Q3_K_XL 58 / 68 / 36 % → 72 / 73 / 46 %, 28.9 → 33.3 t/s (plain 18.8).
+    llama.cpp accepts 92 / 76 / 53 % on Q4_K_M (41.2 t/s). The post-verify
+    rewrite carries the gain; the prompt rows add ~1 point on these short
+    prompts.
+  - Null result: a confidence floor on the draft's top-1 probability
+    (`p_min` 0.5 / 0.75, Q4_K_M) raises acceptance to 87 / 72 / 58 % and
+    94 / 86 / 80 % but not throughput (38.8 / 37.5 vs 39.3 t/s without, same
+    session): a draft step and a verify row are each ~5 % of a cycle, so
+    dropping them buys less than the shorter runs lose. Not shipped.
+  - To do: (1) the residual acceptance gap to llama.cpp (cause not found: the
+    cycle, pairing, norms and KV contents now match `graph_mtp`); (2) row-tile
+    traits for the remaining dtypes; (3) scheduler + SSE paths; (4) DFlash2
+    drafter (`dflash` GGUF arch: 5 layers, block 8, target taps at layers
+    6/20/34/48/62, selector rank 256 / top-k 16) — reuses this verify cycle;
+    (5) sm_86 e2e.
   - Open stability item: GPU page faults on host↔device copies of transient
     host buffers (three on 2026-11-18, fault addresses inside the mimalloc
     arena). The GDN reset no longer uses a host buffer; per-step logits copies

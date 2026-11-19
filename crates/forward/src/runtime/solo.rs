@@ -450,6 +450,7 @@ impl<B: Backend, A: Arch> SoloSession<B, A> {
     }
 
     pub fn reset_kv_slot(&mut self, slot_id: usize) -> Result<()> {
+        self.pool.mtp_pending = None;
         self.pool.reset_gdn_state_slot(slot_id, &self.device)
     }
 
@@ -467,6 +468,7 @@ impl<B: Backend, A: Arch> SoloSession<B, A> {
         let bytes = snaps.first().ok_or_else(|| {
             anyhow!("SoloSession::restore_kv_slot: snapshot has no rank-0 buffer")
         })?;
+        self.pool.mtp_pending = None;
         self.pool.restore_slot_bytes(slot_id, n_tokens, bytes, &self.device)
     }
 

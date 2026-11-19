@@ -277,6 +277,33 @@ pub trait ForwardCtx {
         flambeau_core::DevicePtr::NULL
     }
 
+    /// Stage target hiddens for [`Self::mtp_catchup`]: an optional lead
+    /// row, then `output_norm` of the first `n_rows` rows of `resid`. Call
+    /// before the anchor buffer or `resid` is overwritten.
+    fn mtp_stage_hidden(
+        &mut self,
+        _lm_head: &LmHeadWeights,
+        _resid: &Tensor<F16>,
+        _n_rows: usize,
+        _lead: crate::core::composites::MtpLead,
+    ) -> Result<()> {
+        anyhow::bail!("mtp_stage_hidden: not implemented on this ctx")
+    }
+
+    /// Rewrite the draft layer's KV rows at `positions` from `tokens`
+    /// paired with the staged target hiddens.
+    fn mtp_catchup(
+        &mut self,
+        _w: &MtpWeights,
+        _embedding: &EmbeddingWeights,
+        _tokens: &[u32],
+        _positions: &[usize],
+        _slot_id: usize,
+        _mtp_layer_idx: usize,
+    ) -> Result<()> {
+        anyhow::bail!("mtp_catchup: not implemented on this ctx")
+    }
+
     /// Toggle the GDN verify mode: while on, multi-row GDN layers keep
     /// their state-step inputs so [`Self::gdn_replay_rows`] can roll the
     /// recurrent state back to a row prefix.

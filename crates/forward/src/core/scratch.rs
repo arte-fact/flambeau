@@ -961,8 +961,9 @@ pub struct ScratchPool {
     /// NULL when `config.mtp` is `None`.
     pub mtp_anchor_f16: DevicePtr,
     pub mtp_hidden_f16: DevicePtr,
-    /// MTP composite work buffers (F16 `[hidden]` norms + post-eh_proj
-    /// input; F32 `[hidden]` eh_proj partials). NULL when no MTP.
+    /// MTP composite work buffers (F16 `[rows, hidden]` norms + post-eh_proj
+    /// input; F32 `[rows, hidden]` eh_proj partials), `rows` =
+    /// `max(max_prefill_tokens, max_draft + 1)`. NULL when no MTP.
     pub mtp_e_f16: DevicePtr,
     pub mtp_h_f16: DevicePtr,
     pub mtp_in_f16: DevicePtr,
@@ -980,6 +981,11 @@ pub struct ScratchPool {
     /// arch non-GDN.
     pub mtp_gdn_rows: DevicePtr,
     pub mtp_gdn_rows_layer_bytes: usize,
+    /// Target hiddens (post-`output_norm`, F16 `[rows, hidden]`) staged for
+    /// the draft layer's KV catch-up, and an all-zero `[hidden]` row used
+    /// as the hidden before position 0.
+    pub mtp_rows_f16: DevicePtr,
+    pub mtp_zero_f16: DevicePtr,
     /// While set, the GDN prefill path keeps its state-step inputs in
     /// `mtp_gdn_rows` so a rejected draft suffix can be rolled back by
     /// replaying the state step alone.
@@ -1412,6 +1418,7 @@ impl ScratchPool {
             mtp_gdn_rows_layer_bytes,
         ) = match config.mtp {
             Some(m) => {
+                let h = h * config.max_prefill_tokens.max(m.max_draft + 1);
                 let rows_layer_bytes = config
                     .gdn
                     .map(|g| GdnSpecRows::layer_bytes(&g, m.max_draft + 1))
@@ -1456,6 +1463,30 @@ impl ScratchPool {
                 DevicePtr::NULL,
                 0,
             ),
+        };
+        let (mtp_rows_f16, mtp_zero_f16) = match config.mtp {
+            Some(m) => {
+                let rows = config.max_prefill_tokens.max(m.max_draft + 1);
+                let rows_ptr = alloc_bytes(rows * h * f16)?;
+                let zero_ptr = alloc_bytes(h * f16)?;
+                let zeros = vec![0u8; h * f16];
+                let stream = device.default_stream();
+                // SAFETY: zero_ptr owns h * f16 bytes; zeros outlives the sync.
+                unsafe {
+                    device
+                        .memcpy_async(
+                            stream,
+                            CopyDirection::HostToDevice,
+                            zero_ptr,
+                            DevicePtr(zeros.as_ptr() as usize),
+                            h * f16,
+                        )
+                        .context("zero mtp lead hidden")?;
+                }
+                flambeau_core::Stream::synchronize(stream).context("sync mtp zero")?;
+                (rows_ptr, zero_ptr)
+            }
+            None => (DevicePtr::NULL, DevicePtr::NULL),
         };
 
         // Paged-KV allocation runs alongside the contiguous cache when
@@ -1690,6 +1721,8 @@ impl ScratchPool {
             mtp_snap_valid: false,
             mtp_gdn_rows,
             mtp_gdn_rows_layer_bytes,
+            mtp_rows_f16,
+            mtp_zero_f16,
             mtp_spec_rows: false,
             mtp_pending: None,
             paged_kv_caches,

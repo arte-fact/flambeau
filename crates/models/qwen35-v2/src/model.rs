@@ -4,6 +4,7 @@
 //! caller via `slot_ids` uniformity).
 
 use anyhow::Result;
+use flambeau_forward::core::composites::MtpLead;
 use flambeau_forward::ctx::{ForwardCtx, LayerKind};
 
 use crate::loader::Qwen35V2Model;
@@ -46,10 +47,20 @@ pub fn forward<C: ForwardCtx>(
             resid = ctx.residual_add(resid, d, n)?;
         }
     }
-    if model.mtp.is_some() && ctx.mtp_anchor_ptr() != flambeau_core::DevicePtr::NULL {
-        capture_pending(model, ctx, &resid, n - 1, slot_ids[n - 1], positions[n - 1])?;
-    }
     ctx.output_head(&resid, &model.lm_head, slot_ids)?;
+    if let Some(mtp) = model.mtp.as_ref() {
+        let single_slot = slot_ids.iter().all(|&s| s == slot_ids[0]);
+        if ctx.mtp_anchor_ptr() != flambeau_core::DevicePtr::NULL && single_slot {
+            let slot = slot_ids[0];
+            let lead = match positions[0].checked_sub(1) {
+                Some(prev) if ctx.mtp_pending() == Some((slot, prev)) => MtpLead::Anchor,
+                _ => MtpLead::Zero,
+            };
+            ctx.mtp_stage_hidden(&model.lm_head, &resid, n - 1, lead)?;
+            capture_pending(model, ctx, &resid, n - 1, slot, positions[n - 1])?;
+            ctx.mtp_catchup(mtp, &model.embedding, tokens, positions, slot, model.layout.num_layers)?;
+        }
+    }
     Ok(())
 }
 
@@ -210,7 +221,6 @@ pub fn mtp_cycle<C: ForwardCtx>(
     let positions: Vec<usize> = (pos..pos + k + 1).collect();
     let slots: Vec<usize> = vec![slot_id; k + 1];
 
-    ctx.mtp_set_pending(None);
     if k == 0 {
         forward(model, ctx, &tokens, &positions, &slots)?;
         let row = ctx.logits();
@@ -218,6 +228,7 @@ pub fn mtp_cycle<C: ForwardCtx>(
         out_logits.extend_from_slice(&row[..vocab]);
         return Ok(vec![sample(out_logits).0]);
     }
+    ctx.mtp_set_pending(None);
     ctx.gdn_snapshot(slot_id)?;
     ctx.mtp_spec_rows(true);
     let verified = verify_layers(model, ctx, &tokens, &positions, &slots);
@@ -254,7 +265,17 @@ pub fn mtp_cycle<C: ForwardCtx>(
             }
         }
     }
+    ctx.mtp_stage_hidden(&model.lm_head, &resid, accepted, MtpLead::None)?;
     capture_pending(model, ctx, &resid, accepted, slot_id, pos + accepted)?;
+    ctx.mtp_catchup(
+        mtp,
+        &model.embedding,
+        &tokens[1..=accepted],
+        &positions[1..=accepted],
+        slot_id,
+        mtp_layer_idx,
+    )?;
+    tracing::debug!(target: "mtp.cycle", drafted = k, accepted, "mtp cycle");
 
     *out_logits = row;
     Ok(emitted)
