@@ -1192,9 +1192,9 @@ fn run_completion_blocking_ids(
     let stop_bias = crate::v2_handle::stop_bias_for(&state.cfg.arch);
     let mut reasoning_closer = ReasoningCloser::new(reasoning_close_ids(&state, &params));
     // MTP: draft+verify cycles through the session's nextn head, with the
-    // same stop-token bias as the plain path. Disabled for JSON mode,
-    // logprobs and reasoning budgets (forced tokens would desync the draft
-    // chain), and inside the stop-mask window.
+    // same stop-token mask and bias as the plain path. Disabled for JSON
+    // mode, logprobs and reasoning budgets (forced tokens would desync the
+    // draft chain).
     let mtp_on = state.mtp_max_draft > 0
         && json_state.is_none()
         && logprobs_acc.is_none()
@@ -1202,17 +1202,27 @@ fn run_completion_blocking_ids(
     let mut mtp_offset = 0usize;
     let mut mtp_cycles = 0u32;
     for step in 1..params.max_tokens as usize {
-        let force_mask = step < min_response_tokens && !relax_stop_mask;
+        let force_mask = generated.len() < min_response_tokens && !relax_stop_mask;
         // Phase 12.5 — decode goes through the host-path DtoH always.
         // The GPU sampler keep-on-device branch was retired with the
         // decode/batched collapse (see `use_gpu_sampler` initialiser).
         let mut mtp_emitted: Option<Vec<u32>> = None;
         let next = {
             let pos = prompt_ids.len() + step - 1 + mtp_offset;
-            // Every token a cycle can emit lies past the stop-mask window,
-            // so only the constant stop bias needs replicating inside it.
-            let in_stop_window = generated.len() < min_response_tokens && !relax_stop_mask;
-            if mtp_on && !in_stop_window {
+            // The plain path masks stop ids for generated indices below
+            // `min_response_tokens` and biases them after. A cycle emits at
+            // most `n_draft + 1` tokens from index `generated.len()`, so the
+            // draft count is capped to keep a cycle on one side of that
+            // boundary and the matching rule applies to all its tokens.
+            let in_stop_window = !relax_stop_mask && generated.len() < min_response_tokens;
+            let n_draft = if in_stop_window {
+                state
+                    .mtp_max_draft
+                    .min((min_response_tokens - generated.len()).saturating_sub(1))
+            } else {
+                state.mtp_max_draft
+            };
+            if mtp_on && n_draft > 0 {
                 let sampling2 = sampling.clone();
                 let history2 = generated.clone();
                 let stop_adjust: std::sync::Arc<Vec<(u32, f32)>> = std::sync::Arc::new(if relax_stop_mask {
@@ -1221,7 +1231,11 @@ fn run_completion_blocking_ids(
                     stop_ids
                         .iter()
                         .map(|&sid| {
-                            let delta = if always_stop_ids.contains(&sid) { f32::NEG_INFINITY } else { -stop_bias };
+                            let delta = if in_stop_window || always_stop_ids.contains(&sid) {
+                                f32::NEG_INFINITY
+                            } else {
+                                -stop_bias
+                            };
                             (sid, delta)
                         })
                         .collect()
@@ -1257,7 +1271,7 @@ fn run_completion_blocking_ids(
                     });
                 let seed = params.seed ^ (pos as u64).wrapping_mul(0x9E3779B9);
                 match inflight
-                    .mtp_step(last_token, pos, state.mtp_max_draft, factory, seed, &mut logits_buf)
+                    .mtp_step(last_token, pos, n_draft, factory, seed, &mut logits_buf)
                     .context("mtp step")?
                 {
                     Some(emitted) => {
