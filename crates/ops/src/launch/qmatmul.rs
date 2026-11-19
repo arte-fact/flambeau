@@ -98,19 +98,6 @@ pub fn qmatmul<B: flambeau_core::KernelBackend>(
         let _ = act_q8_1_mmq;
         return Ok(());
     }
-    if dtype_weight == QDtype::Q6_K && m == 2 {
-        mmvq_q6_k_batched(
-
-            reg, stream,
-
-            crate::MmvqBuffers { weights, act_q8_1, dst },
-
-            crate::MmvqBatchShape { n_rows: n, k, n_slots: m },
-
-        )?;
-        let _ = act_q8_1_mmq;
-        return Ok(());
-    }
     // Route to per-row / batched MMVQ for m < 32 (no MMQ amortization) OR
     // whenever k or n is not 128-aligned. The LDS-tiled MMQ this dtype would
     // otherwise dispatch to at m >= 32 produces wrong/NaN output unless both
@@ -346,9 +333,7 @@ pub fn qmatmul_reads_mmq_activation<B: flambeau_core::KernelBackend>(
     if rowtile_batched_k_owns(dtype_weight, m, k) {
         return false;
     }
-    if (matches!(dtype_weight, QDtype::Q4_1 | QDtype::Q8_0) && (2..=4).contains(&m))
-        || (dtype_weight == QDtype::Q6_K && m == 2)
-    {
+    if matches!(dtype_weight, QDtype::Q4_1 | QDtype::Q8_0) && (2..=4).contains(&m) {
         return false;
     }
     // Q4_0/Q5_0/Q5_1 route to per-row / batched MMVQ with no MMQ amortization
@@ -500,6 +485,7 @@ fn rowtile_batched_k_owns(dtype_weight: QDtype, m: usize, k: usize) -> bool {
         dtype_weight,
         QDtype::Q4_K
             | QDtype::Q5_K
+            | QDtype::Q6_K
             | QDtype::IQ4_XS
             | QDtype::IQ3_S
             | QDtype::IQ3_XXS
@@ -509,7 +495,7 @@ fn rowtile_batched_k_owns(dtype_weight: QDtype, m: usize, k: usize) -> bool {
 }
 
 /// Row-tiled batched dp4a MMVQ for the 256-element super-block dtypes (Q4_K,
-/// Q5_K, IQ4_XS, IQ3_S, IQ3_XXS, IQ2_S), `n_slots` ∈ [2, 8]: 8 weight rows per block share one
+/// Q5_K, Q6_K, IQ4_XS, IQ3_S, IQ3_XXS, IQ2_S), `n_slots` ∈ [2, 8]: 8 weight rows per block share one
 /// LDS-staged activation strip and each weight int is decoded once for every
 /// column. Standard Q8_1 activation, slot-major `dst`.
 pub fn mmvq_dp4a_row_tile_batched_k<B: flambeau_core::KernelBackend>(
@@ -595,6 +581,18 @@ pub fn mmvq_dp4a_row_tile_batched_k<B: flambeau_core::KernelBackend>(
                 "flambeau_mmvq_iq2_s_dp4a_q8_1_batched_n6",
                 "flambeau_mmvq_iq2_s_dp4a_q8_1_batched_n7",
                 "flambeau_mmvq_iq2_s_dp4a_q8_1_batched_n8",
+            ],
+        ),
+        QDtype::Q6_K => (
+            "mmvq_q6_k_dp4a_batched",
+            [
+                "flambeau_mmvq_q6_k_dp4a_q8_1_batched_n2",
+                "flambeau_mmvq_q6_k_dp4a_q8_1_batched_n3",
+                "flambeau_mmvq_q6_k_dp4a_q8_1_batched_n4",
+                "flambeau_mmvq_q6_k_dp4a_q8_1_batched_n5",
+                "flambeau_mmvq_q6_k_dp4a_q8_1_batched_n6",
+                "flambeau_mmvq_q6_k_dp4a_q8_1_batched_n7",
+                "flambeau_mmvq_q6_k_dp4a_q8_1_batched_n8",
             ],
         ),
         other => bail!("mmvq_dp4a_row_tile_batched_k: no kernel for {other:?}"),

@@ -898,6 +898,9 @@ pub struct ScratchPool {
     pub gated_q8_1_mmq: DevicePtr,
     pub down_f32: DevicePtr,
 
+    /// Rows `logits_f32_dev` holds: `max_slots`, or the MTP verify batch
+    /// (`max_draft + 1`) when larger.
+    pub logits_rows: usize,
     pub logits_f32_dev: DevicePtr,
     pub position_i32: DevicePtr,
     /// Decode-graph device context: `[position, token_id]` (2 × i32). The
@@ -1214,7 +1217,11 @@ impl ScratchPool {
         };
         let down_f32 = alloc_bytes(n * h * f32)?;
 
-        let logits_f32_dev = alloc_bytes(config.max_slots.max(1) * config.vocab * f32)?;
+        let logits_rows = config
+            .max_slots
+            .max(1)
+            .max(config.mtp.map_or(0, |m| m.max_draft + 1));
+        let logits_f32_dev = alloc_bytes(logits_rows * config.vocab * f32)?;
         let position_i32 = alloc_bytes(n * i32_b)?;
         let decode_ctx_i32 = alloc_bytes(2 * i32_b)?;
 
@@ -1684,6 +1691,7 @@ impl ScratchPool {
             gated_q8_1_mmq,
             down_f32,
             logits_f32_dev,
+            logits_rows,
             position_i32,
             decode_ctx_i32,
             router_logits_f32,

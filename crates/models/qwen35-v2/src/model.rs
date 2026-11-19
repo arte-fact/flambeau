@@ -127,28 +127,6 @@ fn verify_layers<C: ForwardCtx>(
     Ok(resid)
 }
 
-/// Target logits of one row of a verify residual.
-fn head_row<C: ForwardCtx>(
-    model: &Qwen35V2Model,
-    ctx: &mut C,
-    resid: &flambeau_model_ops::Tensor<flambeau_model_ops::F16>,
-    row: usize,
-    slot: usize,
-) -> Result<Vec<f32>> {
-    let hidden = model.layout.hidden;
-    let vocab = model.lm_head.vocab_size;
-    let row_view = unsafe {
-        flambeau_model_ops::Tensor::<flambeau_model_ops::F16>::from_raw(
-            resid.ptr.offset_bytes(row * hidden * 2),
-            hidden,
-        )
-    };
-    ctx.output_head(&row_view, &model.lm_head, &[slot])?;
-    let logits = ctx.logits();
-    anyhow::ensure!(logits.len() >= vocab, "verify head row short");
-    Ok(logits[..vocab].to_vec())
-}
-
 /// One MTP cycle with rejection sampling (mirrors llama.cpp's
 /// `draft-mtp` + `result_q` path).
 ///
@@ -235,12 +213,20 @@ pub fn mtp_cycle<C: ForwardCtx>(
     ctx.mtp_spec_rows(false);
     let resid = verified?;
 
+    // One LM-head pass over all k + 1 rows: the head is weight-bound, so a
+    // batched pass reads its weights once instead of once per row.
+    ctx.output_head_all(&resid, &model.lm_head, &slots, k + 1)?;
+    let all_logits = ctx.logits();
+    anyhow::ensure!(all_logits.len() >= (k + 1) * vocab, "verify logits short");
+    let verify_logits = all_logits[..(k + 1) * vocab].to_vec();
+    let row_at = |i: usize| &verify_logits[i * vocab..(i + 1) * vocab];
+
     let mut emitted: Vec<u32> = Vec::with_capacity(k + 1);
     let mut accepted = 0usize;
     let mut bonus: Option<u32> = None;
-    let mut row = head_row(model, ctx, &resid, 0, slot_id)?;
+    let mut row = row_at(0);
     for d in &drafts {
-        let (_pt, p_dist) = sample(&row);
+        let (_pt, p_dist) = sample(row);
         let p_d = p_dist.iter().find(|(t, _)| *t == d.token).map(|(_, p)| *p).unwrap_or(0.0);
         // accept with prob min(1, p(d)/q(d)); greedy dists are one-hot, so
         // this reduces to argmax-match.
@@ -250,11 +236,11 @@ pub fn mtp_cycle<C: ForwardCtx>(
         }
         emitted.push(d.token);
         accepted += 1;
-        row = head_row(model, ctx, &resid, accepted, slot_id)?;
+        row = row_at(accepted);
     }
     emitted.push(match bonus {
         Some(t) => t,
-        None => sample(&row).0,
+        None => sample(row).0,
     });
 
     if accepted < k {
@@ -277,7 +263,7 @@ pub fn mtp_cycle<C: ForwardCtx>(
     )?;
     tracing::debug!(target: "mtp.cycle", drafted = k, accepted, "mtp cycle");
 
-    *out_logits = row;
+    *out_logits = row.to_vec();
     Ok(emitted)
 }
 

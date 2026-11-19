@@ -1,6 +1,6 @@
 #pragma once
 // Row-tiled batched dp4a MMVQ for the 256-element super-block dtypes (Q4_K,
-// Q5_K, IQ4_XS, IQ3_S, IQ3_XXS, IQ2_S), N activation columns. 256 threads = 8 output rows per block,
+// Q5_K, Q6_K, IQ4_XS, IQ3_S, IQ3_XXS, IQ2_S), N activation columns. 256 threads = 8 output rows per block,
 // each row owned by a 32-lane group. Per weight super-block the block stages
 // the N columns' Q8_1 strip (8 sub-blocks each) into LDS once, then every lane
 // decodes its weight ints in registers once and dots them against the N
@@ -270,6 +270,41 @@ struct IQ2S {
         for (int c = 0; c < N; ++c) {
             const flambeau_block_q8_1* ya = s_blk + c * SUBS + sub;
             acc[c] += dls * (float) ya->d * (float) grid_sumi(ya, l0, g0, g1);
+        }
+    }
+};
+struct Q6K {
+    typedef flambeau_block_q6_K block_t;
+    // lane = one int of `ql` (32 ints = 128 bytes); each lane decodes two
+    // 4-element groups (low / high nibble plus the matching `qh` bits).
+    template<int N>
+    static __device__ __forceinline__ void step(
+        const block_t* bk, const flambeau_block_q8_1* s_blk, int lane_lo, float (&acc)[N])
+    {
+        constexpr int QI = 32;
+        const int iqs          = lane_lo;
+        const int bq8_offset   = 2 * 2 * (iqs / (QI / 2)) + (iqs % (QI / 2)) / (QI / 4);
+        const int scale_offset = (QI / 4) * (iqs / (QI / 2)) + (iqs % (QI / 2)) / (QI / 8);
+        const int vh_shift     = 2 * ((iqs % (QI / 2)) / (QI / 4));
+        const int qh_int_idx   = (QI / 4) * (iqs / (QI / 2)) + iqs % (QI / 4);
+
+        const int vl = load_int_b2((const int8_t*) bk->ql, iqs);
+        const int vh = load_int_b2((const int8_t*) bk->qh, qh_int_idx) >> vh_shift;
+        const int8_t* sc_ptr = bk->scales + scale_offset;
+        const float sc0 = (float) sc_ptr[0];
+        const float sc1 = (float) sc_ptr[4];
+        const int raw0 = ((vl >> 0) & 0x0F0F0F0F) | (((vh >> 0) << 4) & 0x30303030);
+        const int raw1 = ((vl >> 4) & 0x0F0F0F0F) | (((vh >> 4) << 4) & 0x30303030);
+        const float d = (float) bk->d;
+
+        #pragma unroll
+        for (int c = 0; c < N; ++c) {
+            const flambeau_block_q8_1* ya0 = s_blk + c * SUBS + bq8_offset;
+            const flambeau_block_q8_1* ya1 = ya0 + 2;
+            const int u0 = load_int_b2(ya0->qs, iqs % 8);
+            const int u1 = load_int_b2(ya1->qs, iqs % 8);
+            acc[c] += d * ((float) ya0->d * (float) (dp4a(raw0, u0, 0) - 32 * dp4a(0x01010101, u0, 0)) * sc0
+                         + (float) ya1->d * (float) (dp4a(raw1, u1, 0) - 32 * dp4a(0x01010101, u1, 0)) * sc1);
         }
     }
 };

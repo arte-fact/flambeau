@@ -33,10 +33,22 @@ pub fn output_head_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
     let ops = state.ops();
     let emit_all = force_emit_all || (n_tokens > 1 && slot_ids.iter().any(|&s| s != slot_ids[0]));
     let n_emit = if emit_all { n_tokens } else { 1 };
-    if n_emit > state.pool.config.max_slots.max(1) {
+    if n_emit > state.pool.logits_rows {
         bail!(
-            "output_head: n_emit {n_emit} > max_slots {} (pool.logits_f32_dev too small)",
-            state.pool.config.max_slots.max(1)
+            "output_head: n_emit {n_emit} > {} rows in pool.logits_f32_dev",
+            state.pool.logits_rows
+        );
+    }
+    let head_shape = flambeau_ops::MatmulShape {
+        m: n_emit,
+        k: hidden,
+        n: vocab,
+    };
+    if n_emit > 1 && lm_head.lm_head.reads_mmq_activation(head_shape, &ops) {
+        bail!(
+            "output_head: {:?} lm_head at {n_emit} rows dispatches to an MMQ kernel; \
+             only the standard Q8_1 activation is prepared here",
+            lm_head.lm_head.dtype
         );
     }
 

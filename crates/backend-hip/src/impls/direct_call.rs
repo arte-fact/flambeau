@@ -358,6 +358,10 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
         cert_rel_path: "certs/hip/gfx906/qmatmul_iq2_s_mmvq_dp4a_row_tile_batched.json",
     },
     DirectCallKernel {
+        impl_id: "qmatmul_q6_k_mmvq_dp4a_row_tile_batched",
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q6_k_mmvq_dp4a_row_tile_batched.json",
+    },
+    DirectCallKernel {
         impl_id: "qmatmul_q4_0_gate_up_row_tile_mmvq_batched",
         cert_rel_path: "certs/hip/gfx906/qmatmul_q4_0_gate_up_row_tile_mmvq_batched.json",
     },
