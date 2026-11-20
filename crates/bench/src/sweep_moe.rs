@@ -997,21 +997,6 @@ fn tame_q6k_scales(mut raw: Vec<u8>) -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------
-// Fused gate+up MoE MMVQ cert (candle P30)
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// IndexedMoE MMQ Q4_K cert (4-warp LDS-tiled prefill)
-// ---------------------------------------------------------------------------
-// MMQ lives in the prefill regime: many (token, slot) pairs processed together.
-// The caller (CPU) sorts (token, slot) pairs into per-expert buckets of
-// MMQ_X=8 slots so that each block shares ONE expert and can amortise the
-// weight tile across all slots. Sentinel -1 marks an unfilled tail slot.
-
-const MMQ_Y: usize = 16;
-const MMQ_X: usize = 8;
-
-// ---------------------------------------------------------------------------
 // MoE combine cert
 // ---------------------------------------------------------------------------
 
