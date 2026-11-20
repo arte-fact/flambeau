@@ -1,4 +1,4 @@
-//! Parity test — `mmvq_q4_k_batched` vs looping single-row Q4_K MMVQ.
+//! Parity test — batched Q4_K `qmatmul` (m = N slots) vs looping single-row Q4_K MMVQ.
 //! Per-block decode is on-the-fly per element (no DP4A), so the two
 //! paths differ only in FMA ordering across the slot loop.
 

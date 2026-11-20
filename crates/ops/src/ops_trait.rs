@@ -97,18 +97,6 @@ pub trait Ops {
         k: usize,
     ) -> Result<()>;
 
-    fn mmvq_q4_0_gate_up(
-        &self,
-        buffers: crate::MmvqGateUpBuffers,
-        shape: crate::MmvqGateUpShape,
-    ) -> Result<()>;
-
-    fn mmvq_q4_1_gate_up(
-        &self,
-        buffers: crate::MmvqGateUpBuffers,
-        shape: crate::MmvqGateUpShape,
-    ) -> Result<()>;
-
     fn mmvq_q8_0_gate_up(
         &self,
         buffers: crate::MmvqGateUpBuffers,

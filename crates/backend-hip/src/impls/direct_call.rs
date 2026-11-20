@@ -242,14 +242,6 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
         cert_rel_path: "certs/hip/gfx906/qmatmul_q8_0_gate_up_t128_vdr2.json",
     },
     DirectCallKernel {
-        impl_id: "qmatmul_q4_0_gate_up_dp4a",
-        cert_rel_path: "certs/hip/gfx906/qmatmul_q4_0_gate_up_dp4a.json",
-    },
-    DirectCallKernel {
-        impl_id: "qmatmul_q4_1_gate_up_dp4a",
-        cert_rel_path: "certs/hip/gfx906/qmatmul_q4_1_gate_up_dp4a.json",
-    },
-    DirectCallKernel {
         impl_id: "qmatmul_q5_k_gate_up_dp4a",
         cert_rel_path: "certs/hip/gfx906/qmatmul_q5_k_gate_up_dp4a.json",
     },
@@ -268,14 +260,6 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
         cert_rel_path: "certs/hip/gfx906/qmatmul_q4_1_mmvq_batched.json",
     },
     DirectCallKernel {
-        impl_id: "qmatmul_q4_k_mmvq_batched",
-        cert_rel_path: "certs/hip/gfx906/qmatmul_q4_k_mmvq_batched.json",
-    },
-    DirectCallKernel {
-        impl_id: "qmatmul_q6_k_mmvq_batched",
-        cert_rel_path: "certs/hip/gfx906/qmatmul_q6_k_mmvq_batched.json",
-    },
-    DirectCallKernel {
         impl_id: "qmatmul_q5_k_r2_mmvq_batched",
         cert_rel_path: "certs/hip/gfx906/qmatmul_q5_k_r2_mmvq_batched.json",
     },
@@ -286,10 +270,6 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
     DirectCallKernel {
         impl_id: "qmatmul_q4_0_mmvq_row_tile_batched",
         cert_rel_path: "certs/hip/gfx906/qmatmul_q4_0_mmvq_row_tile_batched.json",
-    },
-    DirectCallKernel {
-        impl_id: "qmatmul_q5_k_mmvq_row_tile_batched",
-        cert_rel_path: "certs/hip/gfx906/qmatmul_q5_k_mmvq_row_tile_batched.json",
     },
     DirectCallKernel {
         impl_id: "qmatmul_q4_k_mmvq_dp4a_row_tile_batched",

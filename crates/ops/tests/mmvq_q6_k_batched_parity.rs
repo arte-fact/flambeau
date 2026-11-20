@@ -1,4 +1,4 @@
-//! Parity test — `mmvq_q6_k_batched` vs looping single-row Q6_K MMVQ.
+//! Parity test — batched Q6_K `qmatmul` (m = N slots) vs looping single-row Q6_K MMVQ.
 
 #![cfg(feature = "hip")]
 #![expect(

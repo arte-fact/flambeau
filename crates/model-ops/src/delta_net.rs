@@ -9,7 +9,7 @@
 //!
 //! Decode pipeline (single token):
 //! - fused rmsnorm(x_in) + Q8_1 quant
-//! - `attn_qkv` + `attn_gate` (fused mmvq_q8_0 / mmvq_q4_0_gate_up when
+//! - `attn_qkv` + `attn_gate` (fused mmvq_q8_0 / mmvq_q4_0_gate_up_t128 when
 //!   both same dtype, else separate mmvq per branch)
 //! - `ssm_alpha` + `ssm_beta` (fused mmvq_q8_0 if both Q8_0, else separate)
 //! - assemble conv input + causal conv1d + shift conv history

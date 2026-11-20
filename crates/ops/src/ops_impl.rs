@@ -137,32 +137,6 @@ impl<B: KernelBackend> Ops for OpsImpl<'_, B> {
         crate::launch::qmatmul::mmvq_q4_0_kv_f16dst(self.reg, self.stream, buf, n_rows_kv, k)
     }
 
-    fn mmvq_q4_0_gate_up(
-        &self,
-        buffers: crate::MmvqGateUpBuffers,
-        shape: crate::MmvqGateUpShape,
-    ) -> Result<()> {
-        crate::launch::qmatmul::mmvq_q4_0_gate_up(
-            self.reg,
-            self.stream,
-            buffers,
-            shape,
-        )
-    }
-
-    fn mmvq_q4_1_gate_up(
-        &self,
-        buffers: crate::MmvqGateUpBuffers,
-        shape: crate::MmvqGateUpShape,
-    ) -> Result<()> {
-        crate::launch::qmatmul::mmvq_q4_1_gate_up(
-            self.reg,
-            self.stream,
-            buffers,
-            shape,
-        )
-    }
-
     fn mmvq_q8_0_gate_up(
         &self,
         buffers: crate::MmvqGateUpBuffers,

@@ -690,9 +690,7 @@ pub fn run_sweep<B: BenchBackend>(spec: &SweepSpec, repo_root: &Path, arch: &str
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GateUpDtype {
     Q8_0,
-    Q4_0,
     Q4_0T128,
-    Q4_1,
     Q5K,
 }
 
@@ -700,58 +698,49 @@ impl GateUpDtype {
     pub fn name(self) -> &'static str {
         match self {
             GateUpDtype::Q8_0 => "Q8_0",
-            GateUpDtype::Q4_0 | GateUpDtype::Q4_0T128 => "Q4_0",
-            GateUpDtype::Q4_1 => "Q4_1",
+            GateUpDtype::Q4_0T128 => "Q4_0",
             GateUpDtype::Q5K => "Q5_K",
         }
     }
     fn ggml(self) -> GgmlDType {
         match self {
             GateUpDtype::Q8_0 => GgmlDType::Q8_0,
-            GateUpDtype::Q4_0 | GateUpDtype::Q4_0T128 => GgmlDType::Q4_0,
-            GateUpDtype::Q4_1 => GgmlDType::Q4_1,
+            GateUpDtype::Q4_0T128 => GgmlDType::Q4_0,
             GateUpDtype::Q5K => GgmlDType::Q5K,
         }
     }
     fn weight_dtype(self) -> Dtype {
         match self {
             GateUpDtype::Q8_0 => Dtype::Q8_0Dp4a,
-            GateUpDtype::Q4_0 | GateUpDtype::Q4_0T128 => Dtype::Q4_0,
-            GateUpDtype::Q4_1 => Dtype::Q4_1Dp4a,
+            GateUpDtype::Q4_0T128 => Dtype::Q4_0,
             GateUpDtype::Q5K => Dtype::Q5K,
         }
     }
     fn impl_id(self) -> &'static str {
         match self {
             GateUpDtype::Q8_0 => "qmatmul_q8_0_gate_up_t128_vdr2",
-            GateUpDtype::Q4_0 => "qmatmul_q4_0_gate_up_dp4a",
             GateUpDtype::Q4_0T128 => "qmatmul_q4_0_gate_up_t128_dp4a",
-            GateUpDtype::Q4_1 => "qmatmul_q4_1_gate_up_dp4a",
             GateUpDtype::Q5K => "qmatmul_q5_k_gate_up_dp4a",
         }
     }
     fn kernel_stem(self) -> &'static str {
         match self {
             GateUpDtype::Q8_0 => "mmvq_q8_0_gate_up_t128_vdr2",
-            GateUpDtype::Q4_0 => "mmvq_q4_0_gate_up_dp4a",
             GateUpDtype::Q4_0T128 => "mmvq_q4_0_gate_up_t128_dp4a",
-            GateUpDtype::Q4_1 => "mmvq_q4_1_gate_up_dp4a",
             GateUpDtype::Q5K => "mmvq_q5_k_gate_up_dp4a",
         }
     }
     fn kernel_entry(self) -> &'static str {
         match self {
             GateUpDtype::Q8_0 => "flambeau_mmvq_q8_0_gate_up_t128_vdr2_q8_1",
-            GateUpDtype::Q4_0 => "flambeau_mmvq_q4_0_gate_up_dp4a_q8_1",
             GateUpDtype::Q4_0T128 => "flambeau_mmvq_q4_0_gate_up_t128_dp4a_q8_1",
-            GateUpDtype::Q4_1 => "flambeau_mmvq_q4_1_gate_up_dp4a_q8_1",
             GateUpDtype::Q5K => "flambeau_mmvq_q5_k_gate_up_dp4a_q8_1",
         }
     }
     fn launch_threads(self) -> u32 {
         match self {
             GateUpDtype::Q8_0 | GateUpDtype::Q4_0T128 => 128,
-            GateUpDtype::Q4_0 | GateUpDtype::Q4_1 | GateUpDtype::Q5K => 256,
+            GateUpDtype::Q5K => 256,
         }
     }
 }
@@ -1118,12 +1107,9 @@ pub enum BatchedDtype {
     Q8_0,
     Q4_0,
     Q4_1,
-    Q4K,
-    Q6K,
     Q5K,
     Q8_0RowTile,
     Q4_0RowTile,
-    Q5KRowTile,
     /// Row-tiled dp4a batched MMVQ (`mmvq_dp4a_batched_k.cuh`), N = 2..8.
     Q4KDp4aRowTile,
     Q5KDp4aRowTile,
@@ -1140,9 +1126,8 @@ impl BatchedDtype {
             BatchedDtype::Q8_0 | BatchedDtype::Q8_0RowTile => "Q8_0",
             BatchedDtype::Q4_0 | BatchedDtype::Q4_0RowTile => "Q4_0",
             BatchedDtype::Q4_1 => "Q4_1",
-            BatchedDtype::Q4K | BatchedDtype::Q4KDp4aRowTile => "Q4_K",
-            BatchedDtype::Q6K => "Q6_K",
-            BatchedDtype::Q5K | BatchedDtype::Q5KRowTile | BatchedDtype::Q5KDp4aRowTile => "Q5_K",
+            BatchedDtype::Q4KDp4aRowTile => "Q4_K",
+            BatchedDtype::Q5K | BatchedDtype::Q5KDp4aRowTile => "Q5_K",
             BatchedDtype::Iq4XsDp4aRowTile => "IQ4_XS",
             BatchedDtype::Iq3SDp4aRowTile => "IQ3_S",
             BatchedDtype::Iq3XxsDp4aRowTile => "IQ3_XXS",
@@ -1155,9 +1140,8 @@ impl BatchedDtype {
             BatchedDtype::Q8_0 | BatchedDtype::Q8_0RowTile => Dtype::Q8_0Dp4a,
             BatchedDtype::Q4_0 | BatchedDtype::Q4_0RowTile => Dtype::Q4_0,
             BatchedDtype::Q4_1 => Dtype::Q4_1Dp4a,
-            BatchedDtype::Q4K | BatchedDtype::Q4KDp4aRowTile => Dtype::Q4K,
-            BatchedDtype::Q6K => Dtype::Q6K,
-            BatchedDtype::Q5K | BatchedDtype::Q5KRowTile | BatchedDtype::Q5KDp4aRowTile => Dtype::Q5K,
+            BatchedDtype::Q4KDp4aRowTile => Dtype::Q4K,
+            BatchedDtype::Q5K | BatchedDtype::Q5KDp4aRowTile => Dtype::Q5K,
             BatchedDtype::Iq4XsDp4aRowTile => Dtype::Iq4XsDp4a,
             BatchedDtype::Iq3SDp4aRowTile => Dtype::Iq3SDp4a,
             BatchedDtype::Iq3XxsDp4aRowTile => Dtype::Iq3XxsDp4a,
@@ -1170,12 +1154,9 @@ impl BatchedDtype {
             BatchedDtype::Q8_0 => "qmatmul_q8_0_mmvq_batched",
             BatchedDtype::Q4_0 => "qmatmul_q4_0_mmvq_batched",
             BatchedDtype::Q4_1 => "qmatmul_q4_1_mmvq_batched",
-            BatchedDtype::Q4K => "qmatmul_q4_k_mmvq_batched",
-            BatchedDtype::Q6K => "qmatmul_q6_k_mmvq_batched",
             BatchedDtype::Q5K => "qmatmul_q5_k_r2_mmvq_batched",
             BatchedDtype::Q8_0RowTile => "qmatmul_q8_0_mmvq_row_tile_batched",
             BatchedDtype::Q4_0RowTile => "qmatmul_q4_0_mmvq_row_tile_batched",
-            BatchedDtype::Q5KRowTile => "qmatmul_q5_k_mmvq_row_tile_batched",
             BatchedDtype::Q4KDp4aRowTile => "qmatmul_q4_k_mmvq_dp4a_row_tile_batched",
             BatchedDtype::Q5KDp4aRowTile => "qmatmul_q5_k_mmvq_dp4a_row_tile_batched",
             BatchedDtype::Iq4XsDp4aRowTile => "qmatmul_iq4_xs_mmvq_dp4a_row_tile_batched",
@@ -1190,12 +1171,9 @@ impl BatchedDtype {
             BatchedDtype::Q8_0 => "mmvq_q8_0_batched",
             BatchedDtype::Q4_0 => "mmvq_q4_0_batched",
             BatchedDtype::Q4_1 => "mmvq_q4_1_batched",
-            BatchedDtype::Q4K => "mmvq_q4_k_batched",
-            BatchedDtype::Q6K => "mmvq_q6_k_batched",
             BatchedDtype::Q5K => "mmvq_q5_k_r2_batched",
             BatchedDtype::Q8_0RowTile => "mmvq_q8_0_row_tile_batched",
             BatchedDtype::Q4_0RowTile => "mmvq_q4_0_row_tile_batched",
-            BatchedDtype::Q5KRowTile => "mmvq_q5_k_row_tile_batched",
             BatchedDtype::Q4KDp4aRowTile => "mmvq_q4_k_dp4a_batched",
             BatchedDtype::Q5KDp4aRowTile => "mmvq_q5_k_dp4a_batched",
             BatchedDtype::Iq4XsDp4aRowTile => "mmvq_iq4_xs_dp4a_batched",
@@ -1212,7 +1190,6 @@ impl BatchedDtype {
             | BatchedDtype::Q4_1
             | BatchedDtype::Q8_0RowTile
             | BatchedDtype::Q4_0RowTile
-            | BatchedDtype::Q5KRowTile
             | BatchedDtype::Q4KDp4aRowTile
             | BatchedDtype::Q5KDp4aRowTile
             | BatchedDtype::Iq4XsDp4aRowTile
@@ -1220,7 +1197,7 @@ impl BatchedDtype {
             | BatchedDtype::Iq3XxsDp4aRowTile
             | BatchedDtype::Iq2SDp4aRowTile
             | BatchedDtype::Q6KDp4aRowTile => 256,
-            BatchedDtype::Q4K | BatchedDtype::Q6K | BatchedDtype::Q5K => 64,
+            BatchedDtype::Q5K => 64,
         }
     }
     /// Output rows computed per block: 2 for the r2 Q5_K kernel, 8 for the
@@ -1230,8 +1207,7 @@ impl BatchedDtype {
         match self {
             BatchedDtype::Q5K => 2,
             BatchedDtype::Q8_0RowTile | BatchedDtype::Q4_0RowTile => 4,
-            BatchedDtype::Q5KRowTile
-            | BatchedDtype::Q4KDp4aRowTile
+            BatchedDtype::Q4KDp4aRowTile
             | BatchedDtype::Q5KDp4aRowTile
             | BatchedDtype::Iq4XsDp4aRowTile
             | BatchedDtype::Iq3SDp4aRowTile
@@ -1265,12 +1241,6 @@ impl BatchedDtype {
             (BatchedDtype::Q4_1, 2) => "flambeau_mmvq_q4_1_q8_1_batched_n2",
             (BatchedDtype::Q4_1, 3) => "flambeau_mmvq_q4_1_q8_1_batched_n3",
             (BatchedDtype::Q4_1, 4) => "flambeau_mmvq_q4_1_q8_1_batched_n4",
-            (BatchedDtype::Q4K, 2) => "flambeau_mmvq_q4_k_q8_1_batched_n2",
-            (BatchedDtype::Q4K, 3) => "flambeau_mmvq_q4_k_q8_1_batched_n3",
-            (BatchedDtype::Q4K, 4) => "flambeau_mmvq_q4_k_q8_1_batched_n4",
-            (BatchedDtype::Q6K, 2) => "flambeau_mmvq_q6_k_q8_1_batched_n2",
-            (BatchedDtype::Q6K, 3) => "flambeau_mmvq_q6_k_q8_1_batched_n3",
-            (BatchedDtype::Q6K, 4) => "flambeau_mmvq_q6_k_q8_1_batched_n4",
             (BatchedDtype::Q5K, 2) => "flambeau_mmvq_q5_k_r2_q8_1_batched_n2",
             (BatchedDtype::Q5K, 3) => "flambeau_mmvq_q5_k_r2_q8_1_batched_n3",
             (BatchedDtype::Q5K, 4) => "flambeau_mmvq_q5_k_r2_q8_1_batched_n4",
@@ -1280,9 +1250,6 @@ impl BatchedDtype {
             (BatchedDtype::Q4_0RowTile, 2) => "flambeau_mmvq_q4_0_row_tile_dp4a_q8_1_batched_n2",
             (BatchedDtype::Q4_0RowTile, 3) => "flambeau_mmvq_q4_0_row_tile_dp4a_q8_1_batched_n3",
             (BatchedDtype::Q4_0RowTile, 4) => "flambeau_mmvq_q4_0_row_tile_dp4a_q8_1_batched_n4",
-            (BatchedDtype::Q5KRowTile, 2) => "flambeau_mmvq_q5_k_row_tile_q8_1_batched_n2",
-            (BatchedDtype::Q5KRowTile, 3) => "flambeau_mmvq_q5_k_row_tile_q8_1_batched_n3",
-            (BatchedDtype::Q5KRowTile, 4) => "flambeau_mmvq_q5_k_row_tile_q8_1_batched_n4",
             (BatchedDtype::Q4KDp4aRowTile, 2) => "flambeau_mmvq_q4_k_dp4a_q8_1_batched_n2",
             (BatchedDtype::Q4KDp4aRowTile, 3) => "flambeau_mmvq_q4_k_dp4a_q8_1_batched_n3",
             (BatchedDtype::Q4KDp4aRowTile, 4) => "flambeau_mmvq_q4_k_dp4a_q8_1_batched_n4",

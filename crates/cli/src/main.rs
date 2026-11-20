@@ -1382,9 +1382,7 @@ fn gate_up_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::GateUpDtype>
     use flambeau_bench::sweep_mmvq::GateUpDtype;
     match dtype {
         "Q8_0_gate_up" => Some(GateUpDtype::Q8_0),
-        "Q4_0_gate_up" => Some(GateUpDtype::Q4_0),
         "Q4_0_gate_up_t128" => Some(GateUpDtype::Q4_0T128),
-        "Q4_1_gate_up" => Some(GateUpDtype::Q4_1),
         "Q5_K_gate_up" => Some(GateUpDtype::Q5K),
         _ => None,
     }
@@ -1398,12 +1396,9 @@ fn batched_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::BatchedDtype
         "Q8_0_batched" => Some(BatchedDtype::Q8_0),
         "Q4_0_batched" => Some(BatchedDtype::Q4_0),
         "Q4_1_batched" => Some(BatchedDtype::Q4_1),
-        "Q4_K_batched" => Some(BatchedDtype::Q4K),
-        "Q6_K_batched" => Some(BatchedDtype::Q6K),
         "Q5_K_batched" => Some(BatchedDtype::Q5K),
         "Q8_0_row_tile_batched" => Some(BatchedDtype::Q8_0RowTile),
         "Q4_0_row_tile_batched" => Some(BatchedDtype::Q4_0RowTile),
-        "Q5_K_row_tile_batched" => Some(BatchedDtype::Q5KRowTile),
         "Q4_K_dp4a_row_tile_batched" => Some(BatchedDtype::Q4KDp4aRowTile),
         "Q5_K_dp4a_row_tile_batched" => Some(BatchedDtype::Q5KDp4aRowTile),
         "IQ4_XS_dp4a_row_tile_batched" => Some(BatchedDtype::Iq4XsDp4aRowTile),

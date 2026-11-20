@@ -502,10 +502,6 @@ pub const BENCH_REFERENCE_KERNELS_SM86: &[DirectCallKernel] = &[
         cert_rel_path: "certs/cuda/sm_86/qmatmul_q3_k_mmq_wave64.json",
     },
     DirectCallKernel {
-        impl_id: "qmatmul_q4_0_gate_up_dp4a",
-        cert_rel_path: "certs/cuda/sm_86/qmatmul_q4_0_gate_up_dp4a.json",
-    },
-    DirectCallKernel {
         impl_id: "qmatmul_q4_0_gate_up_row_tile_mmvq_batched",
         cert_rel_path: "certs/cuda/sm_86/qmatmul_q4_0_gate_up_row_tile_mmvq_batched.json",
     },
@@ -538,10 +534,6 @@ pub const BENCH_REFERENCE_KERNELS_SM86: &[DirectCallKernel] = &[
         cert_rel_path: "certs/cuda/sm_86/qmatmul_q4_0_mmvq_t128_vdr2.json",
     },
     DirectCallKernel {
-        impl_id: "qmatmul_q4_1_gate_up_dp4a",
-        cert_rel_path: "certs/cuda/sm_86/qmatmul_q4_1_gate_up_dp4a.json",
-    },
-    DirectCallKernel {
         impl_id: "qmatmul_q4_1_mmq_4warp_lds",
         cert_rel_path: "certs/cuda/sm_86/qmatmul_q4_1_mmq_4warp_lds.json",
     },
@@ -560,10 +552,6 @@ pub const BENCH_REFERENCE_KERNELS_SM86: &[DirectCallKernel] = &[
     DirectCallKernel {
         impl_id: "qmatmul_q4_k_mmq_wave64",
         cert_rel_path: "certs/cuda/sm_86/qmatmul_q4_k_mmq_wave64.json",
-    },
-    DirectCallKernel {
-        impl_id: "qmatmul_q4_k_mmvq_batched",
-        cert_rel_path: "certs/cuda/sm_86/qmatmul_q4_k_mmvq_batched.json",
     },
     DirectCallKernel {
         impl_id: "qmatmul_q4_k_mmvq_dp4a_row_tile_batched",
@@ -590,20 +578,12 @@ pub const BENCH_REFERENCE_KERNELS_SM86: &[DirectCallKernel] = &[
         cert_rel_path: "certs/cuda/sm_86/qmatmul_q5_k_mmvq_dp4a_row_tile_batched.json",
     },
     DirectCallKernel {
-        impl_id: "qmatmul_q5_k_mmvq_row_tile_batched",
-        cert_rel_path: "certs/cuda/sm_86/qmatmul_q5_k_mmvq_row_tile_batched.json",
-    },
-    DirectCallKernel {
         impl_id: "qmatmul_q5_k_r2_mmvq_batched",
         cert_rel_path: "certs/cuda/sm_86/qmatmul_q5_k_r2_mmvq_batched.json",
     },
     DirectCallKernel {
         impl_id: "qmatmul_q6_k_mmq_wave64",
         cert_rel_path: "certs/cuda/sm_86/qmatmul_q6_k_mmq_wave64.json",
-    },
-    DirectCallKernel {
-        impl_id: "qmatmul_q6_k_mmvq_batched",
-        cert_rel_path: "certs/cuda/sm_86/qmatmul_q6_k_mmvq_batched.json",
     },
     DirectCallKernel {
         impl_id: "qmatmul_q6_k_mmvq_dp4a_row_tile_batched",
