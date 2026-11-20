@@ -1659,18 +1659,6 @@ const QMATMUL_RECIPES: &[RecipeRow] = &[
         },
     },
     RecipeRow {
-        ids: &["qmatmul_q4_k_mmvq_dp4a"],
-        recipe: Recipe {
-            kind: RecipeKind::Mmvq,
-            stem: "mmvq_q4_k_r2_dp4a",
-            entry: "flambeau_mmvq_q4_k_r2_dp4a_q8_1",
-            entry_f16: Some("flambeau_mmvq_q4_k_r2_dp4a_q8_1_f16"),
-            threads: 64,
-            rows_per_block: 2,
-            mmq_tile: (0, 0),
-        },
-    },
-    RecipeRow {
         ids: &["qmatmul_iq4_nl_mmvq_dp4a"],
         recipe: Recipe {
             kind: RecipeKind::Mmvq,
