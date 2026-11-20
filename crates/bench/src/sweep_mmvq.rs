@@ -601,6 +601,12 @@ pub fn run_sweep<B: BenchBackend>(spec: &SweepSpec, repo_root: &Path, arch: &str
     // Capture the kernel's static PMC once per sweep — it's shape-independent
     // (no runtime specialisation), so one query covers every `ShapeResult`.
     let pmc = capture_static_pmc::<B>(&dev, spec.dtype)?;
+    // The F16-output entry of the same kernel, when the module has one: it
+    // is certified with the F32 entry (same body, only the final store
+    // differs) and must reproduce the saturated, rounded F32 output exactly.
+    let entry_f16: &'static str =
+        Box::leak(format!("{}_f16", spec.dtype.kernel_entry()).into_boxed_str());
+    let mut f16_checked = false;
 
     let mut results = Vec::new();
     for &m in &spec.m_grid {
@@ -609,9 +615,19 @@ pub fn run_sweep<B: BenchBackend>(spec: &SweepSpec, repo_root: &Path, arch: &str
                 .seed
                 .wrapping_add((m as u64).wrapping_mul(0x1234567))
                 .wrapping_add((k as u64).wrapping_mul(0x9E3779B97F4A7C15));
-            let (got, reference) = run_shape::<B>(&dev, spec.dtype, m, k, seed)?;
+            let (got, reference, f16_mismatches) =
+                run_shape::<B>(&dev, spec.dtype, entry_f16, m, k, seed)?;
             let max_rel_err = max_rel_err_with_floor(&got, &reference, (k as f32).sqrt());
             let tolerance = cert_tol(k);
+            f16_checked |= f16_mismatches.is_some();
+            if let Some(bad) = f16_mismatches.filter(|&bad| bad > 0) {
+                tracing::warn!(
+                    target: "flambeau_bench::sweep_mmvq",
+                    dtype = spec.dtype.name(),
+                    m, k, bad,
+                    "F16-output entry differs from the saturated F32 output"
+                );
+            }
             results.push(ShapeResult {
                 m,
                 k,
@@ -619,7 +635,7 @@ pub fn run_sweep<B: BenchBackend>(spec: &SweepSpec, repo_root: &Path, arch: &str
                 seed,
                 max_rel_err,
                 tolerance,
-                pass: max_rel_err <= tolerance,
+                pass: max_rel_err <= tolerance && f16_mismatches.unwrap_or(0) == 0,
             });
             tracing::info!(
                 target: "flambeau_bench::sweep_mmvq",
@@ -643,7 +659,12 @@ pub fn run_sweep<B: BenchBackend>(spec: &SweepSpec, repo_root: &Path, arch: &str
         op: "qmatmul_mmvq".to_string(),
         dtype_weight: spec.dtype.name().to_string(),
         dtype_activation: "Q8_1".to_string(),
-        tolerance_formula: "|err| <= 3e-2 * max(|ref|, sqrt(k))".to_string(),
+        tolerance_formula: if f16_checked {
+            "|err| <= 3e-2 * max(|ref|, sqrt(k)); _f16 entry == F32 saturated to ±65504 and rounded"
+                .to_string()
+        } else {
+            "|err| <= 3e-2 * max(|ref|, sqrt(k))".to_string()
+        },
         results,
         pass,
         emitted_at: now_utc_iso8601(),
@@ -1510,13 +1531,17 @@ fn capture_static_pmc<B: BenchBackend>(dev: &B::Device, dtype: Dtype) -> Result<
 
 // ---- per-shape runner -----------------------------------------------------
 
+/// Returns the F32 output, the CPU reference, and — when the module has
+/// `entry_f16` — how many rows of the F16-output entry differ from the F32
+/// output saturated to ±65504 and rounded to F16.
 fn run_shape<B: BenchBackend>(
     dev: &B::Device,
     dtype: Dtype,
+    entry_f16: &'static str,
     m: usize,
     k: usize,
     seed: u64,
-) -> Result<(Vec<f32>, Vec<f32>)> {
+) -> Result<(Vec<f32>, Vec<f32>, Option<usize>)> {
     let q_bytes =
         B::image("quantize_q8_1").ok_or_else(|| anyhow!("quantize_q8_1 not compiled"))?;
     let m_bytes = B::image(dtype.kernel_stem())
@@ -1525,6 +1550,7 @@ fn run_shape<B: BenchBackend>(
     let m_module = B::load(dev, m_bytes)?;
     let k_quantize = B::kernel(&q_module, "flambeau_quantize_row_q8_1")?;
     let k_mmvq = B::kernel(&m_module, dtype.kernel_entry())?;
+    let k_mmvq_f16 = B::kernel(&m_module, entry_f16).ok();
 
     let block_elems = dtype.block_elem_count();
     assert_eq!(
@@ -1603,6 +1629,51 @@ fn run_shape<B: BenchBackend>(
     }
     dev.default_stream().synchronize()?;
 
+    let f16_mismatches = match k_mmvq_f16 {
+        None => None,
+        Some(k_f16) => {
+            let d_dst_f16 = dev.alloc(m * 2)?;
+            {
+                let stream = dev.default_stream();
+                let m_i = m as i32;
+                let n_units = (k / block_elems) as i32;
+                let d_x_ptr: u64 = d_x.as_usize() as u64;
+                let d_y_q8_1_ptr: u64 = d_y_q8_1.as_usize() as u64;
+                let d_dst_ptr: u64 = d_dst_f16.as_usize() as u64;
+                let mut args = <B::Args<'_>>::default();
+                args.push_arg(&d_x_ptr);
+                args.push_arg(&d_y_q8_1_ptr);
+                args.push_arg(&d_dst_ptr);
+                args.push_arg(&m_i);
+                args.push_arg(&n_units);
+                let grid = (m as u32).div_ceil(dtype.rows_per_block());
+                let cfg = LaunchCfg::one_d(grid, dtype.launch_threads());
+                B::launch(&k_f16, stream, cfg, args)?;
+                stream.synchronize()?;
+            }
+            let mut got_f16 = vec![0u16; m];
+            unsafe {
+                dev.memcpy_async(
+                    dev.default_stream(),
+                    CopyDirection::DeviceToHost,
+                    DevicePtr(got_f16.as_mut_ptr() as usize),
+                    d_dst_f16,
+                    m * 2,
+                )?;
+            }
+            dev.default_stream().synchronize()?;
+            unsafe {
+                dev.dealloc(d_dst_f16, m * 2)?;
+            }
+            let bad = got
+                .iter()
+                .zip(&got_f16)
+                .filter(|(&v, &h)| f16::from_f32(v.clamp(-65504.0, 65504.0)).to_bits() != h)
+                .count();
+            Some(bad)
+        }
+    };
+
     unsafe {
         dev.dealloc(d_x, weights_raw.len())?;
         dev.dealloc(d_y_f32, y_f32.len() * 4)?;
@@ -1612,7 +1683,7 @@ fn run_shape<B: BenchBackend>(
 
     let y_rt = quantize_q8_1_roundtrip(&y_f32);
     let reference = reference_matmul(&weights_dequant, &y_rt, m, k);
-    Ok((got, reference))
+    Ok((got, reference, f16_mismatches))
 }
 
 // ---- fused gate+up batched (N-slot) sweep ---------------------------------

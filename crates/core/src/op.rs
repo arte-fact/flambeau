@@ -141,6 +141,40 @@ pub enum QDtype {
 }
 
 impl QDtype {
+    /// Number of variants; [`Self::index`] ranges over `0..COUNT`.
+    pub const COUNT: usize = 24;
+
+    /// Dense index in `0..COUNT`, for per-dtype tables. The match is
+    /// exhaustive, so a new variant cannot be added without an index.
+    pub const fn index(self) -> usize {
+        match self {
+            Self::F32 => 0,
+            Self::F16 => 1,
+            Self::BF16 => 2,
+            Self::Q8_0 => 3,
+            Self::Q8_1 => 4,
+            Self::Q4_0 => 5,
+            Self::Q4_1 => 6,
+            Self::Q5_0 => 7,
+            Self::Q5_1 => 8,
+            Self::Q2_K => 9,
+            Self::Q3_K => 10,
+            Self::Q4_K => 11,
+            Self::Q5_K => 12,
+            Self::Q6_K => 13,
+            Self::Q8_K => 14,
+            Self::IQ4_NL => 15,
+            Self::IQ4_XS => 16,
+            Self::IQ3_XXS => 17,
+            Self::IQ3_S => 18,
+            Self::IQ2_XXS => 19,
+            Self::IQ2_XS => 20,
+            Self::IQ2_S => 21,
+            Self::IQ1_S => 22,
+            Self::IQ1_M => 23,
+        }
+    }
+
     pub const fn name(self) -> &'static str {
         match self {
             Self::F32 => "F32",

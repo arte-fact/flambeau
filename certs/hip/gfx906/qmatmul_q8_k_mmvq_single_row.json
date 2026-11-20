@@ -6,7 +6,7 @@
   "op": "qmatmul_mmvq",
   "dtype_weight": "Q8_K",
   "dtype_activation": "Q8_1",
-  "tolerance_formula": "|err| <= 3e-2 * max(|ref|, sqrt(k))",
+  "tolerance_formula": "|err| <= 3e-2 * max(|ref|, sqrt(k)); _f16 entry == F32 saturated to ±65504 and rounded",
   "results": [
     {
       "m": 1,
@@ -145,7 +145,7 @@
     }
   ],
   "pass": true,
-  "emitted_at": "2026-11-19T22:58:36Z",
+  "emitted_at": "2026-11-20T04:39:17Z",
   "rig": "threadreaper-gfx906",
   "pmc": {
     "vgpr_count": 15,

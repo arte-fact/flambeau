@@ -389,36 +389,11 @@ impl QuantWeight {
         ops.qmatmul_reads_mmq_activation(shape, self.dtype)
     }
 
-    /// True iff `dtype` has an F16-direct MMVQ kernel registered in
-    /// `ops.mmvq_f16_direct`. Callers gate the fused-cast fast path on
-    /// this; unsupported dtypes (F16, BF16) keep the F32+cast pair.
-    pub fn supports_decode_to_f16(&self) -> bool {
-        use flambeau_core::op::QDtype;
-        // Q5_K's F16-direct kernel diverges from F32+cast in 1/12288 rows
-        // (mmvq_f16_direct_parity caught it); kept on the slow F32+cast
-        // pair until the kernel is fixed.
-        matches!(
-            self.dtype,
-            QDtype::Q4_0
-                | QDtype::Q4_1
-                | QDtype::Q5_0
-                | QDtype::Q5_1
-                | QDtype::Q8_0
-                | QDtype::Q2_K
-                | QDtype::Q3_K
-                | QDtype::Q4_K
-                | QDtype::Q6_K
-                | QDtype::Q8_K
-                | QDtype::IQ1_S
-                | QDtype::IQ1_M
-                | QDtype::IQ2_XXS
-                | QDtype::IQ2_XS
-                | QDtype::IQ2_S
-                | QDtype::IQ3_XXS
-                | QDtype::IQ3_S
-                | QDtype::IQ4_NL
-                | QDtype::IQ4_XS
-        )
+    /// True when the m = 1 MMVQ kernel for this weight's dtype has an
+    /// F16-output entry (`ops.mmvq_f16_supported`). Callers gate the
+    /// fused-cast fast path on this; otherwise they keep the F32+cast pair.
+    pub fn supports_decode_to_f16(&self, ops: &impl flambeau_ops::Ops) -> bool {
+        ops.mmvq_f16_supported(self.dtype)
     }
 
     /// Decode-only (`m=1`) MMVQ writing directly into an F16

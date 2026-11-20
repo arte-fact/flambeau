@@ -230,6 +230,10 @@ impl<B: KernelBackend> Ops for OpsImpl<'_, B> {
         crate::launch::qmatmul::mmvq_f16_direct(self.reg, self.stream, buf, shape, dtype_weight)
     }
 
+    fn mmvq_f16_supported(&self, dtype_weight: QDtype) -> bool {
+        crate::launch::qmatmul::mmvq_f16_supported(self.reg, dtype_weight)
+    }
+
     fn mmq(
         &self,
         buf: crate::MmvqBuffers,

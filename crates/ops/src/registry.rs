@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use flambeau_core::{Device, KernelBackend};
+use flambeau_core::{Device, KernelBackend, QDtype};
 
 /// Kernel stems every model might touch — the same `extern "C"` stem names in
 /// both the `.hsaco` (HIP) and `.cubin` (CUDA) catalogues. Loaded once in
@@ -331,6 +331,29 @@ pub struct Registry<B: KernelBackend> {
     device_id: i32,
     modules: HashMap<&'static str, B::Module>,
     skipped: Vec<&'static str>,
+    /// The m = 1 MMVQ kernel of each weight dtype, resolved on first use
+    /// (dispatch row → recipe → F16-entry presence) instead of per launch.
+    pub(crate) mmvq_m1: DtypeCache<Option<crate::launch::qmatmul::MmvqM1>>,
+}
+
+/// One lazily-resolved value per weight dtype, kept for the owner's
+/// lifetime: choices that depend only on the dtype are resolved once, on
+/// first use, instead of on every launch.
+pub(crate) struct DtypeCache<T> {
+    slots: [std::sync::OnceLock<T>; QDtype::COUNT],
+}
+
+impl<T> DtypeCache<T> {
+    pub(crate) fn new() -> Self {
+        Self {
+            slots: std::array::from_fn(|_| std::sync::OnceLock::new()),
+        }
+    }
+
+    /// The value for `dtype`, running `init` only the first time.
+    pub(crate) fn get_or_init(&self, dtype: QDtype, init: impl FnOnce() -> T) -> &T {
+        self.slots[dtype.index()].get_or_init(init)
+    }
 }
 
 impl<B: KernelBackend> Registry<B> {
@@ -370,6 +393,7 @@ impl<B: KernelBackend> Registry<B> {
             device_id: dev.id(),
             modules,
             skipped,
+            mmvq_m1: DtypeCache::new(),
         })
     }
 
@@ -399,5 +423,41 @@ impl<B: KernelBackend> Registry<B> {
     /// Device id the registry was bound to.
     pub fn device_id(&self) -> i32 {
         self.device_id
+    }
+}
+
+#[cfg(test)]
+mod dtype_cache_tests {
+    use std::cell::Cell;
+
+    use flambeau_core::QDtype;
+
+    use super::DtypeCache;
+
+    /// The per-launch kernel choice must be resolved once per dtype, not on
+    /// every call: a second lookup returns the stored value without running
+    /// the resolver again, and each dtype has its own slot.
+    #[test]
+    fn resolves_once_per_dtype() {
+        let cache: DtypeCache<usize> = DtypeCache::new();
+        let calls = Cell::new(0);
+        let resolve = |v: usize| {
+            calls.set(calls.get() + 1);
+            v
+        };
+        assert_eq!(*cache.get_or_init(QDtype::Q4_K, || resolve(1)), 1);
+        assert_eq!(*cache.get_or_init(QDtype::Q4_K, || resolve(2)), 1);
+        assert_eq!(calls.get(), 1);
+        assert_eq!(*cache.get_or_init(QDtype::IQ4_XS, || resolve(3)), 3);
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[test]
+    fn every_dtype_has_a_slot() {
+        let cache: DtypeCache<()> = DtypeCache::new();
+        for dtype in [QDtype::F32, QDtype::IQ1_M, QDtype::Q8_1, QDtype::BF16] {
+            cache.get_or_init(dtype, || ());
+        }
+        assert_eq!(QDtype::IQ1_M.index() + 1, QDtype::COUNT);
     }
 }

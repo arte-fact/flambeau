@@ -204,7 +204,7 @@ pub fn dense_ffn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
     // F16-cast — skips one `cast_f32_to_f16` launch per layer per token.
     let f16_fast = n == 1
         && weights.post_ffn_norm.is_none()
-        && weights.ffn_down.supports_decode_to_f16()
+        && weights.ffn_down.supports_decode_to_f16(&ops)
         && (hooks.supports_ar_residual_rmsnorm_f16() || hooks.supports_ar_residual_f16());
     let mut down_f32 = unsafe { Tensor::<F32>::from_raw(state.pool.down_f32, n * hidden) };
     if !f16_fast {

@@ -24,6 +24,16 @@ params = """
     const int n_blocks_per_row"""
 body = "mmvq_dp4a_row<Q8_0, 256>(x, y, dst, n_rows, n_blocks_per_row);"
 
+[[kernel.entry]]
+name = "flambeau_mmvq_q8_0_dp4a_q8_1_f16"
+params = """
+    const flambeau_block_q8_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_dp4a_row<Q8_0, 256, fb_fp16_t>(x, y, dst, n_rows, n_blocks_per_row);"
+
 # Q8_0 t128 config variant — same skeleton at 128 threads/block (2 wave64 → more
 # in-flight blocks/CU; on CUDA 4 warps). An autotune candidate vs the 256-thread
 # dp4a; the THREADS template param is the only difference.
@@ -2006,7 +2016,6 @@ params = """
 body = "mmvq_dp4a_vdr_row<Q4_0, 128, 2>(x, y, dst, n_rows, n_blocks_per_row);"
 
 # Q4_1 single-row MMVQ — legacy 4-bit with per-block min (y = d*q + m).
-# Base kernel is F32-only (the F16-dst Q4_1 path is a separate t128 kernel).
 [[kernel]]
 stem = "mmvq_q4_1"
 includes = ["quant_traits.cuh", "mmvq.cuh"]
@@ -2020,6 +2029,16 @@ params = """
     const int n_rows,
     const int n_blocks_per_row"""
 body = "mmvq_dp4a_row<Q4_1, 256>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_1_q8_1_f16"
+params = """
+    const flambeau_block_q4_1* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_dp4a_row<Q4_1, 256, fb_fp16_t>(x, y, dst, n_rows, n_blocks_per_row);"
 
 # Q5_0 single-row MMVQ — 5-bit, zero-point -16 (5th bit in the qh plane).
 [[kernel]]
@@ -2243,6 +2262,17 @@ params = """
     const int n_superblocks_per_row"""
 body = "mmvq_q4_k_vdr2_row<float, 128>(x, y, dst, n_rows, n_superblocks_per_row);"
 
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_k_dp4a_t128_vdr2_q8_1_f16"
+launch_bounds = "128"
+params = """
+    const flambeau_block_q4_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_q4_k_vdr2_row<fb_fp16_t, 128>(x, y, dst, n_rows, n_superblocks_per_row);"
+
 [[kernel]]
 stem = "mmvq_q5_k_dp4a_t128_vdr2"
 includes = ["mmvq_q5_k.cuh"]
@@ -2258,6 +2288,17 @@ params = """
     const int n_superblocks_per_row"""
 body = "mmvq_q5_k_vdr2_row<float, 128>(x, y, dst, n_rows, n_superblocks_per_row);"
 
+[[kernel.entry]]
+name = "flambeau_mmvq_q5_k_dp4a_t128_vdr2_q8_1_f16"
+launch_bounds = "128"
+params = """
+    const flambeau_block_q5_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_q5_k_vdr2_row<fb_fp16_t, 128>(x, y, dst, n_rows, n_superblocks_per_row);"
+
 [[kernel]]
 stem = "mmvq_iq4_xs_dp4a_t128_vdr4"
 includes = ["mmvq_iq4_xs.cuh"]
@@ -2272,6 +2313,17 @@ params = """
     const int n_rows,
     const int n_superblocks_per_row"""
 body = "mmvq_iq4_xs_vdr4_row<float, 128>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq4_xs_dp4a_t128_vdr4_q8_1_f16"
+launch_bounds = "128"
+params = """
+    const flambeau_block_iq4_xs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_iq4_xs_vdr4_row<fb_fp16_t, 128>(x, y, dst, n_rows, n_superblocks_per_row);"
 
 # Q8_K single-row MMVQ — simplest K-quant (f32 d, no sub-block scales). 256
 # threads, dp4a per Q8_1 sub-block. Used by UD-Q8_K_XL GGUFs.

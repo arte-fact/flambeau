@@ -186,7 +186,7 @@ pub fn standard_attn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
             weights.head_dim,
             &ops,
         )?;
-    } else if n == 1 && weights.attn_q.supports_decode_to_f16() {
+    } else if n == 1 && weights.attn_q.supports_decode_to_f16(&ops) {
         // Decode F16-direct: skip the qmatmul→F32→cast pair, write Q
         // straight to the F16 KV-cache-shape buffer via mmvq's
         // saturating F16 cast. No AR on attn_q (TP col-shards heads).
@@ -240,7 +240,7 @@ pub fn standard_attn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
             flambeau_ops::MmvqShape { n_rows: kv_width, k: hidden },
             &ops,
         )?;
-    } else if n == 1 && weights.attn_k.supports_decode_to_f16() {
+    } else if n == 1 && weights.attn_k.supports_decode_to_f16(&ops) {
         let mut k_f16 = unsafe { Tensor::<F16>::from_raw(state.pool.k_f16, n * kv_width) };
         weights
             .attn_k
@@ -265,7 +265,7 @@ pub fn standard_attn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
     if fuse_kv_q4_0 {
         // V was produced by the fused K+V kernel above.
     } else if let Some(v_w) = weights.attn_v.as_ref() {
-        if n == 1 && v_w.supports_decode_to_f16() {
+        if n == 1 && v_w.supports_decode_to_f16(&ops) {
             let mut v_f16 = unsafe { Tensor::<F16>::from_raw(state.pool.v_f16, n * kv_width) };
             v_w.qmatmul_decode_to_f16(&norm_q8_1, &mut v_f16, hidden, kv_width, &ops)?;
         } else {
@@ -1500,7 +1500,7 @@ pub fn standard_attn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
     // — skips one `cast_f32_to_f16` launch per layer per token.
     let f16_fast = n == 1
         && weights.post_attn_norm.is_none()
-        && weights.attn_output.supports_decode_to_f16()
+        && weights.attn_output.supports_decode_to_f16(&ops)
         && (hooks.supports_ar_residual_rmsnorm_f16() || hooks.supports_ar_residual_f16());
     let mut proj_f32 = unsafe { Tensor::<F32>::from_raw(state.pool.attn_proj_f32, n * hidden) };
     if !f16_fast {
