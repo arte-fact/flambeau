@@ -1688,6 +1688,7 @@ fn sweep_cuda(root: &std::path::Path, op: &str, dtype: &str) -> Result<()> {
         "IQ1_M_dp4a" => vec![Dtype::Iq1MDp4a],
         "Q4_K_dp4a_t128_vdr2" => vec![Dtype::Q4KDp4aT128Vdr2],
         "Q5_K_dp4a_t128_vdr2" => vec![Dtype::Q5KDp4aT128Vdr2],
+        "IQ4_XS_dp4a_t128_vdr4" => vec![Dtype::Iq4XsDp4aT128Vdr4],
         "Q6_K" => vec![Dtype::Q6KDP4A],
         "Q8_K" => vec![Dtype::Q8K],
         "IQ4_NL" => vec![Dtype::Iq4NlDp4a],

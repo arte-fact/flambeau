@@ -10,18 +10,27 @@
 #include "quant_traits.cuh"
 #include "mmvq_reduce.cuh"
 
-// Map 4 packed 4-bit indices to 4 codebook int8 values. The 16 kvalues_iq4nl
-// entries are split into four int32 constants; two byte_perm gather the low/
-// high octet, a third selects between them on bit 3 of each index.
+// The 16 `kvalues_iq4nl` codebook entries as four little-endian int32 words.
+static constexpr unsigned int IQ4NL_KV0 = 0xBFAD9881u; // {-127, -104, -83, -65}
+static constexpr unsigned int IQ4NL_KV1 = 0xF6EADDCFu; // {-49, -35, -22, -10}
+static constexpr unsigned int IQ4NL_KV2 = 0x26190D01u; // {1, 13, 25, 38}
+static constexpr unsigned int IQ4NL_KV3 = 0x71594535u; // {53, 69, 89, 113}
+
+// Map 4 packed 4-bit indices to 4 codebook int8 values. Two byte_perm gather
+// the low / high octet of the codebook, a third selects between them on bit 3
+// of each index.
 static __device__ __forceinline__ unsigned int iq4_nl_table_4(unsigned int q4) {
-    constexpr unsigned int kv0 = 0xBFAD9881u; // {-127, -104, -83, -65}
-    constexpr unsigned int kv1 = 0xF6EADDCFu; // {-49, -35, -22, -10}
-    constexpr unsigned int kv2 = 0x26190D01u; // {1, 13, 25, 38}
-    constexpr unsigned int kv3 = 0x71594535u; // {53, 69, 89, 113}
-    const unsigned int v_low  = byte_perm(kv1, kv0, q4 & 0x07070707u);
-    const unsigned int v_high = byte_perm(kv3, kv2, q4 & 0x07070707u);
+    const unsigned int v_low  = byte_perm(IQ4NL_KV1, IQ4NL_KV0, q4 & 0x07070707u);
+    const unsigned int v_high = byte_perm(IQ4NL_KV3, IQ4NL_KV2, q4 & 0x07070707u);
     const unsigned int mask   = 0x03020100u | ((q4 & 0x08080808u) >> 1);
     return byte_perm(v_high, v_low, mask);
+}
+
+// Map the 8 packed 4-bit indices of `q4` to codebook values: `lo` gets the low
+// nibble of each byte, `hi` the high nibble (arch primitive `lut16_s8_nibbles`).
+static __device__ __forceinline__ void iq4_nl_table_8(unsigned int q4, int& lo, int& hi) {
+    lut16_s8_nibbles(q4, IQ4NL_KV0, IQ4NL_KV1, IQ4NL_KV2,
+                     IQ4NL_KV3, lo, hi);
 }
 
 template<class OutT>

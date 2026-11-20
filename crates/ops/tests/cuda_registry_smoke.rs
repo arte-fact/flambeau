@@ -53,7 +53,7 @@ fn cuda_registry_loads_present_skips_unported() {
         "qmatmul_iq3_xxs_mmvq_dp4a",
         "qmatmul_iq3_s_mmvq_dp4a",
         "qmatmul_iq4_nl_mmvq_dp4a",
-        "qmatmul_iq4_xs_mmvq_dp4a",
+        "qmatmul_iq4_xs_mmvq_dp4a_t128_vdr4",
     ];
     for impl_id in decode_impls {
         let stem = flambeau_ops::qmatmul::recipe_stem_for(impl_id)

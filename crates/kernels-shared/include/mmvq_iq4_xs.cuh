@@ -90,8 +90,8 @@ static __device__ __forceinline__ void mmvq_iq4_xs_vdr4_row(
         #pragma unroll
         for (int j = 0; j < 4; ++j) {
             const unsigned int aux = (unsigned int) load_int_b4(bk->qs, 4 * sub + j);
-            const int v_lo = (int) iq4_nl_table_4(aux & 0x0F0F0F0Fu);
-            const int v_hi = (int) iq4_nl_table_4((aux >> 4) & 0x0F0F0F0Fu);
+            int v_lo, v_hi;
+            iq4_nl_table_8(aux, v_lo, v_hi);
             sumi = dp4a(v_lo, load_int_b4(ya->qs, j), sumi);
             sumi = dp4a(v_hi, load_int_b4(ya->qs, j + 4), sumi);
         }

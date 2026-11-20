@@ -70,6 +70,24 @@ static __device__ __forceinline__ unsigned int byte_perm(unsigned int a, unsigne
     return __builtin_amdgcn_perm(a, b, sel);
 }
 
+// Map the 8 packed 4-bit indices of `q4` through a 16-entry int8 table packed
+// little-endian in t0..t3: `lo` gets the low nibble of each byte, `hi` the high
+// nibble. Per 4 values: two permutes gather the low / high octet of the table,
+// a third selects between them on bit 3 of each index.
+static __device__ __forceinline__ unsigned int lut16_s8_x4(
+    unsigned int q, unsigned int t0, unsigned int t1, unsigned int t2, unsigned int t3) {
+    const unsigned int v_low  = byte_perm(t1, t0, q & 0x07070707u);
+    const unsigned int v_high = byte_perm(t3, t2, q & 0x07070707u);
+    const unsigned int mask   = 0x03020100u | ((q & 0x08080808u) >> 1);
+    return byte_perm(v_high, v_low, mask);
+}
+static __device__ __forceinline__ void lut16_s8_nibbles(
+    unsigned int q4, unsigned int t0, unsigned int t1, unsigned int t2, unsigned int t3,
+    int& lo, int& hi) {
+    lo = (int) lut16_s8_x4(q4 & 0x0F0F0F0Fu, t0, t1, t2, t3);
+    hi = (int) lut16_s8_x4((q4 >> 4) & 0x0F0F0F0Fu, t0, t1, t2, t3);
+}
+
 // Neutral L2-prefetch seam — no-ops (gfx906's global_load_dword hints are a
 // wave64 perf optimization; sm_80.cuh no-ops these too). Signatures mirror
 // gfx906.cuh exactly.

@@ -59,6 +59,27 @@ static __device__ __forceinline__ unsigned int byte_perm(unsigned int a, unsigne
     return __byte_perm(b, a, packed);
 }
 
+// Map the 8 packed 4-bit indices of `q4` through a 16-entry int8 table packed
+// little-endian in t0..t3: `lo` gets the low nibble of each byte, `hi` the high
+// nibble. __byte_perm takes one selector nibble per output byte and reads only
+// its low 3 bits, so the raw indices select within each table half directly;
+// bit 3 then picks the half, and two final permutes de-interleave.
+static __device__ __forceinline__ void lut16_s8_nibbles(
+    unsigned int q4, unsigned int t0, unsigned int t1, unsigned int t2, unsigned int t3,
+    int& lo, int& hi) {
+    const unsigned int half_sel = 0x32103210u | ((q4 & 0x88888888u) >> 1);
+    unsigned int v[2];
+    #pragma unroll
+    for (int i = 0; i < 2; ++i) {
+        const unsigned int sel  = q4 >> (16 * i);
+        const unsigned int low  = __byte_perm(t0, t1, sel);
+        const unsigned int high = __byte_perm(t2, t3, sel);
+        v[i] = __byte_perm(low, high, half_sel >> (16 * i));
+    }
+    lo = (int) __byte_perm(v[0], v[1], 0x6420);
+    hi = (int) __byte_perm(v[0], v[1], 0x7531);
+}
+
 // Neutral L2-prefetch seam for the LDS-tiled MMQ kernels — no-ops on CUDA
 // (correctness-first; cp.async staging is a perf follow-up). gfx906.cuh issues
 // real global_load_dword hints; signatures mirror it exactly.
