@@ -2446,7 +2446,31 @@ pub enum MoeMmvqDtype {
     Iq1MR2,
 }
 
+/// Qwen3.6-35B-A3B expert projections, `(n_rows, k)`: gate / up
+/// (moe_intermediate × hidden) and down (hidden × moe_intermediate).
+const MOE_35B_GATE_UP: (usize, usize) = (768, 2048);
+const MOE_35B_DOWN: (usize, usize) = (2048, 768);
+const MOE_35B_TOP_K: usize = 8;
+const MOE_35B_EXPERTS: usize = 256;
+
+/// `(n_tokens, top_k, n_rows, k)` for every `m` of `m_grid` over `shapes`.
+fn moe_cases(m_grid: &[usize], shapes: &[(usize, usize)]) -> Vec<(usize, usize, usize, usize)> {
+    m_grid
+        .iter()
+        .flat_map(|&m| shapes.iter().map(move |&(n_rows, k)| (m, MOE_35B_TOP_K, n_rows, k)))
+        .collect()
+}
+
 impl MoeMmvqDtype {
+    /// Sweep shapes. The Q4_K r2 / r4 kernels cover the token range of
+    /// their gfx906 dispatch rows (r2: m = 1..31, r4: m >= 32).
+    fn cases(self) -> Vec<(usize, usize, usize, usize)> {
+        match self {
+            MoeMmvqDtype::Q4KR2 => moe_cases(&[1, 8, 31], &[MOE_35B_GATE_UP, MOE_35B_DOWN]),
+            MoeMmvqDtype::Q4KR4 => moe_cases(&[32, 64, 128], &[MOE_35B_GATE_UP, MOE_35B_DOWN]),
+            _ => vec![(1, 4, 256, 2048), (4, 4, 256, 2048), (1, 8, 2048, 768)],
+        }
+    }
     pub fn name(self) -> &'static str {
         match self {
             MoeMmvqDtype::Q8_0 => "Q8_0",
@@ -2590,14 +2614,9 @@ pub fn run_moe_mmvq_sweep<B: BenchBackend>(
         B::attributes(&kernel)?
     };
 
-    // Qwen3.x MoE regime, scaled to 16 experts for cert runtime:
     // (n_tokens, top_k, n_rows = expert output dim, k = hidden).
-    let n_experts = 16usize;
-    let cases = [
-        (1usize, 4usize, 256usize, 2048usize),
-        (4, 4, 256, 2048),
-        (1, 8, 2048, 768),
-    ];
+    let n_experts = MOE_35B_EXPERTS;
+    let cases = dtype.cases();
 
     let mut results = Vec::new();
     for (n_tokens, top_k, n_rows, k) in cases {
@@ -2644,6 +2663,49 @@ pub fn run_moe_mmvq_sweep<B: BenchBackend>(
     Ok(cert)
 }
 
+/// Router ids for `n_pairs` (token, slot) pairs: a deterministic hash over
+/// `[0, n_experts)`, with the first pair on expert 0 and the last on the
+/// highest expert so both ends of the expert-offset range are exercised.
+fn moe_expert_ids(n_pairs: usize, n_experts: usize, seed: u64) -> Vec<i32> {
+    let mut ids: Vec<i32> = (0..n_pairs)
+        .map(|i| {
+            let h = (i as u64)
+                .wrapping_mul(0x9E3779B97F4A7C15)
+                .wrapping_add(seed.wrapping_mul(0x12345));
+            ((h >> 32) as u32 % n_experts as u32) as i32
+        })
+        .collect();
+    if let Some(first) = ids.first_mut() {
+        *first = 0;
+    }
+    if n_pairs > 1 {
+        ids[n_pairs - 1] = n_experts as i32 - 1;
+    }
+    ids
+}
+
+/// Dequantised `[n_rows][k]` weights of each expert `expert_ids` selects;
+/// `raw` holds every expert, `expert_bytes` apart.
+fn dequant_selected_experts(
+    wd: Dtype,
+    raw: &[u8],
+    expert_ids: &[i32],
+    expert_bytes: usize,
+    expert_elems: usize,
+) -> Result<std::collections::BTreeMap<usize, Vec<f32>>> {
+    let mut out = std::collections::BTreeMap::new();
+    for &e in expert_ids {
+        let e = e as usize;
+        if out.contains_key(&e) {
+            continue;
+        }
+        let mut dq = vec![0.0f32; expert_elems];
+        dequantize_into(wd.ggml(), &raw[e * expert_bytes..(e + 1) * expert_bytes], &mut dq)?;
+        out.insert(e, dq);
+    }
+    Ok(out)
+}
+
 /// One indexed-MoE MMVQ shape. Weight `[n_experts][n_rows][k]`, per-token
 /// activation `[n_tokens][k]` Q8_1, router-selected `expert_ids[n_tokens][top_k]`,
 /// output `dst[token, slot, row]`. Returns `(got, reference)`.
@@ -2674,10 +2736,8 @@ fn run_shape_moe_mmvq<B: BenchBackend>(
     let n_blocks = k / block_elems;
 
     // Expert weights [n_experts][n_rows][k].
-    let weights_raw =
-        tame_scales(wd, seeded_bytes(seed, n_experts * n_rows * n_blocks * block_bytes));
-    let mut w_dequant = vec![0.0f32; n_experts * n_rows * k];
-    dequantize_into(wd.ggml(), &weights_raw, &mut w_dequant)?;
+    let expert_bytes = n_rows * n_blocks * block_bytes;
+    let weights_raw = tame_scales(wd, seeded_bytes(seed, n_experts * expert_bytes));
     let d_w = alloc_and_upload(dev, weights_raw.as_slice());
 
     // Per-token activation [n_tokens][k] → token-major Q8_1 [n_tokens][n_blocks].
@@ -2699,16 +2759,10 @@ fn run_shape_moe_mmvq<B: BenchBackend>(
         stream.synchronize()?;
     }
 
-    // Router-selected experts (deterministic hash → [0, n_experts)).
-    let expert_ids: Vec<i32> = (0..n_tokens * top_k)
-        .map(|i| {
-            let h = (i as u64)
-                .wrapping_mul(0x9E3779B97F4A7C15)
-                .wrapping_add(seed.wrapping_mul(0x12345));
-            ((h >> 32) as u32 % n_experts as u32) as i32
-        })
-        .collect();
+    let expert_ids = moe_expert_ids(n_tokens * top_k, n_experts, seed);
     let d_ids = alloc_and_upload(dev, expert_ids.as_slice());
+    let w_dequant =
+        dequant_selected_experts(wd, &weights_raw, &expert_ids, expert_bytes, n_rows * k)?;
 
     let d_dst = dev.alloc(n_tokens * top_k * n_rows * 4)?;
     {
@@ -2767,8 +2821,7 @@ fn run_shape_moe_mmvq<B: BenchBackend>(
         let y_rt = quantize_q8_1_roundtrip(&act_f32[t * k..(t + 1) * k]);
         for slot in 0..top_k {
             let expert = expert_ids[t * top_k + slot] as usize;
-            let wbase = &w_dequant[expert * n_rows * k..(expert + 1) * n_rows * k];
-            let col_out = reference_matmul(wbase, &y_rt, n_rows, k);
+            let col_out = reference_matmul(&w_dequant[&expert], &y_rt, n_rows, k);
             for row in 0..n_rows {
                 reference[(t * top_k + slot) * n_rows + row] = col_out[row];
             }
@@ -2787,6 +2840,14 @@ pub enum MoeGateUpDtype {
 }
 
 impl MoeGateUpDtype {
+    /// Sweep shapes. Q4_K r4 serves every token count (its gfx906 dispatch
+    /// row is m = any), so it covers the decode and prefill range.
+    fn cases(self) -> Vec<(usize, usize, usize, usize)> {
+        match self {
+            MoeGateUpDtype::Q4KR4 => moe_cases(&[1, 8, 31, 32, 64, 128], &[MOE_35B_GATE_UP]),
+            _ => vec![(1, 4, 256, 2048), (4, 4, 256, 2048)],
+        }
+    }
     pub fn name(self) -> &'static str {
         match self {
             MoeGateUpDtype::Q8_0 => "Q8_0",
@@ -2854,8 +2915,8 @@ pub fn run_moe_gate_up_sweep<B: BenchBackend>(
         B::attributes(&kernel)?
     };
 
-    let n_experts = 16usize;
-    let cases = [(1usize, 4usize, 256usize, 2048usize), (4, 4, 256, 2048)];
+    let n_experts = MOE_35B_EXPERTS;
+    let cases = dtype.cases();
 
     let mut results = Vec::new();
     for (n_tokens, top_k, n_rows, k) in cases {
@@ -2933,16 +2994,9 @@ fn run_shape_moe_gate_up<B: BenchBackend>(
     assert_eq!(k % block_elems, 0, "k {k} must be multiple of block size {block_elems}");
     let n_blocks = k / block_elems;
 
-    let gate_raw =
-        tame_scales(wd, seeded_bytes(seed, n_experts * n_rows * n_blocks * block_bytes));
-    let up_raw = tame_scales(
-        wd,
-        seeded_bytes(seed ^ 0xDEAD_BEEF, n_experts * n_rows * n_blocks * block_bytes),
-    );
-    let mut gate_dq = vec![0.0f32; n_experts * n_rows * k];
-    let mut up_dq = vec![0.0f32; n_experts * n_rows * k];
-    dequantize_into(wd.ggml(), &gate_raw, &mut gate_dq)?;
-    dequantize_into(wd.ggml(), &up_raw, &mut up_dq)?;
+    let expert_bytes = n_rows * n_blocks * block_bytes;
+    let gate_raw = tame_scales(wd, seeded_bytes(seed, n_experts * expert_bytes));
+    let up_raw = tame_scales(wd, seeded_bytes(seed ^ 0xDEAD_BEEF, n_experts * expert_bytes));
     let d_gate = alloc_and_upload(dev, gate_raw.as_slice());
     let d_up = alloc_and_upload(dev, up_raw.as_slice());
 
@@ -2964,15 +3018,10 @@ fn run_shape_moe_gate_up<B: BenchBackend>(
         stream.synchronize()?;
     }
 
-    let expert_ids: Vec<i32> = (0..n_tokens * top_k)
-        .map(|i| {
-            let h = (i as u64)
-                .wrapping_mul(0x9E3779B97F4A7C15)
-                .wrapping_add(seed.wrapping_mul(0x12345));
-            ((h >> 32) as u32 % n_experts as u32) as i32
-        })
-        .collect();
+    let expert_ids = moe_expert_ids(n_tokens * top_k, n_experts, seed);
     let d_ids = alloc_and_upload(dev, expert_ids.as_slice());
+    let gate_dq = dequant_selected_experts(wd, &gate_raw, &expert_ids, expert_bytes, n_rows * k)?;
+    let up_dq = dequant_selected_experts(wd, &up_raw, &expert_ids, expert_bytes, n_rows * k)?;
 
     let out_elems = n_tokens * top_k * n_rows;
     let d_gate_out = dev.alloc(out_elems * 4)?;
@@ -3049,10 +3098,8 @@ fn run_shape_moe_gate_up<B: BenchBackend>(
         let y_rt = quantize_q8_1_roundtrip(&act_f32[t * k..(t + 1) * k]);
         for slot in 0..top_k {
             let expert = expert_ids[t * top_k + slot] as usize;
-            let gbase = &gate_dq[expert * n_rows * k..(expert + 1) * n_rows * k];
-            let ubase = &up_dq[expert * n_rows * k..(expert + 1) * n_rows * k];
-            let g_out = reference_matmul(gbase, &y_rt, n_rows, k);
-            let u_out = reference_matmul(ubase, &y_rt, n_rows, k);
+            let g_out = reference_matmul(&gate_dq[&expert], &y_rt, n_rows, k);
+            let u_out = reference_matmul(&up_dq[&expert], &y_rt, n_rows, k);
             for row in 0..n_rows {
                 ref_g[(t * top_k + slot) * n_rows + row] = g_out[row];
                 ref_u[(t * top_k + slot) * n_rows + row] = u_out[row];
