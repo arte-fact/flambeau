@@ -502,6 +502,10 @@ pub const BENCH_REFERENCE_KERNELS_SM86: &[DirectCallKernel] = &[
         cert_rel_path: "certs/cuda/sm_86/qmatmul_q3_k_mmq_wave64.json",
     },
     DirectCallKernel {
+        impl_id: "qmatmul_q3_k_mmvq_dp4a",
+        cert_rel_path: "certs/cuda/sm_86/qmatmul_q3_k_mmvq_dp4a.json",
+    },
+    DirectCallKernel {
         impl_id: "qmatmul_q4_0_gate_up_row_tile_mmvq_batched",
         cert_rel_path: "certs/cuda/sm_86/qmatmul_q4_0_gate_up_row_tile_mmvq_batched.json",
     },

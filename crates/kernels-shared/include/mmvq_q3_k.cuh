@@ -75,3 +75,74 @@ static __device__ __forceinline__ void mmvq_q3_k_dp4a_row(
 
     mmvq_reduce_store<THREADS, OutT>(acc, dst, row);
 }
+
+// Q3_K single row in llama.cpp's CUDA layout (`vec_dot_q3_K_q8_1`, VDR 2):
+// 8 threads per super-block, each loading 2 ints of `qs` and of `hmask` once
+// and covering the 4 two-bit planes (32 weights, 8 dp4a). The 3-bit value is
+// (low 2 bits | high bit << 2) - 4; the -4 is a second dp4a against 0xFC bytes.
+template<class OutT, int THREADS>
+static __device__ __forceinline__ void mmvq_q3_k_vdr2_row(
+    const flambeau_block_q3_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    OutT* __restrict__ dst,
+    int n_rows, int n_superblocks_per_row)
+{
+    constexpr int QI3_K = 16;
+    constexpr int QR3_K = 4;
+    constexpr int QI8_1 = 8;
+    constexpr int VDR   = 2;
+    constexpr int THREADS_PER_SB = QI3_K / VDR;
+    constexpr int SB_PER_ITER    = THREADS / THREADS_PER_SB;
+
+    const int row = blockIdx.x;
+    if (row >= n_rows) return;
+
+    const int tid        = threadIdx.x;
+    const int iqs        = VDR * (tid % THREADS_PER_SB);         // 0, 2, .., 14
+    const int bq8_offset = QR3_K * (iqs / (QI3_K / 2));          // 0 or 4
+    const int iqs8       = iqs % QI8_1;
+    const int sc_shift   = 8 * (iqs8 / (QI8_1 / 2)) + 4 * (iqs / (QI3_K / 2));
+
+    const flambeau_block_q3_K* xrow = x + (size_t) row * n_superblocks_per_row;
+
+    float acc = 0.0f;
+    for (int sb = tid / THREADS_PER_SB; sb < n_superblocks_per_row; sb += SB_PER_ITER) {
+        const flambeau_block_q3_K* bk = xrow + sb;
+
+        int vl[VDR];
+        int vh[VDR];
+        #pragma unroll
+        for (int j = 0; j < VDR; ++j) {
+            vl[j] = load_int_b2((const int8_t*) bk->qs, iqs + j);
+            vh[j] = load_int_b2((const int8_t*) bk->hmask, iqs8 + j) >> bq8_offset;
+        }
+        int scales[3];
+        #pragma unroll
+        for (int l = 0; l < 3; ++l) {
+            scales[l] = load_int_b2((const int8_t*) bk->scales, l) >> sc_shift;
+        }
+
+        const flambeau_block_q8_1* yb = y + (size_t) sb * 8 + bq8_offset;
+        float sumf = 0.0f;
+        #pragma unroll
+        for (int i = 0; i < QR3_K; ++i) {
+            const int sc_low  = (scales[i / 2] >> (16 * (i % 2))) & 0x0F;
+            const int sc_high = (scales[2] >> (16 * (i % 2) + 2 * (i / 2))) & 0x03;
+            const int sc      = (sc_low | (sc_high << 4)) - 32;
+
+            int sumi = 0;
+            #pragma unroll
+            for (int j = 0; j < VDR; ++j) {
+                const int u   = load_int_b4(yb[i].qs, iqs8 + j);
+                const int vil = (vl[j] >> (2 * i)) & 0x03030303;
+                const int vih = ((vh[j] >> i) << 2) & 0x04040404;
+                sumi = dp4a(vil | vih, u, sumi);
+                sumi = dp4a((int) 0xFCFCFCFC, u, sumi);
+            }
+            sumf += (float) yb[i].d * (float) (sumi * sc);
+        }
+        acc += (float) bk->d * sumf;
+    }
+
+    mmvq_reduce_store<THREADS, OutT>(acc, dst, row);
+}

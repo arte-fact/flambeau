@@ -34,7 +34,7 @@ fn cuda_registry_loads_present_skips_unported() {
     // "no launch recipe registered" (Q8_0) or "stem not loaded" (Q4_0/Q5_x).
     let decode_impls = [
         "qmatmul_q2_k_mmvq_dp4a",
-        "qmatmul_q3_k_mmvq_dp4a",
+        "qmatmul_q3_k_mmvq_dp4a_t128_vdr2",
         "qmatmul_q4_k_mmvq_dp4a_t128_vdr2",
         "qmatmul_q5_k_mmvq_dp4a_t128_vdr2",
         "qmatmul_q6_k_mmvq_dp4a",
