@@ -21,8 +21,7 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
     },
     KernelDescriptor {
         op_name: "QMatMul",
-        // Single-row dp4a, 128 threads, llama.cpp's GCN layout (vdr2); the
-        // 256-thread row below is kept as the reference.
+        // Single-row dp4a, 128 threads, llama.cpp's GCN layout (vdr2).
         impl_id: "qmatmul_q4_k_mmvq_dp4a_t128_vdr2",
         backend: "hip",
         arch: "gfx906",
@@ -33,18 +32,8 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
     },
     KernelDescriptor {
         op_name: "QMatMul",
-        impl_id: "qmatmul_q4_k_mmvq_dp4a_t256",
-        backend: "hip",
-        arch: "gfx906",
-        dtype_weight: QDtype::Q4_K,
-        dtype_activation: QDtype::Q8_1,
-        m_range: (usize::MAX, usize::MAX),
-        cert_rel_path: "certs/hip/gfx906/qmatmul_q4_k_mmvq_dp4a_t256.json",
-    },
-    KernelDescriptor {
-        op_name: "QMatMul",
-        // r2 (64 threads, 2 rows per block): superseded by the t256 row;
-        // kept as the regression reference.
+        // r2 (64 threads, 2 rows per block): not dispatched on gfx906 (the
+        // sm_86 dispatch row); kept as the regression reference.
         impl_id: "qmatmul_q4_k_mmvq_dp4a",
         backend: "hip",
         arch: "gfx906",

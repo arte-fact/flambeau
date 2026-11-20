@@ -65,7 +65,7 @@ dtype_q = "Q8_1"
 shape   = { m = "1..2", k = "any", n = "any" }
 impl    = "qmatmul_q4_k_mmvq_dp4a_t128_vdr2"
 cert    = "certs/hip/gfx906/qmatmul_q4_k_mmvq_dp4a_t128_vdr2.json"
-notes   = "Single-row dp4a in llama.cpp's mul_mat_vec_q GCN layout: 128 threads per row, 16 threads per super-block, each loading two ints of one sub-block pair's qs (and qh) once and dotting both nibbles, 16 weights, 8 super-blocks per pass. The 256-thread row (qmatmul_q4_k_mmvq_dp4a_t256) used 32 threads per super-block, each loading the same qs ints as a neighbour and the block header again (MemUnitBusy ~90 % against 61-74 % for llama.cpp); it is kept as the reference. m = 2 goes to the row-tiled batched kernel ahead of this table."
+notes   = "Single-row dp4a in llama.cpp's mul_mat_vec_q GCN layout: 128 threads per row, 16 threads per super-block, each loading two ints of one sub-block pair's qs (and qh) once and dotting both nibbles, 16 weights, 8 super-blocks per pass. The 256-thread kernel mmvq_q4_k_dp4a (still used by the F16-output decode path) uses 32 threads per super-block, each loading the same qs ints as a neighbour and the block header again (MemUnitBusy ~90 % against 61-74 % for llama.cpp). m = 2 goes to the row-tiled batched kernel ahead of this table."
 
 [[qmatmul]]
 dtype   = "IQ4_XS"

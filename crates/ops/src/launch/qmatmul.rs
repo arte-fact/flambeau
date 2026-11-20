@@ -1984,14 +1984,6 @@ impl Recipe {
                 rows_per_block: 1,
                 mmq_tile: (0, 0),
             },
-            "qmatmul_q4_k_mmvq_dp4a_t256" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_q4_k_dp4a",
-                entry: "flambeau_mmvq_q4_k_dp4a_q8_1",
-                threads: 256,
-                rows_per_block: 1,
-                mmq_tile: (0, 0),
-            },
             "qmatmul_q4_k_mmvq_dp4a" => Self {
                 kind: RecipeKind::Mmvq,
                 stem: "mmvq_q4_k_r2_dp4a",
