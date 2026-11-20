@@ -2463,13 +2463,10 @@ pub enum MoeMmvqDtype {
     Q8_0,
     Q4_0,
     Q4_1,
-    Q5_0,
-    Q5_1,
     Q4KR2,
     Q4KR4,
     Q5KR2,
     Q6KR2,
-    Q2KR2,
     Q3KR2,
     Iq4NlR2,
     Iq4XsR2,
@@ -2488,12 +2485,9 @@ impl MoeMmvqDtype {
             MoeMmvqDtype::Q8_0 => "Q8_0",
             MoeMmvqDtype::Q4_0 => "Q4_0",
             MoeMmvqDtype::Q4_1 => "Q4_1",
-            MoeMmvqDtype::Q5_0 => "Q5_0",
-            MoeMmvqDtype::Q5_1 => "Q5_1",
             MoeMmvqDtype::Q4KR2 | MoeMmvqDtype::Q4KR4 => "Q4_K",
             MoeMmvqDtype::Q5KR2 => "Q5_K",
             MoeMmvqDtype::Q6KR2 => "Q6_K",
-            MoeMmvqDtype::Q2KR2 => "Q2_K",
             MoeMmvqDtype::Q3KR2 => "Q3_K",
             MoeMmvqDtype::Iq4NlR2 => "IQ4_NL",
             MoeMmvqDtype::Iq4XsR2 => "IQ4_XS",
@@ -2511,12 +2505,9 @@ impl MoeMmvqDtype {
             MoeMmvqDtype::Q8_0 => Dtype::Q8_0Dp4a,
             MoeMmvqDtype::Q4_0 => Dtype::Q4_0,
             MoeMmvqDtype::Q4_1 => Dtype::Q4_1Dp4a,
-            MoeMmvqDtype::Q5_0 => Dtype::Q5_0,
-            MoeMmvqDtype::Q5_1 => Dtype::Q5_1,
             MoeMmvqDtype::Q4KR2 | MoeMmvqDtype::Q4KR4 => Dtype::Q4K,
             MoeMmvqDtype::Q5KR2 => Dtype::Q5K,
             MoeMmvqDtype::Q6KR2 => Dtype::Q6K,
-            MoeMmvqDtype::Q2KR2 => Dtype::Q2K,
             MoeMmvqDtype::Q3KR2 => Dtype::Q3K,
             MoeMmvqDtype::Iq4NlR2 => Dtype::Iq4Nl,
             MoeMmvqDtype::Iq4XsR2 => Dtype::Iq4Xs,
@@ -2534,13 +2525,10 @@ impl MoeMmvqDtype {
             MoeMmvqDtype::Q8_0 => "indexed_moe_mmvq_q8_0",
             MoeMmvqDtype::Q4_0 => "indexed_moe_mmvq_q4_0",
             MoeMmvqDtype::Q4_1 => "indexed_moe_mmvq_q4_1",
-            MoeMmvqDtype::Q5_0 => "indexed_moe_mmvq_q5_0",
-            MoeMmvqDtype::Q5_1 => "indexed_moe_mmvq_q5_1",
             MoeMmvqDtype::Q4KR2 => "indexed_moe_mmvq_q4_k_r2",
             MoeMmvqDtype::Q4KR4 => "indexed_moe_mmvq_q4_k_r4",
             MoeMmvqDtype::Q5KR2 => "indexed_moe_mmvq_q5_k_r2",
             MoeMmvqDtype::Q6KR2 => "indexed_moe_mmvq_q6_k_r2",
-            MoeMmvqDtype::Q2KR2 => "indexed_moe_mmvq_q2_k_r2",
             MoeMmvqDtype::Q3KR2 => "indexed_moe_mmvq_q3_k_r2",
             MoeMmvqDtype::Iq4NlR2 => "indexed_moe_mmvq_iq4_nl_r2",
             MoeMmvqDtype::Iq4XsR2 => "indexed_moe_mmvq_iq4_xs_r2",
@@ -2558,13 +2546,10 @@ impl MoeMmvqDtype {
             MoeMmvqDtype::Q8_0 => "indexed_moe_mmvq_q8_0",
             MoeMmvqDtype::Q4_0 => "indexed_moe_mmvq_q4_0",
             MoeMmvqDtype::Q4_1 => "indexed_moe_mmvq_q4_1",
-            MoeMmvqDtype::Q5_0 => "indexed_moe_mmvq_q5_0",
-            MoeMmvqDtype::Q5_1 => "indexed_moe_mmvq_q5_1",
             MoeMmvqDtype::Q4KR2 => "indexed_moe_mmvq_q4_k_r2_dp4a",
             MoeMmvqDtype::Q4KR4 => "indexed_moe_mmvq_q4_k_r4_dp4a",
             MoeMmvqDtype::Q5KR2 => "indexed_moe_mmvq_q5_k_r2_dp4a",
             MoeMmvqDtype::Q6KR2 => "indexed_moe_mmvq_q6_k_r2_dp4a",
-            MoeMmvqDtype::Q2KR2 => "indexed_moe_mmvq_q2_k_r2_dp4a",
             MoeMmvqDtype::Q3KR2 => "indexed_moe_mmvq_q3_k_r2_dp4a",
             MoeMmvqDtype::Iq4NlR2 => "indexed_moe_mmvq_iq4_nl_r2_dp4a",
             MoeMmvqDtype::Iq4XsR2 => "indexed_moe_mmvq_iq4_xs_r2_dp4a",
@@ -2582,13 +2567,10 @@ impl MoeMmvqDtype {
             MoeMmvqDtype::Q8_0 => "flambeau_indexed_moe_mmvq_q8_0_dp4a_q8_1",
             MoeMmvqDtype::Q4_0 => "flambeau_indexed_moe_mmvq_q4_0_q8_1",
             MoeMmvqDtype::Q4_1 => "flambeau_indexed_moe_mmvq_q4_1_q8_1",
-            MoeMmvqDtype::Q5_0 => "flambeau_indexed_moe_mmvq_q5_0_q8_1",
-            MoeMmvqDtype::Q5_1 => "flambeau_indexed_moe_mmvq_q5_1_q8_1",
             MoeMmvqDtype::Q4KR2 => "flambeau_indexed_moe_mmvq_q4_k_r2_dp4a_q8_1",
             MoeMmvqDtype::Q4KR4 => "flambeau_indexed_moe_mmvq_q4_k_r4_dp4a_q8_1",
             MoeMmvqDtype::Q5KR2 => "flambeau_indexed_moe_mmvq_q5_k_r2_dp4a_q8_1",
             MoeMmvqDtype::Q6KR2 => "flambeau_indexed_moe_mmvq_q6_k_r2_dp4a_q8_1",
-            MoeMmvqDtype::Q2KR2 => "flambeau_indexed_moe_mmvq_q2_k_r2_dp4a_q8_1",
             MoeMmvqDtype::Q3KR2 => "flambeau_indexed_moe_mmvq_q3_k_r2_dp4a_q8_1",
             MoeMmvqDtype::Iq4NlR2 => "flambeau_indexed_moe_mmvq_iq4_nl_r2_dp4a_q8_1",
             MoeMmvqDtype::Iq4XsR2 => "flambeau_indexed_moe_mmvq_iq4_xs_r2_dp4a_q8_1",
@@ -2608,13 +2590,10 @@ impl MoeMmvqDtype {
         match self {
             MoeMmvqDtype::Q8_0
             | MoeMmvqDtype::Q4_0
-            | MoeMmvqDtype::Q4_1
-            | MoeMmvqDtype::Q5_0
-            | MoeMmvqDtype::Q5_1 => (256, 1),
+            | MoeMmvqDtype::Q4_1 => (256, 1),
             MoeMmvqDtype::Q4KR2
             | MoeMmvqDtype::Q5KR2
             | MoeMmvqDtype::Q6KR2
-            | MoeMmvqDtype::Q2KR2
             | MoeMmvqDtype::Q3KR2
             | MoeMmvqDtype::Iq4NlR2
             | MoeMmvqDtype::Iq4XsR2
@@ -2837,7 +2816,6 @@ fn run_shape_moe_mmvq<B: BenchBackend>(
 pub enum MoeGateUpDtype {
     Q8_0,
     Q4_0,
-    Q4K,
     Q4KR4,
     Q4KR4Sorted,
 }
@@ -2847,21 +2825,20 @@ impl MoeGateUpDtype {
         match self {
             MoeGateUpDtype::Q8_0 => "Q8_0",
             MoeGateUpDtype::Q4_0 => "Q4_0",
-            MoeGateUpDtype::Q4K | MoeGateUpDtype::Q4KR4 | MoeGateUpDtype::Q4KR4Sorted => "Q4_K",
+            MoeGateUpDtype::Q4KR4 | MoeGateUpDtype::Q4KR4Sorted => "Q4_K",
         }
     }
     fn weight_dtype(self) -> Dtype {
         match self {
             MoeGateUpDtype::Q8_0 => Dtype::Q8_0Dp4a,
             MoeGateUpDtype::Q4_0 => Dtype::Q4_0,
-            MoeGateUpDtype::Q4K | MoeGateUpDtype::Q4KR4 | MoeGateUpDtype::Q4KR4Sorted => Dtype::Q4K,
+            MoeGateUpDtype::Q4KR4 | MoeGateUpDtype::Q4KR4Sorted => Dtype::Q4K,
         }
     }
     fn impl_id(self) -> &'static str {
         match self {
             MoeGateUpDtype::Q8_0 => "indexed_moe_mmvq_q8_0_gate_up",
             MoeGateUpDtype::Q4_0 => "indexed_moe_mmvq_q4_0_gate_up",
-            MoeGateUpDtype::Q4K => "indexed_moe_mmvq_q4_k_gate_up",
             MoeGateUpDtype::Q4KR4 => "indexed_moe_mmvq_q4_k_gate_up_r4",
             MoeGateUpDtype::Q4KR4Sorted => "indexed_moe_mmvq_q4_k_gate_up_r4_sorted",
         }
@@ -2870,7 +2847,6 @@ impl MoeGateUpDtype {
         match self {
             MoeGateUpDtype::Q8_0 => "indexed_moe_mmvq_q8_0_gate_up_dp4a",
             MoeGateUpDtype::Q4_0 => "indexed_moe_mmvq_q4_0_gate_up_dp4a",
-            MoeGateUpDtype::Q4K => "indexed_moe_mmvq_q4_k_gate_up",
             MoeGateUpDtype::Q4KR4 => "indexed_moe_mmvq_q4_k_gate_up_r4_dp4a",
             MoeGateUpDtype::Q4KR4Sorted => "indexed_moe_mmvq_q4_k_gate_up_r4_sorted_dp4a",
         }
@@ -2879,7 +2855,6 @@ impl MoeGateUpDtype {
         match self {
             MoeGateUpDtype::Q8_0 => "flambeau_indexed_moe_mmvq_q8_0_gate_up_dp4a_q8_1",
             MoeGateUpDtype::Q4_0 => "flambeau_indexed_moe_mmvq_q4_0_gate_up_dp4a_q8_1",
-            MoeGateUpDtype::Q4K => "flambeau_indexed_moe_mmvq_q4_k_gate_up_q8_1",
             MoeGateUpDtype::Q4KR4 => "flambeau_indexed_moe_mmvq_q4_k_gate_up_r4_dp4a_q8_1",
             MoeGateUpDtype::Q4KR4Sorted => "flambeau_indexed_moe_mmvq_q4_k_gate_up_r4_sorted_dp4a_q8_1",
         }
@@ -2889,7 +2864,7 @@ impl MoeGateUpDtype {
     fn launch_threads(self) -> u32 {
         match self {
             MoeGateUpDtype::Q8_0 | MoeGateUpDtype::Q4_0 => 256,
-            MoeGateUpDtype::Q4K | MoeGateUpDtype::Q4KR4 | MoeGateUpDtype::Q4KR4Sorted => 64,
+            MoeGateUpDtype::Q4KR4 | MoeGateUpDtype::Q4KR4Sorted => 64,
         }
     }
     /// Output rows computed per block (grid.x = ceil(n_rows / this)). The r4

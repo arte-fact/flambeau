@@ -888,14 +888,6 @@ const SIMPLE_SWEEPS: &[(&str, SweepFn)] = &[
         flambeau_bench::sweep_moe::run_indexed_moe_mmvq_r2_sweep,
     ),
     (
-        "indexed_moe_mmvq_q2_k",
-        flambeau_bench::sweep_moe::run_indexed_moe_mmvq_q2_k_sweep,
-    ),
-    (
-        "indexed_moe_mmvq_q3_k",
-        flambeau_bench::sweep_moe::run_indexed_moe_mmvq_q3_k_sweep,
-    ),
-    (
         "indexed_moe_mmvq_q5_k",
         flambeau_bench::sweep_moe::run_indexed_moe_mmvq_q5_k_sweep,
     ),
@@ -1490,13 +1482,10 @@ fn moe_mmvq_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::MoeMmvqDtyp
         "Q8_0_moe_mmvq" => Some(MoeMmvqDtype::Q8_0),
         "Q4_0_moe_mmvq" => Some(MoeMmvqDtype::Q4_0),
         "Q4_1_moe_mmvq" => Some(MoeMmvqDtype::Q4_1),
-        "Q5_0_moe_mmvq" => Some(MoeMmvqDtype::Q5_0),
-        "Q5_1_moe_mmvq" => Some(MoeMmvqDtype::Q5_1),
         "Q4_K_r2_moe_mmvq" => Some(MoeMmvqDtype::Q4KR2),
         "Q4_K_r4_moe_mmvq" => Some(MoeMmvqDtype::Q4KR4),
         "Q5_K_r2_moe_mmvq" => Some(MoeMmvqDtype::Q5KR2),
         "Q6_K_r2_moe_mmvq" => Some(MoeMmvqDtype::Q6KR2),
-        "Q2_K_r2_moe_mmvq" => Some(MoeMmvqDtype::Q2KR2),
         "Q3_K_r2_moe_mmvq" => Some(MoeMmvqDtype::Q3KR2),
         "IQ4_NL_r2_moe_mmvq" => Some(MoeMmvqDtype::Iq4NlR2),
         "IQ4_XS_r2_moe_mmvq" => Some(MoeMmvqDtype::Iq4XsR2),
@@ -1556,7 +1545,6 @@ fn moe_gate_up_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::MoeGateU
     match dtype {
         "Q8_0_gate_up_moe_mmvq" => Some(MoeGateUpDtype::Q8_0),
         "Q4_0_gate_up_moe_mmvq" => Some(MoeGateUpDtype::Q4_0),
-        "Q4_K_gate_up_moe_mmvq" => Some(MoeGateUpDtype::Q4K),
         "Q4_K_gate_up_r4_moe_mmvq" => Some(MoeGateUpDtype::Q4KR4),
         "Q4_K_gate_up_r4_sorted_moe_mmvq" => Some(MoeGateUpDtype::Q4KR4Sorted),
         _ => None,

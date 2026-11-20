@@ -74,14 +74,6 @@ pub const DIRECT_CALL_KERNELS_GFX906: &[DirectCallKernel] = &[
         cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q5_1_gfx906.json",
     },
     DirectCallKernel {
-        impl_id: "indexed_moe_mmvq_q2_k_gfx906",
-        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q2_k_gfx906.json",
-    },
-    DirectCallKernel {
-        impl_id: "indexed_moe_mmvq_q3_k_gfx906",
-        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q3_k_gfx906.json",
-    },
-    DirectCallKernel {
         impl_id: "indexed_moe_mmvq_q6_k_gfx906",
         cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q6_k_gfx906.json",
     },
@@ -492,14 +484,6 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
         cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q4_1.json",
     },
     DirectCallKernel {
-        impl_id: "indexed_moe_mmvq_q5_0",
-        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q5_0.json",
-    },
-    DirectCallKernel {
-        impl_id: "indexed_moe_mmvq_q5_1",
-        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q5_1.json",
-    },
-    DirectCallKernel {
         impl_id: "indexed_moe_mmvq_q4_k_r2",
         cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q4_k_r2.json",
     },
@@ -514,10 +498,6 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
     DirectCallKernel {
         impl_id: "indexed_moe_mmvq_q6_k_r2",
         cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q6_k_r2.json",
-    },
-    DirectCallKernel {
-        impl_id: "indexed_moe_mmvq_q2_k_r2",
-        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q2_k_r2.json",
     },
     DirectCallKernel {
         impl_id: "indexed_moe_mmvq_q3_k_r2",
@@ -566,10 +546,6 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
     DirectCallKernel {
         impl_id: "indexed_moe_mmvq_q4_0_gate_up",
         cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q4_0_gate_up.json",
-    },
-    DirectCallKernel {
-        impl_id: "indexed_moe_mmvq_q4_k_gate_up",
-        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q4_k_gate_up.json",
     },
     DirectCallKernel {
         impl_id: "indexed_moe_mmvq_q4_k_gate_up_r4_sorted",

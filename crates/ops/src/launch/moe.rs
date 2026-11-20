@@ -206,47 +206,6 @@ pub fn indexed_moe_mmvq_q3_k<B: flambeau_core::KernelBackend>(
     Ok(())
 }
 
-/// Q2_K MoE MMVQ. Routes through `indexed_moe_mmvq_q2_k_r2_dp4a`:
-/// wave64, 2 rows per block, half-warp DPP reduce. Same indexing
-/// contract as `indexed_moe_mmvq_q4_k`; weights are Q2_K super-blocks
-/// (affine, packed 4-bit (scale, min)).
-pub fn indexed_moe_mmvq_q2_k<B: flambeau_core::KernelBackend>(
-    reg: &crate::Registry<B>,
-    stream: &<B::Device as flambeau_core::Device>::Stream,
-    buffers: crate::MoeMmvqBuffers,
-    shape: crate::MoeMmvqShape,
-) -> Result<()> {
-    let crate::MoeMmvqBuffers { weights: w, act: y, expert_ids, dst } = buffers;
-    let crate::MoeMmvqShape { n_rows, n_tokens, top_k, n_sb_per_row } = shape;
-    let module = reg.expect_module("indexed_moe_mmvq_q2_k_r2_dp4a")?;
-    let kernel = B::kernel(module, "flambeau_indexed_moe_mmvq_q2_k_r2_dp4a_q8_1")?;
-    let n_rows_i = n_rows as i32;
-    let n_tokens_i = n_tokens as i32;
-    let top_k_i = top_k as i32;
-    let nb_i = n_sb_per_row as i32;
-    let w_ptr: u64 = w.as_usize() as u64;
-    let y_ptr: u64 = y.as_usize() as u64;
-    let e_ptr: u64 = expert_ids.as_usize() as u64;
-    let d_ptr: u64 = dst.as_usize() as u64;
-    let mut args = <B::Args<'_>>::default();
-    args.push_arg(&w_ptr);
-    args.push_arg(&y_ptr);
-    args.push_arg(&e_ptr);
-    args.push_arg(&d_ptr);
-    args.push_arg(&n_rows_i);
-    args.push_arg(&n_tokens_i);
-    args.push_arg(&top_k_i);
-    args.push_arg(&nb_i);
-    let grid_x = (n_rows as u32).div_ceil(2);
-    let cfg = LaunchCfg {
-        grid: (grid_x, (n_tokens * top_k) as u32, 1),
-        block: (64, 1, 1),
-        shared_bytes: 0,
-    };
-    B::launch(&kernel, stream, cfg, args)?;
-    Ok(())
-}
-
 /// IQ4_XS MoE MMVQ. Same indexing contract as `indexed_moe_mmvq_q4_k`;
 /// weights are IQ4_XS blocks.
 pub fn indexed_moe_mmvq_iq4_xs<B: flambeau_core::KernelBackend>(
