@@ -1033,162 +1033,10 @@ fn sweep(root: &std::path::Path, arch: &str, op: Option<&str>, dtype: &str) -> R
         match op {
             "qmatmul" => {
                 use flambeau_bench::sweep_mmvq::{run_sweep, Dtype, SweepSpec};
-                if dtype == "Q4_0_kv_f16dst" {
-                    let cert = flambeau_bench::sweep_mmvq::run_kv_f16dst_sweep::<
-                        flambeau_bench::backend::Hip,
-                    >(root, arch)?;
-                    println!(
-                        "sweep mmvq_q4_0_kv_f16dst: pass={} shapes={} rig={}",
-                        cert.pass,
-                        cert.results.len(),
-                        cert.rig
-                    );
-                    return Ok(());
-                }
-                if let Some(gu) = gate_up_dtype(dtype) {
-                    use flambeau_bench::sweep_mmvq::run_gate_up_sweep;
-                    let cert = run_gate_up_sweep::<flambeau_bench::backend::Hip>(gu, root, arch)?;
-                    println!(
-                        "sweep qmatmul_gate_up ({}): pass={} shapes={} rig={}",
-                        gu.name(),
-                        cert.pass,
-                        cert.results.len(),
-                        cert.rig
-                    );
-                    return Ok(());
-                }
-                if let Some(bd) = batched_dtype(dtype) {
-                    use flambeau_bench::sweep_mmvq::run_batched_sweep;
-                    let cert = run_batched_sweep::<flambeau_bench::backend::Hip>(bd, root, arch)?;
-                    println!(
-                        "sweep qmatmul_batched ({}): pass={} shapes={} rig={}",
-                        bd.name(),
-                        cert.pass,
-                        cert.results.len(),
-                        cert.rig
-                    );
-                    return Ok(());
-                }
-                if let Some(gb) = gate_up_batched_dtype(dtype) {
-                    use flambeau_bench::sweep_mmvq::run_gate_up_batched_sweep;
-                    let cert = run_gate_up_batched_sweep::<flambeau_bench::backend::Hip>(gb, root, arch)?;
-                    println!(
-                        "sweep qmatmul_gate_up_batched ({}): pass={} shapes={} rig={}",
-                        gb.name(),
-                        cert.pass,
-                        cert.results.len(),
-                        cert.rig
-                    );
-                    return Ok(());
-                }
-                if let Some(od) = mmq_oracle_dtype(dtype) {
-                    use flambeau_bench::sweep_mmvq::run_mmq_oracle_sweep;
-                    let cert = run_mmq_oracle_sweep::<flambeau_bench::backend::Hip>(od, root, arch)?;
-                    println!(
-                        "sweep qmatmul_mmq_oracle ({}): pass={} shapes={} rig={}",
-                        od.name(),
-                        cert.pass,
-                        cert.results.len(),
-                        cert.rig
-                    );
-                    return Ok(());
-                }
-                if let Some(gd) = mmq_gemm_dtype(dtype) {
-                    use flambeau_bench::sweep_mmvq::run_mmq_gemm_sweep;
-                    let cert = run_mmq_gemm_sweep::<flambeau_bench::backend::Hip>(gd, root, arch)?;
-                    println!(
-                        "sweep qmatmul_mmq_gemm ({}): pass={} shapes={} rig={}",
-                        gd.name(),
-                        cert.pass,
-                        cert.results.len(),
-                        cert.rig
-                    );
-                    return Ok(());
-                }
-                if let Some(wd) = mmq_4warp_dtype(dtype) {
-                    use flambeau_bench::sweep_mmvq::run_mmq_4warp_sweep;
-                    let cert = run_mmq_4warp_sweep::<flambeau_bench::backend::Hip>(wd, root, arch)?;
-                    println!(
-                        "sweep qmatmul_mmq_4warp ({}): pass={} shapes={} rig={}",
-                        wd.name(),
-                        cert.pass,
-                        cert.results.len(),
-                        cert.rig
-                    );
-                    return Ok(());
-                }
-                if let Some(ld) = mmq_4warp_lds_dtype(dtype) {
-                    use flambeau_bench::sweep_mmvq::run_mmq_4warp_lds_sweep;
-                    let cert =
-                        run_mmq_4warp_lds_sweep::<flambeau_bench::backend::Hip>(ld, root, arch)?;
-                    println!(
-                        "sweep qmatmul_mmq_4warp_lds ({}): pass={} shapes={} rig={}",
-                        ld.name(),
-                        cert.pass,
-                        cert.results.len(),
-                        cert.rig
-                    );
-                    return Ok(());
-                }
-                if let Some(md) = moe_mmvq_dtype(dtype) {
-                    use flambeau_bench::sweep_mmvq::run_moe_mmvq_sweep;
-                    let cert = run_moe_mmvq_sweep::<flambeau_bench::backend::Hip>(md, root, arch)?;
-                    println!(
-                        "sweep indexed_moe_mmvq ({}): pass={} shapes={} rig={}",
-                        md.name(),
-                        cert.pass,
-                        cert.results.len(),
-                        cert.rig
-                    );
-                    return Ok(());
-                }
-                if let Some(gu) = moe_gate_up_dtype(dtype) {
-                    use flambeau_bench::sweep_mmvq::run_moe_gate_up_sweep;
-                    let cert = run_moe_gate_up_sweep::<flambeau_bench::backend::Hip>(gu, root, arch)?;
-                    println!(
-                        "sweep indexed_moe_mmvq_gate_up ({}): pass={} shapes={} rig={}",
-                        gu.name(),
-                        cert.pass,
-                        cert.results.len(),
-                        cert.rig
-                    );
-                    return Ok(());
-                }
-                if let Some(ld) = moe_mmq_lds_dtype(dtype) {
-                    use flambeau_bench::sweep_mmvq::run_moe_mmq_lds_sweep;
-                    let cert = run_moe_mmq_lds_sweep::<flambeau_bench::backend::Hip>(ld, root, arch)?;
-                    println!(
-                        "sweep indexed_moe_mmq_lds_tiled ({}): pass={} shapes={} rig={}",
-                        ld.name(),
-                        cert.pass,
-                        cert.results.len(),
-                        cert.rig
-                    );
-                    return Ok(());
-                }
-                if let Some(t8) = moe_mmq_tile8_dtype(dtype) {
-                    use flambeau_bench::sweep_mmvq::run_moe_mmq_tile8_sweep;
-                    let cert = run_moe_mmq_tile8_sweep::<flambeau_bench::backend::Hip>(t8, root, arch)?;
-                    println!(
-                        "sweep indexed_moe_mmq_tile8 ({}): pass={} shapes={} rig={}",
-                        t8.name(),
-                        cert.pass,
-                        cert.results.len(),
-                        cert.rig
-                    );
-                    return Ok(());
-                }
-                if let Some(fk) = f16_sweep_kind(dtype) {
-                    use flambeau_bench::sweep_mmvq_f16::run_f16_sweep;
-                    let cert = run_f16_sweep::<flambeau_bench::backend::Hip>(fk, root, arch)?;
-                    println!(
-                        "sweep qmatmul_f16 ({}): pass={} shapes={} rig={}",
-                        fk.name(),
-                        cert.pass,
-                        cert.results.len(),
-                        cert.rig
-                    );
-                    return Ok(());
+                if let Some(res) =
+                    named_qmatmul_sweep::<flambeau_bench::backend::Hip>(dtype, root, arch)
+                {
+                    return res;
                 }
                 let dtypes: Vec<Dtype> = match dtype {
                     "all" => vec![
@@ -1839,6 +1687,73 @@ fn f16_sweep_kind(dtype: &str) -> Option<flambeau_bench::sweep_mmvq_f16::F16Swee
     }
 }
 
+/// `--op qmatmul` dtypes whose sweep takes a dtype enum of its own (gate/up,
+/// batched, MMQ, MoE, F16 weights), shared by the HIP and CUDA arms. `None`
+/// when `dtype` names none of them.
+#[cfg(any(feature = "hip_sweep", feature = "cuda_sweep"))]
+fn named_qmatmul_sweep<B: flambeau_bench::backend::BenchBackend>(
+    dtype: &str,
+    root: &std::path::Path,
+    arch: &str,
+) -> Option<Result<()>> {
+    use flambeau_bench::sweep_mmvq as mmvq;
+    let (label, cert) = if dtype == "Q4_0_kv_f16dst" {
+        ("mmvq_q4_0_kv_f16dst".to_string(), mmvq::run_kv_f16dst_sweep::<B>(root, arch))
+    } else if let Some(d) = gate_up_dtype(dtype) {
+        (format!("qmatmul_gate_up ({})", d.name()), mmvq::run_gate_up_sweep::<B>(d, root, arch))
+    } else if let Some(d) = batched_dtype(dtype) {
+        (format!("qmatmul_batched ({})", d.name()), mmvq::run_batched_sweep::<B>(d, root, arch))
+    } else if let Some(d) = gate_up_batched_dtype(dtype) {
+        (
+            format!("qmatmul_gate_up_batched ({})", d.name()),
+            mmvq::run_gate_up_batched_sweep::<B>(d, root, arch),
+        )
+    } else if let Some(d) = mmq_oracle_dtype(dtype) {
+        (format!("qmatmul_mmq_oracle ({})", d.name()), mmvq::run_mmq_oracle_sweep::<B>(d, root, arch))
+    } else if let Some(d) = mmq_gemm_dtype(dtype) {
+        (format!("qmatmul_mmq_gemm ({})", d.name()), mmvq::run_mmq_gemm_sweep::<B>(d, root, arch))
+    } else if let Some(d) = mmq_4warp_dtype(dtype) {
+        (format!("qmatmul_mmq_4warp ({})", d.name()), mmvq::run_mmq_4warp_sweep::<B>(d, root, arch))
+    } else if let Some(d) = mmq_4warp_lds_dtype(dtype) {
+        (
+            format!("qmatmul_mmq_4warp_lds ({})", d.name()),
+            mmvq::run_mmq_4warp_lds_sweep::<B>(d, root, arch),
+        )
+    } else if let Some(d) = moe_mmvq_dtype(dtype) {
+        (format!("indexed_moe_mmvq ({})", d.name()), mmvq::run_moe_mmvq_sweep::<B>(d, root, arch))
+    } else if let Some(d) = moe_gate_up_dtype(dtype) {
+        (
+            format!("indexed_moe_mmvq_gate_up ({})", d.name()),
+            mmvq::run_moe_gate_up_sweep::<B>(d, root, arch),
+        )
+    } else if let Some(d) = moe_mmq_lds_dtype(dtype) {
+        (
+            format!("indexed_moe_mmq_lds_tiled ({})", d.name()),
+            mmvq::run_moe_mmq_lds_sweep::<B>(d, root, arch),
+        )
+    } else if let Some(d) = moe_mmq_tile8_dtype(dtype) {
+        (format!("indexed_moe_mmq_tile8 ({})", d.name()), mmvq::run_moe_mmq_tile8_sweep::<B>(d, root, arch))
+    } else if let Some(d) = f16_sweep_kind(dtype) {
+        (
+            format!("qmatmul_f16 ({})", d.name()),
+            flambeau_bench::sweep_mmvq_f16::run_f16_sweep::<B>(d, root, arch),
+        )
+    } else {
+        return None;
+    };
+    Some(cert.map(|cert| {
+        println!(
+            "sweep {label}: pass={} shapes={} rig={}",
+            cert.pass,
+            cert.results.len(),
+            cert.rig
+        );
+    }))
+}
+
+#[cfg(feature = "cuda_sweep")]
+type CudaSweepFn = fn(&std::path::Path, &str) -> anyhow::Result<flambeau_bench::cert::Cert>;
+
 #[cfg(feature = "cuda_sweep")]
 fn sweep_cuda(root: &std::path::Path, op: &str, dtype: &str) -> Result<()> {
     use flambeau_bench::backend::Cuda;
@@ -1856,78 +1771,18 @@ fn sweep_cuda(root: &std::path::Path, op: &str, dtype: &str) -> Result<()> {
         );
         return Ok(());
     }
-    if op == "attention_decode_batched_splitk" {
-        let cert = flambeau_bench::sweep_attention_batched_splitk::run_sweep::<Cuda>(
-            root,
-            "sm_86",
-        )?;
+    const CUDA_ONLY_SWEEPS: &[(&str, CudaSweepFn)] = &[
+        ("attention_decode_batched_splitk", flambeau_bench::sweep_attention_batched_splitk::run_sweep::<Cuda>),
+        ("attention_decode_f16_splitk_dpos", flambeau_bench::sweep_attention_splitk_dpos::run_sweep::<Cuda>),
+        ("kv_append_v_unit_norm_f16_dpos", flambeau_bench::sweep_kv_append_v_unit_norm_dpos::run_sweep::<Cuda>),
+        ("embed_gather_f16_dpos", flambeau_bench::sweep_embed_gather_dpos::run_sweep::<Cuda>),
+        ("attention_decode_q8_kv_splitk_dpos", flambeau_bench::sweep_attention_q8_kv_splitk_dpos::run_sweep::<Cuda>),
+        ("quantize_f16_q8_0_dpos", flambeau_bench::sweep_quantize_f16_q8_0_dpos::run_sweep::<Cuda>),
+    ];
+    if let Some((_, run)) = CUDA_ONLY_SWEEPS.iter().find(|(name, _)| *name == op) {
+        let cert = run(root, "sm_86")?;
         println!(
-            "sweep attention_decode_batched_splitk: pass={} shapes={} rig={}",
-            cert.pass,
-            cert.results.len(),
-            cert.rig
-        );
-        return Ok(());
-    }
-    if op == "attention_decode_f16_splitk_dpos" {
-        let cert = flambeau_bench::sweep_attention_splitk_dpos::run_sweep::<Cuda>(
-            root,
-            "sm_86",
-        )?;
-        println!(
-            "sweep attention_decode_f16_splitk_dpos: pass={} shapes={} rig={}",
-            cert.pass,
-            cert.results.len(),
-            cert.rig
-        );
-        return Ok(());
-    }
-    if op == "kv_append_v_unit_norm_f16_dpos" {
-        let cert = flambeau_bench::sweep_kv_append_v_unit_norm_dpos::run_sweep::<Cuda>(
-            root,
-            "sm_86",
-        )?;
-        println!(
-            "sweep kv_append_v_unit_norm_f16_dpos: pass={} shapes={} rig={}",
-            cert.pass,
-            cert.results.len(),
-            cert.rig
-        );
-        return Ok(());
-    }
-    if op == "embed_gather_f16_dpos" {
-        let cert = flambeau_bench::sweep_embed_gather_dpos::run_sweep::<Cuda>(
-            root,
-            "sm_86",
-        )?;
-        println!(
-            "sweep embed_gather_f16_dpos: pass={} shapes={} rig={}",
-            cert.pass,
-            cert.results.len(),
-            cert.rig
-        );
-        return Ok(());
-    }
-    if op == "attention_decode_q8_kv_splitk_dpos" {
-        let cert = flambeau_bench::sweep_attention_q8_kv_splitk_dpos::run_sweep::<Cuda>(
-            root,
-            "sm_86",
-        )?;
-        println!(
-            "sweep attention_decode_q8_kv_splitk_dpos: pass={} shapes={} rig={}",
-            cert.pass,
-            cert.results.len(),
-            cert.rig
-        );
-        return Ok(());
-    }
-    if op == "quantize_f16_q8_0_dpos" {
-        let cert = flambeau_bench::sweep_quantize_f16_q8_0_dpos::run_sweep::<Cuda>(
-            root,
-            "sm_86",
-        )?;
-        println!(
-            "sweep quantize_f16_q8_0_dpos: pass={} shapes={} rig={}",
+            "sweep {op}: pass={} shapes={} rig={}",
             cert.pass,
             cert.results.len(),
             cert.rig
@@ -1940,159 +1795,8 @@ fn sweep_cuda(root: &std::path::Path, op: &str, dtype: &str) -> Result<()> {
              other ops are gfx906-only (Stream F port in progress, see P3-STREAM-F-PORT.md)"
         );
     }
-    if dtype == "Q4_0_kv_f16dst" {
-        let cert = flambeau_bench::sweep_mmvq::run_kv_f16dst_sweep::<Cuda>(root, "sm_86")?;
-        println!(
-            "sweep mmvq_q4_0_kv_f16dst: pass={} shapes={} rig={}",
-            cert.pass,
-            cert.results.len(),
-            cert.rig
-        );
-        return Ok(());
-    }
-    if let Some(gu) = gate_up_dtype(dtype) {
-        use flambeau_bench::sweep_mmvq::run_gate_up_sweep;
-        let cert = run_gate_up_sweep::<Cuda>(gu, root, "sm_86")?;
-        println!(
-            "sweep qmatmul_gate_up ({}): pass={} shapes={} rig={}",
-            gu.name(),
-            cert.pass,
-            cert.results.len(),
-            cert.rig
-        );
-        return Ok(());
-    }
-    if let Some(bd) = batched_dtype(dtype) {
-        use flambeau_bench::sweep_mmvq::run_batched_sweep;
-        let cert = run_batched_sweep::<Cuda>(bd, root, "sm_86")?;
-        println!(
-            "sweep qmatmul_batched ({}): pass={} shapes={} rig={}",
-            bd.name(),
-            cert.pass,
-            cert.results.len(),
-            cert.rig
-        );
-        return Ok(());
-    }
-    if let Some(gb) = gate_up_batched_dtype(dtype) {
-        use flambeau_bench::sweep_mmvq::run_gate_up_batched_sweep;
-        let cert = run_gate_up_batched_sweep::<Cuda>(gb, root, "sm_86")?;
-        println!(
-            "sweep qmatmul_gate_up_batched ({}): pass={} shapes={} rig={}",
-            gb.name(),
-            cert.pass,
-            cert.results.len(),
-            cert.rig
-        );
-        return Ok(());
-    }
-    if let Some(od) = mmq_oracle_dtype(dtype) {
-        use flambeau_bench::sweep_mmvq::run_mmq_oracle_sweep;
-        let cert = run_mmq_oracle_sweep::<Cuda>(od, root, "sm_86")?;
-        println!(
-            "sweep qmatmul_mmq_oracle ({}): pass={} shapes={} rig={}",
-            od.name(),
-            cert.pass,
-            cert.results.len(),
-            cert.rig
-        );
-        return Ok(());
-    }
-    if let Some(gd) = mmq_gemm_dtype(dtype) {
-        use flambeau_bench::sweep_mmvq::run_mmq_gemm_sweep;
-        let cert = run_mmq_gemm_sweep::<Cuda>(gd, root, "sm_86")?;
-        println!(
-            "sweep qmatmul_mmq_gemm ({}): pass={} shapes={} rig={}",
-            gd.name(),
-            cert.pass,
-            cert.results.len(),
-            cert.rig
-        );
-        return Ok(());
-    }
-    if let Some(wd) = mmq_4warp_dtype(dtype) {
-        use flambeau_bench::sweep_mmvq::run_mmq_4warp_sweep;
-        let cert = run_mmq_4warp_sweep::<Cuda>(wd, root, "sm_86")?;
-        println!(
-            "sweep qmatmul_mmq_4warp ({}): pass={} shapes={} rig={}",
-            wd.name(),
-            cert.pass,
-            cert.results.len(),
-            cert.rig
-        );
-        return Ok(());
-    }
-    if let Some(md) = moe_mmvq_dtype(dtype) {
-        use flambeau_bench::sweep_mmvq::run_moe_mmvq_sweep;
-        let cert = run_moe_mmvq_sweep::<Cuda>(md, root, "sm_86")?;
-        println!(
-            "sweep indexed_moe_mmvq ({}): pass={} shapes={} rig={}",
-            md.name(),
-            cert.pass,
-            cert.results.len(),
-            cert.rig
-        );
-        return Ok(());
-    }
-    if let Some(gu) = moe_gate_up_dtype(dtype) {
-        use flambeau_bench::sweep_mmvq::run_moe_gate_up_sweep;
-        let cert = run_moe_gate_up_sweep::<Cuda>(gu, root, "sm_86")?;
-        println!(
-            "sweep indexed_moe_mmvq_gate_up ({}): pass={} shapes={} rig={}",
-            gu.name(),
-            cert.pass,
-            cert.results.len(),
-            cert.rig
-        );
-        return Ok(());
-    }
-    if let Some(t8) = moe_mmq_tile8_dtype(dtype) {
-        use flambeau_bench::sweep_mmvq::run_moe_mmq_tile8_sweep;
-        let cert = run_moe_mmq_tile8_sweep::<Cuda>(t8, root, "sm_86")?;
-        println!(
-            "sweep indexed_moe_mmq_tile8 ({}): pass={} shapes={} rig={}",
-            t8.name(),
-            cert.pass,
-            cert.results.len(),
-            cert.rig
-        );
-        return Ok(());
-    }
-    if let Some(ld) = moe_mmq_lds_dtype(dtype) {
-        use flambeau_bench::sweep_mmvq::run_moe_mmq_lds_sweep;
-        let cert = run_moe_mmq_lds_sweep::<Cuda>(ld, root, "sm_86")?;
-        println!(
-            "sweep indexed_moe_mmq_lds_tiled ({}): pass={} shapes={} rig={}",
-            ld.name(),
-            cert.pass,
-            cert.results.len(),
-            cert.rig
-        );
-        return Ok(());
-    }
-    if let Some(ld) = mmq_4warp_lds_dtype(dtype) {
-        use flambeau_bench::sweep_mmvq::run_mmq_4warp_lds_sweep;
-        let cert = run_mmq_4warp_lds_sweep::<Cuda>(ld, root, "sm_86")?;
-        println!(
-            "sweep qmatmul_mmq_4warp_lds ({}): pass={} shapes={} rig={}",
-            ld.name(),
-            cert.pass,
-            cert.results.len(),
-            cert.rig
-        );
-        return Ok(());
-    }
-    if let Some(fk) = f16_sweep_kind(dtype) {
-        use flambeau_bench::sweep_mmvq_f16::run_f16_sweep;
-        let cert = run_f16_sweep::<Cuda>(fk, root, "sm_86")?;
-        println!(
-            "sweep qmatmul_f16 ({}): pass={} shapes={} rig={}",
-            fk.name(),
-            cert.pass,
-            cert.results.len(),
-            cert.rig
-        );
-        return Ok(());
+    if let Some(res) = named_qmatmul_sweep::<Cuda>(dtype, root, "sm_86") {
+        return res;
     }
     let dtypes: Vec<Dtype> = match dtype {
         "Q8_0" | "Q8_0_dp4a" => vec![Dtype::Q8_0Dp4a],
