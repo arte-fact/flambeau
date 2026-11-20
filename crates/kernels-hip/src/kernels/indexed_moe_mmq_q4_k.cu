@@ -1,5 +1,5 @@
 // indexed_moe_mmq_q4_k — 4-warp LDS-tiled MoE MMQ for Q4_K × Q8_1.
-// Pattern from `mmq_q8_0_4warp.cu`, adapted for:
+// Specifics:
 // * Q4_K weights (128-element super-blocks, 4-bit packed nibbles + packed
 // 6-bit scales/mins), dequantised into LDS as F32;
 // * Per-block expert indirection — caller (CPU) sorts (token, slot) pairs

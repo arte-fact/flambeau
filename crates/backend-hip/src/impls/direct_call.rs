@@ -245,29 +245,6 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
         impl_id: "peer_copy_via_host_gfx906",
         cert_rel_path: "certs/hip/gfx906/peer_copy_via_host_gfx906.json",
     },
-    // 4-warp LDS-tiled MMQ placeholders. Superseded by wave64 in production
-    // (Q4_K wave64, Q6_K wave64, Q8_0 wave64_tile16). Kept as bench A/B
-    // baselines — `sweep_mmq` runs them as Q{4,6}K4Warp / Q8_04Warp variants
-    // alongside the shipped kernels so the comparison stays live. See CLI
-    // PMC-refresh target list at `crates/cli/src/main.rs`.
-    DirectCallKernel {
-        impl_id: "qmatmul_q4_K_mmq_4warp_lds_gfx906",
-        cert_rel_path: "certs/hip/gfx906/qmatmul_q4_K_mmq_4warp_lds_gfx906.json",
-    },
-    DirectCallKernel {
-        impl_id: "qmatmul_q6_K_mmq_4warp_lds_gfx906",
-        cert_rel_path: "certs/hip/gfx906/qmatmul_q6_K_mmq_4warp_lds_gfx906.json",
-    },
-    DirectCallKernel {
-        impl_id: "qmatmul_q8_0_mmq_4warp_lds_gfx906",
-        cert_rel_path: "certs/hip/gfx906/qmatmul_q8_0_mmq_4warp_lds_gfx906.json",
-    },
-    // superseded Q8_0 MMQ wave64 by wave64_tile16 at m >= 128. Wave64 stays
-    // as the bench baseline (PMC-refresh target).
-    DirectCallKernel {
-        impl_id: "qmatmul_q8_0_mmq_wave64_gfx906",
-        cert_rel_path: "certs/hip/gfx906/qmatmul_q8_0_mmq_wave64_gfx906.json",
-    },
     // Templated mmvq dp4a reference: HIP production dispatches the t128_vdr2
     // Q8_0 row, but the shared `mmvq_dp4a_row<Q8_0>` instantiation is certed on
     // gfx906 too as the cross-backend bit-match baseline against the sm_86 cert.
@@ -387,27 +364,10 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
         impl_id: "qmatmul_q8_0_mmq_oracle",
         cert_rel_path: "certs/hip/gfx906/qmatmul_q8_0_mmq_oracle.json",
     },
-    // Q8_0 single-pass tiled MMQ GEMM (cross-backend); HIP dispatch uses the
-    // legacy _gfx906 row, this is the neutral cross-backend cert.
-    DirectCallKernel {
-        impl_id: "qmatmul_q8_0_mmq_wave64",
-        cert_rel_path: "certs/hip/gfx906/qmatmul_q8_0_mmq_wave64.json",
-    },
+    // Cross-backend MMQ GEMM certs (bit-match baselines against sm_86).
     DirectCallKernel {
         impl_id: "qmatmul_q8_0_mmq_wave64_tile16",
         cert_rel_path: "certs/hip/gfx906/qmatmul_q8_0_mmq_wave64_tile16.json",
-    },
-    DirectCallKernel {
-        impl_id: "qmatmul_q8_0_mmq_4warp",
-        cert_rel_path: "certs/hip/gfx906/qmatmul_q8_0_mmq_4warp.json",
-    },
-    DirectCallKernel {
-        impl_id: "qmatmul_q4_k_mmq_4warp",
-        cert_rel_path: "certs/hip/gfx906/qmatmul_q4_k_mmq_4warp.json",
-    },
-    DirectCallKernel {
-        impl_id: "qmatmul_q6_k_mmq_4warp",
-        cert_rel_path: "certs/hip/gfx906/qmatmul_q6_k_mmq_4warp.json",
     },
     DirectCallKernel {
         impl_id: "qmatmul_q4_0_mmq_4warp_lds",

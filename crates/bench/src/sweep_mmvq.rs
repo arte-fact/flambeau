@@ -2121,11 +2121,9 @@ fn run_shape_mmq_oracle<B: BenchBackend>(
 // ---- MMQ tiled GEMM sweep -------------------------------------------------
 
 /// Weight dtype for the single-pass tiled MMQ GEMM sweep (`dst[col,row] =
-/// Σ_k x[row,k]·y[col,k]`, a `MMQ_Y×TILE_N` output tile per block). Only the
-/// Q8_0 wave64 kernel is templated so far.
+/// Σ_k x[row,k]·y[col,k]`, a `MMQ_Y×TILE_N` output tile per block).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MmqGemmDtype {
-    Q8_0Wave64,
     Q4_0Wave64,
     Q4_1Wave64,
     Q5_0Wave64,
@@ -2151,7 +2149,6 @@ pub enum MmqGemmDtype {
 impl MmqGemmDtype {
     pub fn name(self) -> &'static str {
         match self {
-            MmqGemmDtype::Q8_0Wave64 => "Q8_0",
             MmqGemmDtype::Q4_0Wave64 => "Q4_0",
             MmqGemmDtype::Q4_1Wave64 => "Q4_1",
             MmqGemmDtype::Q5_0Wave64 => "Q5_0",
@@ -2176,7 +2173,6 @@ impl MmqGemmDtype {
     }
     fn weight_dtype(self) -> Dtype {
         match self {
-            MmqGemmDtype::Q8_0Wave64 => Dtype::Q8_0Dp4a,
             MmqGemmDtype::Q4_0Wave64 => Dtype::Q4_0,
             MmqGemmDtype::Q4_1Wave64 => Dtype::Q4_1Dp4a,
             MmqGemmDtype::Q5_0Wave64 => Dtype::Q5_0,
@@ -2201,7 +2197,6 @@ impl MmqGemmDtype {
     }
     fn impl_id(self) -> &'static str {
         match self {
-            MmqGemmDtype::Q8_0Wave64 => "qmatmul_q8_0_mmq_wave64",
             MmqGemmDtype::Q4_0Wave64 => "qmatmul_q4_0_mmq_wave64",
             MmqGemmDtype::Q4_1Wave64 => "qmatmul_q4_1_mmq_wave64",
             MmqGemmDtype::Q5_0Wave64 => "qmatmul_q5_0_mmq_wave64",
@@ -2226,7 +2221,6 @@ impl MmqGemmDtype {
     }
     fn kernel_stem(self) -> &'static str {
         match self {
-            MmqGemmDtype::Q8_0Wave64 => "mmq_q8_0_wave64",
             MmqGemmDtype::Q4_0Wave64 => "mmq_q4_0_wave64",
             MmqGemmDtype::Q4_1Wave64 => "mmq_q4_1_wave64",
             MmqGemmDtype::Q5_0Wave64 => "mmq_q5_0_wave64",
@@ -2251,7 +2245,6 @@ impl MmqGemmDtype {
     }
     fn kernel_entry(self) -> &'static str {
         match self {
-            MmqGemmDtype::Q8_0Wave64 => "flambeau_mmq_q8_0_wave64_q8_1",
             MmqGemmDtype::Q4_0Wave64 => "flambeau_mmq_q4_0_wave64_q8_1",
             MmqGemmDtype::Q4_1Wave64 => "flambeau_mmq_q4_1_wave64_q8_1",
             MmqGemmDtype::Q5_0Wave64 => "flambeau_mmq_q5_0_wave64_q8_1",
@@ -3705,229 +3698,6 @@ fn run_shape_moe_mmq_tile8<B: BenchBackend>(
     }
 }
 
-/// 4-warp LDS-tiled MMQ kernels. Distinct from `MmqGemmDtype` because they use
-/// the runtime's 6-arg ABI `(vx, vy, dst, n_rows, n_batches, n_blocks_per_row)`
-/// and a full MMQ_Y×MMQ_X output tile per block (not one-thread-per-row), so the
-/// launch shape differs.
-#[derive(Clone, Copy)]
-pub enum Mmq4WarpDtype {
-    Q8_0,
-    Q4K,
-    Q6K,
-}
-
-impl Mmq4WarpDtype {
-    pub fn name(self) -> &'static str {
-        match self {
-            Mmq4WarpDtype::Q8_0 => "Q8_0",
-            Mmq4WarpDtype::Q4K => "Q4_K",
-            Mmq4WarpDtype::Q6K => "Q6_K",
-        }
-    }
-    fn weight_dtype(self) -> Dtype {
-        match self {
-            Mmq4WarpDtype::Q8_0 => Dtype::Q8_0Dp4a,
-            Mmq4WarpDtype::Q4K => Dtype::Q4K,
-            Mmq4WarpDtype::Q6K => Dtype::Q6K,
-        }
-    }
-    fn impl_id(self) -> &'static str {
-        match self {
-            Mmq4WarpDtype::Q8_0 => "qmatmul_q8_0_mmq_4warp",
-            Mmq4WarpDtype::Q4K => "qmatmul_q4_k_mmq_4warp",
-            Mmq4WarpDtype::Q6K => "qmatmul_q6_k_mmq_4warp",
-        }
-    }
-    fn kernel_stem(self) -> &'static str {
-        match self {
-            Mmq4WarpDtype::Q8_0 => "mmq_q8_0_4warp",
-            Mmq4WarpDtype::Q4K => "mmq_q4_K_4warp",
-            Mmq4WarpDtype::Q6K => "mmq_q6_K_4warp",
-        }
-    }
-    fn kernel_entry(self) -> &'static str {
-        match self {
-            Mmq4WarpDtype::Q8_0 => "flambeau_mmq_q8_0_4warp_q8_1",
-            Mmq4WarpDtype::Q4K => "flambeau_mmq_q4_K_4warp_q8_1",
-            Mmq4WarpDtype::Q6K => "flambeau_mmq_q6_K_4warp_q8_1",
-        }
-    }
-    /// (MMQ_Y rows/block, MMQ_X cols/block, threads/block).
-    fn tile(self) -> (u32, u32, u32) {
-        match self {
-            Mmq4WarpDtype::Q8_0 => (32, 8, 256),
-            Mmq4WarpDtype::Q4K => (16, 8, 128),
-            Mmq4WarpDtype::Q6K => (16, 8, 128),
-        }
-    }
-}
-
-pub fn run_mmq_4warp_sweep<B: BenchBackend>(
-    dtype: Mmq4WarpDtype,
-    repo_root: &Path,
-    arch: &str,
-) -> Result<Cert> {
-    let dev = B::new_device(0)?;
-    let pmc = {
-        let bytes = B::image(dtype.kernel_stem())
-            .ok_or_else(|| anyhow!("{} kernel not compiled", dtype.kernel_stem()))?;
-        let module = B::load(&dev, bytes)?;
-        let kernel = B::kernel(&module, dtype.kernel_entry())?;
-        B::attributes(&kernel)?
-    };
-
-    let rows_grid = vec![64usize, 256, 4096];
-    let cols_grid = vec![1usize, 8, 16];
-    let k_grid = vec![2048usize, 4096];
-    let seed = 0xC0FFEE_u64;
-
-    let mut results = Vec::new();
-    for &n_rows in &rows_grid {
-        for &n_cols in &cols_grid {
-            for &k in &k_grid {
-                let s = seed
-                    .wrapping_add((n_rows as u64).wrapping_mul(0x1234567))
-                    .wrapping_add((n_cols as u64).wrapping_mul(0x85EBCA6B))
-                    .wrapping_add((k as u64).wrapping_mul(0x9E3779B97F4A7C15));
-                let (got, reference) = run_shape_mmq_4warp::<B>(&dev, dtype, n_rows, n_cols, k, s)?;
-                let max_rel_err = max_rel_err_with_floor(&got, &reference, (k as f32).sqrt());
-                let tolerance = cert_tol(k);
-                results.push(ShapeResult {
-                    m: n_rows,
-                    k,
-                    n: n_cols,
-                    seed: s,
-                    max_rel_err,
-                    tolerance,
-                    pass: max_rel_err <= tolerance,
-                });
-            }
-        }
-    }
-
-    let pass = results.iter().all(|r| r.pass);
-    let cert = Cert {
-        schema_version: SCHEMA_VERSION,
-        impl_id: dtype.impl_id().to_string(),
-        backend: dev.backend().to_string(),
-        arch: arch.to_string(),
-        op: "qmatmul_mmq".to_string(),
-        dtype_weight: dtype.name().to_string(),
-        dtype_activation: "Q8_1".to_string(),
-        tolerance_formula: "|err| <= 3e-2 * max(|ref|, sqrt(k))".to_string(),
-        results,
-        pass,
-        emitted_at: now_utc_iso8601(),
-        rig: rig_for(arch),
-        pmc: Some(pmc),
-    };
-    cert.write_to_disk(repo_root)?;
-    Ok(cert)
-}
-
-#[allow(clippy::undocumented_unsafe_blocks)]
-fn run_shape_mmq_4warp<B: BenchBackend>(
-    dev: &B::Device,
-    dtype: Mmq4WarpDtype,
-    n_rows: usize,
-    n_cols: usize,
-    k: usize,
-    seed: u64,
-) -> Result<(Vec<f32>, Vec<f32>)> {
-    let q_bytes =
-        B::image("quantize_q8_1").ok_or_else(|| anyhow!("quantize_q8_1 not compiled"))?;
-    let m_bytes = B::image(dtype.kernel_stem())
-        .ok_or_else(|| anyhow!("{} kernel not compiled", dtype.kernel_stem()))?;
-    let q_module = B::load(dev, q_bytes)?;
-    let m_module = B::load(dev, m_bytes)?;
-    let k_quantize = B::kernel(&q_module, "flambeau_quantize_row_q8_1")?;
-    let k_mmq = B::kernel(&m_module, dtype.kernel_entry())?;
-
-    let wd = dtype.weight_dtype();
-    let block_elems = wd.block_elem_count();
-    let block_bytes = wd.block_size_bytes();
-    assert_eq!(k % block_elems, 0, "k {k} must be multiple of block size {block_elems}");
-    let n_blocks = k / block_elems;
-
-    let weights_raw = tame_scales(wd, seeded_bytes(seed, n_rows * n_blocks * block_bytes));
-    let mut w_dequant = vec![0.0f32; n_rows * k];
-    dequantize_into(wd.ggml(), &weights_raw, &mut w_dequant)?;
-    let d_x = alloc_and_upload(dev, weights_raw.as_slice());
-
-    let act_f32 = seeded_f32_range(seed.wrapping_add(0xA5A5A5A5), n_cols * k, -1.0, 1.0);
-    let d_act = alloc_and_upload(dev, act_f32.as_slice());
-    let total_y_blocks = n_cols * k / QK8;
-    let y_bytes = total_y_blocks * std::mem::size_of::<BlockQ8_1>();
-    let d_y_q8_1 = dev.alloc(y_bytes)?;
-    {
-        let stream = dev.default_stream();
-        let n_elems = (n_cols * k) as i32;
-        let d_act_ptr: u64 = d_act.as_usize() as u64;
-        let d_y_q8_1_ptr: u64 = d_y_q8_1.as_usize() as u64;
-        let mut args = <B::Args<'_>>::default();
-        args.push_arg(&d_act_ptr);
-        args.push_arg(&d_y_q8_1_ptr);
-        args.push_arg(&n_elems);
-        B::launch(&k_quantize, stream, LaunchCfg::one_d(total_y_blocks as u32, QK8 as u32), args)?;
-        stream.synchronize()?;
-    }
-
-    let d_dst = dev.alloc(n_cols * n_rows * 4)?;
-    {
-        let stream = dev.default_stream();
-        let n_rows_i = n_rows as i32;
-        let n_batches_i = n_cols as i32;
-        let n_bpr_i = n_blocks as i32;
-        let d_x_ptr: u64 = d_x.as_usize() as u64;
-        let d_y_ptr: u64 = d_y_q8_1.as_usize() as u64;
-        let d_dst_ptr: u64 = d_dst.as_usize() as u64;
-        let mut args = <B::Args<'_>>::default();
-        args.push_arg(&d_x_ptr);
-        args.push_arg(&d_y_ptr);
-        args.push_arg(&d_dst_ptr);
-        args.push_arg(&n_rows_i);
-        args.push_arg(&n_batches_i);
-        args.push_arg(&n_bpr_i);
-        let (mmq_y, mmq_x, threads) = dtype.tile();
-        let cfg = LaunchCfg {
-            grid: ((n_rows as u32).div_ceil(mmq_y), (n_cols as u32).div_ceil(mmq_x), 1),
-            block: (threads, 1, 1),
-            shared_bytes: 0,
-        };
-        B::launch(&k_mmq, stream, cfg, args)?;
-        stream.synchronize()?;
-    }
-
-    let mut got = vec![0.0f32; n_cols * n_rows];
-    unsafe {
-        dev.memcpy_async(
-            dev.default_stream(),
-            CopyDirection::DeviceToHost,
-            DevicePtr(got.as_mut_ptr() as usize),
-            d_dst,
-            n_cols * n_rows * 4,
-        )?;
-    }
-    dev.default_stream().synchronize()?;
-
-    unsafe {
-        dev.dealloc(d_x, weights_raw.len())?;
-        dev.dealloc(d_act, act_f32.len() * 4)?;
-        dev.dealloc(d_y_q8_1, y_bytes)?;
-        dev.dealloc(d_dst, n_cols * n_rows * 4)?;
-    }
-
-    let mut reference = vec![0.0f32; n_cols * n_rows];
-    for c in 0..n_cols {
-        let y_rt = quantize_q8_1_roundtrip(&act_f32[c * k..(c + 1) * k]);
-        let col_out = reference_matmul(&w_dequant, &y_rt, n_rows, k);
-        for row in 0..n_rows {
-            reference[c * n_rows + row] = col_out[row];
-        }
-    }
-    Ok((got, reference))
-}
-
 /// DS4 4-warp_lds MMQ kernels. Consume the 144-B `block_q8_1_mmq` activation
 /// (produced by the DS4 quantizer), MMQ_Y=128 × MMQ_X=64 tile, dynamic LDS,
 /// 9-arg ABI with explicit Y/X strides.
@@ -4782,7 +4552,7 @@ fn time_mmq<B: BenchBackend>(
 /// genuinely compete (unlike bandwidth-bound decode). Times each wave64-family
 /// MMQ candidate for `dtype` across the **n_tokens** grid at a representative
 /// (n_out, k) and prints the ranking vs the committed `[[qmatmul_mmq]]` row.
-/// Measurement only (no emit) — the cross-family kernels (oracle / 4warp /
+/// Measurement only (no emit) — the cross-family kernels (oracle /
 /// 4warp_lds) have distinct launch signatures and aren't wired here yet.
 pub fn autotune_mmq<B: BenchBackend>(
     arch: &str,

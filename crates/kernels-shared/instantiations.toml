@@ -1554,22 +1554,6 @@ params = """
     const int nrows_dst"""
 body = "mmq_iq1_m_wave64_row<64, 8>(vx, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst);"
 
-# Q8_0 4-warp LDS-tiled MMQ (prefill GEMM) — MMQ_Y=32 × MMQ_X=8 output tile
-# staged through LDS, 256 threads. Same stem/entry as the retired hand kernel.
-[[kernel]]
-stem = "mmq_q8_0_4warp"
-includes = ["quant_traits.cuh", "mmq_q8_0_4warp.cuh"]
-[[kernel.entry]]
-name = "flambeau_mmq_q8_0_4warp_q8_1"
-params = """
-    const void* __restrict__ vx,
-    const void* __restrict__ vy,
-    float* __restrict__ dst,
-    const int n_rows,
-    const int n_batches,
-    const int n_blocks_per_row"""
-body = "mmq_q8_0_4warp_row<32, 8>(vx, vy, dst, n_rows, n_batches, n_blocks_per_row);"
-
 # Q4_0 4-warp LDS-tiled MMQ (dense-prefill perf kernel), DS4 144-B activation —
 # MMQ_Y=128 × MMQ_X=64, logical 64-wide lanes, dynamic LDS. Same stem/entry as
 # the retired hand kernel.
@@ -1869,40 +1853,6 @@ params = """
     const int stride_row_x,
     const int nrows_dst"""
 body = "(void) stride_col_y; mmq_lds_tiled_row<mmq_lds::IQ4NL, 8, 64, 4>(vx, vy, dst, ncols_x, nrows_x, ncols_y, stride_row_x, nrows_dst);"
-
-# Q4_K 4-warp LDS-tiled MMQ (prefill GEMM), F32-tile variant — MMQ_Y=16 × MMQ_X=8,
-# 128 threads, dequant super-block into LDS then F32 dot. Same stem/entry as the
-# retired hand kernel.
-[[kernel]]
-stem = "mmq_q4_K_4warp"
-includes = ["quant_traits.cuh", "mmq_q4_k_4warp.cuh"]
-[[kernel.entry]]
-name = "flambeau_mmq_q4_K_4warp_q8_1"
-params = """
-    const void* __restrict__ vx,
-    const void* __restrict__ vy,
-    float* __restrict__ dst,
-    const int n_rows,
-    const int n_batches,
-    const int n_sb_per_row"""
-body = "mmq_q4_k_4warp_row<16, 8, 128>(vx, vy, dst, n_rows, n_batches, n_sb_per_row);"
-
-# Q6_K 4-warp LDS-tiled MMQ (prefill GEMM), F32-tile variant — same shape as
-# Q4_K (MMQ_Y=16 × MMQ_X=8, 128 threads), Q6_K super-block decode. Same
-# stem/entry as the retired hand kernel.
-[[kernel]]
-stem = "mmq_q6_K_4warp"
-includes = ["quant_traits.cuh", "mmq_q6_k_4warp.cuh"]
-[[kernel.entry]]
-name = "flambeau_mmq_q6_K_4warp_q8_1"
-params = """
-    const void* __restrict__ vx,
-    const void* __restrict__ vy,
-    float* __restrict__ dst,
-    const int n_rows,
-    const int n_batches,
-    const int n_sb_per_row"""
-body = "mmq_q6_k_4warp_row<16, 8, 128>(vx, vy, dst, n_rows, n_batches, n_sb_per_row);"
 
 # F16 weight × Q8_1 activation — single-row MMVQ (F16 layers in UD-Q8_K_XL).
 [[kernel]]
@@ -2585,7 +2535,6 @@ body = "mmvq_iq1_m_dp4a_row<fb_fp16_t>(x, y, dst, n_rows, n_superblocks_per_row)
 # indexed_moe_mmvq.cuh. Stems/entries match the runtime ops launchers
 # (crates/ops/src/hip/moe.rs) so the dispatch layer is untouched.
 # ===========================================================================
-
 [[kernel]]
 stem = "indexed_moe_mmvq_q8_0"
 includes = ["quant_traits.cuh", "indexed_moe_mmvq.cuh"]
@@ -3013,7 +2962,6 @@ body = "indexed_moe_mmvq_q4_k_gate_up_r4_sorted_dp4a_row<float>(gate_w, up_w, y,
 # slot-cols/block, no LDS/no warp ops. Simple block quants ride the generic
 # indexed_moe_mmq_{gate_up,down}_tile8_row<Q> skeleton (quant_traits mmq policy).
 # gate_up = 13-arg (2 weights/outputs); down = 11-arg (1 weight/output).
-
 [[kernel]]
 stem = "indexed_moe_mmq_q8_0_gate_up_tile8_dp4a"
 includes = ["indexed_moe_mmq_tile8.cuh"]
@@ -3856,7 +3804,6 @@ body = "indexed_moe_mmq_q4_k_down_lds_tiled_row<8, 128, 4, float>(down_w, y_mmq,
 
 # P3 Stream F — Tier-B block-reduce kernels neutralized to shared `.cuh`
 # (block_reduce_sum over the WARP_SIZE seam → correct on wave64 + wave32).
-
 [[kernel]]
 stem = "rmsnorm_f32"
 includes = ["block_reduce.cuh", "rmsnorm.cuh"]
@@ -3903,7 +3850,6 @@ body = "rmsnorm_f16_row<256>(x, weight, y, n_rows, k, eps);"
 
 # Fused RMSNorm family — gemma4 cast/residual paths + the decode RMSNorm→Q8_1
 # edge, sharing block_reduce_sum (rmsnorm_fused.cuh).
-
 [[kernel]]
 stem = "rmsnorm_f32_to_f16"
 includes = ["block_quant.cuh", "block_reduce.cuh", "rmsnorm_fused.cuh"]
@@ -3976,7 +3922,6 @@ params = """
 body = "rmsnorm_q8_1_fused_row<1024>(x, weight, y, n_rows, k, eps);"
 
 # MoE-decode glue — shared-expert gate (block-reduce dot + sigmoid scale).
-
 [[kernel]]
 stem = "shared_expert_scale_f32"
 includes = ["block_reduce.cuh", "shared_expert_scale.cuh"]
@@ -3992,7 +3937,6 @@ params = """
 body = "shared_expert_scale_f32_row<256>(shared_out, x, gate_w, n_tokens, hidden);"
 
 # Router top-k — per-token argmax×k + softmax (WARP_SIZE-seamed argmax reduce).
-
 [[kernel]]
 stem = "topk_f32"
 includes = ["backend_compat.cuh", "topk.cuh"]
@@ -4009,7 +3953,6 @@ params = """
 body = "topk_softmax_f32_row(logits, out_indices, out_weights, n_tokens, n_experts, k);"
 
 # Online-softmax — shared block_reduce_softmax (max,sum) seam.
-
 [[kernel]]
 stem = "softmax_masked_f16"
 includes = ["backend_compat.cuh", "block_reduce_softmax.cuh", "softmax_masked.cuh"]
@@ -4042,7 +3985,6 @@ body = "sampler_topk_softmax_f32_body(logits, out_ids, out_probs, V, K, inv_temp
 
 # GQA decode attention — online softmax; the Q·K dot is a block sum over the
 # WARP_SIZE seam (warp_reduce_sum + runtime cross-warp LDS).
-
 [[kernel]]
 stem = "attention_decode_f16"
 includes = ["block_quant.cuh", "attention_decode.cuh"]
@@ -4064,7 +4006,6 @@ params = """
 body = "attention_decode_f16_body(q, k_cache, v_cache, out, n_heads_q, n_heads_kv, head_dim, n_tokens, scale, window_size, ring_depth);"
 
 # Flash-decoding split-K attention — chunk (tile-4 __shfl_xor reduce) + combine.
-
 [[kernel]]
 stem = "attention_decode_f16_splitk"
 includes = ["block_quant.cuh", "attention_decode_splitk.cuh"]
@@ -4103,7 +4044,6 @@ params = """
 body = "attention_decode_f16_splitk_combine_body(partials_m, partials_s, partials_o, out, n_heads_q, n_chunks, head_dim);"
 
 # Dense GEMV (router / dense projections) — block_reduce_sum dot.
-
 [[kernel]]
 stem = "dense_gemv_f32_f16"
 includes = ["block_quant.cuh", "block_reduce.cuh", "dense_gemv.cuh"]
@@ -4159,7 +4099,6 @@ params = """
 body = "dense_gemv_row_batched<fb_fp16_t>(w, x, y, n_rows, k, n_tokens);"
 
 # Per-head V RMSNorm (gemma4 attn_v_unit_norm) + fused KV append.
-
 [[kernel]]
 stem = "v_unit_norm_per_head_f16"
 includes = ["block_quant.cuh", "block_reduce.cuh", "v_unit_norm.cuh"]
@@ -4229,7 +4168,6 @@ params = """
 body = "kv_append_v_unit_norm_f16_body<512>(k_src, v_src, k_cache, v_cache, n_kv_heads, write_pos, eps, ring_depth);"
 
 # Fused per-head RMSNorm + partial NeoX RoPE (gemma4 Q/K norm; HEAD_DIM entries).
-
 [[kernel]]
 stem = "rmsnorm_rope_neox_partial_f16"
 includes = ["block_quant.cuh", "block_reduce.cuh", "rmsnorm_rope.cuh"]
@@ -4284,7 +4222,6 @@ body = "rmsnorm_rope_neox_partial_f16_body<512>(x, norm_w, positions, n_heads, r
 
 # GDN recurrent state step (qwen3-coder-next). WARP_SIZE from arch seam → the
 # register-sharded column recurrence scales (2 rows/lane wave64, 4 wave32).
-
 [[kernel]]
 stem = "gdn_state_step_f32"
 includes = ["backend_compat.cuh", "gdn_state_step.cuh"]
@@ -4345,7 +4282,6 @@ body = "gdn_state_step_ab_batched_slots_impl<128>(q, k, v, alpha_in, beta_in, ss
 
 # F16 attention variants (prefill / batched-slots / paged) — online softmax,
 # Q·K dot via __shfl_xor butterfly over WARP_SIZE (bit-identical to hand).
-
 [[kernel]]
 stem = "attention_prefill_f16"
 includes = ["block_quant.cuh", "attention_f16.cuh"]
@@ -4408,7 +4344,6 @@ body = "attention_prefill_f16_paged_body(q, k_pool, v_pool, block_table, out, n_
 
 # Flash-attn-v2 prefill (LDS-tiled) — WARP_SIZE-parameterized; neutral
 # warp_reduce_sum / fast_exp / fast_rcp from the arch seam.
-
 [[kernel]]
 stem = "attention_prefill_flash_tile_f16"
 includes = ["block_quant.cuh", "attention_flash_tile.cuh"]
@@ -4480,7 +4415,6 @@ body = "flash_attn_prefill_v2_impl<512, 4, 8>(q, k_cache, v_cache, out, n_q_toke
 
 # Q8_0 KV-cache attention (decode + prefill) — dp4a score, block_tree_sum reduce
 # (wave-agnostic over the sub-warp head_dim/4 block).
-
 [[kernel]]
 stem = "attention_decode_q8_kv"
 includes = ["block_quant.cuh", "quant_traits.cuh", "block_reduce.cuh", "attention_q8_kv.cuh"]

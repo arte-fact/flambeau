@@ -163,7 +163,6 @@ pub const KERNEL_STEMS: &[&str] = &[
     "mmvq_q6_k_r4",
     "mmvq_q6_k_dp4a",
     "mmq_q8_0_oracle",
-    "mmq_q8_0_4warp",
     "mmq_q8_0_wave64",
     "mmq_q8_0_wave64_tile16",
     "mmvq_f16_q8_1",
@@ -188,7 +187,6 @@ pub const KERNEL_STEMS: &[&str] = &[
     "mmq_q4_0_mma",
     "mmq_q5_0_wave64",
     "mmq_q5_1_wave64",
-    "mmq_q4_K_4warp",
     "mmq_q4_K_lds_tiled",
     "mmq_q5_K_lds_tiled",
     "mmq_q6_K_lds_tiled",
@@ -208,7 +206,6 @@ pub const KERNEL_STEMS: &[&str] = &[
     "mmq_q3_K_wave64",
     "mmq_q5_K_wave64",
     "mmq_q8_K_wave64",
-    "mmq_q6_K_4warp",
     "mmq_q6_K_wave64",
     // Activation quantisation + glue.
     "quantize_q8_1",

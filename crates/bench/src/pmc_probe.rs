@@ -32,7 +32,6 @@ pub fn run_one(kernel_stem: &str, m: usize, k: usize, n: usize) -> Result<String
         "mmvq_q5_k_dp4a" => ("flambeau_mmvq_q5_k_dp4a_q8_1", 256),
         "mmvq_q6_k_r4" => ("flambeau_mmvq_q6_k_r4_q8_1", 64),
         "mmq_q8_0_oracle" => ("flambeau_mmq_q8_0_oracle_q8_1", 256),
-        "mmq_q8_0_4warp" => ("flambeau_mmq_q8_0_4warp_q8_1", 256),
         // 2D block (64, 4, 1), DS4 Q8_1 activation, 9 args, 30336 B LDS.
         "mmq_q4_1_4warp_lds" => ("flambeau_mmq_q4_1_4warp_lds_q8_1", 0),
         "mmq_q4_0_4warp_lds" => ("flambeau_mmq_q4_0_4warp_lds_q8_1", 0),
@@ -64,9 +63,7 @@ pub fn run_one(kernel_stem: &str, m: usize, k: usize, n: usize) -> Result<String
         }
         "mmq_q8_0_wave64" => run_mmq_q8_0_wave64(&dev, &kernel, m, k, n, 8)?,
         "mmq_q8_0_wave64_tile16" => run_mmq_q8_0_wave64(&dev, &kernel, m, k, n, 16)?,
-        "mmq_q8_0_oracle" | "mmq_q8_0_4warp" => {
-            run_mmq_q8_0(&dev, &kernel, kernel_stem, threads, m, k, n)?
-        }
+        "mmq_q8_0_oracle" => run_mmq_q8_0(&dev, &kernel, threads, m, k, n)?,
         _ => run_mmvq(&dev, &kernel, kernel_stem, threads, m, k, n)?,
     }
 
@@ -79,7 +76,6 @@ pub fn run_one(kernel_stem: &str, m: usize, k: usize, n: usize) -> Result<String
 fn run_mmq_q8_0(
     dev: &HipDevice,
     kernel: &HipKernel<'_>,
-    kernel_stem: &str,
     threads: u32,
     m: usize,
     k: usize,
@@ -119,11 +115,7 @@ fn run_mmq_q8_0(
 
     let d_dst = dev.alloc(m * n * 4)?;
 
-    let (grid_x, grid_y) = if kernel_stem == "mmq_q8_0_4warp" {
-        ((n as u32).div_ceil(32), (m as u32).div_ceil(8))
-    } else {
-        (n as u32, m as u32)
-    };
+    let (grid_x, grid_y) = (n as u32, m as u32);
     let d_x_ptr: u64 = d_x.as_usize() as u64;
     let d_y_ptr: u64 = d_y.as_usize() as u64;
     let d_dst_ptr: u64 = d_dst.as_usize() as u64;

@@ -298,7 +298,7 @@ enum Cmd {
     /// Exits immediately after the launch + sync, so rocprofv3 sees a clean
     /// per-kernel dispatch trace. Not intended for human use.
     PmcProbe {
-        /// Kernel stem: `mmvq_q8_0` / `mmq_q8_0_4warp` / etc.
+        /// Kernel stem: `mmvq_q8_0` / `mmq_q8_0_oracle` / etc.
         #[arg(long)]
         kernel: String,
         #[arg(long, default_value_t = 4)]
@@ -1124,29 +1124,25 @@ fn sweep(root: &std::path::Path, arch: &str, op: Option<&str>, dtype: &str) -> R
                 let (dtypes, spec_builder): (Vec<MmqDtype>, fn(MmqDtype) -> SweepSpec) = match dtype
                 {
                     "Q8_0" | "Q8_0_oracle" => (vec![MmqDtype::Q8_0Oracle], SweepSpec::v1_4_oracle),
-                    "Q8_0_4warp" => (vec![MmqDtype::Q8_04Warp], SweepSpec::v1_4_prefill),
-                    "Q8_0_wave64" => (vec![MmqDtype::Q8_0Wave64], SweepSpec::v1_4_prefill),
                     "Q4_1" | "Q4_1_4warp" => (vec![MmqDtype::Q4_14Warp], SweepSpec::v1_4_prefill),
                     "Q4_1_wave64" => (vec![MmqDtype::Q4_1Wave64], SweepSpec::v1_4_prefill),
                     "Q4_0" | "Q4_0_wave64" => (vec![MmqDtype::Q4_0Wave64], SweepSpec::v1_4_prefill),
                     "Q4_0_4warp" => (vec![MmqDtype::Q4_04Warp], SweepSpec::v1_4_prefill),
                     "Q5_0" | "Q5_0_wave64" => (vec![MmqDtype::Q5_0Wave64], SweepSpec::v1_4_prefill),
                     "Q5_1" | "Q5_1_wave64" => (vec![MmqDtype::Q5_1Wave64], SweepSpec::v1_4_prefill),
-                    "Q4_K" | "Q4_K_4warp" => (vec![MmqDtype::Q4K4Warp], SweepSpec::v1_4_prefill),
                     "Q5_K" | "Q5_K_lds_tiled" => (vec![MmqDtype::Q5KLdsTiled], SweepSpec::v1_4_prefill),
                     "Q5_K_lds_tiled_x8" => (vec![MmqDtype::Q5KLdsTiledX8], SweepSpec::v1_4_prefill),
-                    "Q6_K_lds_tiled" => (vec![MmqDtype::Q6KLdsTiled], SweepSpec::v1_4_prefill),
+                    "Q6_K" | "Q6_K_lds_tiled" => (vec![MmqDtype::Q6KLdsTiled], SweepSpec::v1_4_prefill),
                     "Q6_K_lds_tiled_x8" => (vec![MmqDtype::Q6KLdsTiledX8], SweepSpec::v1_4_prefill),
                     "IQ4_XS" | "IQ4_XS_lds_tiled" => (vec![MmqDtype::Iq4XsLdsTiled], SweepSpec::v1_4_prefill),
                     "IQ4_XS_lds_tiled_x8" => (vec![MmqDtype::Iq4XsLdsTiledX8], SweepSpec::v1_4_prefill),
-                    "Q4_K_lds_tiled_y64" => (vec![MmqDtype::Q4KLdsTiledY64], SweepSpec::v1_4_prefill),
+                    "Q4_K" | "Q4_K_lds_tiled_y64" => (vec![MmqDtype::Q4KLdsTiledY64], SweepSpec::v1_4_prefill),
                     "Q4_K_lds_tiled_y64_x8" => (vec![MmqDtype::Q4KLdsTiledY64X8], SweepSpec::v1_4_prefill),
                     "Q3_K" | "Q3_K_lds_tiled" => (vec![MmqDtype::Q3KLdsTiled], SweepSpec::v1_4_prefill),
                     "Q3_K_lds_tiled_x8" => (vec![MmqDtype::Q3KLdsTiledX8], SweepSpec::v1_4_prefill),
                     "IQ4_NL" | "IQ4_NL_lds_tiled" => (vec![MmqDtype::Iq4NlLdsTiled], SweepSpec::v1_4_prefill),
                     "IQ4_NL_lds_tiled_x8" => (vec![MmqDtype::Iq4NlLdsTiledX8], SweepSpec::v1_4_prefill),
                     "Q8_0_lds_tiled" => (vec![MmqDtype::Q8_0LdsTiled], SweepSpec::v1_4_prefill),
-                    "Q6_K" | "Q6_K_4warp" => (vec![MmqDtype::Q6K4Warp], SweepSpec::v1_4_prefill),
                     "Q8_K" | "Q8_K_wave64" => (vec![MmqDtype::Q8KWave64], SweepSpec::v1_4_prefill),
                     "Q2_K" | "Q2_K_wave64" => (vec![MmqDtype::Q2KWave64], SweepSpec::v1_4_prefill),
                     "IQ3_S" | "IQ3_S_wave64" => {
@@ -1173,25 +1169,19 @@ fn sweep(root: &std::path::Path, arch: &str, op: Option<&str>, dtype: &str) -> R
                     "all" => (
                         vec![
                             MmqDtype::Q8_0Oracle,
-                            MmqDtype::Q8_04Warp,
-                            MmqDtype::Q8_0Wave64,
                             MmqDtype::Q4_14Warp,
                             MmqDtype::Q4_1Wave64,
                             MmqDtype::Q4_0Wave64,
                             MmqDtype::Q4_04Warp,
                             MmqDtype::Q5_0Wave64,
                             MmqDtype::Q5_1Wave64,
-                            MmqDtype::Q4K4Warp,
-                            MmqDtype::Q6K4Warp,
                             MmqDtype::Q8KWave64,
                             MmqDtype::Q2KWave64,
                         ],
                         // Oracle uses its small grid, 4warp uses the prefill grid.
                         |d| match d {
                             MmqDtype::Q8_0Oracle => SweepSpec::v1_4_oracle(d),
-                            MmqDtype::Q8_04Warp
-                            | MmqDtype::Q8_0Wave64
-                            | MmqDtype::Q4_14Warp
+                            MmqDtype::Q4_14Warp
                             | MmqDtype::Q4_1Wave64
                             | MmqDtype::Q4_0Wave64
                             | MmqDtype::Q4_04Warp
@@ -1210,8 +1200,6 @@ fn sweep(root: &std::path::Path, arch: &str, op: Option<&str>, dtype: &str) -> R
                             | MmqDtype::Iq4NlLdsTiled
                             | MmqDtype::Iq4NlLdsTiledX8
                             | MmqDtype::Q8_0LdsTiled
-                            | MmqDtype::Q4K4Warp
-                            | MmqDtype::Q6K4Warp
                             | MmqDtype::Q8KWave64
                             | MmqDtype::Q2KWave64
                             | MmqDtype::Iq3SWave64
@@ -1488,7 +1476,6 @@ fn mmq_oracle_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::MmqOracle
 fn mmq_gemm_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::MmqGemmDtype> {
     use flambeau_bench::sweep_mmvq::MmqGemmDtype;
     match dtype {
-        "Q8_0_mmq_wave64" => Some(MmqGemmDtype::Q8_0Wave64),
         "Q4_0_mmq_wave64" => Some(MmqGemmDtype::Q4_0Wave64),
         "Q4_1_mmq_wave64" => Some(MmqGemmDtype::Q4_1Wave64),
         "Q5_0_mmq_wave64" => Some(MmqGemmDtype::Q5_0Wave64),
@@ -1509,17 +1496,6 @@ fn mmq_gemm_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::MmqGemmDtyp
         "IQ1_S_mmq_wave64" => Some(MmqGemmDtype::Iq1SWave64),
         "IQ1_M_mmq_wave64" => Some(MmqGemmDtype::Iq1MWave64),
         "Q8_0_mmq_wave64_tile16" => Some(MmqGemmDtype::Q8_0Wave64Tile16),
-        _ => None,
-    }
-}
-
-#[cfg(any(feature = "hip_sweep", feature = "cuda_sweep"))]
-fn mmq_4warp_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::Mmq4WarpDtype> {
-    use flambeau_bench::sweep_mmvq::Mmq4WarpDtype;
-    match dtype {
-        "Q8_0_mmq_4warp" => Some(Mmq4WarpDtype::Q8_0),
-        "Q4_K_mmq_4warp" => Some(Mmq4WarpDtype::Q4K),
-        "Q6_K_mmq_4warp" => Some(Mmq4WarpDtype::Q6K),
         _ => None,
     }
 }
@@ -1668,8 +1644,6 @@ fn named_qmatmul_sweep<B: flambeau_bench::backend::BenchBackend>(
         (format!("qmatmul_mmq_oracle ({})", d.name()), mmvq::run_mmq_oracle_sweep::<B>(d, root, arch))
     } else if let Some(d) = mmq_gemm_dtype(dtype) {
         (format!("qmatmul_mmq_gemm ({})", d.name()), mmvq::run_mmq_gemm_sweep::<B>(d, root, arch))
-    } else if let Some(d) = mmq_4warp_dtype(dtype) {
-        (format!("qmatmul_mmq_4warp ({})", d.name()), mmvq::run_mmq_4warp_sweep::<B>(d, root, arch))
     } else if let Some(d) = mmq_4warp_lds_dtype(dtype) {
         (
             format!("qmatmul_mmq_4warp_lds ({})", d.name()),
@@ -1937,20 +1911,6 @@ fn pmc_refresh(arch: &str) -> Result<()> {
                 64,
             ),
             (
-                "qmatmul_q8_0_mmq_4warp_lds_gfx906",
-                "mmq_q8_0_4warp",
-                128,
-                2048,
-                64,
-            ),
-            (
-                "qmatmul_q8_0_mmq_wave64_gfx906",
-                "mmq_q8_0_wave64",
-                128,
-                2048,
-                4096,
-            ),
-            (
                 "qmatmul_q4_1_mmq_4warp_lds_gfx906",
                 "mmq_q4_1_4warp_lds",
                 128,
@@ -2023,7 +1983,6 @@ fn kernel_entry(stem: &str) -> Result<&'static str> {
         "mmvq_q5_k_r2" => "flambeau_mmvq_q5_k_r2_q8_1",
         "mmvq_q6_k_r4" => "flambeau_mmvq_q6_k_r4_q8_1",
         "mmq_q8_0_oracle" => "flambeau_mmq_q8_0_oracle_q8_1",
-        "mmq_q8_0_4warp" => "flambeau_mmq_q8_0_4warp_q8_1",
         "mmq_q8_0_wave64" => "flambeau_mmq_q8_0_wave64_q8_1",
         "mmq_q4_1_4warp_lds" => "flambeau_mmq_q4_1_4warp_lds_q8_1",
         "mmq_q4_K_wave64" => "flambeau_mmq_q4_K_wave64_q8_1",
