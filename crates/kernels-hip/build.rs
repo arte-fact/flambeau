@@ -28,6 +28,7 @@ fn main() {
     let cu_files = enumerate_cu_files(src_dir);
 
     let mut entries: BTreeMap<String, PathBuf> = BTreeMap::new();
+    let mut param_counts: BTreeMap<String, usize> = BTreeMap::new();
     if !skip_build && !cu_files.is_empty() {
         let rocm_path = env::var("ROCM_PATH").unwrap_or_else(|_| "/opt/rocm".into());
         let hipcc = find_hipcc(&rocm_path)
@@ -51,6 +52,7 @@ fn main() {
             .cloned()
             .collect();
         let all_cu: Vec<PathBuf> = static_cu.into_iter().chain(generated).collect();
+        param_counts = flambeau_kernels_shared::signatures::param_counts(&all_cu);
 
         // Fold included-header contents into the per-kernel cache key so a
         // change to a shared / arch_primitives header recompiles the kernels.
@@ -112,6 +114,7 @@ fn main() {
             .expect("write to String is infallible");
     }
     hsaco_rs.push_str("];\n");
+    hsaco_rs.push_str(&flambeau_kernels_shared::signatures::render_table(&param_counts));
     fs::write(out_dir.join("hsaco.rs"), hsaco_rs).expect("write hsaco.rs");
 }
 

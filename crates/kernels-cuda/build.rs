@@ -28,6 +28,8 @@ fn main() {
     let cu_files = enumerate_cu_files(src_dir);
 
     let mut entries: BTreeMap<String, PathBuf> = BTreeMap::new();
+
+    let mut param_counts: BTreeMap<String, usize> = BTreeMap::new();
     if !skip_build && !cu_files.is_empty() {
         let cuda_path = env::var("CUDA_PATH").unwrap_or_else(|_| "/usr/local/cuda".into());
         let nvcc = find_nvcc(&cuda_path)
@@ -43,6 +45,7 @@ fn main() {
             "sm_80.cuh",
         );
         let all_cu: Vec<PathBuf> = cu_files.iter().cloned().chain(generated).collect();
+        param_counts = flambeau_kernels_shared::signatures::param_counts(&all_cu);
 
         // Fold included-header contents into the per-kernel cache key so a
         // change to a shared / arch_primitives header recompiles the kernels
@@ -96,6 +99,7 @@ fn main() {
             .expect("write to String is infallible");
     }
     cubin_rs.push_str("];\n");
+    cubin_rs.push_str(&flambeau_kernels_shared::signatures::render_table(&param_counts));
     fs::write(out_dir.join("cubin.rs"), cubin_rs).expect("write cubin.rs");
 }
 

@@ -35,7 +35,7 @@ fn check(code: std::os::raw::c_int, ctx: &'static str) -> DeviceResult<()> {
 pub struct CudaModule {
     module: CUmodule,
     device_id: i32,
-    cache: RwLock<HashMap<&'static str, CUfunction>>,
+    cache: RwLock<HashMap<&'static str, (CUfunction, Option<usize>)>>,
 }
 
 // SAFETY: `CUmodule`/`CUfunction` are opaque driver handles, valid across
@@ -64,12 +64,13 @@ impl CudaModule {
 
     /// Resolve a kernel by `&'static str` name, caching the handle.
     pub fn kernel(&self, name: &'static str) -> DeviceResult<CudaKernel<'_>> {
-        if let Some(&raw) = self.cache.read().expect("module cache poisoned").get(name) {
-            return Ok(CudaKernel { raw, name, _module: PhantomData });
+        if let Some(&(raw, params)) = self.cache.read().expect("module cache poisoned").get(name) {
+            return Ok(CudaKernel { raw, name, params, _module: PhantomData });
         }
         let raw = self.resolve(name)?;
-        self.cache.write().expect("module cache poisoned").insert(name, raw);
-        Ok(CudaKernel { raw, name, _module: PhantomData })
+        let params = flambeau_kernels_cuda::param_count(name);
+        self.cache.write().expect("module cache poisoned").insert(name, (raw, params));
+        Ok(CudaKernel { raw, name, params, _module: PhantomData })
     }
 
     fn resolve(&self, name: &str) -> DeviceResult<CUfunction> {
@@ -104,6 +105,10 @@ impl Drop for CudaModule {
 pub struct CudaKernel<'m> {
     raw: CUfunction,
     pub name: &'static str,
+    /// Parameter count of the entry point, from its source
+    /// ([`flambeau_kernels_cuda::param_count`]); `launch` refuses any other
+    /// argument count. `None` skips the check.
+    params: Option<usize>,
     _module: PhantomData<&'m CudaModule>,
 }
 
@@ -222,6 +227,19 @@ impl CudaKernel<'_> {
 
     /// Launch the kernel on `stream` with `cfg` + `args`.
     pub fn launch(&self, stream: &CudaStream, cfg: LaunchCfg, mut args: KernelArgs<'_>) -> DeviceResult<()> {
+        if let Some(expected) = self.params {
+            if args.len() != expected {
+                return Err(flambeau_core::DeviceError::Backend {
+                    backend: BACKEND,
+                    code: -1,
+                    message: format!(
+                        "launch({}): {} arguments pushed, the kernel takes {expected}",
+                        self.name,
+                        args.len()
+                    ),
+                });
+            }
+        }
         // If a capture is active on this thread, record the launch's arity +
         // tagged slots so post-capture the exec can build a SlotMap. Outside
         // capture this is a no-op.

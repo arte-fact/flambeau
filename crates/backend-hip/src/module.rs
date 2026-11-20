@@ -57,7 +57,7 @@ pub struct HipModule {
     /// `RUST-PERF-CORRECTIONS.md`]. V2 continuous batching will contend the
     /// read lock at most N (num-ranks) ways; a `Mutex` would be fine today
     /// but `RwLock` is forward-compatible for cheap.
-    kernel_cache: RwLock<HashMap<&'static str, HipFunctionT>>,
+    kernel_cache: RwLock<HashMap<&'static str, (HipFunctionT, Option<usize>)>>,
 }
 
 impl std::fmt::Debug for HipModule {
@@ -121,7 +121,7 @@ impl HipModule {
     /// Returns `DeviceError::Backend` if the name contains a NUL byte or
     /// the driver reports `hipModuleGetFunction` failure.
     pub fn kernel(&self, name: &'static str) -> DeviceResult<HipKernel<'_>> {
-        if let Some(raw) = self
+        if let Some((raw, params)) = self
             .kernel_cache
             .read()
             .ok()
@@ -130,18 +130,21 @@ impl HipModule {
             return Ok(HipKernel {
                 raw,
                 name,
+                params,
                 _module: PhantomData,
             });
         }
         let raw = self.resolve(name)?;
+        let params = flambeau_kernels_hip::param_count(name);
         if let Ok(mut guard) = self.kernel_cache.write() {
             // `entry` not `insert` — tolerates a concurrent resolve during
             // the brief window between the read-miss and the write-acquire.
-            guard.entry(name).or_insert(raw);
+            guard.entry(name).or_insert((raw, params));
         }
         Ok(HipKernel {
             raw,
             name,
+            params,
             _module: PhantomData,
         })
     }
@@ -160,6 +163,7 @@ impl HipModule {
             // a per-call allocation while the kernel handle itself carries
             // the identifying address.
             name: "<dyn>",
+            params: flambeau_kernels_hip::param_count(name),
             _module: PhantomData,
         })
     }
@@ -204,6 +208,10 @@ impl Drop for HipModule {
 pub struct HipKernel<'m> {
     raw: HipFunctionT,
     pub name: &'static str,
+    /// Parameter count of the entry point, from its source
+    /// ([`flambeau_kernels_hip::param_count`]); `launch` refuses any other
+    /// argument count. `None` skips the check.
+    params: Option<usize>,
     _module: PhantomData<&'m HipModule>,
 }
 
@@ -389,6 +397,19 @@ impl HipKernel<'_> {
         cfg: LaunchCfg,
         mut args: KernelArgs<'_>,
     ) -> DeviceResult<()> {
+        if let Some(expected) = self.params {
+            if args.len() != expected {
+                return Err(DeviceError::Backend {
+                    backend: BACKEND,
+                    code: -1,
+                    message: format!(
+                        "launch({}): {} arguments pushed, the kernel takes {expected}",
+                        self.name,
+                        args.len()
+                    ),
+                });
+            }
+        }
         // If a capture is active on this thread, record the
         // launch's arity + tagged slots so post-capture the exec can build
         // a SlotMap. Outside capture this is a no-op.

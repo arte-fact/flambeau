@@ -29,3 +29,13 @@ pub fn cubin(name: &str) -> Option<&'static [u8]> {
 pub fn catalogue() -> &'static [(&'static str, &'static [u8])] {
     CATALOGUE
 }
+
+/// Parameter count of the `extern "C" __global__` entry point `entry`, read
+/// from its source at build time. `None` for an entry this build did not
+/// compile or whose signature the source scan could not read.
+pub fn param_count(entry: &str) -> Option<usize> {
+    PARAM_COUNTS
+        .binary_search_by(|(n, _)| (*n).cmp(entry))
+        .ok()
+        .map(|i| usize::from(PARAM_COUNTS[i].1))
+}
