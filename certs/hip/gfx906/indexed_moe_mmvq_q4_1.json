@@ -31,13 +31,13 @@
       "k": 768,
       "n": 2048,
       "seed": 14612891,
-      "max_rel_err": 0.000119584336,
+      "max_rel_err": 0.00012309443,
       "tolerance": 0.03,
       "pass": true
     }
   ],
   "pass": true,
-  "emitted_at": "2026-06-17T11:39:51Z",
+  "emitted_at": "2026-11-20T18:29:24Z",
   "rig": "threadreaper-gfx906",
   "pmc": {
     "vgpr_count": 17,

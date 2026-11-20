@@ -9,35 +9,62 @@
   "tolerance_formula": "|err| <= 3e-2 * max(|ref|, sqrt(k))  (indexed-MoE MMVQ)",
   "results": [
     {
-      "m": 1,
+      "m": 32,
       "k": 2048,
-      "n": 256,
-      "seed": 14600279,
-      "max_rel_err": 0.0035298408,
+      "n": 768,
+      "seed": 14605574,
+      "max_rel_err": 0.010065679,
       "tolerance": 0.03,
       "pass": true
     },
     {
-      "m": 4,
-      "k": 2048,
-      "n": 256,
-      "seed": 14600438,
-      "max_rel_err": 0.01139929,
-      "tolerance": 0.03,
-      "pass": true
-    },
-    {
-      "m": 1,
+      "m": 32,
       "k": 768,
       "n": 2048,
-      "seed": 14612891,
-      "max_rel_err": 0.004717611,
+      "seed": 14614534,
+      "max_rel_err": 0.012289751,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 64,
+      "k": 2048,
+      "n": 768,
+      "seed": 14607270,
+      "max_rel_err": 0.012375411,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 64,
+      "k": 768,
+      "n": 2048,
+      "seed": 14616230,
+      "max_rel_err": 0.021369772,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 128,
+      "k": 2048,
+      "n": 768,
+      "seed": 14610662,
+      "max_rel_err": 0.009726123,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 128,
+      "k": 768,
+      "n": 2048,
+      "seed": 14619622,
+      "max_rel_err": 0.015672361,
       "tolerance": 0.03,
       "pass": true
     }
   ],
   "pass": true,
-  "emitted_at": "2026-06-17T11:50:14Z",
+  "emitted_at": "2026-11-20T19:25:06Z",
   "rig": "threadreaper-sm_86",
   "pmc": {
     "vgpr_count": 40,

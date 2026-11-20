@@ -11,24 +11,60 @@
     {
       "m": 1,
       "k": 2048,
-      "n": 256,
-      "seed": 14600279,
-      "max_rel_err": 0.003818968,
+      "n": 768,
+      "seed": 14603931,
+      "max_rel_err": 0.00660222,
       "tolerance": 0.03,
       "pass": true
     },
     {
-      "m": 4,
+      "m": 8,
       "k": 2048,
-      "n": 256,
-      "seed": 14600438,
-      "max_rel_err": 0.01139929,
+      "n": 768,
+      "seed": 14604302,
+      "max_rel_err": 0.0086471,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 31,
+      "k": 2048,
+      "n": 768,
+      "seed": 14605521,
+      "max_rel_err": 0.010626991,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 32,
+      "k": 2048,
+      "n": 768,
+      "seed": 14605574,
+      "max_rel_err": 0.0100789135,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 64,
+      "k": 2048,
+      "n": 768,
+      "seed": 14607270,
+      "max_rel_err": 0.012375411,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 128,
+      "k": 2048,
+      "n": 768,
+      "seed": 14610662,
+      "max_rel_err": 0.010191867,
       "tolerance": 0.03,
       "pass": true
     }
   ],
   "pass": true,
-  "emitted_at": "2026-06-18T19:59:01Z",
+  "emitted_at": "2026-11-20T19:25:30Z",
   "rig": "threadreaper-sm_86",
   "pmc": {
     "vgpr_count": 48,

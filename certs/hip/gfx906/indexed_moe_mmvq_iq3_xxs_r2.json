@@ -13,7 +13,7 @@
       "k": 2048,
       "n": 256,
       "seed": 14600279,
-      "max_rel_err": 0.00017444581,
+      "max_rel_err": 0.0001986381,
       "tolerance": 0.03,
       "pass": true
     },
@@ -22,7 +22,7 @@
       "k": 2048,
       "n": 256,
       "seed": 14600438,
-      "max_rel_err": 0.0005151926,
+      "max_rel_err": 0.00043965486,
       "tolerance": 0.03,
       "pass": true
     },
@@ -31,13 +31,13 @@
       "k": 768,
       "n": 2048,
       "seed": 14612891,
-      "max_rel_err": 0.00022822541,
+      "max_rel_err": 0.00019076712,
       "tolerance": 0.03,
       "pass": true
     }
   ],
   "pass": true,
-  "emitted_at": "2026-06-17T12:31:33Z",
+  "emitted_at": "2026-11-20T18:31:23Z",
   "rig": "threadreaper-gfx906",
   "pmc": {
     "vgpr_count": 23,
