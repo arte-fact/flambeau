@@ -251,18 +251,27 @@ pub const ROPE_NEOX_PARTIAL_GFX906: &[KernelDescriptor] = &[
     },
 ];
 
+/// Q4_K indexed-MoE MMVQ; `m` is the token count of the launch.
 pub const INDEXED_MOE_MMVQ_GFX906: &[KernelDescriptor] = &[
-    // Active: P29 multi-row r2 (landed ). Halves launches vs single-row,
-    // keeps VGPR 24 / waves/SIMD 10.
     KernelDescriptor {
         op_name: "IndexedMoEMMVQ",
-        impl_id: "indexed_moe_mmvq_q4_k_r2_gfx906",
+        impl_id: "indexed_moe_mmvq_q4_k_r2",
         backend: "hip",
         arch: "gfx906",
         dtype_weight: QDtype::Q4_K,
         dtype_activation: QDtype::Q8_1,
-        m_range: (1, usize::MAX),
-        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q4_k_r2_gfx906.json",
+        m_range: (1, 31),
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q4_k_r2.json",
+    },
+    KernelDescriptor {
+        op_name: "IndexedMoEMMVQ",
+        impl_id: "indexed_moe_mmvq_q4_k_r4",
+        backend: "hip",
+        arch: "gfx906",
+        dtype_weight: QDtype::Q4_K,
+        dtype_activation: QDtype::Q8_1,
+        m_range: (32, usize::MAX),
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q4_k_r4.json",
     },
 ];
 
@@ -279,29 +288,14 @@ pub const MOE_COMBINE_GFX906: &[KernelDescriptor] = &[KernelDescriptor {
 
 pub const INDEXED_MOE_MMVQ_GATE_UP_GFX906: &[KernelDescriptor] = &[KernelDescriptor {
     op_name: "IndexedMoEMMVQGateUp",
-    impl_id: "indexed_moe_mmvq_q4_k_gate_up_gfx906",
+    impl_id: "indexed_moe_mmvq_q4_k_gate_up_r4",
     backend: "hip",
     arch: "gfx906",
     dtype_weight: QDtype::Q4_K,
     dtype_activation: QDtype::Q8_1,
     m_range: (1, usize::MAX),
-    cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q4_k_gate_up_gfx906.json",
+    cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q4_k_gate_up_r4.json",
 }];
-
-pub const INDEXED_MOE_MMQ_GFX906: &[KernelDescriptor] = &[
-    // 4-warp LDS-tiled MoE MMQ. Caller sorts (token, slot) pairs into
-    // per-expert buckets so the weight tile amortises across MMQ_X=8 slots.
-    KernelDescriptor {
-        op_name: "IndexedMoEMMQ",
-        impl_id: "indexed_moe_mmq_q4_k_gfx906",
-        backend: "hip",
-        arch: "gfx906",
-        dtype_weight: QDtype::Q4_K,
-        dtype_activation: QDtype::Q8_1,
-        m_range: (1, usize::MAX),
-        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q4_k_gfx906.json",
-    },
-];
 
 /// Pick the `KernelDescriptor` that matches `cfg`. Predicates are
 /// non-overlapping by construction (see architectural rule: "two rows
@@ -434,7 +428,6 @@ mod tests {
             INDEXED_MOE_MMVQ_GFX906,
             MOE_COMBINE_GFX906,
             INDEXED_MOE_MMVQ_GATE_UP_GFX906,
-            INDEXED_MOE_MMQ_GFX906,
             ROPE_NEOX_PARTIAL_GFX906,
             CAUSAL_CONV1D_GFX906,
             DENSE_GEMV_F32_F16_GFX906,
@@ -534,7 +527,6 @@ mod tests {
             INDEXED_MOE_MMVQ_GFX906,
             MOE_COMBINE_GFX906,
             INDEXED_MOE_MMVQ_GATE_UP_GFX906,
-            INDEXED_MOE_MMQ_GFX906,
             ROPE_NEOX_PARTIAL_GFX906,
             CAUSAL_CONV1D_GFX906,
             DENSE_GEMV_F32_F16_GFX906,
@@ -602,7 +594,6 @@ mod tests {
             INDEXED_MOE_MMVQ_GFX906,
             MOE_COMBINE_GFX906,
             INDEXED_MOE_MMVQ_GATE_UP_GFX906,
-            INDEXED_MOE_MMQ_GFX906,
             ROPE_NEOX_PARTIAL_GFX906,
             CAUSAL_CONV1D_GFX906,
             DENSE_GEMV_F32_F16_GFX906,

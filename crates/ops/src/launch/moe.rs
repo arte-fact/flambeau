@@ -1,21 +1,11 @@
-//! MoE building blocks — TopK router, IndexedMoE matmul (MMVQ r2, fused
-//! gate+up, MMQ prefill), weighted combine.
-//! Expert bucketing (required by `indexed_moe_mmq_q4_k`) lives here as
-//! [`build_expert_buckets`]. Byte-compatible with `sweep_moe::build_expert_buckets`;
-//! the two will be folded into one helper when consumes this.
+//! MoE building blocks — TopK router, IndexedMoE matmul (MMVQ, fused
+//! gate+up, tile8 MMQ prefill), weighted combine.
 
 use anyhow::Result;
 use flambeau_core::{LaunchArgs, LaunchCfg};
 use flambeau_core::{DevicePtr, MOE_SORT_MAX_EXPERTS, TOPK_MAX_EXPERTS};
 
 pub use crate::sig::MoeShape;
-
-/// `MMQ_X` for `indexed_moe_mmq_q4_k` — bucket width. Fixed in the kernel
-/// source.
-pub const INDEXED_MOE_MMQ_X: usize = 8;
-
-/// `MMQ_Y` for `indexed_moe_mmq_q4_k` — output rows per block.
-pub const INDEXED_MOE_MMQ_Y: usize = 16;
 
 /// TopK router over per-token logits. Emits `(token, slot)` → expert index
 /// plus normalised softmax weights over the k selected experts per token.
@@ -104,8 +94,13 @@ pub fn apply_per_expert_scale_f32<B: flambeau_core::KernelBackend>(
     Ok(())
 }
 
-/// Indexed MoE MMVQ (r2 variant) — the decode-path MoE matmul. Half the
-/// launches of single-row, 2 output rows per wave64.
+/// Token count from which the Q4_K MoE MMVQ switches from r2 to r4: the
+/// boundary of the `indexed_moe_mmvq_q4_k_r2` / `_r4` rows of
+/// `dispatch/hip/gfx906.toml` (checked by `tests::q4k_moe_mmvq_split_matches_dispatch`).
+pub const Q4K_MOE_MMVQ_R4_MIN_TOKENS: usize = 32;
+
+/// Q4_K indexed MoE MMVQ: r2 (2 output rows per wave64) below
+/// [`Q4K_MOE_MMVQ_R4_MIN_TOKENS`] tokens, r4 (4 rows) from there on.
 /// Shapes:
 /// - `w[n_experts, n_rows, n_sb_per_row]` Q4_K blocks
 /// - `y[n_tokens, n_sb_per_row * 8]` Q8_1 blocks
@@ -119,12 +114,7 @@ pub fn indexed_moe_mmvq_q4_k_r2<B: flambeau_core::KernelBackend>(
 ) -> Result<()> {
     let crate::MoeMmvqBuffers { weights: w, act: y, expert_ids, dst } = buffers;
     let crate::MoeMmvqShape { n_rows, n_tokens, top_k, n_sb_per_row } = shape;
-    // productisation: shape-aware — r4 (quarter-wave) at prefill
-    // (n_tokens ≥ 32, launch-overhead-bound), r2 (half-wave) at decode
-    // (n_tokens < 32, per-thread-work-bound). Measured r4 +8 % prefill but
-    // -2 % decode vs r2; the split captures both.
-    const R4_TOKEN_THRESHOLD: usize = 32;
-    let (stem, entry, rows_per_block) = if n_tokens >= R4_TOKEN_THRESHOLD {
+    let (stem, entry, rows_per_block) = if n_tokens >= Q4K_MOE_MMVQ_R4_MIN_TOKENS {
         (
             "indexed_moe_mmvq_q4_k_r4_dp4a",
             "flambeau_indexed_moe_mmvq_q4_k_r4_dp4a_q8_1",
@@ -681,84 +671,6 @@ pub fn indexed_moe_mmvq_q4_0<B: flambeau_core::KernelBackend>(
     Ok(())
 }
 
-/// Q5_0 indexed-MoE MMVQ. Same contract as `indexed_moe_mmvq_q4_0` plus
-/// the 5th-bit DP4A from `mmvq_q5_0`: per block, decode adds
-/// `16 · sumi_bit · d_x · d_y` and subtracts `16 · d_x · s_y` for the
-/// (q5 − 16) offset.
-pub fn indexed_moe_mmvq_q5_0<B: flambeau_core::KernelBackend>(
-    reg: &crate::Registry<B>,
-    stream: &<B::Device as flambeau_core::Device>::Stream,
-    buffers: crate::MoeMmvqBuffers,
-    shape: crate::MoeMmvqShape,
-) -> Result<()> {
-    let crate::MoeMmvqBuffers { weights: w, act: y, expert_ids, dst } = buffers;
-    let crate::MoeMmvqShape { n_rows, n_tokens, top_k, n_sb_per_row: n_blocks_per_row } = shape;
-    let module = reg.expect_module("indexed_moe_mmvq_q5_0")?;
-    let kernel = B::kernel(module, "flambeau_indexed_moe_mmvq_q5_0_q8_1")?;
-    let n_rows_i = n_rows as i32;
-    let n_tokens_i = n_tokens as i32;
-    let top_k_i = top_k as i32;
-    let nb_i = n_blocks_per_row as i32;
-    let w_ptr: u64 = w.as_usize() as u64;
-    let y_ptr: u64 = y.as_usize() as u64;
-    let e_ptr: u64 = expert_ids.as_usize() as u64;
-    let d_ptr: u64 = dst.as_usize() as u64;
-    let mut args = <B::Args<'_>>::default();
-    args.push_arg(&w_ptr);
-    args.push_arg(&y_ptr);
-    args.push_arg(&e_ptr);
-    args.push_arg(&d_ptr);
-    args.push_arg(&n_rows_i);
-    args.push_arg(&n_tokens_i);
-    args.push_arg(&top_k_i);
-    args.push_arg(&nb_i);
-    let cfg = LaunchCfg {
-        grid: (n_rows as u32, (n_tokens * top_k) as u32, 1),
-        block: (256, 1, 1),
-        shared_bytes: 0,
-    };
-    B::launch(&kernel, stream, cfg, args)?;
-    Ok(())
-}
-
-/// Q5_1 indexed-MoE MMVQ. Q5_0 indexed structure with the Q4_1-style
-/// `m·s_y` correction (Q5_1 is affine: y = d·q5 + m).
-pub fn indexed_moe_mmvq_q5_1<B: flambeau_core::KernelBackend>(
-    reg: &crate::Registry<B>,
-    stream: &<B::Device as flambeau_core::Device>::Stream,
-    buffers: crate::MoeMmvqBuffers,
-    shape: crate::MoeMmvqShape,
-) -> Result<()> {
-    let crate::MoeMmvqBuffers { weights: w, act: y, expert_ids, dst } = buffers;
-    let crate::MoeMmvqShape { n_rows, n_tokens, top_k, n_sb_per_row: n_blocks_per_row } = shape;
-    let module = reg.expect_module("indexed_moe_mmvq_q5_1")?;
-    let kernel = B::kernel(module, "flambeau_indexed_moe_mmvq_q5_1_q8_1")?;
-    let n_rows_i = n_rows as i32;
-    let n_tokens_i = n_tokens as i32;
-    let top_k_i = top_k as i32;
-    let nb_i = n_blocks_per_row as i32;
-    let w_ptr: u64 = w.as_usize() as u64;
-    let y_ptr: u64 = y.as_usize() as u64;
-    let e_ptr: u64 = expert_ids.as_usize() as u64;
-    let d_ptr: u64 = dst.as_usize() as u64;
-    let mut args = <B::Args<'_>>::default();
-    args.push_arg(&w_ptr);
-    args.push_arg(&y_ptr);
-    args.push_arg(&e_ptr);
-    args.push_arg(&d_ptr);
-    args.push_arg(&n_rows_i);
-    args.push_arg(&n_tokens_i);
-    args.push_arg(&top_k_i);
-    args.push_arg(&nb_i);
-    let cfg = LaunchCfg {
-        grid: (n_rows as u32, (n_tokens * top_k) as u32, 1),
-        block: (256, 1, 1),
-        shared_bytes: 0,
-    };
-    B::launch(&kernel, stream, cfg, args)?;
-    Ok(())
-}
-
 /// Q4_1 indexed-MoE MMVQ. Unblocks Qwen-published
 /// Qwen3.6-35B-A3B-Q4_0 whose `ffn_down_exps` are Q4_1 (gate/up are Q4_0,
 /// down is Q4_1). Same contract as `indexed_moe_mmvq_q4_0`; per-block
@@ -928,50 +840,6 @@ pub fn indexed_moe_mmvq_q8_0_gate_up<B: flambeau_core::KernelBackend>(
     let cfg = LaunchCfg {
         grid: (n_rows as u32, (n_tokens * top_k) as u32, 1),
         block: (256, 1, 1),
-        shared_bytes: 0,
-    };
-    B::launch(&kernel, stream, cfg, args)?;
-    Ok(())
-}
-
-/// Fused gate+up MoE MMVQ (candle P30). One launch does both `gate = W_g · x`
-/// and `up = W_u · x` reading `x` only once. Shapes match
-/// `indexed_moe_mmvq_q4_k_r2` but with two separate weight tensors and two
-/// separate F32 output tensors.
-/// sorted-reorder variant of `indexed_moe_mmvq_q4_k_r2` (down
-/// projection). Same ordering trick as the gate_up sorted kernel.
-pub fn indexed_moe_mmvq_q4_k_r2_sorted<B: flambeau_core::KernelBackend>(
-    reg: &crate::Registry<B>,
-    stream: &<B::Device as flambeau_core::Device>::Stream,
-    buffers: crate::MoeMmvqSortedBuffers,
-    shape: crate::MoeMmvqShape,
-) -> Result<()> {
-    let crate::MoeMmvqSortedBuffers { weights: w, act: y, expert_ids, sorted_pair_idx, dst } = buffers;
-    let crate::MoeMmvqShape { n_rows, n_tokens, top_k, n_sb_per_row } = shape;
-    let module = reg.expect_module("indexed_moe_mmvq_q4_k_r4_sorted_dp4a")?;
-    let kernel = B::kernel(module, "flambeau_indexed_moe_mmvq_q4_k_r4_sorted_dp4a_q8_1")?;
-    let n_rows_i = n_rows as i32;
-    let n_tokens_i = n_tokens as i32;
-    let top_k_i = top_k as i32;
-    let nb_i = n_sb_per_row as i32;
-    let w_ptr: u64 = w.as_usize() as u64;
-    let y_ptr: u64 = y.as_usize() as u64;
-    let e_ptr: u64 = expert_ids.as_usize() as u64;
-    let s_ptr: u64 = sorted_pair_idx.as_usize() as u64;
-    let d_ptr: u64 = dst.as_usize() as u64;
-    let mut args = <B::Args<'_>>::default();
-    args.push_arg(&w_ptr);
-    args.push_arg(&y_ptr);
-    args.push_arg(&e_ptr);
-    args.push_arg(&s_ptr);
-    args.push_arg(&d_ptr);
-    args.push_arg(&n_rows_i);
-    args.push_arg(&n_tokens_i);
-    args.push_arg(&top_k_i);
-    args.push_arg(&nb_i);
-    let cfg = LaunchCfg {
-        grid: ((n_rows as u32).div_ceil(4), (n_tokens * top_k) as u32, 1),
-        block: (64, 1, 1),
         shared_bytes: 0,
     };
     B::launch(&kernel, stream, cfg, args)?;
@@ -2468,56 +2336,6 @@ pub fn indexed_moe_mmq_q6_k_down_tile8<B: flambeau_core::KernelBackend>(
     Ok(())
 }
 
-/// sorted-reorder variant of `indexed_moe_mmvq_q4_k_gate_up`
-/// that takes `sorted_pair_idx` (produced by `moe_sort_by_expert`) and
-/// remaps `blockIdx.y` → original (token, slot). Adjacent blocks thus
-/// share the same expert → L2 cache reuse on weight tiles.
-/// Must be called after `moe_sort_by_expert` has populated
-/// `sorted_pair_idx[total]` with the sort permutation.
-pub fn indexed_moe_mmvq_q4_k_gate_up_sorted<B: flambeau_core::KernelBackend>(
-    reg: &crate::Registry<B>,
-    stream: &<B::Device as flambeau_core::Device>::Stream,
-    buffers: crate::MoeMmvqGateUpSortedBuffers,
-    shape: crate::MoeMmvqShape,
-) -> Result<()> {
-    let crate::MoeMmvqGateUpSortedBuffers { gate_w: w_gate, up_w: w_up, act: y, expert_ids, sorted_pair_idx, gate_out, up_out } = buffers;
-    let crate::MoeMmvqShape { n_rows, n_tokens, top_k, n_sb_per_row } = shape;
-    let module = reg.expect_module("indexed_moe_mmvq_q4_k_gate_up_r4_sorted_dp4a")?;
-    let kernel = B::kernel(module, "flambeau_indexed_moe_mmvq_q4_k_gate_up_r4_sorted_dp4a_q8_1")?;
-
-    let n_rows_i = n_rows as i32;
-    let n_tokens_i = n_tokens as i32;
-    let top_k_i = top_k as i32;
-    let nb_i = n_sb_per_row as i32;
-    let g_ptr: u64 = w_gate.as_usize() as u64;
-    let u_ptr: u64 = w_up.as_usize() as u64;
-    let y_ptr: u64 = y.as_usize() as u64;
-    let e_ptr: u64 = expert_ids.as_usize() as u64;
-    let s_ptr: u64 = sorted_pair_idx.as_usize() as u64;
-    let go_ptr: u64 = gate_out.as_usize() as u64;
-    let uo_ptr: u64 = up_out.as_usize() as u64;
-    let mut args = <B::Args<'_>>::default();
-    args.push_arg(&g_ptr);
-    args.push_arg(&u_ptr);
-    args.push_arg(&y_ptr);
-    args.push_arg(&e_ptr);
-    args.push_arg(&s_ptr);
-    args.push_arg(&go_ptr);
-    args.push_arg(&uo_ptr);
-    args.push_arg(&n_rows_i);
-    args.push_arg(&n_tokens_i);
-    args.push_arg(&top_k_i);
-    args.push_arg(&nb_i);
-    // r4 shape: 4 rows/block, grid.x = n_rows / 4.
-    let cfg = LaunchCfg {
-        grid: ((n_rows as u32).div_ceil(4), (n_tokens * top_k) as u32, 1),
-        block: (64, 1, 1),
-        shared_bytes: 0,
-    };
-    B::launch(&kernel, stream, cfg, args)?;
-    Ok(())
-}
-
 pub fn indexed_moe_mmvq_q4_k_gate_up<B: flambeau_core::KernelBackend>(
     reg: &crate::Registry<B>,
     stream: &<B::Device as flambeau_core::Device>::Stream,
@@ -2526,10 +2344,6 @@ pub fn indexed_moe_mmvq_q4_k_gate_up<B: flambeau_core::KernelBackend>(
 ) -> Result<()> {
     let crate::MoeMmvqGateUpBuffers { gate_w: w_gate, up_w: w_up, act: y, expert_ids, gate_out, up_out } = buffers;
     let crate::MoeMmvqShape { n_rows, n_tokens, top_k, n_sb_per_row } = shape;
-    // productisation: r4 variant — 4 rows per block (quarter-warp
-    // per row) halves block count vs r2 and quarters vs the baseline.
-    // Measured +19 % pp=512 on Qwen3.6-35B-A3B Mesh<2>, +7 % decode.
-    // Parity bit-exact with llama.cpp on 8-token greedy.
     let stem = "indexed_moe_mmvq_q4_k_gate_up_r4_dp4a";
     let entry = "flambeau_indexed_moe_mmvq_q4_k_gate_up_r4_dp4a_q8_1";
     let module = reg.expect_module(stem)?;
@@ -2560,52 +2374,6 @@ pub fn indexed_moe_mmvq_q4_k_gate_up<B: flambeau_core::KernelBackend>(
     let cfg = LaunchCfg {
         grid: ((n_rows as u32).div_ceil(4), (n_tokens * top_k) as u32, 1),
         block: (64, 1, 1),
-        shared_bytes: 0,
-    };
-    B::launch(&kernel, stream, cfg, args)?;
-    Ok(())
-}
-
-/// Indexed MoE MMQ Q4_K — prefill path. Caller pre-sorts (token, slot) pairs
-/// into per-expert buckets of up to MMQ_X=8 refs. See [`build_expert_buckets`].
-/// Shapes:
-/// - `w[n_experts, n_rows, n_sb_per_row]` Q4_K blocks
-/// - `y[n_tokens, n_sb_per_row * 8]` Q8_1 blocks
-/// - `bucket_expert[n_buckets]` i32
-/// - `bucket_slots[n_buckets, MMQ_X]` i32 packed `(token << 16 | slot)`, `-1` sentinel
-/// - `dst[n_tokens, top_k, n_rows]` F32
-pub fn indexed_moe_mmq_q4_k<B: flambeau_core::KernelBackend>(
-    reg: &crate::Registry<B>,
-    stream: &<B::Device as flambeau_core::Device>::Stream,
-    bufs: crate::MoeMmqQ4KBuffers,
-    shape: crate::MoeMmqQ4KShape,
-) -> Result<()> {
-    let crate::MoeMmqQ4KBuffers { w, y, bucket_expert, bucket_slots, dst } = bufs;
-    let crate::MoeMmqQ4KShape { n_rows, n_sb_per_row, top_k, n_buckets } = shape;
-    let module = reg.expect_module("indexed_moe_mmq_q4_k")?;
-    let kernel = B::kernel(module, "flambeau_indexed_moe_mmq_q4_k_q8_1")?;
-
-    let n_rows_i = n_rows as i32;
-    let nb_i = n_sb_per_row as i32;
-    let top_k_i = top_k as i32;
-    let w_ptr: u64 = w.as_usize() as u64;
-    let y_ptr: u64 = y.as_usize() as u64;
-    let be_ptr: u64 = bucket_expert.as_usize() as u64;
-    let bs_ptr: u64 = bucket_slots.as_usize() as u64;
-    let d_ptr: u64 = dst.as_usize() as u64;
-    let mut args = <B::Args<'_>>::default();
-    args.push_arg(&w_ptr);
-    args.push_arg(&y_ptr);
-    args.push_arg(&be_ptr);
-    args.push_arg(&bs_ptr);
-    args.push_arg(&d_ptr);
-    args.push_arg(&n_rows_i);
-    args.push_arg(&nb_i);
-    args.push_arg(&top_k_i);
-    let grid_x = (n_rows as u32).div_ceil(INDEXED_MOE_MMQ_Y as u32);
-    let cfg = LaunchCfg {
-        grid: (grid_x, n_buckets as u32, 1),
-        block: (128, 1, 1),
         shared_bytes: 0,
     };
     B::launch(&kernel, stream, cfg, args)?;
@@ -2779,89 +2547,6 @@ pub fn moe_combine_two_residuals_f16<B: flambeau_core::KernelBackend>(
     let cfg = LaunchCfg::one_d(total.div_ceil(256) as u32, 256);
     B::launch(&kernel, stream, cfg, args)?;
     Ok(())
-}
-
-/// Group `(token, slot)` pairs by expert into buckets of up to [`INDEXED_MOE_MMQ_X`]
-/// refs. Returns `(bucket_expert, bucket_slots)` where `bucket_slots[i, col]`
-/// is either `token << 16 | slot` or `-1` sentinel padding. Deterministic —
-/// experts are emitted in ascending-id order.
-/// Implementation: counting-sort over `expert_id`. Two linear passes
-/// over `expert_ids`, no `HashMap`, no allocations beyond the output vecs
-/// and a `Vec<u32>` of size `max_expert_id + 1`. The old `HashMap` path
-/// showed up in `forward_*_prefill` profiles; for Qwen3.6 with 256 experts
-/// that's a ~256-entry dense Vec — trivially cheaper than the HashMap
-/// round-trip.
-pub fn build_expert_buckets(
-    expert_ids: &[i32],
-    n_tokens: usize,
-    top_k: usize,
-) -> (Vec<i32>, Vec<i32>) {
-    let total = n_tokens * top_k;
-    if total == 0 {
-        return (Vec::new(), Vec::new());
-    }
-
-    // Pass 1: find `max_expert_id` + count pairs per expert.
-    let max_expert = expert_ids.iter().copied().max().unwrap_or(0);
-    // Experts < 0 are invalid — caller contract — but guard cheaply so we
-    // don't OOB the counts array. `as usize` casts negatives to giant
-    // positives; mask first.
-    debug_assert!(
-        expert_ids.iter().all(|&e| e >= 0),
-        "expert_ids must be non-negative"
-    );
-    let n_experts = (max_expert as usize) + 1;
-    let mut counts = vec![0u32; n_experts];
-    for &e in expert_ids {
-        counts[e as usize] += 1;
-    }
-
-    // Pass 2: compute per-expert write offsets by prefix-summing counts
-    // after inflating each to its bucket-padded count
-    // (`ceil(count / MMQ_X) * MMQ_X`). This sizes the output exactly.
-    let mut starts = vec![0usize; n_experts];
-    let mut padded_total = 0usize;
-    for e in 0..n_experts {
-        starts[e] = padded_total;
-        let c = counts[e] as usize;
-        if c > 0 {
-            let padded = c.div_ceil(INDEXED_MOE_MMQ_X) * INDEXED_MOE_MMQ_X;
-            padded_total += padded;
-        }
-    }
-    let n_buckets = padded_total / INDEXED_MOE_MMQ_X;
-
-    // Allocate output in one shot and initialise to -1 (the pad sentinel).
-    let mut bucket_slots = vec![-1i32; padded_total];
-    let mut bucket_expert = Vec::with_capacity(n_buckets);
-    // One bucket_expert entry per MMQ_X chunk. We can fill this up-front
-    // because we already know each expert contributes
-    // `count.div_ceil(MMQ_X)` chunks in ascending-id order.
-    for (e, &count) in counts.iter().enumerate().take(n_experts) {
-        let c = count as usize;
-        if c == 0 {
-            continue;
-        }
-        let chunks = c.div_ceil(INDEXED_MOE_MMQ_X);
-        for _ in 0..chunks {
-            bucket_expert.push(e as i32);
-        }
-    }
-
-    // Pass 3 (over pairs): scatter each packed pair into its expert's
-    // reserved region, bumping a per-expert cursor. `starts` acts as the
-    // cursor — we dense-overwrite the -1 pads for real refs.
-    for t in 0..n_tokens {
-        for slot in 0..top_k {
-            let e = expert_ids[t * top_k + slot] as usize;
-            let packed = ((t as i32) << 16) | (slot as i32);
-            let dst = starts[e];
-            bucket_slots[dst] = packed;
-            starts[e] = dst + 1;
-        }
-    }
-
-    (bucket_expert, bucket_slots)
 }
 
 // ---------------------------------------------------------------------------
@@ -3113,45 +2798,26 @@ pub fn moe_sort_by_expert_padded<B: flambeau_core::KernelBackend>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::Q4K_MOE_MMVQ_R4_MIN_TOKENS;
 
-    #[test]
-    fn bucketing_groups_by_expert_and_pads() {
-        // 3 tokens × top_k=2. Experts chosen to produce one bucket with a
-        // tail-pad and one full bucket.
-        let ids = vec![0i32, 1, 0, 1, 0, 2];
-        let (be, bs) = build_expert_buckets(&ids, 3, 2);
-        // Expert 0 has 3 refs → one bucket with 5× -1 tail pad.
-        // Expert 1 has 2 refs → one bucket with 6× -1 tail pad.
-        // Expert 2 has 1 ref → one bucket with 7× -1 tail pad.
-        assert_eq!(be, vec![0, 1, 2]);
-        assert_eq!(bs.len(), 3 * INDEXED_MOE_MMQ_X);
-        // Expert 0 refs: (t=0,slot=0), (t=1,slot=0), (t=2,slot=0).
-        assert_eq!(bs[0], 0);
-        assert_eq!(bs[1], 1 << 16);
-        assert_eq!(bs[2], 2 << 16);
-        assert_eq!(bs[3], -1);
-        // Expert 1 refs: (t=0,slot=1), (t=1,slot=1).
-        let b1 = INDEXED_MOE_MMQ_X;
-        assert_eq!(bs[b1], 1);
-        assert_eq!(bs[b1 + 1], (1 << 16) | 1);
-        assert_eq!(bs[b1 + 2], -1);
+    /// `m` predicate of the gfx906 dispatch row whose impl is `impl_id`.
+    fn row_m(toml: &str, impl_id: &str) -> String {
+        let row = toml
+            .split("[[")
+            .find(|row| row.contains(&format!("impl    = \"{impl_id}\"")))
+            .unwrap_or_else(|| panic!("no dispatch row for {impl_id}"));
+        let m = row.split("m = \"").nth(1).expect("row has an m predicate");
+        m[..m.find('"').unwrap()].to_string()
     }
 
+    /// The launcher picks r2 / r4 by token count; the dispatch rows that
+    /// certify them must split at the same boundary.
     #[test]
-    fn bucketing_splits_chunks_over_mmq_x() {
-        // One expert hit 10 times → two buckets: full 8 + tail 2.
-        let ids: Vec<i32> = (0..10).map(|_| 7i32).collect();
-        let (be, bs) = build_expert_buckets(&ids, 5, 2);
-        assert_eq!(be, vec![7, 7]);
-        assert_eq!(bs.len(), 2 * INDEXED_MOE_MMQ_X);
-        // Second bucket has 2 real refs (entries 8 and 9 = (t=4,slot=0)
-        // and (t=4,slot=1)) then 6 sentinels.
-        let b2 = INDEXED_MOE_MMQ_X;
-        assert_eq!(bs[b2], 4 << 16);
-        assert_eq!(bs[b2 + 1], (4 << 16) | 1);
-        for i in 2..INDEXED_MOE_MMQ_X {
-            assert_eq!(bs[b2 + i], -1);
-        }
+    fn q4k_moe_mmvq_split_matches_dispatch() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../dispatch/hip/gfx906.toml");
+        let toml = std::fs::read_to_string(path).unwrap();
+        let t = Q4K_MOE_MMVQ_R4_MIN_TOKENS;
+        assert_eq!(row_m(&toml, "indexed_moe_mmvq_q4_k_r2"), format!("1..{}", t - 1));
+        assert_eq!(row_m(&toml, "indexed_moe_mmvq_q4_k_r4"), format!(">={t}"));
     }
 }

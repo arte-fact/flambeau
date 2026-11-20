@@ -2784,7 +2784,6 @@ pub enum MoeGateUpDtype {
     Q8_0,
     Q4_0,
     Q4KR4,
-    Q4KR4Sorted,
 }
 
 impl MoeGateUpDtype {
@@ -2792,14 +2791,14 @@ impl MoeGateUpDtype {
         match self {
             MoeGateUpDtype::Q8_0 => "Q8_0",
             MoeGateUpDtype::Q4_0 => "Q4_0",
-            MoeGateUpDtype::Q4KR4 | MoeGateUpDtype::Q4KR4Sorted => "Q4_K",
+            MoeGateUpDtype::Q4KR4 => "Q4_K",
         }
     }
     fn weight_dtype(self) -> Dtype {
         match self {
             MoeGateUpDtype::Q8_0 => Dtype::Q8_0Dp4a,
             MoeGateUpDtype::Q4_0 => Dtype::Q4_0,
-            MoeGateUpDtype::Q4KR4 | MoeGateUpDtype::Q4KR4Sorted => Dtype::Q4K,
+            MoeGateUpDtype::Q4KR4 => Dtype::Q4K,
         }
     }
     fn impl_id(self) -> &'static str {
@@ -2807,7 +2806,6 @@ impl MoeGateUpDtype {
             MoeGateUpDtype::Q8_0 => "indexed_moe_mmvq_q8_0_gate_up",
             MoeGateUpDtype::Q4_0 => "indexed_moe_mmvq_q4_0_gate_up",
             MoeGateUpDtype::Q4KR4 => "indexed_moe_mmvq_q4_k_gate_up_r4",
-            MoeGateUpDtype::Q4KR4Sorted => "indexed_moe_mmvq_q4_k_gate_up_r4_sorted",
         }
     }
     fn kernel_stem(self) -> &'static str {
@@ -2815,7 +2813,6 @@ impl MoeGateUpDtype {
             MoeGateUpDtype::Q8_0 => "indexed_moe_mmvq_q8_0_gate_up_dp4a",
             MoeGateUpDtype::Q4_0 => "indexed_moe_mmvq_q4_0_gate_up_dp4a",
             MoeGateUpDtype::Q4KR4 => "indexed_moe_mmvq_q4_k_gate_up_r4_dp4a",
-            MoeGateUpDtype::Q4KR4Sorted => "indexed_moe_mmvq_q4_k_gate_up_r4_sorted_dp4a",
         }
     }
     fn kernel_entry(self) -> &'static str {
@@ -2823,7 +2820,6 @@ impl MoeGateUpDtype {
             MoeGateUpDtype::Q8_0 => "flambeau_indexed_moe_mmvq_q8_0_gate_up_dp4a_q8_1",
             MoeGateUpDtype::Q4_0 => "flambeau_indexed_moe_mmvq_q4_0_gate_up_dp4a_q8_1",
             MoeGateUpDtype::Q4KR4 => "flambeau_indexed_moe_mmvq_q4_k_gate_up_r4_dp4a_q8_1",
-            MoeGateUpDtype::Q4KR4Sorted => "flambeau_indexed_moe_mmvq_q4_k_gate_up_r4_sorted_dp4a_q8_1",
         }
     }
     /// Block thread count. The dp4a variants are 256t (4 lanes/block); the Q4_K
@@ -2831,22 +2827,16 @@ impl MoeGateUpDtype {
     fn launch_threads(self) -> u32 {
         match self {
             MoeGateUpDtype::Q8_0 | MoeGateUpDtype::Q4_0 => 256,
-            MoeGateUpDtype::Q4KR4 | MoeGateUpDtype::Q4KR4Sorted => 64,
+            MoeGateUpDtype::Q4KR4 => 64,
         }
     }
     /// Output rows computed per block (grid.x = ceil(n_rows / this)). The r4
     /// kernels do 4 rows/block; the rest one.
     fn rows_per_block(self) -> u32 {
         match self {
-            MoeGateUpDtype::Q4KR4 | MoeGateUpDtype::Q4KR4Sorted => 4,
+            MoeGateUpDtype::Q4KR4 => 4,
             _ => 1,
         }
-    }
-    /// The r4 sorted kernel takes an extra `sorted_pair_idx[n_tokens*top_k]`
-    /// remap argument (between expert_ids and gate_out); the cert uses the
-    /// identity permutation.
-    fn sorted(self) -> bool {
-        matches!(self, MoeGateUpDtype::Q4KR4Sorted)
     }
 }
 
@@ -2984,10 +2974,6 @@ fn run_shape_moe_gate_up<B: BenchBackend>(
         .collect();
     let d_ids = alloc_and_upload(dev, expert_ids.as_slice());
 
-    // r4-sorted kernels take an identity remap for the correctness cert.
-    let sorted_idx: Vec<i32> = (0..(n_tokens * top_k) as i32).collect();
-    let d_sorted = dtype.sorted().then(|| alloc_and_upload(dev, sorted_idx.as_slice()));
-
     let out_elems = n_tokens * top_k * n_rows;
     let d_gate_out = dev.alloc(out_elems * 4)?;
     let d_up_out = dev.alloc(out_elems * 4)?;
@@ -3008,10 +2994,6 @@ fn run_shape_moe_gate_up<B: BenchBackend>(
         args.push_arg(&uw_ptr);
         args.push_arg(&y_ptr);
         args.push_arg(&ids_ptr);
-        let sorted_ptr: u64 = d_sorted.map_or(0, |p| p.as_usize() as u64);
-        if dtype.sorted() {
-            args.push_arg(&sorted_ptr);
-        }
         args.push_arg(&go_ptr);
         args.push_arg(&uo_ptr);
         args.push_arg(&n_rows_i);
@@ -3057,9 +3039,6 @@ fn run_shape_moe_gate_up<B: BenchBackend>(
         dev.dealloc(d_act, act_f32.len() * 4)?;
         dev.dealloc(d_y, y_bytes)?;
         dev.dealloc(d_ids, expert_ids.len() * 4)?;
-        if let Some(p) = d_sorted {
-            dev.dealloc(p, sorted_idx.len() * 4)?;
-        }
         dev.dealloc(d_gate_out, out_elems * 4)?;
         dev.dealloc(d_up_out, out_elems * 4)?;
     }

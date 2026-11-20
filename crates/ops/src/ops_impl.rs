@@ -1335,18 +1335,6 @@ impl<B: KernelBackend> Ops for OpsImpl<'_, B> {
             shape,
         )
     }
-    fn indexed_moe_mmvq_q4_k_r2_sorted(
-        &self,
-        buffers: crate::MoeMmvqSortedBuffers,
-        shape: crate::MoeMmvqShape,
-    ) -> Result<()> {
-        crate::launch::moe::indexed_moe_mmvq_q4_k_r2_sorted(
-            self.reg,
-            self.stream,
-            buffers,
-            shape,
-        )
-    }
 
     fn indexed_moe_mmq_q4_k_gate_up_tile8(
         &self,
@@ -1745,19 +1733,6 @@ impl<B: KernelBackend> Ops for OpsImpl<'_, B> {
         )
     }
 
-    fn indexed_moe_mmvq_q4_k_gate_up_sorted(
-        &self,
-        buffers: crate::MoeMmvqGateUpSortedBuffers,
-        shape: crate::MoeMmvqShape,
-    ) -> Result<()> {
-        crate::launch::moe::indexed_moe_mmvq_q4_k_gate_up_sorted(
-            self.reg,
-            self.stream,
-            buffers,
-            shape,
-        )
-    }
-
     fn indexed_moe_mmvq_q4_k_gate_up(
         &self,
         buffers: crate::MoeMmvqGateUpBuffers,
@@ -1769,14 +1744,6 @@ impl<B: KernelBackend> Ops for OpsImpl<'_, B> {
             buffers,
             shape,
         )
-    }
-
-    fn indexed_moe_mmq_q4_k(
-        &self,
-        bufs: crate::MoeMmqQ4KBuffers,
-        shape: crate::MoeMmqQ4KShape,
-    ) -> Result<()> {
-        crate::launch::moe::indexed_moe_mmq_q4_k(self.reg, self.stream, bufs, shape)
     }
 
     fn shared_expert_scale_f32(

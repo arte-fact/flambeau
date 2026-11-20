@@ -377,35 +377,9 @@ pub struct MoeMmvqGateUpBuffers {
     pub up_out: DevicePtr,
 }
 
-/// Single-weight MoE MMVQ with a sorted-pair token-index reorder for
-/// expert-major launch ordering — same buffer set as
-/// [`MoeMmvqBuffers`] plus the sorted pair index array.
-#[derive(Copy, Clone, Debug)]
-pub struct MoeMmvqSortedBuffers {
-    pub weights: DevicePtr,
-    pub act: DevicePtr,
-    pub expert_ids: DevicePtr,
-    pub sorted_pair_idx: DevicePtr,
-    pub dst: DevicePtr,
-}
-
-/// Fused gate + up MoE MMVQ with sorted-pair token-index reorder —
-/// extends [`MoeMmvqGateUpBuffers`] with the sorted pair index array.
-#[derive(Copy, Clone, Debug)]
-pub struct MoeMmvqGateUpSortedBuffers {
-    pub gate_w: DevicePtr,
-    pub up_w: DevicePtr,
-    pub act: DevicePtr,
-    pub expert_ids: DevicePtr,
-    pub sorted_pair_idx: DevicePtr,
-    pub gate_out: DevicePtr,
-    pub up_out: DevicePtr,
-}
-
-/// Fused gate + up MoE MMQ tile8 buffers — same shape as
-/// [`MoeMmvqGateUpSortedBuffers`] plus a `padded_offsets` ptr that
-/// encodes per-block starting position within the padded sorted
-/// expert-major batch.
+/// Fused gate + up MoE MMQ tile8 buffers: gate/up weights, activation,
+/// expert ids, the padded expert-major pair order, and a `padded_offsets`
+/// ptr that encodes per-block starting position within that order.
 #[derive(Copy, Clone, Debug)]
 pub struct MoeMmqTile8GateUpBuffers {
     pub gate_w: DevicePtr,
@@ -774,29 +748,6 @@ pub struct PenaltyKnobs {
     pub repetition: f32,
     pub presence: f32,
     pub frequency: f32,
-}
-
-// ---------------------------------------------------------------------------
-// MoE Q4_K aggregates — used by the bucket-sorted `indexed_moe_mmq_q4_k` path.
-// ---------------------------------------------------------------------------
-
-/// Buffers for the bucket-sorted [`Ops::indexed_moe_mmq_q4_k`].
-#[derive(Copy, Clone, Debug)]
-pub struct MoeMmqQ4KBuffers {
-    pub w: DevicePtr,
-    pub y: DevicePtr,
-    pub bucket_expert: DevicePtr,
-    pub bucket_slots: DevicePtr,
-    pub dst: DevicePtr,
-}
-
-/// Shape for the bucket-sorted [`Ops::indexed_moe_mmq_q4_k`].
-#[derive(Copy, Clone, Debug)]
-pub struct MoeMmqQ4KShape {
-    pub n_rows: usize,
-    pub n_sb_per_row: usize,
-    pub top_k: usize,
-    pub n_buckets: usize,
 }
 
 // ---------------------------------------------------------------------------

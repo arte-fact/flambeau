@@ -218,7 +218,6 @@ impl    = "qmatmul_iq1_m_mmq_wave64_gfx906"
 cert    = "certs/hip/gfx906/qmatmul_iq1_m_mmq_wave64_gfx906.json"
 notes   = "Wave64 MMQ for IQ1_M. dp4a inner loop with signed-i8 weights (sign mask pre-applied)."
 
-
 [[qmatmul]]
 dtype   = "Q4_1"
 dtype_q = "Q8_1"
@@ -694,10 +693,18 @@ notes   = "Iterative find-max + mask over ≤128 experts, top-k ≤ 16. Stable (
 [[indexed_moe_mmvq]]
 dtype   = "Q4_K"
 dtype_q = "Q8_1"
-shape   = { m = "any", k = "any", n = "any" }
-impl    = "indexed_moe_mmvq_q4_k_r2_gfx906"
-cert    = "certs/hip/gfx906/indexed_moe_mmvq_q4_k_r2_gfx906.json"
-notes   = "P29 multi-row DPP r2 — 2 output rows per wave64, half-warp reduce, expert-id indirection. VGPR 24, waves/SIMD 10. Halves launches vs single-row."
+shape   = { m = "1..31", k = "any", n = "any" }
+impl    = "indexed_moe_mmvq_q4_k_r2"
+cert    = "certs/hip/gfx906/indexed_moe_mmvq_q4_k_r2.json"
+notes   = "DP4A r2: 2 output rows per wave64 (half-warp reduce), expert-id indirection. m = n_tokens; decode is per-thread-work-bound, where r2 beats r4."
+
+[[indexed_moe_mmvq]]
+dtype   = "Q4_K"
+dtype_q = "Q8_1"
+shape   = { m = ">=32", k = "any", n = "any" }
+impl    = "indexed_moe_mmvq_q4_k_r4"
+cert    = "certs/hip/gfx906/indexed_moe_mmvq_q4_k_r4.json"
+notes   = "DP4A r4: 4 output rows per wave64 (quarter-warp reduce). m = n_tokens; at prefill the launch count dominates and r4 halves it."
 
 [[indexed_moe_mmvq]]
 dtype   = "Q6_K"
@@ -747,22 +754,6 @@ impl    = "indexed_moe_mmvq_q4_0_gfx906"
 cert    = "certs/hip/gfx906/indexed_moe_mmvq_q4_0_gfx906.json"
 notes   = "Q4_0 indexed-MoE MMVQ for Qwen3.6-35B-A3B-Q4_0 expert weights. Same inner loop as dense mmvq_q4_0 + expert-id indirection on the weight tensor; 256 threads/block, grid (n_rows, n_tokens·top_k). 5 Q4_1 ffn_down_exps layers get host-converted to Q8_0 at load."
 
-[[indexed_moe_mmvq]]
-dtype   = "Q5_0"
-dtype_q = "Q8_1"
-shape   = { m = "any", k = "any", n = "any" }
-impl    = "indexed_moe_mmvq_q5_0_gfx906"
-cert    = "certs/hip/gfx906/indexed_moe_mmvq_q5_0_gfx906.json"
-notes   = "Q5_0 indexed-MoE MMVQ. Q4_0 indexed kernel structure with the 5th-bit ladder from mmvq_q5_0: per block, (q5 − 16)·y = nibble·y + 16·bit·y − 16·s_y. 256 threads/block, grid (n_rows, n_tokens·top_k)."
-
-[[indexed_moe_mmvq]]
-dtype   = "Q5_1"
-dtype_q = "Q8_1"
-shape   = { m = "any", k = "any", n = "any" }
-impl    = "indexed_moe_mmvq_q5_1_gfx906"
-cert    = "certs/hip/gfx906/indexed_moe_mmvq_q5_1_gfx906.json"
-notes   = "Q5_1 indexed-MoE MMVQ. Q5_0 indexed structure with the Q4_1-style m·s_y correction: per block, d·d_y·(sumi_nib + 16·sumi_bit) + m·s_y/4. 256 threads/block."
-
 [[moe_combine]]
 dtype   = "F16"
 dtype_q = "F16"
@@ -771,22 +762,13 @@ impl    = "moe_combine_f16_gfx906"
 cert    = "certs/hip/gfx906/moe_combine_f16_gfx906.json"
 notes   = "Weighted sum + residual. One thread per (token, hidden_dim) slot. VGPR 24."
 
-# ----- Fused gate+up MoE MMVQ (candle P30) ---------------------------------
+# ----- Fused gate+up MoE MMVQ ----------------------------------------------
 
 [[indexed_moe_mmvq_gate_up]]
 dtype   = "Q4_K"
 dtype_q = "Q8_1"
 shape   = { m = "any", k = "any", n = "any" }
-impl    = "indexed_moe_mmvq_q4_k_gate_up_gfx906"
-cert    = "certs/hip/gfx906/indexed_moe_mmvq_q4_k_gate_up_gfx906.json"
-notes   = "P30 fused gate+up — activation read once, both weight matmuls in same inner loop. Halves launches vs 2× IndexedMoE MMVQ. VGPR 61 / waves 4 (trade register pressure for HBM traffic)."
+impl    = "indexed_moe_mmvq_q4_k_gate_up_r4"
+cert    = "certs/hip/gfx906/indexed_moe_mmvq_q4_k_gate_up_r4.json"
+notes   = "Fused gate+up DP4A r4: activation read once, both weight rows in the same inner loop, 4 output rows per wave64."
 
-# ----- Indexed MoE MMQ (prefill MoE) ------------------------------
-
-[[indexed_moe_mmq]]
-dtype   = "Q4_K"
-dtype_q = "Q8_1"
-shape   = { m = ">=128", k = "any", n = "any" }
-impl    = "indexed_moe_mmq_q4_k_gfx906"
-cert    = "certs/hip/gfx906/indexed_moe_mmq_q4_k_gfx906.json"
-notes   = "4-warp LDS-tiled MoE MMQ. MMQ_Y=16, MMQ_X=8, 128 threads. Caller sorts (token, slot) pairs into per-expert buckets so the weight tile amortises across MMQ_X slots. VGPR 50."

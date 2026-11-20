@@ -898,12 +898,6 @@ pub trait Ops {
         shape: crate::MoeMmvqShape,
     ) -> Result<()>;
 
-    fn indexed_moe_mmvq_q4_k_r2_sorted(
-        &self,
-        buffers: crate::MoeMmvqSortedBuffers,
-        shape: crate::MoeMmvqShape,
-    ) -> Result<()>;
-
     fn indexed_moe_mmq_q4_k_gate_up_tile8(
         &self,
         buffers: crate::MoeMmqTile8GateUpBuffers,
@@ -1086,22 +1080,10 @@ pub trait Ops {
         shape: MoeShape,
     ) -> Result<()>;
 
-    fn indexed_moe_mmvq_q4_k_gate_up_sorted(
-        &self,
-        buffers: crate::MoeMmvqGateUpSortedBuffers,
-        shape: crate::MoeMmvqShape,
-    ) -> Result<()>;
-
     fn indexed_moe_mmvq_q4_k_gate_up(
         &self,
         buffers: crate::MoeMmvqGateUpBuffers,
         shape: crate::MoeMmvqShape,
-    ) -> Result<()>;
-
-    fn indexed_moe_mmq_q4_k(
-        &self,
-        bufs: crate::MoeMmqQ4KBuffers,
-        shape: crate::MoeMmqQ4KShape,
     ) -> Result<()>;
 
     fn shared_expert_scale_f32(

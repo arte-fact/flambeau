@@ -72,6 +72,18 @@ pub const DIRECT_CALL_KERNELS_SM86: &[DirectCallKernel] = &[
         impl_id: "split_q_gate_f16",
         cert_rel_path: "certs/cuda/sm_86/split_q_gate_f16.json",
     },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmvq_q4_k_gate_up_r4",
+        cert_rel_path: "certs/cuda/sm_86/indexed_moe_mmvq_q4_k_gate_up_r4.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmvq_q4_k_r2",
+        cert_rel_path: "certs/cuda/sm_86/indexed_moe_mmvq_q4_k_r2.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmvq_q4_k_r4",
+        cert_rel_path: "certs/cuda/sm_86/indexed_moe_mmvq_q4_k_r4.json",
+    },
 ];
 
 /// Kernels no runtime path launches on sm_86, kept as A/B and cross-backend
@@ -368,22 +380,6 @@ pub const BENCH_REFERENCE_KERNELS_SM86: &[DirectCallKernel] = &[
     DirectCallKernel {
         impl_id: "indexed_moe_mmvq_q4_1",
         cert_rel_path: "certs/cuda/sm_86/indexed_moe_mmvq_q4_1.json",
-    },
-    DirectCallKernel {
-        impl_id: "indexed_moe_mmvq_q4_k_gate_up_r4",
-        cert_rel_path: "certs/cuda/sm_86/indexed_moe_mmvq_q4_k_gate_up_r4.json",
-    },
-    DirectCallKernel {
-        impl_id: "indexed_moe_mmvq_q4_k_gate_up_r4_sorted",
-        cert_rel_path: "certs/cuda/sm_86/indexed_moe_mmvq_q4_k_gate_up_r4_sorted.json",
-    },
-    DirectCallKernel {
-        impl_id: "indexed_moe_mmvq_q4_k_r2",
-        cert_rel_path: "certs/cuda/sm_86/indexed_moe_mmvq_q4_k_r2.json",
-    },
-    DirectCallKernel {
-        impl_id: "indexed_moe_mmvq_q4_k_r4",
-        cert_rel_path: "certs/cuda/sm_86/indexed_moe_mmvq_q4_k_r4.json",
     },
     DirectCallKernel {
         impl_id: "indexed_moe_mmvq_q5_k_r2",
