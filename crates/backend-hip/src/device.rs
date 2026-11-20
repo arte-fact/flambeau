@@ -112,9 +112,7 @@ impl HipStream {
     /// Create a non-blocking stream (`hipStreamNonBlocking` = 1).
     /// These streams do NOT serialise with the null stream and can run
     /// concurrently with each other on the same device, subject to
-    /// occupancy. Used by `HipCluster::reserve_aux_streams` so the
-    /// async ubatch pipeline truly overlaps lanes on the same
-    /// device.
+    /// occupancy.
     pub fn new_non_blocking(device_id: i32) -> DeviceResult<Self> {
         let mut s: HipStreamT = ptr::null_mut();
         const HIP_STREAM_NON_BLOCKING: std::os::raw::c_uint = 1;

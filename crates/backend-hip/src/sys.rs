@@ -142,7 +142,6 @@ extern "C" {
         peer_device_id: c_int,
     ) -> c_int;
     pub fn hipDeviceEnablePeerAccess(peer_device_id: c_int, flags: c_uint) -> c_int;
-    pub fn hipDeviceDisablePeerAccess(peer_device_id: c_int) -> c_int;
 
     // Event primitives for cross-stream / cross-device DAG
     // scheduling (async peer-copy pipeline-parallel ubatch path).

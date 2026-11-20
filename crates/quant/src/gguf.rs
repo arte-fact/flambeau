@@ -16,16 +16,6 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
-
-#[cfg(feature = "dev_trace")]
-fn dev_flag(name: &str) -> bool {
-    std::env::var(name).is_ok()
-}
-#[cfg(not(feature = "dev_trace"))]
-#[inline(always)]
-fn dev_flag(_name: &str) -> bool {
-    false
-}
 use std::sync::Arc;
 
 use byteorder::{LittleEndian, ReadBytesExt};
@@ -370,10 +360,6 @@ impl GgufFile {
         Some((guess.saturating_sub(nextn)..=blocks).find(|&n| is_nextn(n)).unwrap_or(guess))
     }
 
-    pub fn metadata_u64(&self, key: &str) -> Option<u64> {
-        self.metadata.get(key).and_then(Value::as_u64)
-    }
-
     pub fn architecture(&self) -> Option<&str> {
         self.metadata_str("general.architecture")
     }
@@ -387,56 +373,6 @@ impl GgufFile {
     pub fn tensor_raw(&self, name: &str) -> Result<&[u8]> {
         let info = self.info(name)?;
         self.raw_for(info, 0, info.size_in_bytes())
-    }
-
-    /// Hint the kernel that the given tensor's mmap range will not be
-    /// re-read (equivalent to `madvise(MADV_DONTNEED)` on just those pages).
-    /// Safe to call even if the tensor doesn't exist — it's a best-effort
-    /// hint. Used by the weight loader to keep page-cache pressure low when
-    /// the GGUF is larger than host RAM: without this, loading Qwen3.6-27B-
-    /// UD-Q8_K_XL (33 GiB) on a 31 GiB box blows up per-tensor transfer
-    /// latency 100× past the RAM watermark.
-    /// Drop the mmap range for this tensor (definitively, via `munmap` —
-    /// same technique llama.cpp's `unmap_fragment` uses; `madvise(DONTNEED)`
-    /// is advisory and does not reliably free page cache on current Linux).
-    /// Only the page-aligned inner slice is unmapped; partially-used
-    /// boundary pages stay mapped so neighbouring tensors still work.
-    /// Safe to call even if the tensor doesn't exist — best-effort hint.
-    /// Caller must have already transferred (and synced) the bytes off to
-    /// GPU. After this, the tensor is no longer accessible via
-    /// `tensor_raw`.
-    pub fn advise_drop_tensor(&self, name: &str) {
-        let Ok(info) = self.info(name) else { return };
-        let split = &self.splits[info.split_idx as usize];
-        let abs_start = (split.tensor_data_offset + info.rel_offset) as usize;
-        let byte_len = info.size_in_bytes() as usize;
-        if abs_start + byte_len > split.mmap.len() {
-            return;
-        }
-        // Round START UP to the next page (leave partially-used boundary
-        // pages alone — other tensors may share them). Round END DOWN to
-        // page boundary for the same reason.
-        let page_size = 4096usize;
-        let aligned_start = (abs_start + page_size - 1) & !(page_size - 1);
-        let aligned_end = (abs_start + byte_len) & !(page_size - 1);
-        if aligned_end <= aligned_start {
-            return;
-        }
-        let len = aligned_end - aligned_start;
-        // SAFETY: munmapping a range entirely inside our own mmap. After
-        // this, accessing those bytes via `tensor_raw` would SIGSEGV; the
-        // loader guarantees it's done with this tensor.
-        let rc = unsafe {
-            let addr = split.mmap.as_ptr().add(aligned_start) as *mut libc::c_void;
-            libc::munmap(addr, len)
-        };
-        if rc != 0 && dev_flag("FLAMBEAU_LOAD_TRACE") {
-            eprintln!(
-                "  [munmap] {} failed: {}",
-                name,
-                std::io::Error::last_os_error()
-            );
-        }
     }
 
     /// Zero-copy slice of bytes `[byte_start, byte_start + byte_len)` of

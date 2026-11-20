@@ -218,10 +218,6 @@ impl Sampler {
         self.pair_scratch.reserve(vocab_size);
     }
 
-    pub fn rng_mut(&mut self) -> &mut Rng {
-        &mut self.rng
-    }
-
     /// Sample one token from a pre-computed top-K
     /// `(id, prob)` distribution. The caller is responsible for
     /// providing a top-K already softmax-normalised so the K probs sum
@@ -458,27 +454,6 @@ pub fn build_distribution(logits: &[f32], mode: &Sampling, history: &[u32]) -> V
         }
     }
     pairs
-}
-
-/// Multinomial pick from a pre-normalized `[(id, prob)]` distribution.
-/// `dist`'s probs must sum to ≈1; the function tolerates small numeric
-/// drift but not arbitrary rescaling.
-pub fn sample_from_distribution(dist: &[(u32, f32)], rng: &mut Rng) -> u32 {
-    if dist.is_empty() {
-        return 0;
-    }
-    if dist.len() == 1 {
-        return dist[0].0;
-    }
-    let sum: f32 = dist.iter().map(|(_, p)| *p).sum();
-    let mut u = rng.next_f32() * sum;
-    for &(id, p) in dist {
-        u -= p;
-        if u <= 0.0 {
-            return id;
-        }
-    }
-    dist.last().map_or(0, |&(id, _)| id)
 }
 
 fn argmax(logits: &[f32]) -> u32 {

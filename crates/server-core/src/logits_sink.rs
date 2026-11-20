@@ -4,15 +4,3 @@ pub enum LogitsSink<'a> {
     Argmax,
     KeepOnDevice,
 }
-
-impl<'a> LogitsSink<'a> {
-    pub fn is_host(&self) -> bool {
-        matches!(self, LogitsSink::Host(_))
-    }
-    pub fn is_argmax(&self) -> bool {
-        matches!(self, LogitsSink::Argmax)
-    }
-    pub fn is_keep_on_device(&self) -> bool {
-        matches!(self, LogitsSink::KeepOnDevice)
-    }
-}

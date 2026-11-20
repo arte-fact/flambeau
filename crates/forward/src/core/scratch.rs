@@ -546,14 +546,6 @@ impl PagedKvCache {
         self.n_pages * self.page_size * self.kv_width * std::mem::size_of::<u16>()
     }
 
-    /// Total per-layer allocation including K + V pools + block table
-    /// + block-table-lens. Used to size the page pool from a VRAM budget.
-    pub fn per_layer_bytes(&self) -> usize {
-        2 * self.pool_bytes()
-            + self.max_slots * self.max_pages_per_slot * std::mem::size_of::<u32>()
-            + self.max_slots * std::mem::size_of::<u32>()
-    }
-
     /// Allocate K + V page pools + block table + block-table-lens for a
     /// single layer on `device`. The block table is zero-initialised on
     /// the host buffer so unbacked entries decode as page 0 (a tombstone);

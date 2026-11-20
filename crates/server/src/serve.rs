@@ -141,7 +141,7 @@ pub struct ServeConfig {
 /// Blocking serve loop — loads the model, starts the HTTP server, runs
 /// until terminated. Caller owns the tokio runtime.
 pub async fn serve(cfg: ServeConfig, registry: Registry) -> Result<()> {
-    info!(forward_stack = "v2", "flambeau serve: loading model");
+    info!("flambeau serve: loading model");
     info!(?cfg, "flambeau serve config");
 
     let gguf = GgufFile::open(&cfg.gguf_path)

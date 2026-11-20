@@ -844,19 +844,6 @@ pub struct PeerDeviceBuffer {
 
 pub type PeerBuffer<D = HipDevice> = Arc<PeerSlot<D>>;
 
-/// Build a peer slot for the **legacy / hybrid** path — host-bounce
-/// only, no device buffer. Used by [`launch_hybrid`] and any caller
-/// that hasn't migrated to the per-edge BAR1 P2P handoff.
-pub fn new_peer_buffer<D: Device>(hidden: usize) -> PeerBuffer<D> {
-    Arc::new(PeerSlot {
-        buf: Mutex::new(vec![half::f16::ZERO; hidden]),
-        send_done: Mutex::new(None),
-        dst: Mutex::new(None),
-        consumer_device_id: None,
-        consumer_device: None,
-    })
-}
-
 /// Build a per-edge PP slot wired for direct cross-device peer copy.
 /// `consumer_device` is the (caller-owned) device the buffer will be
 /// allocated on; the slot keeps the `Arc` alive for its lifetime. The

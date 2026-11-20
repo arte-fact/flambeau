@@ -223,13 +223,6 @@ impl PerLayerEmbedBlock {
     }
 }
 
-/// Compute the device pointer for `inp_per_layer_table[il]` — `il * pe`
-/// F32 elements into `table_base`. Helper kept on the block module for
-/// callers that compute per-layer slices outside the forward call.
-pub fn table_slice_ptr(table_base: DevicePtr, il: usize, pe: usize) -> DevicePtr {
-    table_base.offset_bytes(il * pe * 4)
-}
-
 /// Host-side build with the `per_layer_model_proj @ inp_batch` matmul
 /// PRECOMPUTED, generalised to `n_tokens >= 1`. The caller supplies
 /// `proj_matmul_f32` of length `n_tokens * pe * n_layer` in TOKEN-MAJOR

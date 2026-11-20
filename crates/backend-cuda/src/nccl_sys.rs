@@ -35,15 +35,12 @@ pub const NCCL_SUM: c_int = 0;
 #[link(name = "nccl")]
 extern "C" {
     pub fn ncclGetErrorString(result: c_int) -> *const c_char;
-    pub fn ncclGetVersion(version: *mut c_int) -> c_int;
     pub fn ncclGetUniqueId(unique_id: *mut NcclUniqueId) -> c_int;
     /// Single-process N-GPU init: `comms[i]` is rank `i` on `devlist[i]`.
     pub fn ncclCommInitAll(comms: *mut NcclComm, ndev: c_int, devlist: *const c_int) -> c_int;
     /// One rank of a world bootstrapped from a shared `ncclUniqueId`.
     pub fn ncclCommInitRank(comm: *mut NcclComm, nranks: c_int, commId: NcclUniqueId, rank: c_int) -> c_int;
     pub fn ncclCommDestroy(comm: NcclComm) -> c_int;
-    pub fn ncclCommCount(comm: NcclComm, count: *mut c_int) -> c_int;
-    pub fn ncclCommUserRank(comm: NcclComm, rank: *mut c_int) -> c_int;
     pub fn ncclAllReduce(
         sendbuff: *const c_void,
         recvbuff: *mut c_void,
