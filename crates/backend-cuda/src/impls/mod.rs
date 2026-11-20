@@ -1,12 +1,92 @@
 //! `KernelDescriptor` dispatch tables for CUDA archs — the Rust-typed counterpart of
-//! `dispatch/cuda/<arch>.toml`. `dispatch_qmatmul` returns the matching row.
+//! `dispatch/cuda/<arch>.toml` — and the catalogs of certified kernels outside
+//! them. `dispatch_qmatmul` returns the matching row.
 
 use flambeau_core::{first_match, KernelDescriptor, QMatMulCfg};
 
+mod direct_call;
 mod qmatmul;
+pub use direct_call::{BENCH_REFERENCE_KERNELS_SM86, DIRECT_CALL_KERNELS_SM86};
 pub use qmatmul::QMATMUL_SM86;
 
 /// Pick the `QMatMul` `KernelDescriptor` for `cfg` from the sm_86 table.
 pub fn dispatch_qmatmul(cfg: &QMatMulCfg) -> Option<&'static KernelDescriptor> {
     first_match(QMATMUL_SM86, cfg.dtype_weight, cfg.dtype_activation, cfg.m)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap().to_path_buf()
+    }
+
+    fn registered() -> impl Iterator<Item = (&'static str, &'static str)> {
+        QMATMUL_SM86
+            .iter()
+            .map(|d| (d.impl_id, d.cert_rel_path))
+            .chain(DIRECT_CALL_KERNELS_SM86.iter().map(|d| (d.impl_id, d.cert_rel_path)))
+            .chain(BENCH_REFERENCE_KERNELS_SM86.iter().map(|d| (d.impl_id, d.cert_rel_path)))
+    }
+
+    #[test]
+    fn every_registered_cert_path_exists_on_disk() {
+        let root = repo_root();
+        let missing: Vec<_> =
+            registered().filter(|(_, path)| !root.join(path).exists()).map(|(id, _)| id).collect();
+        assert!(missing.is_empty(), "registered sm_86 impls without a cert on disk: {missing:?}");
+    }
+
+    #[test]
+    fn every_impl_id_is_registered_once() {
+        let mut seen = std::collections::HashSet::new();
+        let dup: Vec<_> = registered().map(|(id, _)| id).filter(|id| !seen.insert(*id)).collect();
+        assert!(dup.is_empty(), "impl_ids registered twice: {dup:?}");
+    }
+
+    #[test]
+    fn uncertified_certs_are_not_registered() {
+        let both: Vec<_> = registered().map(|(id, _)| id).filter(|id| UNCERTIFIED_CERTS.contains(id)).collect();
+        assert!(both.is_empty(), "listed as uncertified but registered: {both:?}");
+    }
+
+    #[test]
+    fn every_cert_path_names_its_impl() {
+        let bad: Vec<_> = registered()
+            .filter(|(id, path)| *path != format!("certs/cuda/sm_86/{id}.json"))
+            .map(|(id, _)| id)
+            .collect();
+        assert!(bad.is_empty(), "cert_rel_path does not match impl_id: {bad:?}");
+    }
+
+    /// Known rule-2 holes: certs on disk that no sweep writes, so they cannot
+    /// be registered as certified. Shrinks only.
+    const UNCERTIFIED_CERTS: &[&str] = &[
+        // why: no sweep for the CUDA tensor-core prefill attention yet (step 5).
+        "attention_prefill_mma",
+    ];
+
+    /// Every cert JSON under `certs/cuda/sm_86/` is registered in
+    /// `QMATMUL_SM86`, `DIRECT_CALL_KERNELS_SM86` or
+    /// `BENCH_REFERENCE_KERNELS_SM86`, or listed in `UNCERTIFIED_CERTS`.
+    #[test]
+    fn every_cert_on_disk_is_registered() {
+        let dir = repo_root().join("certs/cuda/sm_86");
+        let known: std::collections::HashSet<_> =
+            registered().map(|(id, _)| id).chain(UNCERTIFIED_CERTS.iter().copied()).collect();
+        let mut orphans: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("read_dir {}: {e}", dir.display()))
+            .filter_map(|e| e.unwrap().file_name().to_string_lossy().strip_suffix(".json").map(str::to_string))
+            .filter(|stem| !known.contains(stem.as_str()))
+            .collect();
+        orphans.sort();
+        assert!(
+            orphans.is_empty(),
+            "cert files under certs/cuda/sm_86/ without a registration: {orphans:?}. Either delete \
+             the cert, or add it to QMATMUL_SM86, DIRECT_CALL_KERNELS_SM86 or \
+             BENCH_REFERENCE_KERNELS_SM86."
+        );
+    }
 }
