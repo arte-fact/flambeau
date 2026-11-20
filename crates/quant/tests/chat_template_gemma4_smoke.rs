@@ -148,8 +148,12 @@ fn render_system_user_assistant_turn() {
     );
     assert!(rendered.contains("<|turn>user"), "missing user turn header");
     assert!(rendered.contains("Hello"), "user content dropped");
+    // Newer gemma4 templates (26B-A4B, 31B) close an empty thought channel
+    // after the model header when thinking is off; older ones (E4B) end on
+    // the header itself.
+    let tail = rendered.trim_end();
     assert!(
-        rendered.trim_end().ends_with("<|turn>model"),
+        tail.ends_with("<|turn>model") || tail.ends_with("<|turn>model\n<|channel>thought\n<channel|>"),
         "expected open assistant turn at end, got: {rendered:?}"
     );
 }
