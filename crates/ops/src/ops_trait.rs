@@ -17,7 +17,7 @@ use anyhow::Result;
 use flambeau_core::device::DevicePtr;
 use flambeau_core::op::QDtype;
 
-/// Portable op surface implemented per backend (HIP today, CUDA in V2).
+/// Portable op surface implemented per backend (HIP and CUDA).
 ///
 /// The trait is intentionally one fat surface: every method a model
 /// composition crate needs lands here, grouped by family in the

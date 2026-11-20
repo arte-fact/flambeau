@@ -80,7 +80,6 @@ pub trait ForwardCtx {
     /// slot_id MUST NOT appear in the decode slot_ids[K..].
     ///
     /// Default impl bails — only the engine ctx implements this today.
-    /// See `doc/MIXED_BATCH_V2_PLAN.md` Phase K1.
     fn standard_attn_mixed(
         &mut self,
         input: &Tensor<F16>,
@@ -111,7 +110,7 @@ pub trait ForwardCtx {
     /// once per phase (twice per layer) — matches the v1 driver shape
     /// (see `project_lever1_mixed_batch_v1`).
     ///
-    /// Default impl bails. See `doc/MIXED_BATCH_V2_PLAN.md` Phase K2.
+    /// Default impl bails.
     fn gdn_layer_mixed(
         &mut self,
         input: &Tensor<F16>,

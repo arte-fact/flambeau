@@ -29,7 +29,7 @@ pub struct SamplingParams {
     /// When `Some(n)`, the decode loop collects per-token
     /// log-probabilities + the top-`n` alternatives. `None` means no
     /// collection (the OpenAI default). Range 0..=20, capped at the
-    /// boundary. V1 implementation is non-streaming, host-sampler-only;
+    /// boundary. The implementation is non-streaming, host-sampler-only;
     /// other paths silently return `None` with a warn-once log.
     pub collect_logprobs: Option<u32>,
     /// Opt-in for Qwen3.6 reasoning mode. `true` ⇒
@@ -54,7 +54,7 @@ pub struct SamplingParams {
     /// that case so the model continues from the prefill content,
     /// and `json_prime_bytes` carries the same content so the mask
     /// state matches the model's position. (b) Future template-
-    /// emitted JSON prefixes (`{`-injected meta-prompts, V2). Empty
+    /// emitted JSON prefixes (`{`-injected meta-prompts). Empty
     /// for non-JSON-mode requests and for the common no-prefill
     /// case; the decoder then starts the JSON state machine fresh.
     pub json_prime_bytes: Vec<u8>,

@@ -48,7 +48,7 @@ pub trait V2BatchableSession: Send {
     /// the model's vocab. Slot ids must be distinct.
     fn forward_decode_batched(&mut self, slots: &[(u32, usize, usize)]) -> Result<()>;
 
-    /// Sarathi-Serve mixed-batch forward (Phase K4c). Combines one
+    /// Sarathi-Serve mixed-batch forward. Combines one
     /// prefill chunk (`K` tokens starting at `prefill_start_position`
     /// on `prefill_slot_id`) with N decode tokens (`decodes`) into a
     /// single Session::forward_mixed call. Returns Ok(()) iff the arch

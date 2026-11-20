@@ -230,8 +230,8 @@ impl ToolCallFormat {
 /// 2. `"auto"` or `None` — fall back to the architecture default.
 ///
 /// Architecture defaults are deliberately conservative:
-/// - `qwen35moe` (our V1 model arch) defaults to **`Hermes`**.
-///   **Caveat**: the specific Qwen3.6 GGUF on the V1 rig (Unsloth's
+/// - `qwen35moe` defaults to **`Hermes`**.
+///   **Caveat**: the specific Qwen3.6 GGUF on the test rig (Unsloth's
 ///   `UD-Q8_K_XL` build) ships a **Coder-XML** chat template — see
 ///   `certs/chat_template/qwen35moe_tools/README.md`. Clients running
 ///   that GGUF should set `tool_call_format: "qwen3_coder"` explicitly.

@@ -1,5 +1,5 @@
 //! attention prefill (F16 KV, GQA, causal mask) correctness sweep.
-//! Covers both V1 head_dim values:
+//! Covers both target head_dim values:
 //! - head_dim=128, GQA-32/4 — Qwen3.5 family.
 //! - head_dim=256, GQA-16/2 — Qwen3.6 family.
 //!
@@ -28,7 +28,7 @@ use half::f16;
 use crate::cert::{now_utc_iso8601, Cert, PmcSnapshot, ShapeResult, SCHEMA_VERSION};
 use crate::harness::{alloc_and_upload, max_rel_err_with_floor, rig, seeded_f32_range};
 
-/// (head_dim, n_heads_q, n_heads_kv) — V1 target families + gemma4.
+/// (head_dim, n_heads_q, n_heads_kv) — target families + gemma4.
 const SHAPES: &[(usize, usize, usize)] = &[
     (128, 32, 4),  // Qwen3.5
     (256, 16, 2),  // Qwen3.6

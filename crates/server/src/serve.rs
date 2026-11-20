@@ -10,7 +10,7 @@ use flambeau_runtime::Registry;
 use tokio::sync::Mutex;
 use tracing::info;
 
-/// mesh topology selector. PP-V1 default; TP engages the
+/// mesh topology selector. PP default; TP engages the
 /// Qwen3MoETpModel loader + the BarP2pAllReduce-based forward path.
 /// `Hybrid` adds a manual PP-of-TP composition where
 /// `pp_size` contiguous layer stages each own a `tp_size`-rank TP
@@ -20,7 +20,7 @@ use tracing::info;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[derive(Default)]
 pub enum MeshMode {
-    /// Pipeline parallelism — V1 default. `LayerAssignment` distributes
+    /// Pipeline parallelism — the default. `LayerAssignment` distributes
     /// whole layers across ranks; one `peer_copy_via_host` per stage
     /// transition.
     #[default]
@@ -56,7 +56,7 @@ pub struct ServeConfig {
     pub backend: ServeBackend,
     pub bind_addr: SocketAddr,
     pub model_id: String,
-    /// mesh topology. Defaults to `Pp` for V1 callers that
+    /// mesh topology. Defaults to `Pp` for callers that
     /// don't set the field explicitly (constructors use struct-update
     /// syntax with `..Default::default()`).
     pub mesh_mode: MeshMode,
@@ -75,7 +75,7 @@ pub struct ServeConfig {
     /// Prefill chunk size in tokens. Default 512 is the production sweet
     /// spot across pp/tp/hybrid topologies; tune for short-prompt TTFT.
     pub prefill_ubatch: usize,
-    /// Per-chunk prefill budget used by the K4c mixed-batch scheduler.
+    /// Per-chunk prefill budget used by the mixed-batch scheduler.
     /// Smaller chunks improve short-request TTFT under load
     /// (Sarathi-Serve trade) at the cost of slightly higher long-request
     /// prefill latency. Default 512.

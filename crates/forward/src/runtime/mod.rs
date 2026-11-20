@@ -94,7 +94,7 @@ pub trait Arch: Send + Sync + 'static {
         slot_ids: &[usize],
     ) -> Result<()>;
 
-    /// Sarathi-Serve mixed-batch forward (Phase K4). Rows
+    /// Sarathi-Serve mixed-batch forward. Rows
     /// `[0..prefill_rows)` are a prefill chunk for `slot_ids[0]`;
     /// rows `[prefill_rows..n)` are batched decodes across N distinct
     /// slots. One forward call covering both phases; logit emission
@@ -321,7 +321,7 @@ impl<A: Arch> Session<A> {
         Ok(first)
     }
 
-    /// Sarathi-Serve mixed-batch dispatch (Phase K4). Rows
+    /// Sarathi-Serve mixed-batch dispatch. Rows
     /// `[0..prefill_rows)` are a prefill chunk for `slot_ids[0]`;
     /// rows `[prefill_rows..n)` are batched decodes across N distinct
     /// slots. Logits emitted are `(N + 1)` rows: the last prefill

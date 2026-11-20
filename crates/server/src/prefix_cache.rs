@@ -135,7 +135,7 @@ pub struct TopologyTag {
 
 /// Host-side KV snapshot covering one rank's full layer set at a given
 /// prefix length.
-/// V1 stores the snapshot in host RAM rather than device VRAM — the
+/// The snapshot lives in host RAM rather than device VRAM — the
 /// per-snapshot footprint is too big to keep many on-device, but host
 /// RAM is plentiful (64+ GB). The DtoH→HtoD round-trip on hit is
 /// ~700 ms at 6 GB/s for a 4 GB snapshot — still a net win vs the
@@ -218,7 +218,7 @@ pub struct CacheHit<'a> {
 /// Multi-reader, single-writer via `RwLock<HashMap>`. The hot path is
 /// read-heavy (every prefill consults it once); writes happen at request
 /// end and on eviction. A more elaborate `DashMap` is justified later
-/// if profiling shows lock contention; for V1 a single RwLock is fine
+/// if profiling shows lock contention; a single RwLock is fine
 /// (the chat handler already serialises on bigger primitives).
 /// Indexed by **terminal chunk key** — `chain[chain.len() - 1]`. The
 /// lookup function walks the prompt's chunk_keys longest-to-shortest,

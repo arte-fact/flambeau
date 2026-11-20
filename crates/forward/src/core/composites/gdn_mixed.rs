@@ -1,4 +1,4 @@
-//! Sarathi-Serve mixed-batch GDN (Phase K2).
+//! Sarathi-Serve mixed-batch GDN.
 //!
 //! Rows `[0..K)` are a prefill chunk for slot `slot_p` (single slot,
 //! K contiguous timesteps). Rows `[K..K+N)` are batched decodes
@@ -14,7 +14,7 @@
 //! AR fires once per phase (twice per layer). Matches the v1 driver
 //! shape (see `project_lever1_mixed_batch_v1`).
 //!
-//! K2 slice: requires both `gdn_prefill_scratch` AND
+//! Requires both `gdn_prefill_scratch` AND
 //! `gdn_decode_batched_scratch` to be configured. Same caller
 //! contract as standard_attn_mixed: prefill rows share `slot_ids[0]`;
 //! decode rows must not collide with slot_p.

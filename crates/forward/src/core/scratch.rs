@@ -75,7 +75,7 @@ pub struct ScratchConfig {
     /// [`PagedKvCacheConfig::from_vram_budget`].
     pub paged_kv: Option<PagedKvCacheConfig>,
     /// KV cache element layout. Defaults to [`KvLayout::F16Contig`];
-    /// `--kv q8` selects [`KvLayout::Q8Contig`] (requires S7b/S7c).
+    /// `--kv q8` selects [`KvLayout::Q8Contig`].
     pub kv_layout: KvLayout,
     /// Per-layer override of [`Self::kv_layout`]. `None` ⇒ every layer
     /// uses `kv_layout`. `Some(v)` (length == num_layers) ⇒ layer `li`
@@ -381,7 +381,7 @@ pub fn scratch_config_for<S: ScratchShape + ?Sized>(
 /// (`KvCache<F16Contig>` vs `KvCache<Q8Contig>`). The v2 stack uses an
 /// enum because turning `KvCache` generic would ripple a type parameter
 /// through `ScratchPool`, `CoreState`, `ForwardCtx`, every composite, and
-/// every model crate — multi-session refactor. The enum encodes the same
+/// every model crate. The enum encodes the same
 /// decision at runtime; misdispatches surface as panics at composite
 /// dispatch rather than compile errors. Tracked in
 /// `doc/GEMMA4_PERF_PLAN.md` as the typestate-ification follow-up.
@@ -395,7 +395,7 @@ pub enum KvLayout {
     /// Q8_0 contiguous slabs. `bytes_per_row = (kv_width / 32) *
     /// Q8_0_BLOCK_BYTES`. ~47 % HBM saving on KV reads at decode
     /// for GQA-heavy archs (gemma4 32/16, mistral 32/8, …). Requires
-    /// the Q8 kv_append + attention kernels (S7b).
+    /// the Q8 kv_append + attention kernels.
     Q8Contig,
 }
 
@@ -444,8 +444,7 @@ pub struct KvCache {
     pub bytes_per_row: usize,
     /// Identifies which family of kernels the composite must dispatch
     /// to. F16Contig ⇒ the existing kv_append_f16 / attention_decode_f16
-    /// family. Q8Contig ⇒ the Q8 family (kernels ported in S7b; dispatch
-    /// wired in S7c).
+    /// family. Q8Contig ⇒ the Q8 family.
     pub layout: KvLayout,
     /// Slab depth in tokens (rows). Slot stride = `depth * bytes_per_row`.
     /// Equals `max_seq_len` for full-context layers; `window_size +
@@ -517,7 +516,7 @@ impl PagedKvCacheConfig {
     /// * 2` (K and V pools, F16). The result is clamped to at least
     /// `max_slots * max_pages_per_slot` so every slot can fill its
     ///   table even when the budget is just enough; a larger budget
-    ///   leaves spare pages for cross-slot sharing (E4 prefix cache).
+    ///   leaves spare pages for cross-slot sharing (prefix cache).
     pub fn from_vram_budget(
         per_layer_budget_bytes: usize,
         page_size: usize,

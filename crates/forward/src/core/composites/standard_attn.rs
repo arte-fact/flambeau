@@ -553,7 +553,7 @@ pub fn standard_attn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
         let _ = mpps;
     } else if prefill_shape {
         // Single-slot, contiguous positions → batched kv_append + attn_prefill.
-        // Q8Contig path (S7c) replaces F16 kv_append + attn_decode/prefill with
+        // Q8Contig path replaces F16 kv_append + attn_decode/prefill with
         // the Q8 model-ops siblings. The Q8 dispatch is gated upstream by
         // `scratch_config_for`'s Q8 viability check (head_dim ∈ {64,128,256,512})
         // — at runtime we just trust the cache layout.

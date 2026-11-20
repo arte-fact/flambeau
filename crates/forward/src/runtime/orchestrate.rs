@@ -216,7 +216,7 @@ fn launch_hybrid<A: Arch>(
         }
         None => Vec::new(),
     };
-    // S8b: per-transition per-rank edges, one DtoD peer slot per
+    // Per-transition per-rank edges, one DtoD peer slot per
     // producer-consumer pair (rank_in_stage k of stage i → rank k of
     // stage i+1). Replaces the single shared host-bounce slot +
     // handoff barrier with PpStage's event-based async DtoD pattern.

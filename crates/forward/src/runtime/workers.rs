@@ -396,7 +396,7 @@ impl<A: Arch> WorkerHandle<A> {
         Ok(reply_rx)
     }
 
-    /// Sarathi-Serve mixed-batch forward dispatch (Phase K4). Routes
+    /// Sarathi-Serve mixed-batch forward dispatch. Routes
     /// to `Arch::forward_mixed` which is wired only for archs that
     /// support it (qwen35-v2, qwen35moe-v2 today).
     pub fn send_forward_mixed(

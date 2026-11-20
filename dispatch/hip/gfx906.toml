@@ -21,9 +21,8 @@
 #     `reg.expect_module("stem")` from `crates/ops/hip/*` and
 #     `crates/models/qwen3-moe/src/forward/*`).
 #   - The `dispatch_toml_roundtrip` test in backend-hip asserts both halves
-#     of this invariant at `cargo test --workspace`. It is the V2.8-class
-#     regression guard — V2.8 shipped a silent routing bug because the TOML
-#     row was swapped from tile8 to tile16 without touching `impls.rs`.
+#     of this invariant at `cargo test --workspace`: a row swapped in the TOML
+#     without the matching `impls.rs` change is a silent routing bug.
 #   - Every `cert` path must exist and be green. `flambeau cert-check --arch gfx906`
 #     enforces.
 #   - Two rows whose `shape` predicates both match the same concrete shape =
@@ -33,23 +32,19 @@
 #
 # Dormant A/B candidates in `impls.rs` (registered with m_range=(MAX,MAX) so
 # shape-dispatch never picks them; listed here for discoverability):
-#   - qmatmul_q4_K_mmq_lds_tiled_gfx906    (V2.14.b, promote pending A/B)
+#   - qmatmul_q4_K_mmq_lds_tiled_gfx906    (promote pending A/B)
 #
-# V1.3: multi-row DPP MMVQ kernels (candle P29 `_nw1_r{2,4}`) are the active
-# dispatch targets for Q4_K/Q5_K/Q6_K on the decode path. Q8_0 ships the
-# 256-thread single-row kernel. Single-row reference MMVQ kernels for the
-# K-quants are kept in-tree for cert cross-checks; their certs live at
-# `certs/hip/gfx906/qmatmul_q{4,5,6}_K_mmvq_single_row_gfx906.json` but are
-# not dispatched from.
+# Single-row and nw1_r2 reference MMVQ kernels (`*_single_row_gfx906`,
+# `*_nw1_r2_gfx906`) are kept in-tree as cert oracles; they are not
+# dispatched from.
 
 # ----- QMatMul MMVQ (decode / small-M path) ---------------------------------
 #
-# V1.7.6.f: Runtime Recipe::from_impl_id in ops/hip/qmatmul.rs intercepts the
-# dispatch-table impl_ids and rewrites them to DP4A variants (validated
-# bit-for-bit parity vs llama.cpp on Qwen3.6-35B 8-token greedy). The rows
-# below remain the "table of record" baseline; the DP4A variants inherit the
-# same cert since they're numerically equivalent modulo float-accumulation
-# order.
+# The launch layer (QMATMUL_RECIPES, crates/ops/src/launch/qmatmul.rs) maps
+# some impl_ids to another kernel: `qmatmul_q8_0_mmvq_single_row_gfx906` runs
+# `mmvq_q8_0_t128_vdr2` (bit-for-bit parity with llama.cpp on Qwen3.6-35B,
+# 8-token greedy). Such a row keeps its cert: the kernels are numerically
+# equivalent modulo float-accumulation order.
 
 [[qmatmul]]
 dtype   = "Q8_0"
@@ -121,7 +116,7 @@ dtype_q = "Q8_1"
 shape   = { m = ">=32", k = "any", n = "any" }
 impl    = "qmatmul_iq3_s_mmq_wave64_gfx906"
 cert    = "certs/hip/gfx906/qmatmul_iq3_s_mmq_wave64_gfx906.json"
-notes   = "T-IQ.16 Phase 4 Slice A — wave64 MMQ for IQ3_S. Per-element 9-bit codebook lookup + per-byte sign-mask-into-packed-i8 + dp4a vs Q8_1."
+notes   = "Wave64 MMQ for IQ3_S. Per-element 9-bit codebook lookup + per-byte sign-mask-into-packed-i8 + dp4a vs Q8_1."
 
 [[qmatmul]]
 dtype   = "IQ2_XXS"
@@ -185,7 +180,7 @@ dtype_q = "Q8_1"
 shape   = { m = ">=32", k = "any", n = "any" }
 impl    = "qmatmul_iq3_xxs_mmq_wave64_gfx906"
 cert    = "certs/hip/gfx906/qmatmul_iq3_xxs_mmq_wave64_gfx906.json"
-notes   = "T-IQ.16 Phase 4 Slice A — wave64 MMQ for IQ3_XXS. dp4a inner loop with signed-i8 weights (sign mask pre-applied)."
+notes   = "Wave64 MMQ for IQ3_XXS. dp4a inner loop with signed-i8 weights (sign mask pre-applied)."
 
 [[qmatmul]]
 dtype   = "IQ2_XXS"
@@ -193,7 +188,7 @@ dtype_q = "Q8_1"
 shape   = { m = ">=32", k = "any", n = "any" }
 impl    = "qmatmul_iq2_xxs_mmq_wave64_gfx906"
 cert    = "certs/hip/gfx906/qmatmul_iq2_xxs_mmq_wave64_gfx906.json"
-notes   = "T-IQ.16 Phase 4 Slice A — wave64 MMQ for IQ2_XXS. dp4a inner loop with signed-i8 weights (sign mask pre-applied)."
+notes   = "Wave64 MMQ for IQ2_XXS. dp4a inner loop with signed-i8 weights (sign mask pre-applied)."
 
 [[qmatmul]]
 dtype   = "IQ2_XS"
@@ -201,7 +196,7 @@ dtype_q = "Q8_1"
 shape   = { m = ">=32", k = "any", n = "any" }
 impl    = "qmatmul_iq2_xs_mmq_wave64_gfx906"
 cert    = "certs/hip/gfx906/qmatmul_iq2_xs_mmq_wave64_gfx906.json"
-notes   = "T-IQ.16 Phase 4 Slice A — wave64 MMQ for IQ2_XS. dp4a inner loop with signed-i8 weights (sign mask pre-applied)."
+notes   = "Wave64 MMQ for IQ2_XS. dp4a inner loop with signed-i8 weights (sign mask pre-applied)."
 
 [[qmatmul]]
 dtype   = "IQ2_S"
@@ -209,7 +204,7 @@ dtype_q = "Q8_1"
 shape   = { m = ">=32", k = "any", n = "any" }
 impl    = "qmatmul_iq2_s_mmq_wave64_gfx906"
 cert    = "certs/hip/gfx906/qmatmul_iq2_s_mmq_wave64_gfx906.json"
-notes   = "T-IQ.16 Phase 4 Slice A — wave64 MMQ for IQ2_S. dp4a inner loop with signed-i8 weights (sign mask pre-applied)."
+notes   = "Wave64 MMQ for IQ2_S. dp4a inner loop with signed-i8 weights (sign mask pre-applied)."
 
 [[qmatmul]]
 dtype   = "IQ1_S"
@@ -217,7 +212,7 @@ dtype_q = "Q8_1"
 shape   = { m = ">=32", k = "any", n = "any" }
 impl    = "qmatmul_iq1_s_mmq_wave64_gfx906"
 cert    = "certs/hip/gfx906/qmatmul_iq1_s_mmq_wave64_gfx906.json"
-notes   = "T-IQ.16 Phase 4 Slice A — wave64 MMQ for IQ1_S. dp4a inner loop with signed-i8 weights (sign mask pre-applied)."
+notes   = "Wave64 MMQ for IQ1_S. dp4a inner loop with signed-i8 weights (sign mask pre-applied)."
 
 [[qmatmul]]
 dtype   = "IQ1_M"
@@ -225,7 +220,7 @@ dtype_q = "Q8_1"
 shape   = { m = ">=32", k = "any", n = "any" }
 impl    = "qmatmul_iq1_m_mmq_wave64_gfx906"
 cert    = "certs/hip/gfx906/qmatmul_iq1_m_mmq_wave64_gfx906.json"
-notes   = "T-IQ.16 Phase 4 Slice A — wave64 MMQ for IQ1_M. dp4a inner loop with signed-i8 weights (sign mask pre-applied)."
+notes   = "Wave64 MMQ for IQ1_M. dp4a inner loop with signed-i8 weights (sign mask pre-applied)."
 
 
 [[qmatmul]]
@@ -234,7 +229,7 @@ dtype_q = "Q8_1"
 shape   = { m = "1..31", k = "any", n = "any" }
 impl    = "qmatmul_q4_1_mmvq_t128_gfx906"
 cert    = "certs/hip/gfx906/qmatmul_q4_1_mmvq_t128_gfx906.json"
-notes   = "V2.24.a.3 — 128-thread single-row Q4_1 DP4A MMVQ. Halves threads/block vs V2.2.b to reduce dispatch overhead + raise occupancy. V2.24.a.1 scalar r2 was NULL (−55 %); V2.24.a.2 DP4A r2 was NULL (−7.5 %)."
+notes   = "128-thread single-row Q4_1 DP4A MMVQ. Half the threads per block of the 256-thread kernel: lower dispatch overhead, higher occupancy."
 
 [[qmatmul]]
 dtype   = "Q5_K"
@@ -266,7 +261,7 @@ dtype_q = "Q8_1"
 shape   = { m = "1..2", k = "any", n = "any" }
 impl    = "qmatmul_q6_k_mmvq_dp4a"
 cert    = "certs/hip/gfx906/qmatmul_q6_k_mmvq_dp4a.json"
-notes   = "V1.6 DP4A single-row Q6_K (3.24× per-call win on LM-head). V2.3.d.1: certed directly instead of via runtime intercept under the r4 scalar cert, and fixed a 32-bit unsigned-subtract borrow-chain bug in the (raw - 32) step — same class as V2.3.b.4's mmq_q6_K_wave64 fix. Uses the DP4A bias-correction identity (raw · y − 32 · Σy)."
+notes   = "DP4A single-row Q6_K (3.24× per-call win on LM-head). The (raw - 32) step avoids a 32-bit unsigned-subtract borrow chain. Uses the DP4A bias-correction identity (raw · y − 32 · Σy)."
 
 [[qmatmul]]
 dtype   = "Q8_K"
@@ -290,14 +285,9 @@ dtype_q = "Q8_1"
 shape   = { m = "1..2", k = "any", n = "any" }
 impl    = "qmatmul_q3_K_mmvq_r2_dp4a_gfx906"
 cert    = "certs/hip/gfx906/qmatmul_q3_K_mmvq_r2_dp4a_gfx906.json"
-notes   = "Phase 3b — DP4A 256-thread Q3_K MMVQ port of llama.cpp vec_dot_q3_K_q8_1_impl_mmvq. 64 threads per super-block, BLOCKS_PER_ITER=4. Two DP4A calls per element-group (one for low 2 bits, one for hmask high bit) — sidesteps the int32 borrow that would corrupt a direct __vsubss4 on gfx906. Replaces nw1_r2 which did per-element scalar FP32 multiplies (51.7 % of UD-Q3_K_XL wall at 670 us/call)."
+notes   = "DP4A 256-thread Q3_K MMVQ port of llama.cpp vec_dot_q3_K_q8_1_impl_mmvq. 64 threads per super-block, BLOCKS_PER_ITER=4. Two DP4A calls per element-group (one for low 2 bits, one for hmask high bit) — sidesteps the int32 borrow that would corrupt a direct __vsubss4 on gfx906. Replaces nw1_r2 which did per-element scalar FP32 multiplies (51.7 % of UD-Q3_K_XL wall at 670 us/call)."
 
 # ----- QMatMul MMQ (prefill / large-M path) ---------------------------------
-#
-# V1.4: only the Q8_0 correctness oracle is live. First-class 4-warp
-# LDS-tiled kernels (llamacpp-turbo port) + Q4_K / Q6_K MMQ variants land
-# next session; they replace the same impl_id column with faster kernels
-# tested against this oracle cert.
 
 [[qmatmul_mmq]]
 dtype   = "Q8_0"
@@ -313,7 +303,7 @@ dtype_q = "Q8_1"
 shape   = { m = "32..127", k = "any", n = "any" }
 impl    = "qmatmul_q4_1_mmq_wave64_gfx906"
 cert    = "certs/hip/gfx906/qmatmul_q4_1_mmq_wave64_gfx906.json"
-notes   = "wave64 Q4_1 MMQ — owns m=32..127; the 4warp_lds row takes m>=128. Mirrors the Q4_0 wave64/4warp split so the dense-prefill chunk tail tiles weights instead of re-reading per row in the MMVQ (MMVQ now owns m<32)."
+notes   = "Wave64 Q4_1 MMQ — owns m=32..127; the 4warp_lds row takes m>=128. Mirrors the Q4_0 wave64/4warp split so the dense-prefill chunk tail tiles weights instead of re-reading per row in the MMVQ (MMVQ now owns m<32)."
 
 [[qmatmul_mmq]]
 dtype   = "Q4_1"
@@ -321,7 +311,7 @@ dtype_q = "Q8_1"
 shape   = { m = ">=128", k = "any", n = "any" }
 impl    = "qmatmul_q4_1_mmq_4warp_lds_gfx906"
 cert    = "certs/hip/gfx906/qmatmul_q4_1_mmq_4warp_lds_gfx906.json"
-notes   = "V2.2.d.S1 — 4-warp LDS-tiled Q4_1 MMQ. MMQ_Y=32, MMQ_X=8, 256 threads, DP4A inner (__builtin_amdgcn_sdot4). S1 correctness-first port of llamacpp-turbo's load_tiles_q4_1 + vec_dot_q4_1_q8_1_dp4a; gfx906 vectorised int4 activation loads + L2 prefetch land in S2/S3 under the same impl_id."
+notes   = "4-warp LDS-tiled Q4_1 MMQ. MMQ_Y=32, MMQ_X=8, 256 threads, DP4A inner (__builtin_amdgcn_sdot4). S1 correctness-first port of llamacpp-turbo's load_tiles_q4_1 + vec_dot_q4_1_q8_1_dp4a; gfx906 vectorised int4 activation loads + L2 prefetch land in S2/S3 under the same impl_id."
 
 [[qmatmul_mmq]]
 dtype   = "Q4_0"
@@ -329,7 +319,7 @@ dtype_q = "Q8_1"
 shape   = { m = ">=32", k = "any", n = "any" }
 impl    = "qmatmul_q4_0_mmq_wave64_gfx906"
 cert    = "certs/hip/gfx906/qmatmul_q4_0_mmq_wave64_gfx906.json"
-notes   = "V2.28.a — wave64 MMQ for Q4_0. MMQ_Y=64, TILE_N=8, 64 threads, DP4A inner with the `(q-8)·y = dp4a(q,y) - 8·y_s` bias-correction identity (same pattern as Q4_1 wave64 but no `m` field). Closes the 8.5× prefill gap to llama.cpp on Qwen3.6-35B-A3B-Q4_0 (V2.27 measured 132 vs 1118 tok/s)."
+notes   = "Wave64 MMQ for Q4_0. MMQ_Y=64, TILE_N=8, 64 threads, DP4A inner with the `(q-8)·y = dp4a(q,y) - 8·y_s` bias-correction identity (same pattern as Q4_1 wave64 but no `m` field)."
 
 [[qmatmul_mmq]]
 dtype   = "Q4_0"
@@ -337,7 +327,7 @@ dtype_q = "Q8_1"
 shape   = { m = ">=128", k = "any", n = "any" }
 impl    = "qmatmul_q4_0_mmq_4warp_lds_gfx906"
 cert    = "certs/hip/gfx906/qmatmul_q4_0_mmq_4warp_lds_gfx906.json"
-notes   = "V1-BENCH-C1 — 4-warp LDS-tiled Q4_0 MMQ. MMQ_Y=128, MMQ_X=64, 256 threads (4 warps × 64), DS4 Q8_1 activation layout. Direct port of Q4_1 4warp_lds with bias-correction `(q-8)·y = dp4a(q,y) - 8·y_s` in the dot. Targets dense 27B-Q4_0 prefill where the V2.28.a single-warp wave64 saturates at ~70 tok/s pp4 (vs Q4_1 4warp_lds which gets 188 tok/s on the same shape)."
+notes   = "4-warp LDS-tiled Q4_0 MMQ. MMQ_Y=128, MMQ_X=64, 256 threads (4 warps × 64), DS4 Q8_1 activation layout. Direct port of Q4_1 4warp_lds with bias-correction `(q-8)·y = dp4a(q,y) - 8·y_s` in the dot. Targets dense 27B-Q4_0 prefill, where the single-warp wave64 kernel saturates."
 
 [[qmatmul_mmq]]
 dtype   = "Q5_0"
@@ -345,7 +335,7 @@ dtype_q = "Q8_1"
 shape   = { m = ">=32", k = "any", n = "any" }
 impl    = "qmatmul_q5_0_mmq_wave64_gfx906"
 cert    = "certs/hip/gfx906/qmatmul_q5_0_mmq_wave64_gfx906.json"
-notes   = "V2.30.a — wave64 MMQ for Q5_0. Same tile shape (MMQ_Y=64, TILE_N=8) as Q4_0 MMQ, inner loop adds the 5th-bit DP4A term: `(q5 - 16)·y = dp4a(nibble, y) + 16·dp4a(bit, y) - 16·y_s`. 5th-bit-expand pattern lifted from V2.23 mmvq_q5_0. Targets the 20/40 ffn_*_shexp layers on Qwen3.6-35B-A3B-Q4_0 that V2.26.b originally deferred; now served by the tile kernel at m>=32."
+notes   = "Wave64 MMQ for Q5_0. Same tile shape (MMQ_Y=64, TILE_N=8) as Q4_0 MMQ, inner loop adds the 5th-bit DP4A term: `(q5 - 16)·y = dp4a(nibble, y) + 16·dp4a(bit, y) - 16·y_s`. 5th-bit expansion as in mmvq_q5_0. Serves the ffn_*_shexp layers of Qwen3.6-35B-A3B-Q4_0; the tile kernel takes m >= 32."
 
 [[qmatmul_mmq]]
 dtype   = "Q5_1"
@@ -455,7 +445,7 @@ impl    = "rope_f16_gfx906"
 cert    = "certs/hip/gfx906/rope_f16_gfx906.json"
 notes   = "In-place F16 RoPE, interleaved-pair (Qwen3/gemma4 layout). head_dim/2 threads per block. VGPR 20."
 
-# ----- Gated attention Q/gate split (V1.7.2.E — Qwen3.5/3.6 full-attn) ----
+# ----- Gated attention Q/gate split (Qwen3.5/3.6 full-attn) ----
 
 [[split_q_gate]]
 dtype   = "F16"
@@ -465,7 +455,7 @@ impl    = "split_q_gate_f16"
 cert    = "certs/hip/gfx906/split_q_gate_f16.json"
 notes   = "Strided split of attn_q output into contiguous Q + gate tensors. Post-attn, ops::mlp::swiglu_f16(gate, attn_out) applies silu(gate)*attn_out."
 
-# ----- Shared-expert gate scale (V1.7.2.D — Qwen3.5/3.6 MoE) ---------------
+# ----- Shared-expert gate scale (Qwen3.5/3.6 MoE) ---------------
 
 [[shared_expert_scale]]
 dtype   = "F32"
@@ -475,7 +465,7 @@ impl    = "shared_expert_scale_f32_gfx906"
 cert    = "certs/hip/gfx906/shared_expert_scale_f32_gfx906.json"
 notes   = "Per-token sigmoid(dot(gate_w, x)) + in-place scale shared_out. 256 threads/row."
 
-# ----- Causal depthwise conv1d (V1.7.2.C — GDN input stage) ----------------
+# ----- Causal depthwise conv1d (GDN input stage) ----------------
 
 [[causal_conv1d]]
 dtype   = "F32"
@@ -485,7 +475,7 @@ impl    = "causal_conv1d_f32_gfx906"
 cert    = "certs/hip/gfx906/causal_conv1d_f32_gfx906.json"
 notes   = "Depthwise 1D conv with causal concat of (conv_kernel-1) history + n_new tokens. 256 threads/block, one block per (channel_tile, n_new)."
 
-# ----- F32 → F16 cast glue (V1.7.3-b) --------------------------------------
+# ----- F32 → F16 cast glue --------------------------------------
 
 [[cast_f32_f16]]
 dtype   = "F32"
@@ -495,7 +485,7 @@ impl    = "cast_f32_f16"
 cert    = "certs/hip/gfx906/cast_f32_f16.json"
 notes   = "Pointwise F32→F16 cast. 256 threads/block. Bridges MMVQ F32 output into F16 attention/rmsnorm inputs."
 
-# ----- F16 → F32 cast glue (V1.7.3-c1) -------------------------------------
+# ----- F16 → F32 cast glue -------------------------------------
 
 [[cast_f16_f32]]
 dtype   = "F16"
@@ -505,7 +495,7 @@ impl    = "cast_f16_f32"
 cert    = "certs/hip/gfx906/cast_f16_f32.json"
 notes   = "Pointwise F16→F32 cast. 256 threads/block. Bridges F16 attn_norm output into F32 GDN internal recurrence."
 
-# ----- F32 SiLU / SwiGLU / scale / rmsnorm (V1.7.3-c1 GDN pointwise) -------
+# ----- F32 SiLU / SwiGLU / scale / rmsnorm (GDN pointwise) -------
 
 [[silu_f32]]
 dtype   = "F32"
@@ -539,7 +529,7 @@ impl    = "rmsnorm_f32"
 cert    = "certs/hip/gfx906/rmsnorm_f32.json"
 notes   = "Per-row F32 RMSNorm. 256 threads/row. Used by GDN ssm_norm per-head."
 
-# ----- F16 + F16 residual add (V1.7.3-e1) ----------------------------------
+# ----- F16 + F16 residual add ----------------------------------
 
 [[add_f16]]
 dtype   = "F16"
@@ -549,7 +539,7 @@ impl    = "add_f16"
 cert    = "certs/hip/gfx906/add_f16.json"
 notes   = "Pointwise F16 addition. 256 threads/block. Residual fan-in primitive for forward_one_token (per-layer residual sum + shared-expert merge)."
 
-# ----- MoE router GEMV (V1.7.3-d3) -----------------------------------------
+# ----- MoE router GEMV -----------------------------------------
 
 [[dense_gemv_f32_f16]]
 dtype   = "F32"
@@ -559,7 +549,7 @@ impl    = "dense_gemv_f32_f16_gfx906"
 cert    = "certs/hip/gfx906/dense_gemv_f32_f16_gfx906.json"
 notes   = "Per-row dense F32·F16 GEMV → F32. 256 threads/row. MoE router: ffn_gate_inp.weight × x_norm → expert logits."
 
-# ----- F16 → Q8_1 activation quantise (V1.7.3-g) ---------------------------
+# ----- F16 → Q8_1 activation quantise ---------------------------
 
 [[quantize_f16_q8_1]]
 dtype   = "F16"
@@ -569,7 +559,7 @@ impl    = "quantize_f16_q8_1_gfx906"
 cert    = "certs/hip/gfx906/quantize_f16_q8_1_gfx906.json"
 notes   = "F16 → Q8_1 activation quantise. 32 threads per Q8_1 block. Replaces full_attn host-roundtrip between swiglu and output MMVQ."
 
-# ----- GDN fused α/β/gate compute (V1.7.3-g) -------------------------------
+# ----- GDN fused α/β/gate compute -------------------------------
 
 [[gdn_alpha_beta]]
 dtype   = "F32"
@@ -577,9 +567,9 @@ dtype_q = "F32"
 shape   = { m = "any", k = "any", n = "any" }
 impl    = "gdn_alpha_beta_f32_gfx906"
 cert    = "certs/hip/gfx906/gdn_alpha_beta_f32_gfx906.json"
-notes   = "Fused gate=softplus(α+dt)*A + beta=sigmoid(β). One block/64 threads; covers num_v_heads ≤ 64. Replaces V1.7.3-c2 host α/β roundtrip."
+notes   = "Fused gate=softplus(α+dt)*A + beta=sigmoid(β). One block/64 threads; covers num_v_heads ≤ 64. Replaces the host α/β roundtrip."
 
-# ----- Gated-Delta-Net fused recurrent step (V1.7.2.F) ---------------------
+# ----- Gated-Delta-Net fused recurrent step ---------------------
 
 [[gdn_state_step]]
 dtype   = "F32"
@@ -595,9 +585,9 @@ dtype_q = "F32"
 shape   = { m = "any", k = 128, n = 128 }
 impl    = "gdn_state_step_alphabeta_f32_s128_gfx906"
 cert    = "certs/hip/gfx906/gdn_state_step_alphabeta_f32_s128_gfx906.json"
-notes   = "C10 — same kernel as gdn_state_step_f32_s128 but absorbs the preceding gdn_alpha_beta_f32 launch (softplus/sigmoid/exp inline in the per-token loop). One fewer launch per GDN layer per token; max_rel_err=0.0 vs unfused chain in cert."
+notes   = "Same kernel as gdn_state_step_f32_s128 but absorbs the preceding gdn_alpha_beta_f32 launch (softplus/sigmoid/exp inline in the per-token loop). One fewer launch per GDN layer per token; max_rel_err=0.0 vs unfused chain in cert."
 
-# ----- L2 norm (V1.7.2.B — used by Gated-Delta-Net on Q and K) -------------
+# ----- L2 norm (used by Gated-Delta-Net on Q and K) -------------
 
 [[l2_norm]]
 dtype   = "F32"
@@ -607,7 +597,7 @@ impl    = "l2_norm_f32"
 cert    = "certs/hip/gfx906/l2_norm_f32.json"
 notes   = "Per-row L2 norm, 256 threads/row, wave64 sum-of-squares reduce. F32 in/out."
 
-# ----- RoPE NeoX-split partial (V1.7.2.A — Qwen3.5/3.6 full-attn layers) ---
+# ----- RoPE NeoX-split partial (Qwen3.5/3.6 full-attn layers) ---
 
 [[rope_neox_partial]]
 dtype   = "F16"
@@ -643,7 +633,7 @@ dtype_q = "Q8_1"
 shape   = { m = "any", k = "any", n = "any" }
 impl    = "qmatmul_f16_mmvq"
 cert    = "certs/hip/gfx906/qmatmul_f16_mmvq.json"
-notes   = "V2.21.b — F16 weight × Q8_1 activation MMVQ. Unblocks Unsloth UD-Q8_K_XL GGUFs (i-matrix-flagged layers kept in F16). 256 threads × n_rows blocks, 8 elements/thread F32 FMA. No DP4A (weight is F16). HBM-bound at ~30 µs/call for 6144×5120."
+notes   = "F16 weight × Q8_1 activation MMVQ. Unblocks Unsloth UD-Q8_K_XL GGUFs (i-matrix-flagged layers kept in F16). 256 threads × n_rows blocks, 8 elements/thread F32 FMA. No DP4A (weight is F16). HBM-bound at ~30 µs/call for 6144×5120."
 
 [[qmatmul]]
 dtype   = "F16"
@@ -651,7 +641,7 @@ dtype_q = "Q8_1"
 shape   = { m = "1..7", k = "any", n = "any" }
 impl    = "qmatmul_f16_mmq"
 cert    = "certs/hip/gfx906/qmatmul_f16_mmq.json"
-notes   = "V2.25.a — multi-row F16 × Q8_1. Same per-block math as `mmvq_f16_q8_1`, grid.y = n_tokens. Default for small m where tile partial-fill hurts; V2.29.a tile kernel covers m >= 8."
+notes   = "Multi-row F16 × Q8_1. Same per-block math as `mmvq_f16_q8_1`, grid.y = n_tokens. Default for small m where tile partial-fill hurts; the tile kernel covers m >= 8."
 
 [[qmatmul]]
 dtype   = "F16"
@@ -659,7 +649,7 @@ dtype_q = "Q8_1"
 shape   = { m = ">=8", k = "any", n = "any" }
 impl    = "qmatmul_f16_mmq_tile"
 cert    = "certs/hip/gfx906/qmatmul_f16_mmq_tile.json"
-notes   = "V2.29.a — tile-M F16 × Q8_1 MMQ. 64 threads/block wave64, MMQ_Y=64 output rows × MMQ_X=8 activation rows per block (512 outputs/block). Each thread loads 32 F16 weights per K-sub-block once into registers and reuses 8× across activation rows; activation tile reads from L1-hot line across the 64 threads per sub-block. Measured Qwen3.6-27B-UD-Q8_K_XL Mesh<4> prefill L=512: 56.2 → 95.0 tok/s (+69 %, ratio vs llama.cpp 0.40 → 0.67). Under-fill (n_tokens < 8) early-exits per-slot via the slot_token[c] < 0 guard."
+notes   = "Tile-M F16 × Q8_1 MMQ. 64 threads/block wave64, MMQ_Y=64 output rows × MMQ_X=8 activation rows per block (512 outputs/block). Each thread loads 32 F16 weights per K-sub-block once into registers and reuses 8× across activation rows; activation tile reads from L1-hot line across the 64 threads per sub-block. Measured Qwen3.6-27B-UD-Q8_K_XL Mesh<4> prefill L=512: 56.2 → 95.0 tok/s (+69 %, ratio vs llama.cpp 0.40 → 0.67). Under-fill (n_tokens < 8) early-exits per-slot via the slot_token[c] < 0 guard."
 
 [[attention_decode]]
 dtype   = "F16"
@@ -667,7 +657,7 @@ dtype_q = "F16"
 shape   = { m = "1..4", k = "256..", n = "any" }   # long-context decode
 impl    = "attention_decode_f16_splitk_gfx906"
 cert    = "certs/hip/gfx906/attention_decode_f16_splitk_gfx906.json"
-notes   = "V2.19.b flash-decoding split-K. Two-pass (chunk + combine) partitioning n_tokens across grid.y lifts grid from 16 to 16×n_chunks blocks, attacking the single-pass kernel's 27% CU occupancy on Qwen3.6. Measured 7.78× at n_tokens=2048 head_dim=256; forward.rs threshold is n_tokens_kv > 256."
+notes   = "Flash-decoding split-K. Two-pass (chunk + combine) partitioning n_tokens across grid.y lifts grid from 16 to 16×n_chunks blocks, attacking the single-pass kernel's 27% CU occupancy on Qwen3.6. Measured 7.78× at n_tokens=2048 head_dim=256; forward.rs threshold is n_tokens_kv > 256."
 
 [[attention_decode]]
 dtype   = "Q8_0"          # KV dtype
@@ -675,7 +665,7 @@ dtype_q = "F16"           # Q / output dtype
 shape   = { m = "1..4", k = "any", n = "any" }
 impl    = "attention_decode_q8_kv_gfx906"
 cert    = "certs/hip/gfx906/attention_decode_q8_kv_gfx906.json"
-notes   = "GQA fused decode with Q8_0 KV (head_dim=128). 2× HBM saving vs F16 KV. Dispatched per-model after V1.7 delta-ppl quality cert passes."
+notes   = "GQA fused decode with Q8_0 KV (head_dim=128). 2× HBM saving vs F16 KV. Dispatched per-model after the delta-ppl quality cert passes."
 
 # ----- Attention prefill (causal, F16 KV) -----------------------------------
 
@@ -695,7 +685,7 @@ impl    = "qmatmul_q8_0_mmq_oracle_gfx906"
 cert    = "certs/hip/gfx906/qmatmul_q8_0_mmq_oracle_gfx906.json"
 notes   = "Correctness oracle — 2D grid of single-wave blocks, one output element per block. Owns only the tiny-M band (4..31); tile16 owns m>=32 (the short prefill-chunk tail), where weight-tiling beats the oracle's per-row weight re-read."
 
-# ----- MoE (V1.5 — TopK router + indexed expert matmul + combine) -----------
+# ----- MoE (TopK router + indexed expert matmul + combine) -----------
 
 [[topk]]
 dtype   = "F32"
@@ -719,7 +709,7 @@ dtype_q = "Q8_1"
 shape   = { m = "any", k = "any", n = "any" }
 impl    = "indexed_moe_mmvq_q6_k_gfx906"
 cert    = "certs/hip/gfx906/indexed_moe_mmvq_q6_k_gfx906.json"
-notes   = "V1.7.5.K — Q6_K MoE MMVQ for UD-Q4_K_S's mixed-quant ffn_down_exps. Single-row wave64, scales-per-16-elem layout, qh upper-2-bit ladder. Multi-row r2/r4 is a follow-up perf lever."
+notes   = "Q6_K MoE MMVQ for UD-Q4_K_S's mixed-quant ffn_down_exps. Single-row wave64, scales-per-16-elem layout, qh upper-2-bit ladder. Multi-row r2/r4 is a follow-up perf lever."
 
 [[indexed_moe_mmvq]]
 dtype   = "Q8_0"
@@ -727,7 +717,7 @@ dtype_q = "Q8_1"
 shape   = { m = "any", k = "any", n = "any" }
 impl    = "indexed_moe_mmvq_q8_0_gfx906"
 cert    = "certs/hip/gfx906/indexed_moe_mmvq_q8_0_gfx906.json"
-notes   = "V2.22.a — Q8_0 MoE MMVQ for UD-Q8_K_XL's Q8_0 expert weights (ffn_gate/up/down + ffn_*_shexp). 256-thread VDR=2 DP4A kernel, 1 output row per block. BF16 layers quantised to Q8_0 on host at load so they flow through this path too. MMQ tile8 variant queued for V2.22.b (prefill speed-up)."
+notes   = "Q8_0 MoE MMVQ for UD-Q8_K_XL's Q8_0 expert weights (ffn_gate/up/down + ffn_*_shexp). 256-thread VDR=2 DP4A kernel, 1 output row per block. BF16 layers quantised to Q8_0 on host at load so they flow through this path too."
 
 [[qmatmul_mmvq]]
 dtype   = "Q4_0"
@@ -735,7 +725,7 @@ dtype_q = "Q8_1"
 shape   = { m = "any", k = "any", n = "any" }
 impl    = "mmvq_q4_0_gfx906"
 cert    = "certs/hip/gfx906/mmvq_q4_0_gfx906.json"
-notes   = "V2.23.a — Q4_0 dense MMVQ for Qwen3.6-35B-A3B-Q4_0 (attn_qkv/gate/output/q, ssm_out in Q4_0). 256-thread DP4A, nibble-pair pattern from mmvq_q4_1 with the bias-correction identity `(q - 8) · y = dp4a(q, y) - 8·s_y`."
+notes   = "Q4_0 dense MMVQ for Qwen3.6-35B-A3B-Q4_0 (attn_qkv/gate/output/q, ssm_out in Q4_0). 256-thread DP4A, nibble-pair pattern from mmvq_q4_1 with the bias-correction identity `(q - 8) · y = dp4a(q, y) - 8·s_y`."
 
 [[qmatmul_mmvq]]
 dtype   = "Q5_0"
@@ -743,7 +733,7 @@ dtype_q = "Q8_1"
 shape   = { m = "any", k = "any", n = "any" }
 impl    = "mmvq_q5_0_gfx906"
 cert    = "certs/hip/gfx906/mmvq_q5_0_gfx906.json"
-notes   = "V2.23.a — Q5_0 dense MMVQ for Qwen3.6-35B-A3B-Q4_0 shared-expert FFN (ffn_*_shexp in 20 layers). 256-thread DP4A: computes `(q5 - 16)·y = nibble·y + 16·bit·y - 16·s_y` with the 5th-bit packed field expanded to int-per-4-bytes for a second DP4A."
+notes   = "Q5_0 dense MMVQ for Qwen3.6-35B-A3B-Q4_0 shared-expert FFN (ffn_*_shexp in 20 layers). 256-thread DP4A: computes `(q5 - 16)·y = nibble·y + 16·bit·y - 16·s_y` with the 5th-bit packed field expanded to int-per-4-bytes for a second DP4A."
 
 [[qmatmul_mmvq]]
 dtype   = "Q5_1"
@@ -751,7 +741,7 @@ dtype_q = "Q8_1"
 shape   = { m = "any", k = "any", n = "any" }
 impl    = "mmvq_q5_1_gfx906"
 cert    = "certs/hip/gfx906/mmvq_q5_1_gfx906.json"
-notes   = "V2.26.a — Q5_1 dense MMVQ (llama.cpp parity; no current Qwen3 GGUF uses it but unblocks arbitrary incoming GGUF mixes). Identical DP4A structure to Q5_0 but with the Q4_1-style `m·s_y` correction term instead of `-16·d·s_y` since Q5_1 is affine quant (y = d·q5 + m) not zero-point quant."
+notes   = "Q5_1 dense MMVQ (llama.cpp parity; no current Qwen3 GGUF uses it but unblocks arbitrary incoming GGUF mixes). Identical DP4A structure to Q5_0 but with the Q4_1-style `m·s_y` correction term instead of `-16·d·s_y` since Q5_1 is affine quant (y = d·q5 + m) not zero-point quant."
 
 [[indexed_moe_mmvq]]
 dtype   = "Q4_0"
@@ -759,7 +749,7 @@ dtype_q = "Q8_1"
 shape   = { m = "any", k = "any", n = "any" }
 impl    = "indexed_moe_mmvq_q4_0_gfx906"
 cert    = "certs/hip/gfx906/indexed_moe_mmvq_q4_0_gfx906.json"
-notes   = "V2.23.a — Q4_0 indexed-MoE MMVQ for Qwen3.6-35B-A3B-Q4_0 expert weights. Same inner loop as dense mmvq_q4_0 + expert-id indirection on the weight tensor; 256 threads/block, grid (n_rows, n_tokens·top_k). 5 Q4_1 ffn_down_exps layers get host-converted to Q8_0 at load."
+notes   = "Q4_0 indexed-MoE MMVQ for Qwen3.6-35B-A3B-Q4_0 expert weights. Same inner loop as dense mmvq_q4_0 + expert-id indirection on the weight tensor; 256 threads/block, grid (n_rows, n_tokens·top_k). 5 Q4_1 ffn_down_exps layers get host-converted to Q8_0 at load."
 
 [[indexed_moe_mmvq]]
 dtype   = "Q5_0"
@@ -795,7 +785,7 @@ impl    = "indexed_moe_mmvq_q4_k_gate_up_gfx906"
 cert    = "certs/hip/gfx906/indexed_moe_mmvq_q4_k_gate_up_gfx906.json"
 notes   = "P30 fused gate+up — activation read once, both weight matmuls in same inner loop. Halves launches vs 2× IndexedMoE MMVQ. VGPR 61 / waves 4 (trade register pressure for HBM traffic)."
 
-# ----- Indexed MoE MMQ (V1.5.7 — prefill MoE) ------------------------------
+# ----- Indexed MoE MMQ (prefill MoE) ------------------------------
 
 [[indexed_moe_mmq]]
 dtype   = "Q4_K"

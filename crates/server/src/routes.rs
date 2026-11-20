@@ -91,7 +91,7 @@ pub struct ServerState {
     /// is false (default OFF; flip via `FLAMBEAU_PREFIX_CACHE=1`).
     /// Stores host-RAM KV snapshots keyed by chained chunk hashes;
     /// LRU-evicts under `FLAMBEAU_PREFIX_CACHE_MAX_GB` (default 2 GB).
-    /// PP and TP supported; Hybrid bails on capture/restore in V1.
+    /// PP and TP supported; Hybrid bails on capture/restore.
     pub prefix_cache: Arc<PrefixCache>,
     /// Chunk size used by every cache entry in this server's
     /// lifetime (snapshot of `FLAMBEAU_PREFILL_UBATCH` at boot). Cache
@@ -105,8 +105,8 @@ pub struct ServerState {
     /// without `--embedding-model`; the endpoint returns 503 in that
     /// case. Wrapped in `tokio::sync::Mutex` because forward state
     /// (per-layer scratch + KV) is shared and concurrent requests
-    /// must serialise — embedding inference is fast enough on a
-    /// 0.6B model that V1 doesn't bother with multi-slot pooling.
+    /// must serialise — embedding inference on a 0.6B model is fast
+    /// enough without multi-slot pooling.
     pub embedding_model:
         Option<Arc<tokio::sync::Mutex<Box<dyn crate::embedding::EmbeddingHandle>>>>,
     /// Embedding model's own tokenizer.
@@ -140,7 +140,7 @@ pub struct ServerState {
     /// prefill driver and the lazy TP-prefill scratch allocator.
     pub prefill_ubatch: usize,
     /// `--prefill-chunk-tokens` (default 512). Per-chunk prefill budget
-    /// for the K4c mixed-batch scheduler.
+    /// for the mixed-batch scheduler.
     pub prefill_chunk_tokens: usize,
     pub mtp_max_draft: usize,
     /// `--gpu-sampler` (default true). When true the head rank's
@@ -547,7 +547,7 @@ impl ServerState {
         Ok(buf)
     }
 
-    /// **Cycle 3** — sibling of [`decode_via_scheduler`] that fills a
+    /// Sibling of [`decode_via_scheduler`] that fills a
     /// caller-provided buffer instead of allocating a fresh `Vec` per
     /// step. Used by the scheduler-aware handler's decode loop to
     /// recycle one ~600 KB logits buffer across all decode steps
@@ -559,7 +559,7 @@ impl ServerState {
         position: usize,
         logits_out: &mut Vec<f32>,
     ) -> anyhow::Result<()> {
-        // **Cycle 2 optimisation (single-user fast path)** — when no
+        // Single-user fast path: when no
         // other slot is active, aggregation is structurally impossible.
         // Fall through to the legacy `decode_logits` path which uses
         // decode-flavoured kernels (fused rmsnorm+quant_q8_1, per-step
@@ -627,7 +627,7 @@ impl ServerState {
         let mut dispatch_lock_opt: Option<_> = self.batched_dispatcher.try_lock().ok();
         tr!("LEADER try_lock={}", dispatch_lock_opt.is_some());
         if dispatch_lock_opt.is_some() {
-            // **Cycle 1 optimisation (single-user fast path)** — only
+            // Single-user fast path: only
             // sleep on the batching window when there's actually an
             // active OTHER slot that could plausibly join the batch.
             let n_others_active = self
@@ -716,7 +716,7 @@ impl ServerState {
     /// the response senders.
     /// Returns Err on dispatch failure; caller fans the error to all
     /// pending senders.
-    /// Sarathi-Serve mixed-batch dispatch (Phase K4c). Combines one
+    /// Sarathi-Serve mixed-batch dispatch. Combines one
     /// prefill chunk for `prefill_slot_idx` (tokens at contiguous
     /// positions starting at `prefill_start_position`) with the
     /// drained `pending` decode entries into a single
@@ -891,7 +891,7 @@ impl ServerState {
             .forward_decode_batched(self, inflights, slots, logits_refs)
     }
 
-    /// Phase 12.5 — single-slot decode through the batched path. Replaces
+    /// Single-slot decode through the batched path. Replaces
     /// the legacy `crate::qwen3moe_handle::decode_logits` free function. Caller
     /// must hold the slot's mutex (passing the live `&mut Inflight`
     /// borrowed from the guard).

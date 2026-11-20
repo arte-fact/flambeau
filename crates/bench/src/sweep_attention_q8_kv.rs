@@ -27,7 +27,7 @@ use half::f16;
 use crate::cert::{now_utc_iso8601, Cert, PmcSnapshot, ShapeResult, SCHEMA_VERSION};
 use crate::harness::{alloc_and_upload, max_rel_err_with_floor, rig, seeded_f32_range};
 
-/// (head_dim, n_heads_q, n_heads_kv) — V1 target families.
+/// (head_dim, n_heads_q, n_heads_kv) — target families.
 const SHAPES: &[(usize, usize, usize)] = &[
     (128, 32, 4), // Qwen3.5
     (256, 16, 2), // Qwen3.6

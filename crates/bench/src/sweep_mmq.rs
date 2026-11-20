@@ -3,11 +3,10 @@
 //! weights: [N, K] Q-format blocks
 //! act: [M, K] F32 → quantised to Q8_1 on device
 //! output: [M, N] F32
-//! The roadmap cert grid is `M ∈ {128, 512, 2048}` × Qwen3.6 attention /
-//! MoE projection widths (K, N). This sweep runs a compact sub-grid; full
-//! coverage lands with the first-class 4-warp LDS-tiled port next session.
-//! Current impl: `qmatmul_q8_0_mmq_oracle_gfx906` — the `mmq_q8_0_oracle`
-//! kernel (one output element per single-wave block). Slow but correct.
+//! Runs a compact sub-grid of `M ∈ {128, 512, 2048}` × Qwen3.6 attention /
+//! MoE projection widths (K, N). `qmatmul_q8_0_mmq_oracle_gfx906` (the
+//! `mmq_q8_0_oracle` kernel, one output element per single-wave block) is the
+//! slow but simple reference.
 
 #![cfg(feature = "hip")]
 #![expect(
@@ -90,13 +89,13 @@ pub enum Dtype {
     Q4KLdsTiledY64X8,
     Q3KLdsTiledX8,
     Iq4NlLdsTiledX8,
-    /// Wave64 Q4_K MMQ (, candle port). MMQ_Y=64, TILE_N=8, 64 threads.
+    /// Wave64 Q4_K MMQ. MMQ_Y=64, TILE_N=8, 64 threads.
     Q4KWave64,
-    /// Wave64 Q5_K MMQ (, candle port). MMQ_Y=64, TILE_N=8, 64 threads.
+    /// Wave64 Q5_K MMQ. MMQ_Y=64, TILE_N=8, 64 threads.
     Q5KWave64,
     /// 4-warp LDS-tiled Q6_K MMQ, MMQ_Y=16, MMQ_X=8, 128 threads.
     Q6K4Warp,
-    /// Wave64 Q6_K MMQ (flambeau-authored, no candle source).
+    /// Wave64 Q6_K MMQ.
     /// MMQ_Y=64, TILE_N=8, 64 threads. DP4A inner.
     Q6KWave64,
     /// Wave64 Q8_K MMQ. MMQ_Y=64, TILE_N=8, 64 threads. DP4A inner.
@@ -720,8 +719,8 @@ fn run_shape(
     assert_eq!(k % dtype.block_elem_count(), 0);
     let nb_per_row = k / dtype.block_elem_count();
 
-    // Q4_1 MMQ uses the DS4 / BlockQ8_1Mmq activation layout (series
-    // port of candle). Every other MMQ variant still uses the per-row
+    // Q4_1 MMQ uses the DS4 / BlockQ8_1Mmq activation layout. Every other
+    // MMQ variant still uses the per-row
     // BlockQ8_1 layout. The fork happens here.
     let uses_mmq_layout = matches!(
         dtype,

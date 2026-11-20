@@ -74,7 +74,7 @@ pub enum Dtype {
     Q8K,
     /// r2 multi-row variant of Q2_K.
     Q2KR2,
-    /// DP4A 256-thread Q2_K MMVQ (Phase 3e — port of llama.cpp's
+    /// DP4A 256-thread Q2_K MMVQ (port of llama.cpp's
     /// `vec_dot_q2_K_q8_1_impl_mmvq`). Two DP4A calls per (iqs, i):
     /// one for the 2-bit packed values, one for the broadcast-min
     /// term (m × Σu via dp4a(m_packed, u, 0)). Same 64-threads-per-
@@ -85,7 +85,7 @@ pub enum Dtype {
     Q2KR2Dp4a,
     /// r2 multi-row variant of Q3_K.
     Q3KR2,
-    /// DP4A 256-thread Q3_K MMVQ (Phase 3b — port of llama.cpp's
+    /// DP4A 256-thread Q3_K MMVQ (port of llama.cpp's
     /// `vec_dot_q3_K_q8_1_impl_mmvq`). 64 threads per super-block,
     /// 4 super-blocks per iter. Splits the 2-bit + 1-bit-hmask decode
     /// into two DP4A calls (one for low bits, one for hmask bit) to
@@ -98,7 +98,7 @@ pub enum Dtype {
     Q3KR2Dp4a,
     /// r2 multi-row variant of Q4_K (2 output rows per wave64).
     Q4KR2,
-    /// DP4A r2 multi-row Q4_K MMVQ (Phase 3a — port of llama.cpp's
+    /// DP4A r2 multi-row Q4_K MMVQ (port of llama.cpp's
     /// `vec_dot_q4_K_q8_1_impl_vmmq`). Same shape as Q4KR2 but with
     /// `__builtin_amdgcn_sdot4` SIMD int8 dot products instead of
     /// per-element FP32 multiplies. Mirrors the MoE
@@ -138,12 +138,11 @@ pub enum Dtype {
     Q4_1R2DP4A,
     /// thin-block 128-thread single-row Q4_1 DP4A.
     Q4_1T128,
-    /// C9-i1 thin-block 128-thread single-row Q8_0 DP4A — analog of Q4_1T128
+    /// Thin-block 128-thread single-row Q8_0 DP4A — analog of Q4_1T128
     /// for Q8_0 weights — targets the gfx906 latency-bound regime where Q8_0
     /// MMVQ is the dominant kernel on Coder-30B-Q8_0 / 27B-Q8_0 decode.
     Q8_0T128,
-    /// C9-followup t128 + VDR=2 combined (the kernel that should beat
-    /// vdr2-alone where t128-alone lost).
+    /// t128 + VDR=2 combined.
     Q8_0T128VDR2,
     /// r2 multi-row Q8_0 (`mmvq_dp4a_nrow_row<Q8_0, 64, 2>`): one 64-thread
     /// block computes 2 output rows (32 lanes each), sharing the Q8_1
@@ -159,7 +158,7 @@ pub enum Dtype {
     Iq4Nl,
     /// native IQ4_NL r2 multi-row MMVQ.
     Iq4NlR2,
-    /// DP4A IQ4_NL MMVQ (Phase 3d — port of llama.cpp's
+    /// DP4A IQ4_NL MMVQ (port of llama.cpp's
     /// `vec_dot_iq4_nl_q8_1`). 256 threads/block, single row, mirrors
     /// `mmvq_q4_0` launch shape (4 lanes per 32-elem block, 64 blocks
     /// per outer iter). Uses the same `__builtin_amdgcn_perm` LUT
@@ -169,7 +168,7 @@ pub enum Dtype {
     Iq4Xs,
     /// native IQ4_XS r2 multi-row MMVQ.
     Iq4XsR2,
-    /// DP4A IQ4_XS MMVQ (Phase 3c — port of llama.cpp's
+    /// DP4A IQ4_XS MMVQ (port of llama.cpp's
     /// `vec_dot_iq4_xs_q8_1`). 256 threads, single row, 32 threads
     /// per super-block. Uses `__builtin_amdgcn_perm` for 4-way LUT
     /// lookup into `kvalues_iq4nl`, then dp4a inner.
@@ -178,7 +177,7 @@ pub enum Dtype {
     Iq3Xxs,
     /// native IQ3_XXS r2 multi-row MMVQ.
     Iq3XxsR2,
-    /// DP4A IQ3_XXS MMVQ (Phase 3g — port of llama.cpp's
+    /// DP4A IQ3_XXS MMVQ (port of llama.cpp's
     /// `vec_dot_iq3_xxs_q8_1`). Uses IQ3XXS_GRID + unpack_ksigns
     /// (popcount-parity 8th-bit extension) + the apply_signs helper
     /// from IQ3_S.
@@ -187,7 +186,7 @@ pub enum Dtype {
     Iq3S,
     /// native IQ3_S r2 multi-row MMVQ.
     Iq3SR2,
-    /// DP4A IQ3_S MMVQ (Phase 3f — port of llama.cpp's
+    /// DP4A IQ3_S MMVQ (port of llama.cpp's
     /// `vec_dot_iq3_s_q8_1`). First codebook kernel: looks up 9-bit
     /// indices into `IQ3S_GRID` for 4-i8-packed magnitudes, applies
     /// per-byte sign from packed bits (manual __vsub4 emulation on
@@ -197,28 +196,28 @@ pub enum Dtype {
     /// native IQ2_XXS single-row MMVQ.
     Iq2Xxs,
     Iq2XxsR2,
-    /// DP4A IQ2_XXS MMVQ (Phase 3j — port of llama.cpp's
+    /// DP4A IQ2_XXS MMVQ (port of llama.cpp's
     /// `vec_dot_iq2_xxs_q8_1`). Per sub-block 8 qs bytes split into 4
     /// codebook indices + 4 × 7-bit signs + 4-bit scale (top of aux32).
     /// One scale per sub-block (no ls0/ls1 split).
     Iq2XxsDp4a,
     Iq2Xs,
     Iq2XsR2,
-    /// DP4A IQ2_XS MMVQ (Phase 3i — port of llama.cpp's
+    /// DP4A IQ2_XS MMVQ (port of llama.cpp's
     /// `vec_dot_iq2_xs_q8_1`). Each qs entry is uint16: low 9 bits
     /// index IQ2XS_GRID, high 7 bits are signs (popcount-parity for
     /// 8th bit). Reuses apply_signs + unpack_ksigns helpers.
     Iq2XsDp4a,
     Iq2S,
     Iq2SR2,
-    /// DP4A IQ2_S MMVQ (Phase 3h — port of llama.cpp's
+    /// DP4A IQ2_S MMVQ (port of llama.cpp's
     /// `vec_dot_iq2_s_q8_1`). IQ2S_GRID is uint64[1024] (8 i8 per
     /// entry); per (iqs, l_grp) lane: one grid lookup, two dp4as,
     /// two sub-block scales (ls0/ls1) over l_grp split.
     Iq2SDp4a,
     Iq1S,
     Iq1SR2,
-    /// DP4A IQ1_S MMVQ (Phase 3k — port of llama.cpp's
+    /// DP4A IQ1_S MMVQ (port of llama.cpp's
     /// `vec_dot_iq1_s_q8_1`). No sign mask; codebook stores signed i8
     /// magnitudes directly in IQ1S_GRID (uint64 of 8 packed i8).
     /// Per-sub-block delta offset (±IQ1_DELTA) introduces a bias term
@@ -226,7 +225,7 @@ pub enum Dtype {
     Iq1SDp4a,
     Iq1M,
     Iq1MR2,
-    /// DP4A IQ1_M MMVQ (Phase 3l — port of llama.cpp's
+    /// DP4A IQ1_M MMVQ (port of llama.cpp's
     /// `vec_dot_iq1_m_q8_1`). Closes the IQ family. Same IQ1S_GRID +
     /// delta pattern as IQ1_S but with per-half-sub-block scales
     /// (sc0/sc1) and per-l_grp delta sign from qh nibbles. d itself

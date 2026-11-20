@@ -102,8 +102,7 @@ pub fn attention_decode_f16_slots<B: flambeau_core::KernelBackend>(
 ///   [`attention_decode_f16`]: `[n_tokens, n_heads_kv, head_dim]` F16.
 ///   Launch: `gridDim = (n_heads_q, n_slots)`, `blockDim = (head_dim,)`.
 ///   At `n_slots = 1` the kernel produces output bit-identical to
-///   [`attention_decode_f16_slots`] for the same inputs (regression guard
-///   for the wiring task #266c).
+///   [`attention_decode_f16_slots`] for the same inputs.
 /// # Safety
 /// All device pointers must outlive the kernel launch and remain valid
 /// on the stream's device. `k_cache_ptrs` / `v_cache_ptrs` / `n_tokens_kv`
@@ -1446,11 +1445,8 @@ pub fn split_q_gate_f16<B: flambeau_core::KernelBackend>(
 /// `n_k_tokens` KV rows with causal masking (`q_token_i` attends to
 /// `k_token_0..k_token_{q_offset + i}`).
 /// Dispatches:
-/// - `attention_prefill_flash_tile_f16` (candle port —
-///   BR=4 LDS-tiled flash-attn v2) when `n_q_tokens >= 4` and head_dim
-///   ∈ {64, 128, 256}. Per-call time on gfx906 is ~5× the previous
-///   oracle kernel at pp512 (measured 2026-04-22: 2994 µs → target
-///   ≤800 µs).
+/// - `attention_prefill_flash_tile_f16` (BR=4 LDS-tiled flash-attn v2)
+///   when `n_q_tokens >= 4` and head_dim ∈ {64, 128, 256}.
 /// - The per-(q_token, q_head) oracle kernel (`attention_prefill_f16`)
 ///   otherwise. Shape grid covers the n_q < 4 edge that flash-tile's
 ///   BR=4 coop-load pattern under-utilises.

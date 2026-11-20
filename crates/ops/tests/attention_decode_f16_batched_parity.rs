@@ -1,4 +1,4 @@
-//! #266b parity test — verify `attention_decode_f16_batched` produces
+//! Parity test — verify `attention_decode_f16_batched` produces
 //! output bit-identical to running `attention_decode_f16_slots` once
 //! per slot.
 //! Each (q_head, slot) block in the batched kernel reuses the same
@@ -281,7 +281,7 @@ fn parity_qwen35_gqa32_4_hd128() -> Result<()> {
         n_heads_kv: 4,
         head_dim: 128,
     };
-    // N=1 — regression guard for the wiring task (#266c).
+    // N=1 — regression guard for the single-slot wiring.
     run_parity("Qwen3.5/N=1/kv=128", shape, 1, &[128], 0xA5)?;
     // N=2 / homogeneous KV-len.
     run_parity("Qwen3.5/N=2/kv=512", shape, 2, &[512, 512], 0xA6)?;
@@ -331,9 +331,8 @@ fn parity_qwen36_gqa16_2_hd256() -> Result<()> {
 }
 
 /// Gemma4 26B-A4B full-attention layer shape: head_dim=512, GQA-16/2.
-/// The cap was 256 until Phase 13 extended splitk/batched/q8_kv to 512;
-/// this case keeps that extension green and proves the batched path
-/// works at the new max head_dim alongside the smaller models.
+/// Covers the 512 head_dim cap of splitk / batched / q8_kv: the batched
+/// path works at the max head_dim alongside the smaller models.
 #[test]
 fn parity_gemma4_full_attn_gqa16_2_hd512() -> Result<()> {
     let shape = Shape {

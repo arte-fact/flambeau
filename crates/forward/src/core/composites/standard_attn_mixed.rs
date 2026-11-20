@@ -1,4 +1,4 @@
-//! Sarathi-Serve mixed-batch standard_attn (Phase K1a).
+//! Sarathi-Serve mixed-batch standard_attn.
 //!
 //! Rows `[0..K)` are a prefill chunk for slot `slot_p` at contiguous
 //! positions `[pos0, pos0 + K)`. Rows `[K..K+N)` are batched decodes
@@ -8,9 +8,8 @@
 //! prefill rows + existing `attn_decode_f16_batched` over the N decode
 //! rows. No new device kernels.
 //!
-//! K1a slice: bail on paged / kv-shared / `attn_v_unit_norm_w` /
-//! `attn_q_gated` / `post_attn_norm` paths. Future slices handle
-//! those. Clean Qwen3.5-9B-class dense path only.
+//! Bails on paged / kv-shared / `attn_v_unit_norm_w` / `attn_q_gated` /
+//! `post_attn_norm` paths. Clean Qwen3.5-9B-class dense path only.
 //!
 //! See `doc/MIXED_BATCH_V2_PLAN.md`.
 
@@ -70,9 +69,9 @@ pub fn standard_attn_mixed_local<B: flambeau_backend::Backend, H: TopologyHooks<
         }
     }
 
-    // Remaining bails: paged KV (Phase K-paged) and gemma 4n's
-    // shared-KV layers. SWA / V-unit-norm / post_attn_norm / V-from-K
-    // ship in this slice for gemma4 dense and 26B-A4B MoE.
+    // Bails on paged KV and gemma 4n's shared-KV layers. SWA /
+    // V-unit-norm / post_attn_norm / V-from-K are handled for gemma4 dense
+    // and 26B-A4B MoE.
     if state.pool.paged_kv_caches.is_some() {
         bail!("standard_attn_mixed: paged KV not yet supported (Phase K-paged)");
     }

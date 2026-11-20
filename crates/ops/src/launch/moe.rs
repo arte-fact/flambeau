@@ -3186,7 +3186,7 @@ pub fn moe_combine_two_residuals_f16<B: flambeau_core::KernelBackend>(
 /// refs. Returns `(bucket_expert, bucket_slots)` where `bucket_slots[i, col]`
 /// is either `token << 16 | slot` or `-1` sentinel padding. Deterministic —
 /// experts are emitted in ascending-id order.
-/// Implementation (C4): counting-sort over `expert_id`. Two linear passes
+/// Implementation: counting-sort over `expert_id`. Two linear passes
 /// over `expert_ids`, no `HashMap`, no allocations beyond the output vecs
 /// and a `Vec<u32>` of size `max_expert_id + 1`. The old `HashMap` path
 /// showed up in `forward_*_prefill` profiles; for Qwen3.6 with 256 experts

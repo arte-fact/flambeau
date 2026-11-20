@@ -134,7 +134,7 @@ pub fn gdn_alpha_beta_f32<B: flambeau_core::KernelBackend>(
     Ok(())
 }
 
-/// **C10** — fused GDN recurrent step that absorbs the preceding
+/// Fused GDN recurrent step that absorbs the preceding
 /// `gdn_alpha_beta_f32` launch. Same launch shape as
 /// [`gdn_state_step_f32_s128`] but reads the raw mmvq outputs
 /// `alpha_in[B,L,H]` / `beta_in[B,L,H]` plus per-head `ssm_dt_bias` /

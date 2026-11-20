@@ -115,7 +115,7 @@ pub struct ChatCompletionRequest {
     pub parallel_tool_calls: Option<bool>,
     /// Override the parser family. `None` / `"auto"` inspects the loaded
     /// model architecture (Qwen3.6 `qwen35moe` → `hermes`). Future-proofs
-    /// the wire for the Qwen3-Coder XML parser (V2.x, see ROADMAP-V2 §T2).
+    /// the wire for the Qwen3-Coder XML parser.
     #[serde(default)]
     pub tool_call_format: Option<String>,
 
@@ -132,7 +132,7 @@ pub struct ChatCompletionRequest {
     // ---- Logprobs ----
     /// OpenAI `logprobs`: when `true`, the response carries the
     /// per-token log-probability of every generated token. Default
-    /// `false`. V1 implementation is non-streaming, host-path-only:
+    /// `false`. The implementation is non-streaming, host-path-only:
     /// requests on the GPU sampler path or spec-decode path silently
     /// return `null` with a warn-once log.
     #[serde(default)]
@@ -204,7 +204,7 @@ pub enum ResponseFormat {
     /// Constrain output to be parseable as a single top-level JSON value.
     JsonObject,
     /// Constrain to a specific JSON schema (more strict than JsonObject).
-    /// V1 implementation: treat same as `JsonObject` (schema-aware
+    /// Implemented as `JsonObject` (schema-aware
     /// constraint is a follow-up; the structural constraint already
     /// catches 95 % of malformations).
     JsonSchema {
@@ -1208,7 +1208,7 @@ mod tests {
 /// - an array of strings (batch),
 /// - a single token id array,
 /// - an array of token id arrays.
-///   V1 only handles strings; integer-array forms return 400.
+///   Only strings are handled; integer-array forms return 400.
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(untagged)]
 pub enum EmbeddingsInput {
@@ -1218,20 +1218,20 @@ pub enum EmbeddingsInput {
 
 /// Embeddings request body. Mirrors the OpenAI shape; unsupported
 /// fields (`encoding_format = base64`, `dimensions`, `user`) are
-/// accepted and ignored in V1 — we always return raw F32.
+/// accepted and ignored — we always return raw F32.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct EmbeddingsRequest {
     pub input: EmbeddingsInput,
     /// Echoed in the response for compatibility — not actually
-    /// dispatched to a different model since V1 ships exactly one
+    /// dispatched to a different model since the server ships exactly one
     /// embedding head.
     #[serde(default)]
     pub model: Option<String>,
-    /// V1 only emits `"float"`. Reserved for compat.
+    /// Only `"float"` is emitted. Reserved for compat.
     #[serde(default)]
     pub encoding_format: Option<String>,
-    /// V1 returns the model's native hidden size; the OpenAI
-    /// truncation-at-`dimensions` feature is V2.
+    /// The model's native hidden size is returned; the OpenAI
+    /// truncation at `dimensions` is not implemented.
     #[serde(default)]
     pub dimensions: Option<usize>,
     #[serde(default)]

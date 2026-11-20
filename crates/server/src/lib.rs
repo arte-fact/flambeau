@@ -3,9 +3,7 @@
 //! `POST /v1/chat/completions` (non-streaming only in ; SSE is ).
 //! Chat template from GGUF `tokenizer.chat_template` via `minijinja`.
 //! Single-session model: one shared `ModelState` behind a Tokio mutex.
-//! Concurrent HTTP requests serialise through the mutex — continuous
-//! batching is V2. The V1 target is "works end-to-end with real OpenAI
-//! clients", not throughput at load.
+//! Concurrent HTTP requests serialise through the mutex.
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 

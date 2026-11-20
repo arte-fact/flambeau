@@ -362,7 +362,7 @@ fn chunked_prefill_pp(
     logits_out: &mut Vec<f32>,
 ) -> Result<bool> {
     let prefill_chunk = state.prefill_chunk_tokens.max(1);
-    // Phase K4c — mixed-batch engagement on every arch that
+    // Mixed-batch engagement on every arch that
     // implements `Model::supports_mixed_batch` (qwen35 / qwen35moe /
     // gemma3 / gemma4 today). Each per-chunk lock acquisition tries
     // to also become the batched-decode leader. If we get the lock

@@ -52,7 +52,7 @@ pub fn qmatmul<B: flambeau_core::KernelBackend>(
         return mmq_f16_launch(reg, stream, bufs, n, m, k);
     }
     // Q4_1 at m ∈ {2, 3, 4}: per-N compile-time batched MMVQ.
-    // Sibling of K1's Q4_0 batched path. The first cut of Q4_1 batched
+    // Sibling of the Q4_0 batched path. The first cut of Q4_1 batched
     // (runtime-N=8 loop) hit ~59 VGPRs and lost on every anchor — the
     // per-N template compiles down to ~20-30 VGPRs which preserves
     // gfx906 wave occupancy. Outside this window Q4_1 falls through to
@@ -109,7 +109,7 @@ pub fn qmatmul<B: flambeau_core::KernelBackend>(
     if (m < 32 || k % 128 != 0 || n % 128 != 0)
         && matches!(dtype_weight, QDtype::Q4_0 | QDtype::Q5_0 | QDtype::Q5_1)
     {
-        // K1 — Q4_0 at m ∈ {2, 3, 4}: single-launch batched MMVQ with
+        // Q4_0 at m ∈ {2, 3, 4}: single-launch batched MMVQ with
         // compile-time N specialization. Each N has its own kernel
         // entry so VGPR usage stays close to the single-row baseline
         // (~17 VGPRs) and gfx906 occupancy is preserved. Outside this
@@ -166,16 +166,13 @@ pub fn qmatmul<B: flambeau_core::KernelBackend>(
 
     match recipe.kind {
         RecipeKind::Mmvq => {
-            // 4-fix-C: `nb_per_row` (kernel arg) counts WEIGHT
-            // superblocks (size = `block_elems(dtype_weight)`); the
-            // activation row stride uses Q8_1's QK8_1=32 element blocks.
-            // For Q4_0/Q4_1/Q5_0/Q5_1/Q8_0 these coincide (block_elems=32).
-            // For Q4_K/Q5_K/Q6_K (block_elems=256=QK_K) they DIVERGE — the
-            // pre-fix `act_row_bytes = nb_per_row * sizeof(BlockQ8_1)` was
-            // 8× too small, so row i ≥ 1 read partway into row 0's
-            // activation. Caused the 4 forward_prefill_pp L>1 bug on
-            // every model with K-quant weights routed through this path
-            // (e.g. ssm_out=Q5_K on Qwen3.5/3.6 hybrid).
+            // `nb_per_row` (kernel arg) counts WEIGHT superblocks (size =
+            // `block_elems(dtype_weight)`); the activation row stride uses
+            // Q8_1's QK8_1=32 element blocks. For Q4_0/Q4_1/Q5_0/Q5_1/Q8_0
+            // these coincide (block_elems=32); for the K-quants
+            // (block_elems=256=QK_K) they DIVERGE: a stride of
+            // `nb_per_row * sizeof(BlockQ8_1)` is 8× too small and row i ≥ 1
+            // reads into row 0's activation.
             let nb_per_row = k / block_elems(dtype_weight);
             let act_blocks_per_row = k / 32; // QK8_1 = 32 elements per Q8_1 block.
             let w_row_bytes = 0; // weight doesn't stride per batch
@@ -388,7 +385,7 @@ pub fn mmvq_q4_0_t128<B: flambeau_core::KernelBackend>(
     Ok(())
 }
 
-/// **K1** — Q4_0 batched MMVQ: one launch covers `n_slots` activation
+/// Q4_0 batched MMVQ: one launch covers `n_slots` activation
 /// rows, each block reads its weight row once and applies it across all
 /// slots in the inner kbx loop. Amortizes weight HBM reads across
 /// activations; the lever for the `qmatmul(m=N)` row-by-row null
@@ -729,7 +726,7 @@ pub fn mmvq_q4_1_batched<B: flambeau_core::KernelBackend>(
     Ok(())
 }
 
-/// **K3** — Q5_K batched MMVQ with r2 multi-row + per-N activation
+/// Q5_K batched MMVQ with r2 multi-row + per-N activation
 /// columns. Sibling of [`mmvq_q4_0_batched`] for Q5_K weights (the
 /// `ssm_*` projections in GDN layers — second-largest decode bucket
 /// per S2 rocprof at 760 ms / spec phase). Same lever: one launch
@@ -850,7 +847,7 @@ pub fn mmvq_q4_0_gate_up_t128<B: flambeau_core::KernelBackend>(
     Ok(())
 }
 
-/// **C6-i1** — Q4_0 single-warp (64 t/block) MMVQ. Sibling of `mmvq_q4_0_t128`
+/// Q4_0 single-warp (64 t/block) MMVQ. Sibling of `mmvq_q4_0_t128`
 /// targeting an even smaller block to pack more in-flight blocks per CU at
 /// gfx906 decode (where occupancy is the lever, not VALU). One wave64/block
 /// = no LDS reduce, just an in-place gfx906 DPP butterfly.
@@ -961,7 +958,7 @@ pub fn mmvq_q4_0_gate_up<B: flambeau_core::KernelBackend>(
     Ok(())
 }
 
-/// **K5** — Q4_0 fused gate+up MMVQ batched across N activation cols.
+/// Q4_0 fused gate+up MMVQ batched across N activation cols.
 /// Sibling of [`mmvq_q4_0_gate_up`] (single-col fused) and
 /// [`mmvq_q4_0_batched`] (multi-col single-weight). Combines both
 /// levers: each block reads ONE gate weight row + ONE up weight row +
@@ -972,7 +969,7 @@ pub fn mmvq_q4_0_gate_up<B: flambeau_core::KernelBackend>(
 /// slot-major F32. Asymmetric-row support preserved (n_rows_gate vs
 /// n_rows_up may differ; per-row do_gate/do_up short-circuit).
 ///
-/// `n_slots` ∈ [2, 4]. Used by the K6 batched-GDN paired-L=2 forward.
+/// `n_slots` ∈ [2, 4]. Used by the batched-GDN paired-L=2 forward.
 pub fn mmvq_q4_0_gate_up_batched<B: flambeau_core::KernelBackend>(
     reg: &crate::Registry<B>,
     stream: &<B::Device as flambeau_core::Device>::Stream,
@@ -1015,7 +1012,7 @@ pub fn mmvq_q4_0_gate_up_batched<B: flambeau_core::KernelBackend>(
 /// Row-tiled sibling of [`mmvq_q4_0_gate_up_batched`]. Each block owns
 /// `R = 4` consecutive rows of the gate+up matmul and shares one
 /// LDS-resident Q8_1 activation strip across the N decode slots; cuts
-/// activation HBM traffic ~4× vs the per-row K5 kernel at the same
+/// activation HBM traffic ~4× vs the per-row kernel at the same
 /// output count.
 ///
 /// `n_slots` ∈ [2, 4]. Output ABI identical to `mmvq_q4_0_gate_up_batched`
@@ -1142,7 +1139,7 @@ pub fn mmvq_q8_0_row_tile_batched<B: flambeau_core::KernelBackend>(
     Ok(())
 }
 
-/// **C8-i1** — fused gate+up Q4_1 dense MMVQ. Sibling of `mmvq_q4_0_gate_up`
+/// Fused gate+up Q4_1 dense MMVQ. Sibling of `mmvq_q4_0_gate_up`
 /// for Q4_1 weights (Qwen3.5-9B-Q4_1 / 27B-Q4_1 dense FFN). Reads the Q8_1
 /// activation once per block, produces both gate and up outputs.
 pub fn mmvq_q4_1_gate_up<B: flambeau_core::KernelBackend>(
@@ -1653,7 +1650,7 @@ enum RecipeKind {
     /// but block (32, NWARPS)=(32, 8) and static shared (dynamic bytes = 0).
     /// CUDA-only; gfx906 has no matrix core and keeps the dp4a MmqLdsX64 path.
     MmqMma,
-    /// wave64 MMQ for Q5_K (candle port `mul_mat_q5_K_gfx906_v2`).
+    /// wave64 MMQ for Q5_K.
     /// Consumes the standard `flambeau_block_q8_1` layout (NOT DS4), so no
     /// special activation quantise is needed at call sites. Grid =
     /// (ceil(N/64), ceil(M/8)), block = 64 threads (1 warp), 8 output cols

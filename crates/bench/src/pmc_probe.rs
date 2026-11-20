@@ -33,7 +33,7 @@ pub fn run_one(kernel_stem: &str, m: usize, k: usize, n: usize) -> Result<String
         "mmvq_q6_k_r4" => ("flambeau_mmvq_q6_k_r4_q8_1", 64),
         "mmq_q8_0_oracle" => ("flambeau_mmq_q8_0_oracle_q8_1", 256),
         "mmq_q8_0_4warp" => ("flambeau_mmq_q8_0_4warp_q8_1", 256),
-        // candle port: 2D block (64, 4, 1), DS4 Q8_1 activation, 9 args, 30336 B LDS.
+        // 2D block (64, 4, 1), DS4 Q8_1 activation, 9 args, 30336 B LDS.
         "mmq_q4_1_4warp_lds" => ("flambeau_mmq_q4_1_4warp_lds_q8_1", 0),
         "mmq_q4_0_4warp_lds" => ("flambeau_mmq_q4_0_4warp_lds_q8_1", 0),
         // / K-quant wave64 MMQ ports. All three share the same
@@ -152,7 +152,7 @@ fn run_mmq_q8_0(
     Ok(())
 }
 
-/// Q4_1 4-warp LDS-tiled MMQ probe (candle port).
+/// Q4_1 4-warp LDS-tiled MMQ probe.
 /// Args: (vx, vy, dst, ncols_x, nrows_x, ncols_y, stride_col_y, stride_row_x, nrows_dst)
 /// Block = (64, 4, 1), shared = 30336 B.
 /// Y layout: block_q8_1_mmq × (n_big_blocks_k, ncols_y), 144 B each, where

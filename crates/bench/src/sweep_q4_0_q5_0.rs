@@ -77,7 +77,7 @@ pub fn run_mmvq_q5_1_sweep(repo_root: &Path) -> Result<Cert> {
 
 type EncodeFn = fn(&[f32]) -> Vec<u8>;
 
-/// **C6-i1** — Q4_0 single-warp (64 t/block) MMVQ correctness sweep.
+/// Q4_0 single-warp (64 t/block) MMVQ correctness sweep.
 /// Same shapes as `run_mmvq_q4_0_sweep`, only the block-thread count and
 /// kernel stem change.
 pub fn run_mmvq_q4_0_warpcoop64_sweep(repo_root: &Path) -> Result<Cert> {

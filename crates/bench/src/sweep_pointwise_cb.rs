@@ -1,8 +1,6 @@
-//! Cross-backend (BenchBackend-generic) correctness sweeps for the Stream F
-//! fixed pointwise kernels. The legacy `sweep_f32_pointwise` is HIP-only
-//! (`open_kernel` + hardcoded `_gfx906` certs); this module is the P3 spine —
-//! the same sweeps over `BenchBackend` so each kernel certs on HIP gfx906 AND
-//! CUDA sm_86 from one driver. Pilot: `add_f16`.
+//! Cross-backend (BenchBackend-generic) correctness sweeps for the fixed
+//! pointwise kernels: one driver certs each kernel on HIP gfx906 and CUDA
+//! sm_86.
 #![cfg(any(feature = "hip", feature = "cuda"))]
 #![expect(
     clippy::undocumented_unsafe_blocks,
@@ -20,7 +18,7 @@ use crate::backend::{BenchBackend, LaunchArgs};
 use crate::cert::{now_utc_iso8601, Cert, ShapeResult, SCHEMA_VERSION};
 use crate::harness::{alloc_and_upload, max_rel_err_with_floor, rig_for, seeded_f32_range};
 
-/// Route a Stream F pointwise `--op` to its generic sweep, for either backend.
+/// Route a pointwise `--op` to its generic sweep, for either backend.
 /// Returns `None` when `op` is not a pointwise-spine kernel (the caller then
 /// falls through to its other sweep tables). One table, both rigs — the cli's
 /// HIP and CUDA arms share this so a newly-ported kernel is wired in one place.

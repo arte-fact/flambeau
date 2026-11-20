@@ -324,7 +324,7 @@ fn swa_decode_window_geq_ntokens_matches_unbounded() {
 
 /// Gemma4 26B-A4B full-attention layer shape: head_dim=512, GQA-16/2,
 /// SWA window not used (full-attn). Force splitk by n_tokens > 256.
-/// Phase 13: ATTN_SK_MAX_HEAD_DIM bumped 256→512.
+/// ATTN_SK_MAX_HEAD_DIM is 512.
 #[test]
 fn splitk_matches_single_pass_gemma4_hd512() {
     let Some(dev) = dev_or_skip() else {
@@ -859,7 +859,7 @@ fn softcap_f32_inplace() {
     }
 }
 
-// ---- Ring-buffered SWA (Phase 2 ring_depth addressing) -----------------
+// ---- Ring-buffered SWA (ring_depth addressing) -----------------
 //
 // The kernel and CPU reference both read the SAME ring_depth-row K/V slab at
 // physical row `t % ring_depth`. Parameters are chosen so the windowed key
