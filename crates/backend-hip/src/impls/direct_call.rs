@@ -179,6 +179,37 @@ pub const DIRECT_CALL_KERNELS_GFX906: &[DirectCallKernel] = &[
         impl_id: "gdn_state_step_alphabeta_f32_s128_gfx906",
         cert_rel_path: "certs/hip/gfx906/gdn_state_step_alphabeta_f32_s128_gfx906.json",
     },
+    // Pointwise and block-reduce kernels certified by the cross-backend sweep
+    // (crates/bench/src/sweep_pointwise_cb.rs, neutral impl_ids shared with
+    // certs/cuda/sm_86/).
+    DirectCallKernel {
+        impl_id: "add_f16",
+        cert_rel_path: "certs/hip/gfx906/add_f16.json",
+    },
+    DirectCallKernel {
+        impl_id: "cast_f16_f32",
+        cert_rel_path: "certs/hip/gfx906/cast_f16_f32.json",
+    },
+    DirectCallKernel {
+        impl_id: "cast_f32_f16",
+        cert_rel_path: "certs/hip/gfx906/cast_f32_f16.json",
+    },
+    DirectCallKernel {
+        impl_id: "rmsnorm_f32",
+        cert_rel_path: "certs/hip/gfx906/rmsnorm_f32.json",
+    },
+    DirectCallKernel {
+        impl_id: "scale_f32",
+        cert_rel_path: "certs/hip/gfx906/scale_f32.json",
+    },
+    DirectCallKernel {
+        impl_id: "l2_norm_f32",
+        cert_rel_path: "certs/hip/gfx906/l2_norm_f32.json",
+    },
+    DirectCallKernel {
+        impl_id: "split_q_gate_f16",
+        cert_rel_path: "certs/hip/gfx906/split_q_gate_f16.json",
+    },
 ];
 
 /// Catalog of kernels that are **not** dispatched at runtime but are kept
@@ -772,27 +803,9 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
         impl_id: "indexed_moe_mmq_q4_k_down_lds_tiled",
         cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q4_k_down_lds_tiled.json",
     },
-    // P3 Stream F — cross-backend (neutral impl_id) certs for the fixed
-    // pointwise kernels. Same gfx906 kernels as the `_gfx906` dispatch rows
-    // above; these are the cross-backend bit-match baselines against the
-    // sm_86 twins under certs/cuda/sm_86/. Sweep harness:
-    // crates/bench/src/sweep_pointwise_cb.rs.
-    DirectCallKernel {
-        impl_id: "add_f16",
-        cert_rel_path: "certs/hip/gfx906/add_f16.json",
-    },
-    DirectCallKernel {
-        impl_id: "cast_f16_f32",
-        cert_rel_path: "certs/hip/gfx906/cast_f16_f32.json",
-    },
-    DirectCallKernel {
-        impl_id: "cast_f32_f16",
-        cert_rel_path: "certs/hip/gfx906/cast_f32_f16.json",
-    },
-    DirectCallKernel {
-        impl_id: "scale_f32",
-        cert_rel_path: "certs/hip/gfx906/scale_f32.json",
-    },
+    // Cross-backend (neutral impl_id) certs for fixed pointwise kernels, the
+    // bit-match baselines against the sm_86 twins under certs/cuda/sm_86/.
+    // Sweep harness: crates/bench/src/sweep_pointwise_cb.rs.
     DirectCallKernel {
         impl_id: "scale_f16",
         cert_rel_path: "certs/hip/gfx906/scale_f16.json",
@@ -817,21 +830,8 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
         impl_id: "swiglu_f32_to_q8_1",
         cert_rel_path: "certs/hip/gfx906/swiglu_f32_to_q8_1.json",
     },
-    DirectCallKernel {
-        impl_id: "split_q_gate_f16",
-        cert_rel_path: "certs/hip/gfx906/split_q_gate_f16.json",
-    },
-    // Tier-B block-reduce kernels, neutralized to a shared `.cuh` (the body
-    // rides block_reduce_sum over the WARP_SIZE seam). The `_gfx906` rows above
-    // remain the dispatch certs; these are the cross-backend baselines.
-    DirectCallKernel {
-        impl_id: "rmsnorm_f32",
-        cert_rel_path: "certs/hip/gfx906/rmsnorm_f32.json",
-    },
-    DirectCallKernel {
-        impl_id: "l2_norm_f32",
-        cert_rel_path: "certs/hip/gfx906/l2_norm_f32.json",
-    },
+    // Block-reduce kernels on the shared `.cuh` (block_reduce_sum over the
+    // WARP_SIZE seam); cross-backend baselines.
     DirectCallKernel {
         impl_id: "rmsnorm_f16",
         cert_rel_path: "certs/hip/gfx906/rmsnorm_f16.json",

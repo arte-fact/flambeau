@@ -43,8 +43,6 @@ pub mod sweep_rope;
 #[cfg(feature = "hip")]
 pub mod sweep_rope_neox;
 
-#[cfg(feature = "hip")]
-pub mod sweep_l2_norm;
 
 #[cfg(feature = "hip")]
 pub mod sweep_causal_conv1d;
@@ -55,8 +53,6 @@ pub mod sweep_gdn_step;
 #[cfg(feature = "hip")]
 pub mod sweep_gdn_step_alphabeta;
 
-#[cfg(feature = "hip")]
-pub mod sweep_cast;
 
 #[cfg(feature = "hip")]
 pub mod sweep_f32_pointwise;
@@ -70,8 +66,6 @@ pub mod sweep_peer_copy;
 #[cfg(feature = "hip")]
 pub mod sweep_shared_expert;
 
-#[cfg(feature = "hip")]
-pub mod sweep_split_q_gate;
 
 #[cfg(feature = "hip")]
 pub mod sweep_softmax;

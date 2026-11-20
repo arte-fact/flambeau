@@ -769,7 +769,6 @@ const SIMPLE_SWEEPS: &[(&str, SweepFn)] = &[
         "rope_neox_partial",
         flambeau_bench::sweep_rope_neox::run_sweep,
     ),
-    ("l2_norm", flambeau_bench::sweep_l2_norm::run_sweep),
     (
         "causal_conv1d",
         flambeau_bench::sweep_causal_conv1d::run_sweep,
@@ -790,10 +789,6 @@ const SIMPLE_SWEEPS: &[(&str, SweepFn)] = &[
     (
         "shared_expert_scale",
         flambeau_bench::sweep_shared_expert::run_sweep,
-    ),
-    (
-        "split_q_gate",
-        flambeau_bench::sweep_split_q_gate::run_sweep,
     ),
     ("softmax", flambeau_bench::sweep_softmax::run_sweep),
     (
@@ -828,29 +823,12 @@ const SIMPLE_SWEEPS: &[(&str, SweepFn)] = &[
         flambeau_bench::sweep_attention_q8_kv::run_sweep,
     ),
     (
-        "add_f16_gfx906",
-        flambeau_bench::sweep_f32_pointwise::run_add_f16_sweep,
-    ),
-    (
-        "cast_f16_f32_gfx906",
-        flambeau_bench::sweep_f32_pointwise::run_cast_f16_f32_sweep,
-    ),
-    ("cast_f32_f16_gfx906", flambeau_bench::sweep_cast::run_sweep),
-    (
         "dense_gemv_f32_f16_gfx906",
         flambeau_bench::sweep_f32_pointwise::run_dense_gemv_sweep,
     ),
     (
         "quantize_f16_q8_1_gfx906",
         flambeau_bench::sweep_f32_pointwise::run_quantize_f16_q8_1_sweep,
-    ),
-    (
-        "rmsnorm_f32_gfx906",
-        flambeau_bench::sweep_f32_pointwise::run_rmsnorm_f32_sweep,
-    ),
-    (
-        "scale_f32_gfx906",
-        flambeau_bench::sweep_f32_pointwise::run_scale_sweep,
     ),
     (
         "silu_f32_gfx906",

@@ -461,8 +461,8 @@ notes   = "In-place F16 RoPE, interleaved-pair (Qwen3/gemma4 layout). head_dim/2
 dtype   = "F16"
 dtype_q = "F16"
 shape   = { m = "any", k = "any", n = "any" }
-impl    = "split_q_gate_f16_gfx906"
-cert    = "certs/hip/gfx906/split_q_gate_f16_gfx906.json"
+impl    = "split_q_gate_f16"
+cert    = "certs/hip/gfx906/split_q_gate_f16.json"
 notes   = "Strided split of attn_q output into contiguous Q + gate tensors. Post-attn, ops::mlp::swiglu_f16(gate, attn_out) applies silu(gate)*attn_out."
 
 # ----- Shared-expert gate scale (V1.7.2.D — Qwen3.5/3.6 MoE) ---------------
@@ -491,8 +491,8 @@ notes   = "Depthwise 1D conv with causal concat of (conv_kernel-1) history + n_n
 dtype   = "F32"
 dtype_q = "F16"
 shape   = { m = "any", k = "any", n = "any" }
-impl    = "cast_f32_f16_gfx906"
-cert    = "certs/hip/gfx906/cast_f32_f16_gfx906.json"
+impl    = "cast_f32_f16"
+cert    = "certs/hip/gfx906/cast_f32_f16.json"
 notes   = "Pointwise F32→F16 cast. 256 threads/block. Bridges MMVQ F32 output into F16 attention/rmsnorm inputs."
 
 # ----- F16 → F32 cast glue (V1.7.3-c1) -------------------------------------
@@ -501,8 +501,8 @@ notes   = "Pointwise F32→F16 cast. 256 threads/block. Bridges MMVQ F32 output 
 dtype   = "F16"
 dtype_q = "F32"
 shape   = { m = "any", k = "any", n = "any" }
-impl    = "cast_f16_f32_gfx906"
-cert    = "certs/hip/gfx906/cast_f16_f32_gfx906.json"
+impl    = "cast_f16_f32"
+cert    = "certs/hip/gfx906/cast_f16_f32.json"
 notes   = "Pointwise F16→F32 cast. 256 threads/block. Bridges F16 attn_norm output into F32 GDN internal recurrence."
 
 # ----- F32 SiLU / SwiGLU / scale / rmsnorm (V1.7.3-c1 GDN pointwise) -------
@@ -527,16 +527,16 @@ notes   = "Pointwise y = silu(a) * b. F32 counterpart of swiglu_f16. GDN gated-o
 dtype   = "F32"
 dtype_q = "F32"
 shape   = { m = "any", k = "any", n = "any" }
-impl    = "scale_f32_gfx906"
-cert    = "certs/hip/gfx906/scale_f32_gfx906.json"
+impl    = "scale_f32"
+cert    = "certs/hip/gfx906/scale_f32.json"
 notes   = "Pointwise y = x * scale. GDN Q-scale by 1/sqrt(head_k_dim) pre state-step."
 
 [[rmsnorm_f32]]
 dtype   = "F32"
 dtype_q = "F32"
 shape   = { m = "any", k = "any", n = "any" }
-impl    = "rmsnorm_f32_gfx906"
-cert    = "certs/hip/gfx906/rmsnorm_f32_gfx906.json"
+impl    = "rmsnorm_f32"
+cert    = "certs/hip/gfx906/rmsnorm_f32.json"
 notes   = "Per-row F32 RMSNorm. 256 threads/row. Used by GDN ssm_norm per-head."
 
 # ----- F16 + F16 residual add (V1.7.3-e1) ----------------------------------
@@ -545,8 +545,8 @@ notes   = "Per-row F32 RMSNorm. 256 threads/row. Used by GDN ssm_norm per-head."
 dtype   = "F16"
 dtype_q = "F16"
 shape   = { m = "any", k = "any", n = "any" }
-impl    = "add_f16_gfx906"
-cert    = "certs/hip/gfx906/add_f16_gfx906.json"
+impl    = "add_f16"
+cert    = "certs/hip/gfx906/add_f16.json"
 notes   = "Pointwise F16 addition. 256 threads/block. Residual fan-in primitive for forward_one_token (per-layer residual sum + shared-expert merge)."
 
 # ----- MoE router GEMV (V1.7.3-d3) -----------------------------------------
@@ -603,8 +603,8 @@ notes   = "C10 — same kernel as gdn_state_step_f32_s128 but absorbs the preced
 dtype   = "F32"
 dtype_q = "F32"
 shape   = { m = "any", k = "any", n = "any" }
-impl    = "l2_norm_f32_gfx906"
-cert    = "certs/hip/gfx906/l2_norm_f32_gfx906.json"
+impl    = "l2_norm_f32"
+cert    = "certs/hip/gfx906/l2_norm_f32.json"
 notes   = "Per-row L2 norm, 256 threads/row, wave64 sum-of-squares reduce. F32 in/out."
 
 # ----- RoPE NeoX-split partial (V1.7.2.A — Qwen3.5/3.6 full-attn layers) ---

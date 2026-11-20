@@ -119,20 +119,6 @@ pub const TOPK_GFX906: &[KernelDescriptor] = &[KernelDescriptor {
     cert_rel_path: "certs/hip/gfx906/topk_f32_gfx906.json",
 }];
 
-pub const SPLIT_Q_GATE_GFX906: &[KernelDescriptor] = &[
-    // split (Q | gate) output of Qwen3.5/3.6 gated attention.
-    KernelDescriptor {
-        op_name: "SplitQGate",
-        impl_id: "split_q_gate_f16_gfx906",
-        backend: "hip",
-        arch: "gfx906",
-        dtype_weight: QDtype::F16,
-        dtype_activation: QDtype::F16,
-        m_range: (1, usize::MAX),
-        cert_rel_path: "certs/hip/gfx906/split_q_gate_f16_gfx906.json",
-    },
-];
-
 pub const SHARED_EXPERT_SCALE_GFX906: &[KernelDescriptor] = &[
     // fused per-token sigmoid-gate scaling for shared expert.
     KernelDescriptor {
@@ -161,34 +147,6 @@ pub const CAUSAL_CONV1D_GFX906: &[KernelDescriptor] = &[
     },
 ];
 
-pub const ADD_F16_GFX906: &[KernelDescriptor] = &[
-    // e1 — pointwise F16 + F16 → F16. Residual fan-in primitive.
-    KernelDescriptor {
-        op_name: "AddF16",
-        impl_id: "add_f16_gfx906",
-        backend: "hip",
-        arch: "gfx906",
-        dtype_weight: QDtype::F16,
-        dtype_activation: QDtype::F16,
-        m_range: (1, usize::MAX),
-        cert_rel_path: "certs/hip/gfx906/add_f16_gfx906.json",
-    },
-];
-
-pub const CAST_F16_F32_GFX906: &[KernelDescriptor] = &[
-    // c1 glue — F16 → F32 for the GDN path's internal recurrence.
-    KernelDescriptor {
-        op_name: "CastF16F32",
-        impl_id: "cast_f16_f32_gfx906",
-        backend: "hip",
-        arch: "gfx906",
-        dtype_weight: QDtype::F16,
-        dtype_activation: QDtype::F32,
-        m_range: (1, usize::MAX),
-        cert_rel_path: "certs/hip/gfx906/cast_f16_f32_gfx906.json",
-    },
-];
-
 pub const SILU_F32_GFX906: &[KernelDescriptor] = &[
     // c1 — standalone F32 SiLU for GDN's silu(conv_out).
     KernelDescriptor {
@@ -214,48 +172,6 @@ pub const SWIGLU_F32_GFX906: &[KernelDescriptor] = &[
         dtype_activation: QDtype::F32,
         m_range: (1, usize::MAX),
         cert_rel_path: "certs/hip/gfx906/swiglu_f32_gfx906.json",
-    },
-];
-
-pub const SCALE_F32_GFX906: &[KernelDescriptor] = &[
-    // c1 — pointwise scalar multiply. GDN scales Q by 1/sqrt(head_k_dim).
-    KernelDescriptor {
-        op_name: "ScaleF32",
-        impl_id: "scale_f32_gfx906",
-        backend: "hip",
-        arch: "gfx906",
-        dtype_weight: QDtype::F32,
-        dtype_activation: QDtype::F32,
-        m_range: (1, usize::MAX),
-        cert_rel_path: "certs/hip/gfx906/scale_f32_gfx906.json",
-    },
-];
-
-pub const RMSNORM_F32_GFX906: &[KernelDescriptor] = &[
-    // c1 — F32 RMSNorm for GDN's ssm_norm (per-head on F32 state out).
-    KernelDescriptor {
-        op_name: "RmsnormF32",
-        impl_id: "rmsnorm_f32_gfx906",
-        backend: "hip",
-        arch: "gfx906",
-        dtype_weight: QDtype::F32,
-        dtype_activation: QDtype::F32,
-        m_range: (1, usize::MAX),
-        cert_rel_path: "certs/hip/gfx906/rmsnorm_f32_gfx906.json",
-    },
-];
-
-pub const CAST_F32_F16_GFX906: &[KernelDescriptor] = &[
-    // b glue — F32 MMVQ output → F16 for attention / rmsnorm inputs.
-    KernelDescriptor {
-        op_name: "CastF32F16",
-        impl_id: "cast_f32_f16_gfx906",
-        backend: "hip",
-        arch: "gfx906",
-        dtype_weight: QDtype::F32,
-        dtype_activation: QDtype::F16,
-        m_range: (1, usize::MAX),
-        cert_rel_path: "certs/hip/gfx906/cast_f32_f16_gfx906.json",
     },
 ];
 
@@ -318,20 +234,6 @@ pub const GDN_STATE_STEP_GFX906: &[KernelDescriptor] = &[
         dtype_activation: QDtype::F32,
         m_range: (1, usize::MAX),
         cert_rel_path: "certs/hip/gfx906/gdn_state_step_f32_s128_gfx906.json",
-    },
-];
-
-pub const L2_NORM_GFX906: &[KernelDescriptor] = &[
-    // per-row L2 norm. Used inside GDN.
-    KernelDescriptor {
-        op_name: "L2Norm",
-        impl_id: "l2_norm_f32_gfx906",
-        backend: "hip",
-        arch: "gfx906",
-        dtype_weight: QDtype::F32,
-        dtype_activation: QDtype::F32,
-        m_range: (1, usize::MAX),
-        cert_rel_path: "certs/hip/gfx906/l2_norm_f32_gfx906.json",
     },
 ];
 
@@ -534,20 +436,13 @@ mod tests {
             INDEXED_MOE_MMVQ_GATE_UP_GFX906,
             INDEXED_MOE_MMQ_GFX906,
             ROPE_NEOX_PARTIAL_GFX906,
-            L2_NORM_GFX906,
-            ADD_F16_GFX906,
-            CAST_F16_F32_GFX906,
-            CAST_F32_F16_GFX906,
             CAUSAL_CONV1D_GFX906,
             DENSE_GEMV_F32_F16_GFX906,
             GDN_ALPHA_BETA_GFX906,
             GDN_STATE_STEP_GFX906,
             QUANTIZE_F16_Q8_1_GFX906,
-            RMSNORM_F32_GFX906,
-            SCALE_F32_GFX906,
             SHARED_EXPERT_SCALE_GFX906,
             SILU_F32_GFX906,
-            SPLIT_Q_GATE_GFX906,
             SWIGLU_F32_GFX906,
         ] {
             for d in table {
@@ -641,20 +536,13 @@ mod tests {
             INDEXED_MOE_MMVQ_GATE_UP_GFX906,
             INDEXED_MOE_MMQ_GFX906,
             ROPE_NEOX_PARTIAL_GFX906,
-            L2_NORM_GFX906,
-            ADD_F16_GFX906,
-            CAST_F16_F32_GFX906,
-            CAST_F32_F16_GFX906,
             CAUSAL_CONV1D_GFX906,
             DENSE_GEMV_F32_F16_GFX906,
             GDN_ALPHA_BETA_GFX906,
             GDN_STATE_STEP_GFX906,
             QUANTIZE_F16_Q8_1_GFX906,
-            RMSNORM_F32_GFX906,
-            SCALE_F32_GFX906,
             SHARED_EXPERT_SCALE_GFX906,
             SILU_F32_GFX906,
-            SPLIT_Q_GATE_GFX906,
             SWIGLU_F32_GFX906,
         ] {
             for d in table {
@@ -716,20 +604,13 @@ mod tests {
             INDEXED_MOE_MMVQ_GATE_UP_GFX906,
             INDEXED_MOE_MMQ_GFX906,
             ROPE_NEOX_PARTIAL_GFX906,
-            L2_NORM_GFX906,
-            ADD_F16_GFX906,
-            CAST_F16_F32_GFX906,
-            CAST_F32_F16_GFX906,
             CAUSAL_CONV1D_GFX906,
             DENSE_GEMV_F32_F16_GFX906,
             GDN_ALPHA_BETA_GFX906,
             GDN_STATE_STEP_GFX906,
             QUANTIZE_F16_Q8_1_GFX906,
-            RMSNORM_F32_GFX906,
-            SCALE_F32_GFX906,
             SHARED_EXPERT_SCALE_GFX906,
             SILU_F32_GFX906,
-            SPLIT_Q_GATE_GFX906,
             SWIGLU_F32_GFX906,
         ] {
             for d in table {
