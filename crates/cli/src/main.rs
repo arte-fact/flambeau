@@ -286,6 +286,12 @@ enum Cmd {
         /// `--emit`.
         #[arg(long)]
         check: bool,
+        /// Output-row counts to time (dry run only; default: 1,8,16).
+        #[arg(long, value_delimiter = ',')]
+        rows: Vec<usize>,
+        /// Inner dimensions to time (dry run only; default: 2048,4096).
+        #[arg(long, value_delimiter = ',')]
+        k: Vec<usize>,
     },
     /// Validate that every dispatch row has a matching green cert (+).
     CertCheck {
@@ -422,7 +428,9 @@ fn main() -> Result<()> {
                 sweep(&out.unwrap_or_else(repo_root), &arch, op.as_deref(), &dtype)?
             }
         }
-        Cmd::Autotune { arch, op, dtype, emit, check } => autotune(&arch, &op, &dtype, emit, check)?,
+        Cmd::Autotune { arch, op, dtype, emit, check, rows, k } => {
+            autotune(&arch, &op, &dtype, emit, check, &rows, &k)?
+        }
         Cmd::CertCheck { arch, backend } => cert_check(&backend, &arch)?,
         Cmd::PmcProbe { kernel, m, k, n } => pmc_probe(&kernel, m, k, n)?,
         Cmd::PmcRefresh { arch } => pmc_refresh(&arch)?,
@@ -1239,7 +1247,15 @@ fn pmc_probe(kernel: &str, m: usize, k: usize, n: usize) -> Result<()> {
     }
 }
 
-fn autotune(arch: &str, op: &str, dtype: &str, emit: bool, check: bool) -> Result<()> {
+fn autotune(
+    arch: &str,
+    op: &str,
+    dtype: &str,
+    emit: bool,
+    check: bool,
+    rows: &[usize],
+    k: &[usize],
+) -> Result<()> {
     if op == "qmatmul_mmq" {
         return autotune_mmq(arch, dtype);
     }
@@ -1309,17 +1325,20 @@ fn autotune(arch: &str, op: &str, dtype: &str, emit: bool, check: bool) -> Resul
                 "autotune: only --dtype Q8_0 / Q4_0 / Q4_1 / Q5_0 / Q5_1 / Q2_K / Q3_K / Q4_K / Q5_K / Q6_K / Q8_K / IQ4_NL / IQ4_XS / IQ2_XXS / IQ3_XXS / IQ3_S / IQ2_XS / IQ2_S / IQ1_S / IQ1_M are wired so far (got {other:?})"
             ),
         };
-        let m_grid = [1usize, 8, 16];
-        let k_grid = [2048usize, 4096];
+        if (emit || check) && !(rows.is_empty() && k.is_empty()) {
+            anyhow::bail!("autotune: --rows / --k only apply to a dry run");
+        }
+        let m_grid: &[usize] = if rows.is_empty() { &[1, 8, 16] } else { rows };
+        let k_grid: &[usize] = if k.is_empty() { &[2048, 4096] } else { k };
         let root = repo_root();
         match arch {
             #[cfg(feature = "hip_sweep")]
             "gfx906" => {
-                run::<flambeau_bench::backend::Hip>(arch, &candidates, &m_grid, &k_grid, &root, mode)
+                run::<flambeau_bench::backend::Hip>(arch, &candidates, m_grid, k_grid, &root, mode)
             }
             #[cfg(feature = "cuda_sweep")]
             "sm_86" => {
-                run::<flambeau_bench::backend::Cuda>(arch, &candidates, &m_grid, &k_grid, &root, mode)
+                run::<flambeau_bench::backend::Cuda>(arch, &candidates, m_grid, k_grid, &root, mode)
             }
             other => anyhow::bail!(
                 "autotune: unsupported --arch {other:?} (need gfx906 / sm_86 with the matching feature)"
@@ -1328,7 +1347,7 @@ fn autotune(arch: &str, op: &str, dtype: &str, emit: bool, check: bool) -> Resul
     }
     #[cfg(not(any(feature = "hip_sweep", feature = "cuda_sweep")))]
     {
-        let _ = (arch, dtype, emit, check);
+        let _ = (arch, dtype, emit, check, rows, k);
         anyhow::bail!("autotune requires --features hip_sweep and/or cuda_sweep")
     }
 }
