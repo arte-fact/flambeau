@@ -49,7 +49,7 @@
 # bit-for-bit parity vs llama.cpp on Qwen3.6-35B 8-token greedy). The rows
 # below remain the "table of record" baseline; the DP4A variants inherit the
 # same cert since they're numerically equivalent modulo float-accumulation
-# order. FLAMBEAU_VARIANT=baseline reverts at runtime for regression testing.
+# order.
 
 [[qmatmul]]
 dtype   = "Q8_0"
@@ -587,7 +587,7 @@ dtype_q = "F32"
 shape   = { m = "any", k = 128, n = 128 }
 impl    = "gdn_state_step_f32_s128_gfx906"
 cert    = "certs/hip/gfx906/gdn_state_step_f32_s128_gfx906.json"
-notes   = "Fused per-(B,H) recurrent step at S_v=128 (head_k_dim=head_v_dim=128 on Qwen3.6). One launch handles decode (L=1) and prefill (L>1); state register-resident across the full L loop. 4 warps/block, grid = (H, B, S_v/4). GQA via n_rep. Baseline path; opt-in via FLAMBEAU_VARIANT=baseline."
+notes   = "Fused per-(B,H) recurrent step at S_v=128 (head_k_dim=head_v_dim=128 on Qwen3.6). One launch handles decode (L=1) and prefill (L>1); state register-resident across the full L loop. 4 warps/block, grid = (H, B, S_v/4). GQA via n_rep."
 
 [[gdn_state_step_alphabeta]]
 dtype   = "F32"
@@ -595,7 +595,7 @@ dtype_q = "F32"
 shape   = { m = "any", k = 128, n = 128 }
 impl    = "gdn_state_step_alphabeta_f32_s128_gfx906"
 cert    = "certs/hip/gfx906/gdn_state_step_alphabeta_f32_s128_gfx906.json"
-notes   = "C10 — same kernel as gdn_state_step_f32_s128 but absorbs the preceding gdn_alpha_beta_f32 launch (softplus/sigmoid/exp inline in the per-token loop). One fewer launch per GDN layer per token; max_rel_err=0.0 vs unfused chain in cert. Default-on; FLAMBEAU_VARIANT=baseline reverts."
+notes   = "C10 — same kernel as gdn_state_step_f32_s128 but absorbs the preceding gdn_alpha_beta_f32 launch (softplus/sigmoid/exp inline in the per-token loop). One fewer launch per GDN layer per token; max_rel_err=0.0 vs unfused chain in cert."
 
 # ----- L2 norm (V1.7.2.B — used by Gated-Delta-Net on Q and K) -------------
 
@@ -667,7 +667,7 @@ dtype_q = "F16"
 shape   = { m = "1..4", k = "256..", n = "any" }   # long-context decode
 impl    = "attention_decode_f16_splitk_gfx906"
 cert    = "certs/hip/gfx906/attention_decode_f16_splitk_gfx906.json"
-notes   = "V2.19.b flash-decoding split-K. Two-pass (chunk + combine) partitioning n_tokens across grid.y lifts grid from 16 to 16×n_chunks blocks, attacking the single-pass kernel's 27% CU occupancy on Qwen3.6. Measured 7.78× at n_tokens=2048 head_dim=256; forward.rs threshold is n_tokens_kv > 256. FLAMBEAU_VARIANT=baseline opts out."
+notes   = "V2.19.b flash-decoding split-K. Two-pass (chunk + combine) partitioning n_tokens across grid.y lifts grid from 16 to 16×n_chunks blocks, attacking the single-pass kernel's 27% CU occupancy on Qwen3.6. Measured 7.78× at n_tokens=2048 head_dim=256; forward.rs threshold is n_tokens_kv > 256."
 
 [[attention_decode]]
 dtype   = "Q8_0"          # KV dtype

@@ -532,6 +532,7 @@ fn init_rank<A: Arch>(
         paged_kv_pages,
         kv_layout,
         mtp_max_draft,
+        decode_graph: _,
     } = params;
     let device = HipDevice::new(device_id).context("HipDevice::new")?;
     device.bind().context("device.bind")?;

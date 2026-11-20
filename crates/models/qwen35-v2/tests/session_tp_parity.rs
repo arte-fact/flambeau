@@ -40,6 +40,7 @@ fn session_qwen35_9b_tp_size_2_argmax_matches_sd() {
             paged_kv_pages: None,
             kv_layout: flambeau_forward::KvLayout::F16Contig,
                     mtp_max_draft: 0,
+                    decode_graph: true,
         },
     )
     .expect("Session<Qwen35V2> TP=2");

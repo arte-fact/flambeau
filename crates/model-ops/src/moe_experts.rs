@@ -1316,7 +1316,6 @@ impl MoeExperts {
         // 2. Q4_0 / Q8_0 short-prompt fast path. Uses plain indexed
         // MoE MMVQ (no sort/pad). Allowed combos: Q4_0 gate+up with
         // Q4_0 / Q8_0 / Q4_1 down; Q8_0 gate+up with Q8_0 down.
-        let allow_tile8_decode = std::env::var("FLAMBEAU_MOE_TILE8_DECODE").as_deref() != Ok("0");
         let tile8_tokens_ok = self
             .tile8_min_tokens
             .map(|m| prompt_len >= m)
@@ -1324,13 +1323,11 @@ impl MoeExperts {
         let q4_0_use_tile8 = gate_dt == QDtype::Q4_0
             && (down_dt == QDtype::Q4_0 || down_dt == QDtype::Q8_0 || down_dt == QDtype::Q4_1)
             && n_pairs >= Self::TILE8_PAIRS_MIN
-            && tile8_tokens_ok
-            && allow_tile8_decode;
+            && tile8_tokens_ok;
         let q8_0_use_tile8 = gate_dt == QDtype::Q8_0
             && down_dt == QDtype::Q8_0
             && n_pairs >= Self::TILE8_PAIRS_MIN
-            && tile8_tokens_ok
-            && allow_tile8_decode;
+            && tile8_tokens_ok;
         if (gate_dt == QDtype::Q4_0 && !q4_0_use_tile8)
             || (gate_dt == QDtype::Q8_0 && !q8_0_use_tile8)
         {

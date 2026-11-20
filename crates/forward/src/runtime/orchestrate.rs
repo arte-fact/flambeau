@@ -108,6 +108,9 @@ pub struct LaunchParams {
     pub kv_layout: crate::core::KvLayout,
     /// Max MTP draft tokens per verify step; 0 = MTP off.
     pub mtp_max_draft: usize,
+    /// Single-token decode graph capture where the backend supports it
+    /// (single-device CUDA sessions); `false` forces direct launches.
+    pub decode_graph: bool,
 }
 
 /// Shared runtime configuration for the topology launchers.

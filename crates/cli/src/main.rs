@@ -205,6 +205,10 @@ enum Cmd {
             default_missing_value = "true",
         )]
         no_batched_decode: bool,
+        /// Disable single-token decode graph capture (single-device CUDA;
+        /// default: enabled). The non-graph path gives byte-identical output.
+        #[arg(long = "no-decode-graph")]
+        no_decode_graph: bool,
         /// Enable prompt prefix cache (chat workloads).
         #[arg(
             long = "prefix-cache",
@@ -369,6 +373,7 @@ fn main() -> Result<()> {
             ctx_cap,
             no_gpu_sampler,
             no_batched_decode,
+            no_decode_graph,
             prefix_cache,
             prefix_cache_max_gb,
             kv,
@@ -395,6 +400,7 @@ fn main() -> Result<()> {
             ctx_cap,
             gpu_sampler: !no_gpu_sampler,
             batched_decode: !no_batched_decode,
+            decode_graph: !no_decode_graph,
             prefix_cache,
             prefix_cache_max_gb,
             kv,
@@ -447,6 +453,7 @@ struct ServeArgs {
     ctx_cap: Option<usize>,
     gpu_sampler: bool,
     batched_decode: bool,
+    decode_graph: bool,
     prefix_cache: bool,
     prefix_cache_max_gb: f64,
     kv: String,
@@ -493,6 +500,7 @@ fn serve_cmd(args: ServeArgs) -> Result<()> {
         ctx_cap,
         gpu_sampler,
         batched_decode,
+        decode_graph,
         prefix_cache,
         prefix_cache_max_gb,
         kv,
@@ -611,6 +619,7 @@ fn serve_cmd(args: ServeArgs) -> Result<()> {
         ctx_cap,
         gpu_sampler,
         batched_decode,
+        decode_graph,
         prefix_cache,
         prefix_cache_max_gb,
         kv,

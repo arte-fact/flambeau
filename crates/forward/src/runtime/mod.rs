@@ -188,6 +188,7 @@ impl<A: Arch> Session<A> {
             paged_kv_pages: _,
             kv_layout: _,
             mtp_max_draft: _,
+            decode_graph: _,
         } = params;
         if prefill_ubatch == 0 {
             anyhow::bail!("Session::new: prefill_ubatch must be > 0");

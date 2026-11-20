@@ -71,6 +71,7 @@ fn run(
             paged_kv_pages: None,
             kv_layout: KvLayout::F16Contig,
             mtp_max_draft: 0,
+            decode_graph: true,
         },
     )
     .expect("Session<Qwen35V2>");

@@ -38,6 +38,7 @@ fn session_qwen36_a3b_q3_k_s_pp_size_2_runs() {
             paged_kv_pages: None,
             kv_layout: flambeau_forward::KvLayout::F16Contig,
                     mtp_max_draft: 0,
+                    decode_graph: true,
         },
     ) {
         Ok(s) => s,

@@ -45,18 +45,6 @@ struct DecodeGraphBlock {
     retry_at: usize,
 }
 
-/// `FLAMBEAU_DECODE_GRAPH` — capability switch for the single-stream decode
-/// graph. Default ON now that capture is validated (bit-identical off-vs-on
-/// across the SWA regimes on gemma + qwen). Set to `0`/`false`/`off`/`no` to
-/// force the byte-identical non-graph path. One capability switch, not
-/// kernel-variant selection (root rule 1); the graph only engages where the
-/// dispatch already permits (n=1, CUDA, non-paged).
-fn decode_graph_enabled() -> bool {
-    !matches!(
-        std::env::var("FLAMBEAU_DECODE_GRAPH").ok().as_deref(),
-        Some("0") | Some("false") | Some("off") | Some("no")
-    )
-}
 
 /// Single-device, single-rank session. Owns the device, registry, scratch pool
 /// and model; every forward builds a fresh `ForwardEngine::<B>::new_solo` over
@@ -66,13 +54,17 @@ pub struct SoloSession<B: Backend, A: Arch> {
     model: A::Model,
     pool: ScratchPool,
     reg: B::Registry,
-    /// Cached single-token decode graph (CUDA-only, `FLAMBEAU_DECODE_GRAPH` on).
+    /// Cached single-token decode graph (CUDA-only, `decode_graph` on).
     /// `None` until the first eligible decode token captures one; invalidated
     /// (recaptured) when the split-K grid / SWA regime / slot changes.
     /// Declared BEFORE `device` so the graph exec (which needs the CUDA context
     /// in its destructor) drops before the device releases it.
     graph: Option<DecodeGraphCache<B>>,
     graph_block: Option<DecodeGraphBlock>,
+    /// Capture single-token decode into a graph where the backend supports
+    /// it (CUDA, non-paged KV); off forces the non-graph path, which gives
+    /// byte-identical output.
+    decode_graph: bool,
     device: B::Device,
     last_logits: Vec<f32>,
     prefill_ubatch: usize,
@@ -84,7 +76,15 @@ impl<B: Backend, A: Arch> SoloSession<B, A> {
     /// scratch pool and registry. Mirrors `workers::init_rank` for the
     /// single-device (`Replicated`, no layer slice) case.
     pub fn new(file: GgufFile, device_id: i32, params: LaunchParams) -> Result<Self> {
-        let LaunchParams { ctx_cap, prefill_ubatch, max_slots, paged_kv_pages, kv_layout, mtp_max_draft } = params;
+        let LaunchParams {
+            ctx_cap,
+            prefill_ubatch,
+            max_slots,
+            paged_kv_pages,
+            kv_layout,
+            mtp_max_draft,
+            decode_graph,
+        } = params;
         if prefill_ubatch == 0 {
             anyhow::bail!("SoloSession::new: prefill_ubatch must be > 0");
         }
@@ -114,6 +114,7 @@ impl<B: Backend, A: Arch> SoloSession<B, A> {
             prefill_ubatch,
             graph: None,
             graph_block: None,
+            decode_graph,
             disposed: false,
         })
     }
@@ -124,7 +125,7 @@ impl<B: Backend, A: Arch> SoloSession<B, A> {
 
     /// Core forward dispatcher. Routes the single-token, contiguous-KV CUDA
     /// decode case through the capture/replay graph driver when
-    /// `FLAMBEAU_DECODE_GRAPH` is on; everything else (prefill, batched decode,
+    /// `decode_graph` is on; everything else (prefill, batched decode,
     /// HIP, paged KV, graph off) runs the untouched inline forward. With the
     /// gate off the graph path is never reached and behaviour is byte-identical.
     fn forward(&mut self, tokens: &[u32], positions: &[usize], slot_ids: &[usize]) -> Result<()> {
@@ -140,7 +141,7 @@ impl<B: Backend, A: Arch> SoloSession<B, A> {
             );
         }
         if B::supports_decode_graph()
-            && decode_graph_enabled()
+            && self.decode_graph
             && tokens.len() == 1
             && self.pool.paged_kv_caches.is_none()
         {

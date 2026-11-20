@@ -103,6 +103,8 @@ pub struct ServeConfig {
     pub ctx_cap: Option<usize>,
     /// Max MTP draft tokens per verify step (0 = off).
     pub mtp: usize,
+    /// Single-token decode graph capture on single-device CUDA sessions.
+    pub decode_graph: bool,
     /// On-device GPU sampler (top-k + softmax + penalties on the head
     /// rank, single DtoH per token). Drops sampler cost from ~12 ms to
     /// ~0 ms on chat workloads.
@@ -272,6 +274,7 @@ pub(crate) async fn serve_inner_v2(
             paged_kv_pages: cfg.paged_kv_pages,
             kv_layout,
             mtp_max_draft: cfg.mtp,
+            decode_graph: cfg.decode_graph,
         },
     )
     .with_context(|| format!("v2 shared session ({gguf_arch})"))?;

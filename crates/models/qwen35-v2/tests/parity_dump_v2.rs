@@ -31,6 +31,7 @@ fn parity_dump_v2() {
                 paged_kv_pages: None,
                 kv_layout: flambeau_forward::KvLayout::F16Contig,
                         mtp_max_draft: 0,
+                        decode_graph: true,
         },
         )
         .expect("Session SD");

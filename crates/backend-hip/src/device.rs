@@ -702,7 +702,7 @@ impl HipGraphExec {
                  usable graph (last end-capture code {last_end_code}). \
                  hipStreamBeginCaptureToGraph is documented beta with \
                  'outstanding issues' — confirmed broken on multi-device \
-                 captures here. Disable FLAMBEAU_DECODE_GRAPH on \
+                 captures here. Graph capture stays off on HIP \
                  TP/hybrid topologies; revisit on newer ROCm."
             ),
         })
