@@ -61,8 +61,8 @@ notes   = "autotuned"
 dtype   = "IQ4_NL"
 dtype_q = "Q8_1"
 shape   = { m = "any", k = "any", n = "any" }
-impl    = "qmatmul_iq4_nl_mmvq_dp4a"
-cert    = "certs/cuda/sm_86/qmatmul_iq4_nl_mmvq_dp4a.json"
+impl    = "qmatmul_iq4_nl_mmvq_dp4a_t128_vdr2"
+cert    = "certs/cuda/sm_86/qmatmul_iq4_nl_mmvq_dp4a_t128_vdr2.json"
 notes   = "autotuned"
 
 [[qmatmul]]

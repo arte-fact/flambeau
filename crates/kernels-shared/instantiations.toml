@@ -2200,6 +2200,32 @@ params = """
     const int n_blocks_per_row"""
 body = "mmvq_iq4_nl_dp4a_row<fb_fp16_t>(x, y, dst, n_rows, n_blocks_per_row);"
 
+[[kernel]]
+stem = "mmvq_iq4_nl_dp4a_t128_vdr2"
+includes = ["mmvq_iq4_nl.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq4_nl_dp4a_t128_vdr2_q8_1"
+launch_bounds = "128"
+params = """
+    const flambeau_block_iq4_nl* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_iq4_nl_vdr2_row<float, 128>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq4_nl_dp4a_t128_vdr2_q8_1_f16"
+launch_bounds = "128"
+params = """
+    const flambeau_block_iq4_nl* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_iq4_nl_vdr2_row<fb_fp16_t, 128>(x, y, dst, n_rows, n_blocks_per_row);"
+
 # IQ4_XS single-row MMVQ — super-block (8×32) IQ4, same kvalues_iq4nl codebook
 # as IQ4_NL (reuses iq4_nl_table_4) + 6-bit sub-block scales.
 [[kernel]]

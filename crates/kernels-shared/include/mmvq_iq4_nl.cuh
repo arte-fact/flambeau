@@ -76,3 +76,44 @@ static __device__ __forceinline__ void mmvq_iq4_nl_dp4a_row(
 
     mmvq_reduce_store<THREADS, OutT>(acc, dst, row);
 }
+
+// IQ4_NL single row in llama.cpp's CUDA layout (`vec_dot_iq4_nl_q8_1`, VDR 2):
+// 2 threads per 32-element block, each decoding 2 ints of `qs` (16 weights,
+// 4 dp4a) through the 8-value LUT; THREADS / 2 blocks per iteration.
+template<class OutT, int THREADS>
+static __device__ __forceinline__ void mmvq_iq4_nl_vdr2_row(
+    const flambeau_block_iq4_nl* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    OutT* __restrict__ dst,
+    int n_rows, int n_blocks_per_row)
+{
+    constexpr int VDR             = 2;
+    constexpr int THREADS_PER_BLK = 4 / VDR;
+    constexpr int BLK_PER_ITER    = THREADS / THREADS_PER_BLK;
+
+    const int row = blockIdx.x;
+    if (row >= n_rows) return;
+
+    const int tid = threadIdx.x;
+    const int iqs = VDR * (tid % THREADS_PER_BLK);
+
+    const flambeau_block_iq4_nl* xrow = x + (size_t) row * n_blocks_per_row;
+
+    float acc = 0.0f;
+    for (int b = tid / THREADS_PER_BLK; b < n_blocks_per_row; b += BLK_PER_ITER) {
+        const flambeau_block_iq4_nl* bx = xrow + b;
+        const flambeau_block_q8_1*   by = y + b;
+
+        int sumi = 0;
+        #pragma unroll
+        for (int l = 0; l < VDR; ++l) {
+            int v_lo, v_hi;
+            iq4_nl_table_8((unsigned int) load_int_b2((const int8_t*) bx->qs, iqs + l), v_lo, v_hi);
+            sumi = dp4a(v_lo, load_int_b4(by->qs, iqs + l), sumi);
+            sumi = dp4a(v_hi, load_int_b4(by->qs, iqs + l + 4), sumi);
+        }
+        acc += (float) bx->d * (float) by->d * (float) sumi;
+    }
+
+    mmvq_reduce_store<THREADS, OutT>(acc, dst, row);
+}
