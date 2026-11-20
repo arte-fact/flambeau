@@ -68,10 +68,17 @@ notes   = "autotuned"
 [[qmatmul]]
 dtype   = "IQ4_XS"
 dtype_q = "Q8_1"
-shape   = { m = "any", k = "any", n = "any" }
+shape   = { m = "1", k = "any", n = "any" }
 impl    = "qmatmul_iq4_xs_mmvq_dp4a_t128_vdr4"
 cert    = "certs/cuda/sm_86/qmatmul_iq4_xs_mmvq_dp4a_t128_vdr4.json"
 notes   = "autotuned"
+[[qmatmul]]
+dtype   = "IQ4_XS"
+dtype_q = "Q8_1"
+shape   = { m = ">=2", k = "any", n = "any" }
+impl    = "qmatmul_iq4_xs_mmvq_dp4a_t128_vdr4_batched"
+cert    = "certs/cuda/sm_86/qmatmul_iq4_xs_mmvq_dp4a_t128_vdr4_batched.json"
+notes   = "batched, 1..8 columns per launch"
 
 [[qmatmul]]
 dtype   = "Q2_K"

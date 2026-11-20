@@ -1111,6 +1111,22 @@ fn run_shape_kv_f16dst<B: BenchBackend>(
 
 // ---- batched (N-slot) sweep -----------------------------------------------
 
+/// The `_n1` .. `_n8` entry names of a batched MMVQ cell.
+macro_rules! batched_entries {
+    ($base:literal) => {
+        [
+            concat!($base, "_n1"),
+            concat!($base, "_n2"),
+            concat!($base, "_n3"),
+            concat!($base, "_n4"),
+            concat!($base, "_n5"),
+            concat!($base, "_n6"),
+            concat!($base, "_n7"),
+            concat!($base, "_n8"),
+        ]
+    };
+}
+
 /// Weight dtype for the batched MMVQ sweep (one weight row × N activation
 /// columns). Separate from `Dtype` because the kernel has N=2/3/4 entries and a
 /// slot-major output; only Q8_0 is templated so far.
@@ -1130,6 +1146,8 @@ pub enum BatchedDtype {
     Iq3XxsDp4aRowTile,
     Iq2SDp4aRowTile,
     Q6KDp4aRowTile,
+    /// R10s layout (`mmvq_vdr_batched.cuh`), N = 1..8.
+    Iq4XsT128Vdr4Batched,
 }
 
 impl BatchedDtype {
@@ -1145,6 +1163,7 @@ impl BatchedDtype {
             BatchedDtype::Iq3XxsDp4aRowTile => "IQ3_XXS",
             BatchedDtype::Iq2SDp4aRowTile => "IQ2_S",
             BatchedDtype::Q6KDp4aRowTile => "Q6_K",
+            BatchedDtype::Iq4XsT128Vdr4Batched => "IQ4_XS",
         }
     }
     fn weight_dtype(self) -> Dtype {
@@ -1159,6 +1178,7 @@ impl BatchedDtype {
             BatchedDtype::Iq3XxsDp4aRowTile => Dtype::Iq3XxsDp4a,
             BatchedDtype::Iq2SDp4aRowTile => Dtype::Iq2SDp4a,
             BatchedDtype::Q6KDp4aRowTile => Dtype::Q6KDP4A,
+            BatchedDtype::Iq4XsT128Vdr4Batched => Dtype::Iq4XsDp4a,
         }
     }
     fn impl_id(self) -> &'static str {
@@ -1176,6 +1196,7 @@ impl BatchedDtype {
             BatchedDtype::Iq3XxsDp4aRowTile => "qmatmul_iq3_xxs_mmvq_dp4a_row_tile_batched",
             BatchedDtype::Iq2SDp4aRowTile => "qmatmul_iq2_s_mmvq_dp4a_row_tile_batched",
             BatchedDtype::Q6KDp4aRowTile => "qmatmul_q6_k_mmvq_dp4a_row_tile_batched",
+            BatchedDtype::Iq4XsT128Vdr4Batched => "qmatmul_iq4_xs_mmvq_dp4a_t128_vdr4_batched",
         }
     }
     fn kernel_stem(self) -> &'static str {
@@ -1193,7 +1214,12 @@ impl BatchedDtype {
             BatchedDtype::Iq3XxsDp4aRowTile => "mmvq_iq3_xxs_dp4a_batched",
             BatchedDtype::Iq2SDp4aRowTile => "mmvq_iq2_s_dp4a_batched",
             BatchedDtype::Q6KDp4aRowTile => "mmvq_q6_k_dp4a_batched",
+            BatchedDtype::Iq4XsT128Vdr4Batched => "mmvq_iq4_xs_dp4a_t128_vdr4_batched",
         }
+    }
+    /// The R10s-layout batched kernels (`mmvq_vdr_batched.cuh`).
+    fn is_vdr_batched(self) -> bool {
+        matches!(self, BatchedDtype::Iq4XsT128Vdr4Batched)
     }
     fn launch_threads(self) -> u32 {
         match self {
@@ -1210,11 +1236,20 @@ impl BatchedDtype {
             | BatchedDtype::Iq2SDp4aRowTile
             | BatchedDtype::Q6KDp4aRowTile => 256,
             BatchedDtype::Q5K => 64,
+            BatchedDtype::Iq4XsT128Vdr4Batched => 32,
         }
     }
     /// Output rows computed per block: 2 for the r2 Q5_K kernel, 8 for the
     /// 32-lane-group Q5_K row-tile (same on both backends), 4 for the
     /// Q8_0/Q4_0 row-tiles (over-launches harmlessly on wave32's R=8), 1 else.
+    /// (threads, rows per block) of the `n_slots`-column entry.
+    fn launch_shape(self, n_slots: usize) -> (u32, u32) {
+        if self.is_vdr_batched() {
+            flambeau_ops::qmatmul::mmvq_batched_shape(n_slots)
+        } else {
+            (self.launch_threads(), self.rows_per_block())
+        }
+    }
     fn rows_per_block(self) -> u32 {
         match self {
             BatchedDtype::Q5K => 2,
@@ -1239,6 +1274,7 @@ impl BatchedDtype {
             | BatchedDtype::Iq3XxsDp4aRowTile
             | BatchedDtype::Iq2SDp4aRowTile
             | BatchedDtype::Q6KDp4aRowTile => &[2, 3, 4, 5, 6, 7, 8],
+            BatchedDtype::Iq4XsT128Vdr4Batched => &[1, 2, 3, 4, 5, 6, 7, 8],
             _ => &[2, 3, 4],
         }
     }
@@ -1311,6 +1347,7 @@ impl BatchedDtype {
             (BatchedDtype::Q6KDp4aRowTile, 6) => "flambeau_mmvq_q6_k_dp4a_q8_1_batched_n6",
             (BatchedDtype::Q6KDp4aRowTile, 7) => "flambeau_mmvq_q6_k_dp4a_q8_1_batched_n7",
             (BatchedDtype::Q6KDp4aRowTile, 8) => "flambeau_mmvq_q6_k_dp4a_q8_1_batched_n8",
+            (BatchedDtype::Iq4XsT128Vdr4Batched, n) => batched_entries!("flambeau_mmvq_iq4_xs_dp4a_t128_vdr4_batched_q8_1")[n - 1],
             _ => unreachable!("batched n_slots has no kernel entry"),
         }
     }
@@ -1455,8 +1492,9 @@ fn run_shape_batched<B: BenchBackend>(
         args.push_arg(&d_dst_ptr);
         args.push_arg(&n_rows);
         args.push_arg(&n_units);
-        let grid = (m as u32).div_ceil(dtype.rows_per_block());
-        B::launch(&k_mmvq, stream, LaunchCfg::one_d(grid, dtype.launch_threads()), args)?;
+        let (threads, rows_per_block) = dtype.launch_shape(n_slots);
+        let grid = (m as u32).div_ceil(rows_per_block);
+        B::launch(&k_mmvq, stream, LaunchCfg::one_d(grid, threads), args)?;
         stream.synchronize()?;
     }
 

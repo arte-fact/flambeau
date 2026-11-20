@@ -57,6 +57,19 @@ pub fn qmatmul<B: flambeau_core::KernelBackend>(
     // per-N template compiles down to ~20-30 VGPRs which preserves
     // gfx906 wave occupancy. Outside this window Q4_1 falls through to
     // the B::dispatch_qmatmul() table (row-by-row m-loop).
+    if m >= 2 {
+        if let Some(recipe) = mmvq_batched::<B>(reg, dtype_weight, m) {
+            let _ = act_q8_1_mmq;
+            return mmvq_batched_launch(
+                reg,
+                stream,
+                recipe,
+                crate::MmvqBuffers { weights, act_q8_1, dst },
+                crate::MmvqBatchShape { n_rows: n, k, n_slots: m },
+                block_elems(dtype_weight),
+            );
+        }
+    }
     if dtype_weight == QDtype::Q4_1 && (2..=4).contains(&m) {
         mmvq_q4_1_batched(
 
@@ -242,6 +255,9 @@ pub fn qmatmul<B: flambeau_core::KernelBackend>(
                 m,
                 nb_per_row,
             )
+        }
+        RecipeKind::MmvqBatched => {
+            bail!("qmatmul: batched MMVQ recipe {} resolved past the batched path", recipe.stem)
         }
         RecipeKind::MmqWave64 => {
             mmq_wave64_launch(
@@ -1185,6 +1201,106 @@ fn mmvq_m1_recipe<B: flambeau_core::KernelBackend>(dtype_weight: QDtype) -> Resu
 /// True when the m = 1 kernel of `dtype_weight` (see [`mmvq_m1_recipe`]) has
 /// an F16-output entry and the registry's module contains it. Read from the
 /// registry's per-dtype cache after the first call.
+/// Most activation columns one batched MMVQ launch covers (its `_n8` entry).
+const MMVQ_BATCH_MAX: usize = 8;
+
+/// (threads, rows per block) of every batched-MMVQ entry: one warp, two
+/// weight rows sharing each activation load (fastest of 32/64/128 threads x
+/// 1/2/4 rows for N = 1..8 at the FFN shapes on sm_86).
+pub const fn mmvq_batched_shape(_cols: usize) -> (u32, u32) {
+    (32, 2)
+}
+
+/// The `<base>_n1` .. `<base>_n8` entry names of a batched MMVQ cell.
+macro_rules! batched_entries {
+    ($base:literal) => {
+        [
+            concat!($base, "_n1"),
+            concat!($base, "_n2"),
+            concat!($base, "_n3"),
+            concat!($base, "_n4"),
+            concat!($base, "_n5"),
+            concat!($base, "_n6"),
+            concat!($base, "_n7"),
+            concat!($base, "_n8"),
+        ]
+    };
+}
+
+/// Per batched-MMVQ stem, its entry for 1..=`MMVQ_BATCH_MAX` columns. Each
+/// name is `<recipe.entry>_n<cols>` (checked by `recipe_table_tests`).
+const MMVQ_BATCHED_ENTRIES: &[(&str, [&str; MMVQ_BATCH_MAX])] = &[
+    ("mmvq_iq4_xs_dp4a_t128_vdr4_batched", batched_entries!("flambeau_mmvq_iq4_xs_dp4a_t128_vdr4_batched_q8_1")),
+];
+
+/// The dispatched batched-MMVQ recipe of `dtype_weight` at `m` columns, or
+/// `None` when the arch's dispatch row at that `m` is not batched (then the
+/// caller keeps its other paths). Resolved once per (dtype, m) up to
+/// `MMVQ_BATCH_MAX`, beyond which the answer at `MMVQ_BATCH_MAX` is reused.
+fn mmvq_batched<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    dtype_weight: QDtype,
+    m: usize,
+) -> Option<Recipe> {
+    let m = m.min(MMVQ_BATCH_MAX);
+    reg.mmvq_batched[m - 2]
+        .get_or_init(dtype_weight, || {
+            let cfg = QMatMulCfg { dtype_weight, dtype_activation: QDtype::Q8_1, m, k: 0, n: 0 };
+            B::dispatch_qmatmul(&cfg)
+                .and_then(|desc| Recipe::from_impl_id(desc.impl_id).ok())
+                .filter(|recipe| recipe.kind == RecipeKind::MmvqBatched)
+                .map(|recipe| MmvqBatchedRecipe { recipe })
+        })
+        .map(|cached| cached.recipe)
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MmvqBatchedRecipe {
+    recipe: Recipe,
+}
+
+/// Launch a batched MMVQ over `n_slots` slot-major activation columns, in
+/// chunks of at most `MMVQ_BATCH_MAX` (entry `<recipe.entry>_n<cols>`).
+fn mmvq_batched_launch<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
+    recipe: Recipe,
+    bufs: crate::MmvqBuffers,
+    shape: crate::MmvqBatchShape,
+    block_elems: usize,
+) -> Result<()> {
+    let crate::MmvqBuffers { weights, act_q8_1, dst } = bufs;
+    let crate::MmvqBatchShape { n_rows, k, n_slots } = shape;
+    let module = reg.expect_module(recipe.stem)?;
+    let entries = MMVQ_BATCHED_ENTRIES
+        .iter()
+        .find(|(stem, _)| *stem == recipe.stem)
+        .map(|(_, entries)| entries)
+        .ok_or_else(|| anyhow!("batched MMVQ stem {} has no entry table", recipe.stem))?;
+    let act_col_bytes = (k / 32) * std::mem::size_of::<flambeau_quant::BlockQ8_1>();
+    let dst_col_bytes = n_rows * 4;
+    let n_rows_i = n_rows as i32;
+    let n_blocks_i = (k / block_elems) as i32;
+    let w_ptr: u64 = weights.as_usize() as u64;
+    let mut c0 = 0;
+    while c0 < n_slots {
+        let cols = (n_slots - c0).min(MMVQ_BATCH_MAX);
+        let kernel = B::kernel(module, entries[cols - 1])?;
+        let a_ptr: u64 = act_q8_1.offset_bytes(c0 * act_col_bytes).as_usize() as u64;
+        let d_ptr: u64 = dst.offset_bytes(c0 * dst_col_bytes).as_usize() as u64;
+        let mut args = <B::Args<'_>>::default();
+        args.push_arg(&w_ptr);
+        args.push_arg(&a_ptr);
+        args.push_arg(&d_ptr);
+        args.push_arg(&n_rows_i);
+        args.push_arg(&n_blocks_i);
+        let (threads, rows) = mmvq_batched_shape(cols);
+        B::launch(&kernel, stream, LaunchCfg::one_d((n_rows as u32).div_ceil(rows), threads), args)?;
+        c0 += cols;
+    }
+    Ok(())
+}
+
 pub fn mmvq_f16_supported<B: flambeau_core::KernelBackend>(
     reg: &crate::Registry<B>,
     dtype_weight: QDtype,
@@ -1469,6 +1585,9 @@ enum RecipeKind {
     /// per tile. Args: `(vx, vy, dst, ncols_x=K, nrows_x=N, ncols_y=M,
     /// nrows_y=K, nrows_dst=N)`.
     MmqWave64,
+    /// One output row per block over up to `MMVQ_BATCH_MAX` activation
+    /// columns (entries `<entry>_n1` .. `_n8`); more columns run in chunks.
+    MmvqBatched,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1655,6 +1774,18 @@ const QMATMUL_RECIPES: &[RecipeRow] = &[
             entry_f16: Some("flambeau_mmvq_iq4_xs_dp4a_t128_vdr4_q8_1_f16"),
             threads: 128,
             rows_per_block: 1,
+            mmq_tile: (0, 0),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_iq4_xs_mmvq_dp4a_t128_vdr4_batched"],
+        recipe: Recipe {
+            kind: RecipeKind::MmvqBatched,
+            stem: "mmvq_iq4_xs_dp4a_t128_vdr4_batched",
+            entry: "flambeau_mmvq_iq4_xs_dp4a_t128_vdr4_batched_q8_1",
+            entry_f16: None,
+            threads: 32,
+            rows_per_block: 2,
             mmq_tile: (0, 0),
         },
     },
@@ -2511,7 +2642,7 @@ fn block_elems(dtype: QDtype) -> usize {
 
 #[cfg(test)]
 mod recipe_table_tests {
-    use super::QMATMUL_RECIPES;
+    use super::{RecipeKind, MMVQ_BATCHED_ENTRIES, QMATMUL_RECIPES};
 
     #[test]
     fn every_impl_id_names_one_recipe() {
@@ -2536,6 +2667,20 @@ mod recipe_table_tests {
     fn every_sm86_descriptor_has_a_recipe() {
         for d in flambeau_backend_cuda::impls::QMATMUL_SM86 {
             assert!(super::Recipe::from_impl_id(d.impl_id).is_ok(), "no recipe for {}", d.impl_id);
+        }
+    }
+
+    /// Every batched recipe has an entry table, named after its base entry.
+    #[test]
+    fn every_batched_recipe_has_its_entries() {
+        for row in QMATMUL_RECIPES.iter().filter(|r| r.recipe.kind == RecipeKind::MmvqBatched) {
+            let (_, entries) = MMVQ_BATCHED_ENTRIES
+                .iter()
+                .find(|(stem, _)| *stem == row.recipe.stem)
+                .unwrap_or_else(|| panic!("no entry table for {}", row.recipe.stem));
+            for (i, e) in entries.iter().enumerate() {
+                assert_eq!(*e, format!("{}_n{}", row.recipe.entry, i + 1));
+            }
         }
     }
 

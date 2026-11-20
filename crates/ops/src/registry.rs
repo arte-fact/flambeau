@@ -77,6 +77,7 @@ pub const KERNEL_STEMS: &[&str] = &[
     "mmvq_q4_k_dp4a_t128_vdr2",
     "mmvq_q5_k_dp4a_t128_vdr2",
     "mmvq_iq4_xs_dp4a_t128_vdr4",
+    "mmvq_iq4_xs_dp4a_t128_vdr4_batched",
     "mmvq_q4_k_r4",
     "mmvq_q5_k",
     "mmvq_q5_k_r2",
@@ -310,6 +311,9 @@ pub struct Registry<B: KernelBackend> {
     /// The m = 1 MMVQ kernel of each weight dtype, resolved on first use
     /// (dispatch row → recipe → F16-entry presence) instead of per launch.
     pub(crate) mmvq_m1: DtypeCache<Option<crate::launch::qmatmul::MmvqM1>>,
+    /// The batched MMVQ recipe of each weight dtype at m = 2..=8 columns
+    /// (`None` where dispatch picks another kernel), resolved on first use.
+    pub(crate) mmvq_batched: [DtypeCache<Option<crate::launch::qmatmul::MmvqBatchedRecipe>>; 7],
 }
 
 /// One lazily-resolved value per weight dtype, kept for the owner's
@@ -370,6 +374,7 @@ impl<B: KernelBackend> Registry<B> {
             modules,
             skipped,
             mmvq_m1: DtypeCache::new(),
+            mmvq_batched: std::array::from_fn(|_| DtypeCache::new()),
         })
     }
 
