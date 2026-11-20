@@ -214,7 +214,17 @@ pub fn gdn_layer_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
             |buf: DevicePtr, n_elems: usize, dev: &B::Device, stm: &B::Stream| -> Result<()> {
                 hooks.ar_sum_f32(buf, n_elems, dev, stm)
             };
-        if let Some(batched_scratch) = state.pool.gdn_decode_batched_scratch.as_ref() {
+        // One row takes the per-slot path even when the pool has multi-slot
+        // scratch: the batched path uploads per-slot pointers and
+        // synchronises the stream, which a decode-graph capture cannot record
+        // (CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED on every capture of a server
+        // configured with more than one slot).
+        let batched = state
+            .pool
+            .gdn_decode_batched_scratch
+            .as_ref()
+            .filter(|_| uses_batched_slots(n_tokens));
+        if let Some(batched_scratch) = batched {
             let batched_view = batched_scratch.view();
             if n_tokens > batched_view.max_slots {
                 bail!(
@@ -299,4 +309,24 @@ pub fn gdn_layer_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
     Ok(Some(unsafe {
         Tensor::<F16>::from_raw(delta_ptr, n_tokens * hidden)
     }))
+}
+
+/// Whether a GDN decode of `n_tokens` rows (one per slot) goes through the
+/// multi-slot batched kernels; a single row always takes the per-slot path.
+fn uses_batched_slots(n_tokens: usize) -> bool {
+    n_tokens > 1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::uses_batched_slots;
+
+    /// A single-row decode must stay on the per-slot path: it is the one a
+    /// CUDA decode-graph capture records, and the batched path synchronises
+    /// the stream mid-capture.
+    #[test]
+    fn single_row_decode_never_takes_the_batched_slot_path() {
+        assert!(!uses_batched_slots(1));
+        assert!(uses_batched_slots(2));
+    }
 }
