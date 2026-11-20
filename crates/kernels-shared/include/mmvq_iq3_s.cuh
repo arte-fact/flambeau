@@ -79,3 +79,68 @@ static __device__ __forceinline__ void mmvq_iq3_s_dp4a_row(
 
     mmvq_reduce_store<THREADS, OutT>(acc, dst, row);
 }
+
+// Bit i of `nibble` (0..15) → 0xFF in byte i, 0x00 elsewhere. The four shifted
+// copies of the multiply land on disjoint bits, so no carry crosses a byte.
+static __device__ __forceinline__ unsigned int iq3s_sign_mask(unsigned int nibble) {
+    return ((nibble * 0x00204081u) & 0x01010101u) * 0xFFu;
+}
+
+// IQ3_S single row in llama.cpp's CUDA layout (`vec_dot_iq3_s_q8_1`, VDR 2):
+// 8 threads per super-block, each loading 2 ints of `qs`, one `qh` byte and
+// one int of `signs` once, then 8 grid lookups and 8 dp4a (32 weights). Grid
+// bytes are never 0, so the per-byte negate (g ^ 0xFF) + 1 cannot carry.
+template<class OutT, int THREADS>
+static __device__ __forceinline__ void mmvq_iq3_s_vdr2_row(
+    const flambeau_block_iq3_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    OutT* __restrict__ dst,
+    int n_rows, int n_superblocks_per_row)
+{
+    constexpr int VDR            = 2;
+    constexpr int THREADS_PER_SB = 16 / VDR;
+    constexpr int SB_PER_ITER    = THREADS / THREADS_PER_SB;
+
+    const int row = blockIdx.x;
+    if (row >= n_rows) return;
+
+    const int tid = threadIdx.x;
+    const int iqs = VDR * (tid % THREADS_PER_SB);     // 0, 2, .., 14
+
+    const flambeau_block_iq3_s* xrow = x + (size_t) row * n_superblocks_per_row;
+
+    float acc = 0.0f;
+    for (int sb = tid / THREADS_PER_SB; sb < n_superblocks_per_row; sb += SB_PER_ITER) {
+        const flambeau_block_iq3_s* bk = xrow + sb;
+        const flambeau_block_q8_1*  yb = y + (size_t) sb * 8 + iqs / 2;
+
+        const unsigned int qs_w[2] = {
+            (unsigned int) load_int_b2((const int8_t*) bk->qs, iqs + 0),
+            (unsigned int) load_int_b2((const int8_t*) bk->qs, iqs + 1),
+        };
+        const int qh = bk->qh[iqs / 2];
+        const unsigned int signs = (unsigned int) load_int_b2((const int8_t*) bk->signs, iqs / 2);
+
+        int sumi = 0;
+        #pragma unroll
+        for (int l0 = 0; l0 < 8; l0 += 2) {
+            const unsigned int q0 = (qs_w[l0 / 4] >> (8 * (l0 % 4))) & 0xFF;
+            const unsigned int q1 = (qs_w[l0 / 4] >> (8 * (l0 % 4 + 1))) & 0xFF;
+            const unsigned int g0 = IQ3S_GRID[q0 | ((qh << (8 - l0)) & 0x100)];
+            const unsigned int g1 = IQ3S_GRID[q1 | ((qh << (7 - l0)) & 0x100)];
+
+            const unsigned int s  = (signs >> (4 * l0)) & 0xFF;
+            const unsigned int m0 = iq3s_sign_mask(s & 0x0F);
+            const unsigned int m1 = iq3s_sign_mask(s >> 4);
+            const int grid_l = (int) ((g0 ^ m0) + (m0 & 0x01010101u));
+            const int grid_h = (int) ((g1 ^ m1) + (m1 & 0x01010101u));
+
+            sumi = dp4a(grid_l, load_int_b4(yb->qs, l0 + 0), sumi);
+            sumi = dp4a(grid_h, load_int_b4(yb->qs, l0 + 1), sumi);
+        }
+        sumi *= 1 + 2 * ((bk->scales[iqs / 4] >> ((iqs << 1) & 0x04)) & 0x0F);
+        acc += (float) bk->d * (float) yb->d * (float) sumi;
+    }
+
+    mmvq_reduce_store<THREADS, OutT>(acc, dst, row);
+}

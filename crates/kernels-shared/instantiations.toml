@@ -2328,6 +2328,32 @@ params = """
     const int n_superblocks_per_row"""
 body = "mmvq_iq3_s_dp4a_row<fb_fp16_t>(x, y, dst, n_rows, n_superblocks_per_row);"
 
+[[kernel]]
+stem = "mmvq_iq3_s_dp4a_t128_vdr2"
+includes = ["mmvq_iq3_s.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq3_s_dp4a_t128_vdr2_q8_1"
+launch_bounds = "128"
+params = """
+    const flambeau_block_iq3_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_iq3_s_vdr2_row<float, 128>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq3_s_dp4a_t128_vdr2_q8_1_f16"
+launch_bounds = "128"
+params = """
+    const flambeau_block_iq3_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_iq3_s_vdr2_row<fb_fp16_t, 128>(x, y, dst, n_rows, n_superblocks_per_row);"
+
 # IQ2_XS single-row MMVQ — u16 (9-bit grid idx | 7-bit ksigns) + IQ2XS_GRID.
 [[kernel]]
 stem = "mmvq_iq2_xs_dp4a"

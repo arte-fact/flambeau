@@ -57,13 +57,13 @@ pub const QMATMUL_SM86: &[KernelDescriptor] = &[
     },
     KernelDescriptor {
         op_name: "QMatMul",
-        impl_id: "qmatmul_iq3_s_mmvq_dp4a",
+        impl_id: "qmatmul_iq3_s_mmvq_dp4a_t128_vdr2",
         backend: "cuda",
         arch: "sm_86",
         dtype_weight: QDtype::IQ3_S,
         dtype_activation: QDtype::Q8_1,
         m_range: (1, usize::MAX),
-        cert_rel_path: "certs/cuda/sm_86/qmatmul_iq3_s_mmvq_dp4a.json",
+        cert_rel_path: "certs/cuda/sm_86/qmatmul_iq3_s_mmvq_dp4a_t128_vdr2.json",
     },
     KernelDescriptor {
         op_name: "QMatMul",
