@@ -129,6 +129,76 @@ struct QkVdr2 {
     }
 };
 
+// Q6_K, VDR 2 (`vec_dot_q6_K_q8_1`): 16 threads per super-block, 2 ints of
+// `ql` / `qh` each over 2 planes; the -32 bias is a dp4a against 0xE0 bytes.
+struct Q6K {
+    typedef flambeau_block_q6_K block_t;
+    static constexpr int TPB = 16;
+    static constexpr int YPB = 8;
+    template<int N, int R>
+    static __device__ __forceinline__ void step(
+        const block_t* const (&bk)[R], const flambeau_block_q8_1* y, size_t ys, int lane,
+        float (&acc)[R][N])
+    {
+        constexpr int QI6_K = 32;
+        constexpr int QR6_K = 2;
+        constexpr int QI8_1 = 8;
+        const int iqs          = 2 * lane;
+        const int bq8_offset   = 2 * QR6_K * (iqs / (QI6_K / 2)) + (iqs % (QI6_K / 2)) / (QI6_K / 4);
+        const int scale_offset = (QI6_K / 4) * (iqs / (QI6_K / 2)) + (iqs % (QI6_K / 2)) / (QI6_K / 8);
+        const int vh_shift     = 2 * ((iqs % (QI6_K / 2)) / (QI6_K / 4));
+        const int qh_idx       = (QI6_K / 4) * (iqs / (QI6_K / 2)) + iqs % (QI6_K / 4);
+        int v[R][QR6_K][2];
+        int sc[R][QR6_K];
+        float d[R];
+        #pragma unroll
+        for (int r = 0; r < R; ++r) {
+            int vl[2], vh[2];
+            #pragma unroll
+            for (int j = 0; j < 2; ++j) {
+                vl[j] = load_int_b2((const int8_t*) bk[r]->ql, iqs + j);
+                vh[j] = load_int_b2((const int8_t*) bk[r]->qh, qh_idx + j) >> vh_shift;
+            }
+            #pragma unroll
+            for (int i = 0; i < QR6_K; ++i) {
+                sc[r][i] = bk[r]->scales[scale_offset + 4 * i];
+                #pragma unroll
+                for (int j = 0; j < 2; ++j) {
+                    v[r][i][j] = ((vl[j] >> (4 * i)) & 0x0F0F0F0F) | (((vh[j] >> (4 * i)) << 4) & 0x30303030);
+                }
+            }
+            d[r] = (float) bk[r]->d;
+        }
+        #pragma unroll
+        for (int c = 0; c < N; ++c) {
+            int u[QR6_K][2];
+            float d8[QR6_K];
+            #pragma unroll
+            for (int i = 0; i < QR6_K; ++i) {
+                const flambeau_block_q8_1* ya = y + c * ys + bq8_offset + 2 * i;
+                #pragma unroll
+                for (int j = 0; j < 2; ++j) u[i][j] = load_int_b4(ya->qs, iqs % QI8_1 + j);
+                d8[i] = (float) ya->d;
+            }
+            #pragma unroll
+            for (int r = 0; r < R; ++r) {
+                float sumf = 0.0f;
+                #pragma unroll
+                for (int i = 0; i < QR6_K; ++i) {
+                    int sumi = 0;
+                    #pragma unroll
+                    for (int j = 0; j < 2; ++j) {
+                        sumi = dp4a(v[r][i][j], u[i][j], sumi);
+                        sumi = dp4a((int) 0xE0E0E0E0, u[i][j], sumi);
+                    }
+                    sumf += d8[i] * (float) (sumi * sc[r][i]);
+                }
+                acc[r][c] += d[r] * sumf;
+            }
+        }
+    }
+};
+
 }  // namespace mmvq_vdr
 
 // One block of G threads (G <= the hardware warp) owns R output rows: each

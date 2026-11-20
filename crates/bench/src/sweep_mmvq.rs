@@ -1152,6 +1152,8 @@ pub enum BatchedDtype {
     Q5KT128Vdr2Batched,
     /// R10s layout (`mmvq_vdr_batched.cuh`), N = 1..8.
     Q4KT128Vdr2Batched,
+    /// R10s layout (`mmvq_vdr_batched.cuh`), N = 1..8.
+    Q6KVdr2Batched,
 }
 
 impl BatchedDtype {
@@ -1167,6 +1169,7 @@ impl BatchedDtype {
             BatchedDtype::Iq3XxsDp4aRowTile => "IQ3_XXS",
             BatchedDtype::Iq2SDp4aRowTile => "IQ2_S",
             BatchedDtype::Q6KDp4aRowTile => "Q6_K",
+            BatchedDtype::Q6KVdr2Batched => "Q6_K",
             BatchedDtype::Q4KT128Vdr2Batched => "Q4_K",
             BatchedDtype::Q5KT128Vdr2Batched => "Q5_K",
             BatchedDtype::Iq4XsT128Vdr4Batched => "IQ4_XS",
@@ -1184,6 +1187,7 @@ impl BatchedDtype {
             BatchedDtype::Iq3XxsDp4aRowTile => Dtype::Iq3XxsDp4a,
             BatchedDtype::Iq2SDp4aRowTile => Dtype::Iq2SDp4a,
             BatchedDtype::Q6KDp4aRowTile => Dtype::Q6KDP4A,
+            BatchedDtype::Q6KVdr2Batched => Dtype::Q6KDP4A,
             BatchedDtype::Q4KT128Vdr2Batched => Dtype::Q4K,
             BatchedDtype::Q5KT128Vdr2Batched => Dtype::Q5K,
             BatchedDtype::Iq4XsT128Vdr4Batched => Dtype::Iq4XsDp4a,
@@ -1204,6 +1208,7 @@ impl BatchedDtype {
             BatchedDtype::Iq3XxsDp4aRowTile => "qmatmul_iq3_xxs_mmvq_dp4a_row_tile_batched",
             BatchedDtype::Iq2SDp4aRowTile => "qmatmul_iq2_s_mmvq_dp4a_row_tile_batched",
             BatchedDtype::Q6KDp4aRowTile => "qmatmul_q6_k_mmvq_dp4a_row_tile_batched",
+            BatchedDtype::Q6KVdr2Batched => "qmatmul_q6_k_mmvq_dp4a_vdr2_batched",
             BatchedDtype::Q4KT128Vdr2Batched => "qmatmul_q4_k_mmvq_dp4a_t128_vdr2_batched",
             BatchedDtype::Q5KT128Vdr2Batched => "qmatmul_q5_k_mmvq_dp4a_t128_vdr2_batched",
             BatchedDtype::Iq4XsT128Vdr4Batched => "qmatmul_iq4_xs_mmvq_dp4a_t128_vdr4_batched",
@@ -1224,6 +1229,7 @@ impl BatchedDtype {
             BatchedDtype::Iq3XxsDp4aRowTile => "mmvq_iq3_xxs_dp4a_batched",
             BatchedDtype::Iq2SDp4aRowTile => "mmvq_iq2_s_dp4a_batched",
             BatchedDtype::Q6KDp4aRowTile => "mmvq_q6_k_dp4a_batched",
+            BatchedDtype::Q6KVdr2Batched => "mmvq_q6_k_dp4a_vdr2_batched",
             BatchedDtype::Q4KT128Vdr2Batched => "mmvq_q4_k_dp4a_t128_vdr2_batched",
             BatchedDtype::Q5KT128Vdr2Batched => "mmvq_q5_k_dp4a_t128_vdr2_batched",
             BatchedDtype::Iq4XsT128Vdr4Batched => "mmvq_iq4_xs_dp4a_t128_vdr4_batched",
@@ -1231,7 +1237,7 @@ impl BatchedDtype {
     }
     /// The R10s-layout batched kernels (`mmvq_vdr_batched.cuh`).
     fn is_vdr_batched(self) -> bool {
-        matches!(self, BatchedDtype::Iq4XsT128Vdr4Batched | BatchedDtype::Q4KT128Vdr2Batched | BatchedDtype::Q5KT128Vdr2Batched)
+        matches!(self, BatchedDtype::Iq4XsT128Vdr4Batched | BatchedDtype::Q6KVdr2Batched | BatchedDtype::Q4KT128Vdr2Batched | BatchedDtype::Q5KT128Vdr2Batched)
     }
     fn launch_threads(self) -> u32 {
         match self {
@@ -1248,6 +1254,7 @@ impl BatchedDtype {
             | BatchedDtype::Iq2SDp4aRowTile
             | BatchedDtype::Q6KDp4aRowTile => 256,
             BatchedDtype::Q5K => 64,
+            BatchedDtype::Q6KVdr2Batched => 32,
             BatchedDtype::Q4KT128Vdr2Batched => 32,
             BatchedDtype::Q5KT128Vdr2Batched => 32,
             BatchedDtype::Iq4XsT128Vdr4Batched => 32,
@@ -1291,6 +1298,7 @@ impl BatchedDtype {
             BatchedDtype::Iq4XsT128Vdr4Batched => &[1, 2, 3, 4, 5, 6, 7, 8],
             BatchedDtype::Q5KT128Vdr2Batched => &[1, 2, 3, 4, 5, 6, 7, 8],
             BatchedDtype::Q4KT128Vdr2Batched => &[1, 2, 3, 4, 5, 6, 7, 8],
+            BatchedDtype::Q6KVdr2Batched => &[1, 2, 3, 4, 5, 6, 7, 8],
             _ => &[2, 3, 4],
         }
     }
@@ -1366,6 +1374,7 @@ impl BatchedDtype {
             (BatchedDtype::Iq4XsT128Vdr4Batched, n) => batched_entries!("flambeau_mmvq_iq4_xs_dp4a_t128_vdr4_batched_q8_1")[n - 1],
             (BatchedDtype::Q5KT128Vdr2Batched, n) => batched_entries!("flambeau_mmvq_q5_k_dp4a_t128_vdr2_batched_q8_1")[n - 1],
             (BatchedDtype::Q4KT128Vdr2Batched, n) => batched_entries!("flambeau_mmvq_q4_k_dp4a_t128_vdr2_batched_q8_1")[n - 1],
+            (BatchedDtype::Q6KVdr2Batched, n) => batched_entries!("flambeau_mmvq_q6_k_dp4a_vdr2_batched_q8_1")[n - 1],
             _ => unreachable!("batched n_slots has no kernel entry"),
         }
     }
