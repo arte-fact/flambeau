@@ -18,7 +18,7 @@ use flambeau_core::{DevicePtr, QDtype, QMatMulCfg};
 /// which impl wins, not to paper over that MMVQ is per-row.
 /// Takes both the standard [`flambeau_quant::BlockQ8_1`] layout and the DS4
 /// [`flambeau_quant::BlockQ8_1Mmq`] layout. The dispatcher picks:
-/// - `act_q8_1` → MMVQ and Mmq4Warp kernels (36 B per-row blocks)
+/// - `act_q8_1` → MMVQ and Q8_1-layout MMQ kernels (36 B per-row blocks)
 /// - `act_q8_1_mmq` → MmqLdsX64 kernel (144 B DS4 blocks)
 ///   Decode-path callers that never hit the MmqLdsX64 recipe can pass a null
 ///   [`DevicePtr`] for `act_q8_1_mmq`; use [`qmatmul_decode`] for ergonomics.
@@ -196,7 +196,7 @@ pub fn qmatmul<B: flambeau_core::KernelBackend>(
             }
             Ok(())
         }
-        RecipeKind::MmqOracle | RecipeKind::Mmq4Warp => {
+        RecipeKind::MmqOracle => {
             let nb_per_row = k / block_elems(dtype_weight);
             mmq_launch(
                 reg, stream,
@@ -1642,9 +1642,8 @@ pub fn mmq<B: flambeau_core::KernelBackend>(
 enum RecipeKind {
     Mmvq,
     MmqOracle,
-    Mmq4Warp,
     /// 5 port of candle's 4-warp LDS-tiled MMQ with DS4 Q8_1 activation
-    /// layout. Differs from `Mmq4Warp` in: 2D block dims (64, 4, 1), 9 scalar
+    /// layout. Differs from `MmqOracle` in: 2D block dims (64, 4, 1), 9 scalar
     /// args (ncols_x, nrows_x, ncols_y, stride_col_y, stride_row_x, nrows_dst),
     /// dynamic shared-memory bytes, and the Y buffer pre-formatted as
     /// `BlockQ8_1Mmq` via `flambeau_quantize_q8_1_mmq`.
@@ -1674,7 +1673,7 @@ struct Recipe {
     threads: u32,
     /// MMVQ only — output rows per block.
     rows_per_block: u32,
-    /// Mmq4Warp only — (rows_per_tile, batches_per_tile).
+    /// MMQ only — (rows_per_tile, batches_per_tile) of the launch grid.
     mmq_tile: (u32, u32),
 }
 
@@ -1712,1036 +1711,855 @@ fn mmq_lds_x64_params(stem: &str) -> Result<(u32, u32)> {
 
 impl Recipe {
     fn from_impl_id(impl_id: &str) -> Result<Self> {
-        // C9-followup — Q8_0 t128_vdr2 (combine occupancy + ILP).
-        // Single-row Q8_0 dispatch rows are aliased to the t128_vdr2 kernel
-        // (≥+3 % on Qwen3.6-27B-Q8_0 and Qwen3.5-27B-Q8_0).
-        let impl_id = match impl_id {
-            "qmatmul_q8_0_mmvq_single_row_gfx906" => "qmatmul_q8_0_mmvq_t128_vdr2",
-            "qmatmul_q8_0_mmvq_dp4a_vdr2" => "qmatmul_q8_0_mmvq_t128_vdr2",
-            // CUDA sm_86 dispatch emits the un-suffixed cert impl_id; the recipe
-            // (stem + entry) is arch-neutral, so map it to the shared key. The
-            // K-quants + IQ already carry a matching un-suffixed `_mmvq_dp4a`
-            // arm; these are the dtypes whose un-suffixed name had only a
-            // `_gfx906` arm (Q8_0, Q4_1) — Q4_0/Q5_0/Q5_1 get their own arms.
-            "qmatmul_q8_0_mmvq_dp4a" => "qmatmul_q8_0_mmvq_dp4a_gfx906",
-            "qmatmul_q4_1_mmvq_dp4a" => "qmatmul_q4_1_mmvq_dp4a_gfx906",
-            other => other,
-        };
-        Ok(match impl_id {
-            "qmatmul_q8_0_mmvq_single_row_gfx906" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_q8_0",
-                entry: "flambeau_mmvq_q8_0_q8_1",
-                entry_f16: None,
-                threads: 256,
-                rows_per_block: 1,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_q8_0_mmvq_dp4a_gfx906" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_q8_0_dp4a",
-                entry: "flambeau_mmvq_q8_0_dp4a_q8_1",
-                entry_f16: Some("flambeau_mmvq_q8_0_dp4a_q8_1_f16"),
-                threads: 256,
-                rows_per_block: 1,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_q8_0_mmvq_dp4a_vdr2" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_q8_0_dp4a_vdr2",
-                entry: "flambeau_mmvq_q8_0_dp4a_vdr2_q8_1",
-                entry_f16: None,
-                threads: 256,
-                rows_per_block: 1,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_q8_0_mmvq_llamacpp_style_gfx906" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_q8_0_llamacpp_style",
-                entry: "flambeau_mmvq_q8_0_llamacpp_style_q8_1",
-                entry_f16: None,
-                threads: 128,
-                rows_per_block: 1,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_q8_0_mmvq_t128" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_q8_0_t128",
-                entry: "flambeau_mmvq_q8_0_t128_q8_1",
-                entry_f16: None,
-                threads: 128,
-                rows_per_block: 1,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_q8_0_mmvq_t128_vdr2" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_q8_0_t128_vdr2",
-                entry: "flambeau_mmvq_q8_0_t128_vdr2_q8_1",
-                entry_f16: Some("flambeau_mmvq_q8_0_t128_vdr2_q8_1_f16"),
-                threads: 128,
-                rows_per_block: 1,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_q2_K_mmvq_single_row_gfx906" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_q2_k",
-                entry: "flambeau_mmvq_q2_K_q8_1",
-                entry_f16: None,
-                threads: 64,
-                rows_per_block: 1,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_q2_K_mmvq_nw1_r2_gfx906" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_q2_k_r2",
-                entry: "flambeau_mmvq_q2_K_r2_q8_1",
-                entry_f16: Some("flambeau_mmvq_q2_K_r2_q8_1_f16"),
-                threads: 64,
-                rows_per_block: 2,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_q2_k_mmvq_dp4a" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_q2_k_dp4a",
-                entry: "flambeau_mmvq_q2_k_dp4a_q8_1",
-                entry_f16: Some("flambeau_mmvq_q2_k_dp4a_q8_1_f16"),
-                threads: 256,
-                rows_per_block: 1,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_q2_K_mmvq_r2_dp4a_gfx906" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_q2_k_r2_dp4a",
-                entry: "flambeau_mmvq_q2_k_r2_dp4a_q8_1",
-                entry_f16: Some("flambeau_mmvq_q2_k_r2_dp4a_q8_1_f16"),
-                threads: 64,
-                rows_per_block: 2,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_q3_K_mmvq_single_row_gfx906" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_q3_k",
-                entry: "flambeau_mmvq_q3_k_q8_1",
-                entry_f16: None,
-                threads: 64,
-                rows_per_block: 1,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_q3_K_mmvq_nw1_r2_gfx906" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_q3_k_r2",
-                entry: "flambeau_mmvq_q3_k_r2_q8_1",
-                entry_f16: Some("flambeau_mmvq_q3_k_r2_q8_1_f16"),
-                threads: 64,
-                rows_per_block: 2,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_q3_k_mmvq_dp4a" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_q3_k_dp4a",
-                entry: "flambeau_mmvq_q3_k_dp4a_q8_1",
-                entry_f16: Some("flambeau_mmvq_q3_k_dp4a_q8_1_f16"),
-                threads: 256,
-                rows_per_block: 1,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_q3_K_mmvq_r2_dp4a_gfx906" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_q3_k_r2_dp4a",
-                entry: "flambeau_mmvq_q3_k_r2_dp4a_q8_1",
-                entry_f16: Some("flambeau_mmvq_q3_k_r2_dp4a_q8_1_f16"),
-                threads: 64,
-                rows_per_block: 2,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_q8_k_mmvq_single_row" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_q8_k",
-                entry: "flambeau_mmvq_q8_K_q8_1",
-                entry_f16: Some("flambeau_mmvq_q8_K_q8_1_f16"),
-                threads: 256,
-                rows_per_block: 1,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_q4_K_mmvq_nw1_r2_gfx906" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_q4_k_r2",
-                entry: "flambeau_mmvq_q4_k_r2_q8_1",
-                entry_f16: Some("flambeau_mmvq_q4_k_r2_q8_1_f16"),
-                threads: 64,
-                rows_per_block: 2,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_q4_k_mmvq_dp4a_t128_vdr2" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_q4_k_dp4a_t128_vdr2",
-                entry: "flambeau_mmvq_q4_k_dp4a_t128_vdr2_q8_1",
-                entry_f16: Some("flambeau_mmvq_q4_k_dp4a_t128_vdr2_q8_1_f16"),
-                threads: 128,
-                rows_per_block: 1,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_q5_k_mmvq_dp4a_t128_vdr2" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_q5_k_dp4a_t128_vdr2",
-                entry: "flambeau_mmvq_q5_k_dp4a_t128_vdr2_q8_1",
-                entry_f16: Some("flambeau_mmvq_q5_k_dp4a_t128_vdr2_q8_1_f16"),
-                threads: 128,
-                rows_per_block: 1,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_iq4_xs_mmvq_dp4a_t128_vdr4" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_iq4_xs_dp4a_t128_vdr4",
-                entry: "flambeau_mmvq_iq4_xs_dp4a_t128_vdr4_q8_1",
-                entry_f16: Some("flambeau_mmvq_iq4_xs_dp4a_t128_vdr4_q8_1_f16"),
-                threads: 128,
-                rows_per_block: 1,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_q4_k_mmvq_dp4a" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_q4_k_r2_dp4a",
-                entry: "flambeau_mmvq_q4_k_r2_dp4a_q8_1",
-                entry_f16: Some("flambeau_mmvq_q4_k_r2_dp4a_q8_1_f16"),
-                threads: 64,
-                rows_per_block: 2,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_q4_K_mmvq_nw1_r4_gfx906" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_q4_k_r4",
-                entry: "flambeau_mmvq_q4_k_r4_q8_1",
-                entry_f16: None,
-                threads: 64,
-                rows_per_block: 4,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_iq4_nl_mmvq_single_row_gfx906" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_iq4_nl",
-                entry: "flambeau_mmvq_iq4_nl_q8_1",
-                entry_f16: None,
-                threads: 64,
-                rows_per_block: 1,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_iq4_nl_mmvq_nw1_r2_gfx906" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_iq4_nl_r2",
-                entry: "flambeau_mmvq_iq4_nl_r2_q8_1",
-                entry_f16: Some("flambeau_mmvq_iq4_nl_r2_q8_1_f16"),
-                threads: 64,
-                rows_per_block: 2,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_iq4_nl_mmvq_dp4a" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_iq4_nl_dp4a",
-                entry: "flambeau_mmvq_iq4_nl_dp4a_q8_1",
-                entry_f16: Some("flambeau_mmvq_iq4_nl_dp4a_q8_1_f16"),
-                threads: 256,
-                rows_per_block: 1,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_iq4_xs_mmvq_single_row_gfx906" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_iq4_xs",
-                entry: "flambeau_mmvq_iq4_xs_q8_1",
-                entry_f16: None,
-                threads: 64,
-                rows_per_block: 1,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_iq4_xs_mmvq_nw1_r2_gfx906" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_iq4_xs_r2",
-                entry: "flambeau_mmvq_iq4_xs_r2_q8_1",
-                entry_f16: Some("flambeau_mmvq_iq4_xs_r2_q8_1_f16"),
-                threads: 64,
-                rows_per_block: 2,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_iq4_xs_mmvq_dp4a" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_iq4_xs_dp4a",
-                entry: "flambeau_mmvq_iq4_xs_dp4a_q8_1",
-                entry_f16: Some("flambeau_mmvq_iq4_xs_dp4a_q8_1_f16"),
-                threads: 256,
-                rows_per_block: 1,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_iq3_xxs_mmvq_single_row_gfx906" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_iq3_xxs",
-                entry: "flambeau_mmvq_iq3_xxs_q8_1",
-                entry_f16: None,
-                threads: 64,
-                rows_per_block: 1,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_iq3_xxs_mmvq_nw1_r2_gfx906" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_iq3_xxs_r2",
-                entry: "flambeau_mmvq_iq3_xxs_r2_q8_1",
-                entry_f16: Some("flambeau_mmvq_iq3_xxs_r2_q8_1_f16"),
-                threads: 64,
-                rows_per_block: 2,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_iq3_xxs_mmvq_dp4a" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_iq3_xxs_dp4a",
-                entry: "flambeau_mmvq_iq3_xxs_dp4a_q8_1",
-                entry_f16: Some("flambeau_mmvq_iq3_xxs_dp4a_q8_1_f16"),
-                threads: 256,
-                rows_per_block: 1,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_iq3_s_mmvq_single_row_gfx906" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_iq3_s",
-                entry: "flambeau_mmvq_iq3_s_q8_1",
-                entry_f16: None,
-                threads: 64,
-                rows_per_block: 1,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_iq3_s_mmvq_nw1_r2_gfx906" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_iq3_s_r2",
-                entry: "flambeau_mmvq_iq3_s_r2_q8_1",
-                entry_f16: Some("flambeau_mmvq_iq3_s_r2_q8_1_f16"),
-                threads: 64,
-                rows_per_block: 2,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_iq3_s_mmvq_dp4a" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_iq3_s_dp4a",
-                entry: "flambeau_mmvq_iq3_s_dp4a_q8_1",
-                entry_f16: Some("flambeau_mmvq_iq3_s_dp4a_q8_1_f16"),
-                threads: 256,
-                rows_per_block: 1,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_iq2_xxs_mmvq_single_row_gfx906" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_iq2_xxs",
-                entry: "flambeau_mmvq_iq2_xxs_q8_1",
-                entry_f16: None,
-                threads: 64,
-                rows_per_block: 1,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_iq2_xxs_mmvq_nw1_r2_gfx906" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_iq2_xxs_r2",
-                entry: "flambeau_mmvq_iq2_xxs_r2_q8_1",
-                entry_f16: Some("flambeau_mmvq_iq2_xxs_r2_q8_1_f16"),
-                threads: 64,
-                rows_per_block: 2,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_iq2_xxs_mmvq_dp4a" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_iq2_xxs_dp4a",
-                entry: "flambeau_mmvq_iq2_xxs_dp4a_q8_1",
-                entry_f16: Some("flambeau_mmvq_iq2_xxs_dp4a_q8_1_f16"),
-                threads: 256,
-                rows_per_block: 1,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_iq2_xs_mmvq_single_row_gfx906" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_iq2_xs",
-                entry: "flambeau_mmvq_iq2_xs_q8_1",
-                entry_f16: None,
-                threads: 64,
-                rows_per_block: 1,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_iq2_xs_mmvq_nw1_r2_gfx906" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_iq2_xs_r2",
-                entry: "flambeau_mmvq_iq2_xs_r2_q8_1",
-                entry_f16: Some("flambeau_mmvq_iq2_xs_r2_q8_1_f16"),
-                threads: 64,
-                rows_per_block: 2,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_iq2_xs_mmvq_dp4a" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_iq2_xs_dp4a",
-                entry: "flambeau_mmvq_iq2_xs_dp4a_q8_1",
-                entry_f16: Some("flambeau_mmvq_iq2_xs_dp4a_q8_1_f16"),
-                threads: 256,
-                rows_per_block: 1,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_iq2_s_mmvq_single_row_gfx906" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_iq2_s",
-                entry: "flambeau_mmvq_iq2_s_q8_1",
-                entry_f16: None,
-                threads: 64,
-                rows_per_block: 1,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_iq2_s_mmvq_nw1_r2_gfx906" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_iq2_s_r2",
-                entry: "flambeau_mmvq_iq2_s_r2_q8_1",
-                entry_f16: Some("flambeau_mmvq_iq2_s_r2_q8_1_f16"),
-                threads: 64,
-                rows_per_block: 2,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_iq2_s_mmvq_dp4a" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_iq2_s_dp4a",
-                entry: "flambeau_mmvq_iq2_s_dp4a_q8_1",
-                entry_f16: Some("flambeau_mmvq_iq2_s_dp4a_q8_1_f16"),
-                threads: 256,
-                rows_per_block: 1,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_iq1_s_mmvq_single_row_gfx906" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_iq1_s",
-                entry: "flambeau_mmvq_iq1_s_q8_1",
-                entry_f16: None,
-                threads: 64,
-                rows_per_block: 1,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_iq1_s_mmvq_nw1_r2_gfx906" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_iq1_s_r2",
-                entry: "flambeau_mmvq_iq1_s_r2_q8_1",
-                entry_f16: Some("flambeau_mmvq_iq1_s_r2_q8_1_f16"),
-                threads: 64,
-                rows_per_block: 2,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_iq1_s_mmvq_dp4a" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_iq1_s_dp4a",
-                entry: "flambeau_mmvq_iq1_s_dp4a_q8_1",
-                entry_f16: Some("flambeau_mmvq_iq1_s_dp4a_q8_1_f16"),
-                threads: 256,
-                rows_per_block: 1,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_iq1_m_mmvq_single_row_gfx906" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_iq1_m",
-                entry: "flambeau_mmvq_iq1_m_q8_1",
-                entry_f16: None,
-                threads: 64,
-                rows_per_block: 1,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_iq1_m_mmvq_nw1_r2_gfx906" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_iq1_m_r2",
-                entry: "flambeau_mmvq_iq1_m_r2_q8_1",
-                entry_f16: Some("flambeau_mmvq_iq1_m_r2_q8_1_f16"),
-                threads: 64,
-                rows_per_block: 2,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_iq1_m_mmvq_dp4a" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_iq1_m_dp4a",
-                entry: "flambeau_mmvq_iq1_m_dp4a_q8_1",
-                entry_f16: Some("flambeau_mmvq_iq1_m_dp4a_q8_1_f16"),
-                threads: 256,
-                rows_per_block: 1,
-                mmq_tile: (0, 0),
-            },
-            //— dense MMQ wave64 for IQ family.
-            // MMQ_Y=64, TILE_N=8 (same tile shape as the K-quant wave64 MMQ).
-            "qmatmul_iq4_xs_mmq_wave64_gfx906" => Self {
-                kind: RecipeKind::MmqWave64,
-                stem: "mmq_iq4_xs_wave64",
-                entry: "flambeau_mmq_iq4_xs_wave64_q8_1",
-                entry_f16: None,
-                threads: 64,
-                rows_per_block: 0,
-                mmq_tile: (64, 8),
-            },
-            "qmatmul_iq3_s_mmq_wave64_gfx906" => Self {
-                kind: RecipeKind::MmqWave64,
-                stem: "mmq_iq3_s_wave64",
-                entry: "flambeau_mmq_iq3_s_wave64_q8_1",
-                entry_f16: None,
-                threads: 64,
-                rows_per_block: 0,
-                mmq_tile: (64, 8),
-            },
-            "qmatmul_iq4_nl_mmq_wave64_gfx906" => Self {
-                kind: RecipeKind::MmqWave64,
-                stem: "mmq_iq4_nl_wave64",
-                entry: "flambeau_mmq_iq4_nl_wave64_q8_1",
-                entry_f16: None,
-                threads: 64,
-                rows_per_block: 0,
-                mmq_tile: (64, 8),
-            },
-            "qmatmul_iq3_xxs_mmq_wave64_gfx906" => Self {
-                kind: RecipeKind::MmqWave64,
-                stem: "mmq_iq3_xxs_wave64",
-                entry: "flambeau_mmq_iq3_xxs_wave64_q8_1",
-                entry_f16: None,
-                threads: 64,
-                rows_per_block: 0,
-                mmq_tile: (64, 8),
-            },
-            "qmatmul_iq2_xxs_mmq_wave64_gfx906" => Self {
-                kind: RecipeKind::MmqWave64,
-                stem: "mmq_iq2_xxs_wave64",
-                entry: "flambeau_mmq_iq2_xxs_wave64_q8_1",
-                entry_f16: None,
-                threads: 64,
-                rows_per_block: 0,
-                mmq_tile: (64, 8),
-            },
-            "qmatmul_iq2_xs_mmq_wave64_gfx906" => Self {
-                kind: RecipeKind::MmqWave64,
-                stem: "mmq_iq2_xs_wave64",
-                entry: "flambeau_mmq_iq2_xs_wave64_q8_1",
-                entry_f16: None,
-                threads: 64,
-                rows_per_block: 0,
-                mmq_tile: (64, 8),
-            },
-            "qmatmul_iq2_s_mmq_wave64_gfx906" => Self {
-                kind: RecipeKind::MmqWave64,
-                stem: "mmq_iq2_s_wave64",
-                entry: "flambeau_mmq_iq2_s_wave64_q8_1",
-                entry_f16: None,
-                threads: 64,
-                rows_per_block: 0,
-                mmq_tile: (64, 8),
-            },
-            "qmatmul_iq1_s_mmq_wave64_gfx906" => Self {
-                kind: RecipeKind::MmqWave64,
-                stem: "mmq_iq1_s_wave64",
-                entry: "flambeau_mmq_iq1_s_wave64_q8_1",
-                entry_f16: None,
-                threads: 64,
-                rows_per_block: 0,
-                mmq_tile: (64, 8),
-            },
-            "qmatmul_iq1_m_mmq_wave64_gfx906" => Self {
-                kind: RecipeKind::MmqWave64,
-                stem: "mmq_iq1_m_wave64",
-                entry: "flambeau_mmq_iq1_m_wave64_q8_1",
-                entry_f16: None,
-                threads: 64,
-                rows_per_block: 0,
-                mmq_tile: (64, 8),
-            },
-            "qmatmul_q4_1_mmvq_dp4a_gfx906" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_q4_1",
-                entry: "flambeau_mmvq_q4_1_q8_1",
-                entry_f16: Some("flambeau_mmvq_q4_1_q8_1_f16"),
-                threads: 256,
-                rows_per_block: 1,
-                mmq_tile: (0, 0),
-            },
-            // CUDA sm_86 dispatches Q4_0/Q5_0/Q5_1 decode to the single-row base
-            // mmvq (the autotuned `_mmvq_dp4a` row); HIP routes these through MMQ,
-            // so there was no shared mmvq arm. The base kernel is the sweep
-            // oracle (256t, 1 row/block) and is present in the sm_86 catalogue.
-            "qmatmul_q4_0_mmvq_dp4a" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_q4_0",
-                entry: "flambeau_mmvq_q4_0_q8_1",
-                entry_f16: Some("flambeau_mmvq_q4_0_q8_1_f16"),
-                threads: 256,
-                rows_per_block: 1,
-                mmq_tile: (0, 0),
-            },
-            // Q4_0 m=1 decode autotune candidates — the templated 128-thread
-            // single-row DP4A and its VDR=2 sibling. Distinct stems from the
-            // gfx906-only hand kernel `mmvq_q4_0_t128`; certified + ranked by
-            // `autotune --dtype Q4_0`, wired only through the sm_86 dispatch table.
-            "qmatmul_q4_0_mmvq_t128_dp4a" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_q4_0_t128_dp4a",
-                entry: "flambeau_mmvq_q4_0_t128_dp4a_q8_1",
-                entry_f16: None,
-                threads: 128,
-                rows_per_block: 1,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_q4_0_mmvq_t128_vdr2" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_q4_0_t128_vdr2",
-                entry: "flambeau_mmvq_q4_0_t128_vdr2_q8_1",
-                entry_f16: None,
-                threads: 128,
-                rows_per_block: 1,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_q5_0_mmvq_dp4a" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_q5_0",
-                entry: "flambeau_mmvq_q5_0_q8_1",
-                entry_f16: Some("flambeau_mmvq_q5_0_q8_1_f16"),
-                threads: 256,
-                rows_per_block: 1,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_q5_1_mmvq_dp4a" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_q5_1",
-                entry: "flambeau_mmvq_q5_1_q8_1",
-                entry_f16: Some("flambeau_mmvq_q5_1_q8_1_f16"),
-                threads: 256,
-                rows_per_block: 1,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_q4_1_mmvq_nw1_r2_gfx906" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_q4_1_r2",
-                entry: "flambeau_mmvq_q4_1_r2_q8_1",
-                entry_f16: None,
-                threads: 64,
-                rows_per_block: 2,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_q4_1_mmvq_r2_dp4a_gfx906" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_q4_1_r2_dp4a",
-                entry: "flambeau_mmvq_q4_1_r2_dp4a_q8_1",
-                entry_f16: None,
-                threads: 256,
-                rows_per_block: 2,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_q4_1_mmvq_t128_gfx906" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_q4_1_t128",
-                entry: "flambeau_mmvq_q4_1_t128_q8_1",
-                entry_f16: Some("flambeau_mmvq_q4_1_t128_q8_1_f16"),
-                threads: 128,
-                rows_per_block: 1,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_q5_K_mmvq_nw1_r2_gfx906" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_q5_k_r2",
-                entry: "flambeau_mmvq_q5_k_r2_q8_1",
-                entry_f16: Some("flambeau_mmvq_q5_k_r2_q8_1_f16"),
-                threads: 64,
-                rows_per_block: 2,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_q5_k_mmvq_dp4a" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_q5_k_dp4a",
-                entry: "flambeau_mmvq_q5_k_dp4a_q8_1",
-                entry_f16: Some("flambeau_mmvq_q5_k_dp4a_q8_1_f16"),
-                threads: 256,
-                rows_per_block: 1,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_q5_K_mmvq_r2_dp4a_gfx906" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_q5_k_r2_dp4a",
-                entry: "flambeau_mmvq_q5_k_r2_dp4a_q8_1",
-                entry_f16: Some("flambeau_mmvq_q5_k_r2_dp4a_q8_1_f16"),
-                threads: 64,
-                rows_per_block: 2,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_q6_K_mmvq_nw1_r4_gfx906" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_q6_k_r4",
-                entry: "flambeau_mmvq_q6_k_r4_q8_1",
-                entry_f16: None,
-                threads: 64,
-                rows_per_block: 4,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_q6_k_mmvq_dp4a" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_q6_k_dp4a",
-                entry: "flambeau_mmvq_q6_k_dp4a_q8_1",
-                entry_f16: Some("flambeau_mmvq_q6_k_dp4a_q8_1_f16"),
-                threads: 64,
-                rows_per_block: 1,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_q6_K_mmvq_single_row_gfx906" => Self {
-                kind: RecipeKind::Mmvq,
-                stem: "mmvq_q6_k",
-                entry: "flambeau_mmvq_q6_k_q8_1",
-                entry_f16: None,
-                threads: 64,
-                rows_per_block: 1,
-                mmq_tile: (0, 0),
-            },
-            "qmatmul_q8_0_mmq_oracle_gfx906" => Self {
-                kind: RecipeKind::MmqOracle,
-                stem: "mmq_q8_0_oracle",
-                entry: "flambeau_mmq_q8_0_oracle_q8_1",
-                entry_f16: None,
-                // i fix: the oracle kernel requires 256 threads / 4
-                // warps — its cross-warp reduce reads `s_warp[0..4]`. Launching
-                // with 64 threads (1 warp) leaves `s_warp[1..4]` uninitialised
-                // and the __shfl_xor reduce inside `if (warp == 0)` then sums
-                // garbage lanes. The sweep harness already launches at 256
-                // (see `sweep_mmq::Dtype::launch_threads`) so the cert didn't
-                // catch it.
-                threads: 256,
-                rows_per_block: 0,
-                mmq_tile: (1, 1),
-            },
-            "qmatmul_q8_0_mmq_4warp_lds_gfx906" => Self {
-                kind: RecipeKind::Mmq4Warp,
-                stem: "mmq_q8_0_4warp",
-                entry: "flambeau_mmq_q8_0_4warp_q8_1",
-                entry_f16: None,
-                threads: 256,
-                rows_per_block: 0,
-                mmq_tile: (32, 8),
-            },
-            "qmatmul_q8_0_mmq_wave64_gfx906" => Self {
-                kind: RecipeKind::MmqWave64,
-                stem: "mmq_q8_0_wave64",
-                entry: "flambeau_mmq_q8_0_wave64_q8_1",
-                entry_f16: None,
-                threads: 64,
-                rows_per_block: 0,
-                // MMQ_Y=64 rows × TILE_N=8 cols per tile (matches K-quant wave64)
-                mmq_tile: (64, 8),
-            },
-            "qmatmul_q8_0_mmq_wave64_tile32_gfx906" => Self {
-                kind: RecipeKind::MmqWave64,
-                stem: "mmq_q8_0_wave64_tile32",
-                entry: "flambeau_mmq_q8_0_wave64_tile32_q8_1",
-                entry_f16: None,
-                threads: 64,
-                rows_per_block: 0,
-                // TILE_N=32 experimental.
-                mmq_tile: (64, 32),
-            },
-            "qmatmul_q8_0_mmq_wave64_tile16_gfx906" => Self {
-                kind: RecipeKind::MmqWave64,
-                stem: "mmq_q8_0_wave64_tile16",
-                entry: "flambeau_mmq_q8_0_wave64_tile16_q8_1",
-                entry_f16: None,
-                threads: 64,
-                rows_per_block: 0,
-                // MMQ_Y=64 rows × TILE_N=16 — halves weight HBM bandwidth vs
-                // the TILE_N=8 variant at the cost of doubled per-thread
-                // accumulator VGPR (16 floats).
-                mmq_tile: (64, 16),
-            },
-            "qmatmul_q4_1_mmq_4warp_lds_gfx906" => Self {
-                kind: RecipeKind::MmqLdsX64,
-                stem: "mmq_q4_1_4warp_lds",
-                entry: "flambeau_mmq_q4_1_4warp_lds_q8_1",
-                entry_f16: None,
-                threads: 0, // unused for MmqLdsX64 (2D block dims hard-coded in launcher)
-                rows_per_block: 0,
-                // MMQ_Y=128, MMQ_X=64 — used by the launcher to compute the grid
-                // and dynamic LDS bytes. These MUST match mmq_q4_1_4warp_lds.cu.
-                mmq_tile: (128, 64),
-            },
-            // wave64 MMQ for Q4_1. Same shape family as Q8_0/K-quant
-            // wave64 kernels — MMQ_Y=64, TILE_N=8, 64 threads, DP4A inner.
-            "qmatmul_q4_1_mmq_wave64_gfx906" => Self {
-                kind: RecipeKind::MmqWave64,
-                stem: "mmq_q4_1_wave64",
-                entry: "flambeau_mmq_q4_1_wave64_q8_1",
-                entry_f16: None,
-                threads: 64,
-                rows_per_block: 0,
-                mmq_tile: (64, 8),
-            },
-            // TILE_N=16 port from mmq_q8_0_wave64_tile16. Each
-            // decoded Q4_1 weight tile (8 v[] entries) reused across 16
-            // output cols instead of 8 → halves weight HBM bandwidth.
-            "qmatmul_q4_1_mmq_wave64_tile16_gfx906" => Self {
-                kind: RecipeKind::MmqWave64,
-                stem: "mmq_q4_1_wave64_tile16",
-                entry: "flambeau_mmq_q4_1_wave64_tile16_q8_1",
-                entry_f16: None,
-                threads: 64,
-                rows_per_block: 0,
-                mmq_tile: (64, 16),
-            },
-            // wave64 MMQ for Q4_0. Closes the prefill gap to
-            // llama.cpp on Qwen3.6-35B-A3B-Q4_0 at dense + MoE shapes.
-            "qmatmul_q4_0_mmq_wave64_gfx906" => Self {
-                kind: RecipeKind::MmqWave64,
-                stem: "mmq_q4_0_wave64",
-                entry: "flambeau_mmq_q4_0_wave64_q8_1",
-                entry_f16: None,
-                threads: 64,
-                rows_per_block: 0,
-                mmq_tile: (64, 8),
-            },
-            // 4-warp LDS-tiled Q4_0 MMQ — port of the Q4_1
-            // 4warp_lds structure with bias-correction in the dot. Closes
-            // the 2.5× dense-prefill gap (27B-Q4_0 73 → ~190 tok/s pp4).
-            // MUST match mmq_q4_0_4warp_lds.cu's MMQ_Y=128, MMQ_X=64.
-            "qmatmul_q4_0_mmq_4warp_lds_gfx906" | "qmatmul_q4_0_mmq_4warp_lds" => Self {
-                kind: RecipeKind::MmqLdsX64,
-                stem: "mmq_q4_0_4warp_lds",
-                entry: "flambeau_mmq_q4_0_4warp_lds_q8_1",
-                entry_f16: None,
-                threads: 0,
-                rows_per_block: 0,
-                mmq_tile: (128, 64),
-            },
-            // Int8 tensor-core MMQ for Q4_0 (sm_80+). MUST match
-            // mmq_q4_0_mma.cu's mmq_q4_0_mma_row<128, 64, 4, 2>.
-            "qmatmul_q4_0_mma" => Self {
-                kind: RecipeKind::MmqMma,
-                stem: "mmq_q4_0_mma",
-                entry: "flambeau_mmq_q4_0_mma_q8_1",
-                entry_f16: None,
-                threads: 0,
-                rows_per_block: 0,
-                mmq_tile: (256, 128),
-            },
-            // wave64 MMQ for Q5_0. Same tile shape + launch as Q4_0;
-            // inner loop adds the 5th-bit `16·bit·y` DP4A term
-            // (mmvq_q5_0 pattern).
-            "qmatmul_q5_0_mmq_wave64_gfx906" => Self {
-                kind: RecipeKind::MmqWave64,
-                stem: "mmq_q5_0_wave64",
-                entry: "flambeau_mmq_q5_0_wave64_q8_1",
-                entry_f16: None,
-                threads: 64,
-                rows_per_block: 0,
-                mmq_tile: (64, 8),
-            },
-            "qmatmul_q5_1_mmq_wave64_gfx906" => Self {
-                kind: RecipeKind::MmqWave64,
-                stem: "mmq_q5_1_wave64",
-                entry: "flambeau_mmq_q5_1_wave64_q8_1",
-                entry_f16: None,
-                threads: 64,
-                rows_per_block: 0,
-                mmq_tile: (64, 8),
-            },
-            "qmatmul_q4_K_mmq_4warp_lds_gfx906" => Self {
-                kind: RecipeKind::Mmq4Warp,
-                stem: "mmq_q4_K_4warp",
-                entry: "flambeau_mmq_q4_K_4warp_q8_1",
-                entry_f16: None,
-                threads: 128,
-                rows_per_block: 0,
-                mmq_tile: (16, 8),
-            },
-            // 128×16-tile Q4_K LDS-tiled MMQ, DS4 Q8_1 activation, 256 threads
-            // per (64, 4, 1) block, 22528 B dynamic LDS. No longer dispatched on
-            // gfx906 (superseded by the 64×64 `_y64` recipe); kept for A/B.
-            "qmatmul_q4_K_mmq_lds_tiled_gfx906" => Self {
-                kind: RecipeKind::MmqLdsX64,
-                stem: "mmq_q4_K_lds_tiled",
-                entry: "flambeau_mmq_q4_K_lds_tiled_q8_1",
-                entry_f16: None,
-                threads: 0, // unused for MmqLdsX64
-                rows_per_block: 0,
-                // MMQ_Y=128, MMQ_X=16 (must match mmq_q4_K_lds_tiled.cu).
-                mmq_tile: (128, 16),
-            },
-            "qmatmul_q5_K_mmq_lds_tiled_gfx906" => Self {
-                kind: RecipeKind::MmqLdsX64,
-                stem: "mmq_q5_K_lds_tiled",
-                entry: "flambeau_mmq_q5_K_lds_tiled_q8_1",
-                entry_f16: None,
-                threads: 0,
-                rows_per_block: 0,
-                mmq_tile: (64, 64),
-            },
-            "qmatmul_q6_K_mmq_lds_tiled_gfx906" => Self {
-                kind: RecipeKind::MmqLdsX64,
-                stem: "mmq_q6_K_lds_tiled",
-                entry: "flambeau_mmq_q6_K_lds_tiled_q8_1",
-                entry_f16: None,
-                threads: 0,
-                rows_per_block: 0,
-                mmq_tile: (64, 64),
-            },
-            "qmatmul_iq4_xs_mmq_lds_tiled_gfx906" => Self {
-                kind: RecipeKind::MmqLdsX64,
-                stem: "mmq_iq4_xs_lds_tiled",
-                entry: "flambeau_mmq_iq4_xs_lds_tiled_q8_1",
-                entry_f16: None,
-                threads: 0,
-                rows_per_block: 0,
-                mmq_tile: (64, 64),
-            },
-            "qmatmul_q4_K_mmq_lds_tiled_y64_gfx906" => Self {
-                kind: RecipeKind::MmqLdsX64,
-                stem: "mmq_q4_K_lds_tiled_y64",
-                entry: "flambeau_mmq_q4_K_lds_tiled_y64_q8_1",
-                entry_f16: None,
-                threads: 0,
-                rows_per_block: 0,
-                mmq_tile: (64, 64),
-            },
-            "qmatmul_q3_K_mmq_lds_tiled_gfx906" => Self {
-                kind: RecipeKind::MmqLdsX64,
-                stem: "mmq_q3_K_lds_tiled",
-                entry: "flambeau_mmq_q3_K_lds_tiled_q8_1",
-                entry_f16: None,
-                threads: 0,
-                rows_per_block: 0,
-                mmq_tile: (64, 64),
-            },
-            "qmatmul_iq4_nl_mmq_lds_tiled_gfx906" => Self {
-                kind: RecipeKind::MmqLdsX64,
-                stem: "mmq_iq4_nl_lds_tiled",
-                entry: "flambeau_mmq_iq4_nl_lds_tiled_q8_1",
-                entry_f16: None,
-                threads: 0,
-                rows_per_block: 0,
-                mmq_tile: (64, 64),
-            },
-            "qmatmul_q8_0_mmq_lds_tiled_gfx906" => Self {
-                kind: RecipeKind::MmqLdsX64,
-                stem: "mmq_q8_0_lds_tiled",
-                entry: "flambeau_mmq_q8_0_lds_tiled_q8_1",
-                entry_f16: None,
-                threads: 0,
-                rows_per_block: 0,
-                mmq_tile: (64, 64),
-            },
-            "qmatmul_q5_K_mmq_lds_tiled_x8_gfx906" => Self {
-                kind: RecipeKind::MmqLdsX64,
-                stem: "mmq_q5_K_lds_tiled_x8",
-                entry: "flambeau_mmq_q5_K_lds_tiled_x8_q8_1",
-                entry_f16: None,
-                threads: 0,
-                rows_per_block: 0,
-                mmq_tile: (64, 8),
-            },
-            "qmatmul_q6_K_mmq_lds_tiled_x8_gfx906" => Self {
-                kind: RecipeKind::MmqLdsX64,
-                stem: "mmq_q6_K_lds_tiled_x8",
-                entry: "flambeau_mmq_q6_K_lds_tiled_x8_q8_1",
-                entry_f16: None,
-                threads: 0,
-                rows_per_block: 0,
-                mmq_tile: (64, 8),
-            },
-            "qmatmul_iq4_xs_mmq_lds_tiled_x8_gfx906" => Self {
-                kind: RecipeKind::MmqLdsX64,
-                stem: "mmq_iq4_xs_lds_tiled_x8",
-                entry: "flambeau_mmq_iq4_xs_lds_tiled_x8_q8_1",
-                entry_f16: None,
-                threads: 0,
-                rows_per_block: 0,
-                mmq_tile: (64, 8),
-            },
-            "qmatmul_q4_K_mmq_lds_tiled_y64_x8_gfx906" => Self {
-                kind: RecipeKind::MmqLdsX64,
-                stem: "mmq_q4_K_lds_tiled_y64_x8",
-                entry: "flambeau_mmq_q4_K_lds_tiled_y64_x8_q8_1",
-                entry_f16: None,
-                threads: 0,
-                rows_per_block: 0,
-                mmq_tile: (64, 8),
-            },
-            "qmatmul_q3_K_mmq_lds_tiled_x8_gfx906" => Self {
-                kind: RecipeKind::MmqLdsX64,
-                stem: "mmq_q3_K_lds_tiled_x8",
-                entry: "flambeau_mmq_q3_K_lds_tiled_x8_q8_1",
-                entry_f16: None,
-                threads: 0,
-                rows_per_block: 0,
-                mmq_tile: (64, 8),
-            },
-            "qmatmul_iq4_nl_mmq_lds_tiled_x8_gfx906" => Self {
-                kind: RecipeKind::MmqLdsX64,
-                stem: "mmq_iq4_nl_lds_tiled_x8",
-                entry: "flambeau_mmq_iq4_nl_lds_tiled_x8_q8_1",
-                entry_f16: None,
-                threads: 0,
-                rows_per_block: 0,
-                mmq_tile: (64, 8),
-            },
-            "qmatmul_q4_K_mmq_wave64_gfx906" => Self {
-                kind: RecipeKind::MmqWave64,
-                stem: "mmq_q4_K_wave64",
-                entry: "flambeau_mmq_q4_K_wave64_q8_1",
-                entry_f16: None,
-                threads: 64,
-                rows_per_block: 0,
-                // MMQ_Y = 64 rows, TILE_N = 8 cols per tile
-                mmq_tile: (64, 8),
-            },
-            "qmatmul_q5_K_mmq_wave64_gfx906" => Self {
-                kind: RecipeKind::MmqWave64,
-                stem: "mmq_q5_K_wave64",
-                entry: "flambeau_mmq_q5_K_wave64_q8_1",
-                entry_f16: None,
-                threads: 64,
-                rows_per_block: 0,
-                // MMQ_Y = 64 rows, TILE_N = 8 cols per tile
-                mmq_tile: (64, 8),
-            },
-            "qmatmul_q6_K_mmq_4warp_lds_gfx906" => Self {
-                kind: RecipeKind::Mmq4Warp,
-                stem: "mmq_q6_K_4warp",
-                entry: "flambeau_mmq_q6_K_4warp_q8_1",
-                entry_f16: None,
-                threads: 128,
-                rows_per_block: 0,
-                mmq_tile: (16, 8),
-            },
-            "qmatmul_q6_K_mmq_wave64_gfx906" => Self {
-                kind: RecipeKind::MmqWave64,
-                stem: "mmq_q6_K_wave64",
-                entry: "flambeau_mmq_q6_K_wave64_q8_1",
-                entry_f16: None,
-                threads: 64,
-                rows_per_block: 0,
-                // MMQ_Y = 64 rows, TILE_N = 8 cols per tile
-                mmq_tile: (64, 8),
-            },
-            "qmatmul_q8_K_mmq_wave64_gfx906" => Self {
-                kind: RecipeKind::MmqWave64,
-                stem: "mmq_q8_K_wave64",
-                entry: "flambeau_mmq_q8_K_wave64_q8_1",
-                entry_f16: None,
-                threads: 64,
-                rows_per_block: 0,
-                mmq_tile: (64, 8),
-            },
-            "qmatmul_q2_K_mmq_wave64_gfx906" => Self {
-                kind: RecipeKind::MmqWave64,
-                stem: "mmq_q2_K_wave64",
-                entry: "flambeau_mmq_q2_K_wave64_q8_1",
-                entry_f16: None,
-                threads: 64,
-                rows_per_block: 0,
-                mmq_tile: (64, 8),
-            },
-            "qmatmul_q3_K_mmq_wave64_gfx906" => Self {
-                kind: RecipeKind::MmqWave64,
-                stem: "mmq_q3_K_wave64",
-                entry: "flambeau_mmq_q3_K_wave64_q8_1",
-                entry_f16: None,
-                threads: 64,
-                rows_per_block: 0,
-                mmq_tile: (64, 8),
-            },
-            other => bail!("no launch recipe registered for impl_id {other}"),
-        })
+        QMATMUL_RECIPES
+            .iter()
+            .find(|row| row.ids.contains(&impl_id))
+            .map(|row| row.recipe)
+            .ok_or_else(|| anyhow!("no launch recipe registered for impl_id {impl_id}"))
     }
 }
+
+/// Launch recipe of every QMatMul impl a dispatch descriptor (or an alias of
+/// one) can name, keyed by the impl_ids that resolve to it. Arch-neutral: HIP
+/// and CUDA descriptors share rows. `recipe_table_tests` keeps it in step with
+/// `QMATMUL_GFX906` / `QMATMUL_SM86` in both directions.
+struct RecipeRow {
+    ids: &'static [&'static str],
+    recipe: Recipe,
+}
+
+const QMATMUL_RECIPES: &[RecipeRow] = &[
+    RecipeRow {
+        ids: &["qmatmul_q8_0_mmvq_dp4a_gfx906", "qmatmul_q8_0_mmvq_dp4a"],
+        recipe: Recipe {
+            kind: RecipeKind::Mmvq,
+            stem: "mmvq_q8_0_dp4a",
+            entry: "flambeau_mmvq_q8_0_dp4a_q8_1",
+            entry_f16: Some("flambeau_mmvq_q8_0_dp4a_q8_1_f16"),
+            threads: 256,
+            rows_per_block: 1,
+            mmq_tile: (0, 0),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_q8_0_mmvq_t128_vdr2", "qmatmul_q8_0_mmvq_single_row_gfx906", "qmatmul_q8_0_mmvq_dp4a_vdr2"],
+        recipe: Recipe {
+            kind: RecipeKind::Mmvq,
+            stem: "mmvq_q8_0_t128_vdr2",
+            entry: "flambeau_mmvq_q8_0_t128_vdr2_q8_1",
+            entry_f16: Some("flambeau_mmvq_q8_0_t128_vdr2_q8_1_f16"),
+            threads: 128,
+            rows_per_block: 1,
+            mmq_tile: (0, 0),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_q2_k_mmvq_dp4a"],
+        recipe: Recipe {
+            kind: RecipeKind::Mmvq,
+            stem: "mmvq_q2_k_dp4a",
+            entry: "flambeau_mmvq_q2_k_dp4a_q8_1",
+            entry_f16: Some("flambeau_mmvq_q2_k_dp4a_q8_1_f16"),
+            threads: 256,
+            rows_per_block: 1,
+            mmq_tile: (0, 0),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_q2_K_mmvq_r2_dp4a_gfx906"],
+        recipe: Recipe {
+            kind: RecipeKind::Mmvq,
+            stem: "mmvq_q2_k_r2_dp4a",
+            entry: "flambeau_mmvq_q2_k_r2_dp4a_q8_1",
+            entry_f16: Some("flambeau_mmvq_q2_k_r2_dp4a_q8_1_f16"),
+            threads: 64,
+            rows_per_block: 2,
+            mmq_tile: (0, 0),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_q3_k_mmvq_dp4a"],
+        recipe: Recipe {
+            kind: RecipeKind::Mmvq,
+            stem: "mmvq_q3_k_dp4a",
+            entry: "flambeau_mmvq_q3_k_dp4a_q8_1",
+            entry_f16: Some("flambeau_mmvq_q3_k_dp4a_q8_1_f16"),
+            threads: 256,
+            rows_per_block: 1,
+            mmq_tile: (0, 0),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_q3_K_mmvq_r2_dp4a_gfx906"],
+        recipe: Recipe {
+            kind: RecipeKind::Mmvq,
+            stem: "mmvq_q3_k_r2_dp4a",
+            entry: "flambeau_mmvq_q3_k_r2_dp4a_q8_1",
+            entry_f16: Some("flambeau_mmvq_q3_k_r2_dp4a_q8_1_f16"),
+            threads: 64,
+            rows_per_block: 2,
+            mmq_tile: (0, 0),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_q8_k_mmvq_single_row"],
+        recipe: Recipe {
+            kind: RecipeKind::Mmvq,
+            stem: "mmvq_q8_k",
+            entry: "flambeau_mmvq_q8_K_q8_1",
+            entry_f16: Some("flambeau_mmvq_q8_K_q8_1_f16"),
+            threads: 256,
+            rows_per_block: 1,
+            mmq_tile: (0, 0),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_q4_k_mmvq_dp4a_t128_vdr2"],
+        recipe: Recipe {
+            kind: RecipeKind::Mmvq,
+            stem: "mmvq_q4_k_dp4a_t128_vdr2",
+            entry: "flambeau_mmvq_q4_k_dp4a_t128_vdr2_q8_1",
+            entry_f16: Some("flambeau_mmvq_q4_k_dp4a_t128_vdr2_q8_1_f16"),
+            threads: 128,
+            rows_per_block: 1,
+            mmq_tile: (0, 0),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_q5_k_mmvq_dp4a_t128_vdr2"],
+        recipe: Recipe {
+            kind: RecipeKind::Mmvq,
+            stem: "mmvq_q5_k_dp4a_t128_vdr2",
+            entry: "flambeau_mmvq_q5_k_dp4a_t128_vdr2_q8_1",
+            entry_f16: Some("flambeau_mmvq_q5_k_dp4a_t128_vdr2_q8_1_f16"),
+            threads: 128,
+            rows_per_block: 1,
+            mmq_tile: (0, 0),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_iq4_xs_mmvq_dp4a_t128_vdr4"],
+        recipe: Recipe {
+            kind: RecipeKind::Mmvq,
+            stem: "mmvq_iq4_xs_dp4a_t128_vdr4",
+            entry: "flambeau_mmvq_iq4_xs_dp4a_t128_vdr4_q8_1",
+            entry_f16: Some("flambeau_mmvq_iq4_xs_dp4a_t128_vdr4_q8_1_f16"),
+            threads: 128,
+            rows_per_block: 1,
+            mmq_tile: (0, 0),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_q4_k_mmvq_dp4a"],
+        recipe: Recipe {
+            kind: RecipeKind::Mmvq,
+            stem: "mmvq_q4_k_r2_dp4a",
+            entry: "flambeau_mmvq_q4_k_r2_dp4a_q8_1",
+            entry_f16: Some("flambeau_mmvq_q4_k_r2_dp4a_q8_1_f16"),
+            threads: 64,
+            rows_per_block: 2,
+            mmq_tile: (0, 0),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_iq4_nl_mmvq_dp4a"],
+        recipe: Recipe {
+            kind: RecipeKind::Mmvq,
+            stem: "mmvq_iq4_nl_dp4a",
+            entry: "flambeau_mmvq_iq4_nl_dp4a_q8_1",
+            entry_f16: Some("flambeau_mmvq_iq4_nl_dp4a_q8_1_f16"),
+            threads: 256,
+            rows_per_block: 1,
+            mmq_tile: (0, 0),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_iq4_xs_mmvq_dp4a"],
+        recipe: Recipe {
+            kind: RecipeKind::Mmvq,
+            stem: "mmvq_iq4_xs_dp4a",
+            entry: "flambeau_mmvq_iq4_xs_dp4a_q8_1",
+            entry_f16: Some("flambeau_mmvq_iq4_xs_dp4a_q8_1_f16"),
+            threads: 256,
+            rows_per_block: 1,
+            mmq_tile: (0, 0),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_iq3_xxs_mmvq_dp4a"],
+        recipe: Recipe {
+            kind: RecipeKind::Mmvq,
+            stem: "mmvq_iq3_xxs_dp4a",
+            entry: "flambeau_mmvq_iq3_xxs_dp4a_q8_1",
+            entry_f16: Some("flambeau_mmvq_iq3_xxs_dp4a_q8_1_f16"),
+            threads: 256,
+            rows_per_block: 1,
+            mmq_tile: (0, 0),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_iq3_s_mmvq_dp4a"],
+        recipe: Recipe {
+            kind: RecipeKind::Mmvq,
+            stem: "mmvq_iq3_s_dp4a",
+            entry: "flambeau_mmvq_iq3_s_dp4a_q8_1",
+            entry_f16: Some("flambeau_mmvq_iq3_s_dp4a_q8_1_f16"),
+            threads: 256,
+            rows_per_block: 1,
+            mmq_tile: (0, 0),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_iq2_xxs_mmvq_dp4a"],
+        recipe: Recipe {
+            kind: RecipeKind::Mmvq,
+            stem: "mmvq_iq2_xxs_dp4a",
+            entry: "flambeau_mmvq_iq2_xxs_dp4a_q8_1",
+            entry_f16: Some("flambeau_mmvq_iq2_xxs_dp4a_q8_1_f16"),
+            threads: 256,
+            rows_per_block: 1,
+            mmq_tile: (0, 0),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_iq2_xs_mmvq_dp4a"],
+        recipe: Recipe {
+            kind: RecipeKind::Mmvq,
+            stem: "mmvq_iq2_xs_dp4a",
+            entry: "flambeau_mmvq_iq2_xs_dp4a_q8_1",
+            entry_f16: Some("flambeau_mmvq_iq2_xs_dp4a_q8_1_f16"),
+            threads: 256,
+            rows_per_block: 1,
+            mmq_tile: (0, 0),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_iq2_s_mmvq_dp4a"],
+        recipe: Recipe {
+            kind: RecipeKind::Mmvq,
+            stem: "mmvq_iq2_s_dp4a",
+            entry: "flambeau_mmvq_iq2_s_dp4a_q8_1",
+            entry_f16: Some("flambeau_mmvq_iq2_s_dp4a_q8_1_f16"),
+            threads: 256,
+            rows_per_block: 1,
+            mmq_tile: (0, 0),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_iq1_s_mmvq_dp4a"],
+        recipe: Recipe {
+            kind: RecipeKind::Mmvq,
+            stem: "mmvq_iq1_s_dp4a",
+            entry: "flambeau_mmvq_iq1_s_dp4a_q8_1",
+            entry_f16: Some("flambeau_mmvq_iq1_s_dp4a_q8_1_f16"),
+            threads: 256,
+            rows_per_block: 1,
+            mmq_tile: (0, 0),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_iq1_m_mmvq_dp4a"],
+        recipe: Recipe {
+            kind: RecipeKind::Mmvq,
+            stem: "mmvq_iq1_m_dp4a",
+            entry: "flambeau_mmvq_iq1_m_dp4a_q8_1",
+            entry_f16: Some("flambeau_mmvq_iq1_m_dp4a_q8_1_f16"),
+            threads: 256,
+            rows_per_block: 1,
+            mmq_tile: (0, 0),
+        },
+    },
+    //— dense MMQ wave64 for IQ family.
+    // MMQ_Y=64, TILE_N=8 (same tile shape as the K-quant wave64 MMQ).
+    RecipeRow {
+        ids: &["qmatmul_iq4_xs_mmq_wave64_gfx906"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqWave64,
+            stem: "mmq_iq4_xs_wave64",
+            entry: "flambeau_mmq_iq4_xs_wave64_q8_1",
+            entry_f16: None,
+            threads: 64,
+            rows_per_block: 0,
+            mmq_tile: (64, 8),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_iq3_s_mmq_wave64_gfx906"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqWave64,
+            stem: "mmq_iq3_s_wave64",
+            entry: "flambeau_mmq_iq3_s_wave64_q8_1",
+            entry_f16: None,
+            threads: 64,
+            rows_per_block: 0,
+            mmq_tile: (64, 8),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_iq4_nl_mmq_wave64_gfx906"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqWave64,
+            stem: "mmq_iq4_nl_wave64",
+            entry: "flambeau_mmq_iq4_nl_wave64_q8_1",
+            entry_f16: None,
+            threads: 64,
+            rows_per_block: 0,
+            mmq_tile: (64, 8),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_iq3_xxs_mmq_wave64_gfx906"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqWave64,
+            stem: "mmq_iq3_xxs_wave64",
+            entry: "flambeau_mmq_iq3_xxs_wave64_q8_1",
+            entry_f16: None,
+            threads: 64,
+            rows_per_block: 0,
+            mmq_tile: (64, 8),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_iq2_xxs_mmq_wave64_gfx906"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqWave64,
+            stem: "mmq_iq2_xxs_wave64",
+            entry: "flambeau_mmq_iq2_xxs_wave64_q8_1",
+            entry_f16: None,
+            threads: 64,
+            rows_per_block: 0,
+            mmq_tile: (64, 8),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_iq2_xs_mmq_wave64_gfx906"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqWave64,
+            stem: "mmq_iq2_xs_wave64",
+            entry: "flambeau_mmq_iq2_xs_wave64_q8_1",
+            entry_f16: None,
+            threads: 64,
+            rows_per_block: 0,
+            mmq_tile: (64, 8),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_iq2_s_mmq_wave64_gfx906"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqWave64,
+            stem: "mmq_iq2_s_wave64",
+            entry: "flambeau_mmq_iq2_s_wave64_q8_1",
+            entry_f16: None,
+            threads: 64,
+            rows_per_block: 0,
+            mmq_tile: (64, 8),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_iq1_s_mmq_wave64_gfx906"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqWave64,
+            stem: "mmq_iq1_s_wave64",
+            entry: "flambeau_mmq_iq1_s_wave64_q8_1",
+            entry_f16: None,
+            threads: 64,
+            rows_per_block: 0,
+            mmq_tile: (64, 8),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_iq1_m_mmq_wave64_gfx906"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqWave64,
+            stem: "mmq_iq1_m_wave64",
+            entry: "flambeau_mmq_iq1_m_wave64_q8_1",
+            entry_f16: None,
+            threads: 64,
+            rows_per_block: 0,
+            mmq_tile: (64, 8),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_q4_1_mmvq_dp4a_gfx906", "qmatmul_q4_1_mmvq_dp4a"],
+        recipe: Recipe {
+            kind: RecipeKind::Mmvq,
+            stem: "mmvq_q4_1",
+            entry: "flambeau_mmvq_q4_1_q8_1",
+            entry_f16: Some("flambeau_mmvq_q4_1_q8_1_f16"),
+            threads: 256,
+            rows_per_block: 1,
+            mmq_tile: (0, 0),
+        },
+    },
+    // CUDA sm_86 dispatches Q4_0/Q5_0/Q5_1 decode to the single-row base
+    // mmvq (the autotuned `_mmvq_dp4a` row); HIP routes these through MMQ,
+    // so there was no shared mmvq arm. The base kernel is the sweep
+    // oracle (256t, 1 row/block) and is present in the sm_86 catalogue.
+    RecipeRow {
+        ids: &["qmatmul_q4_0_mmvq_dp4a"],
+        recipe: Recipe {
+            kind: RecipeKind::Mmvq,
+            stem: "mmvq_q4_0",
+            entry: "flambeau_mmvq_q4_0_q8_1",
+            entry_f16: Some("flambeau_mmvq_q4_0_q8_1_f16"),
+            threads: 256,
+            rows_per_block: 1,
+            mmq_tile: (0, 0),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_q5_0_mmvq_dp4a"],
+        recipe: Recipe {
+            kind: RecipeKind::Mmvq,
+            stem: "mmvq_q5_0",
+            entry: "flambeau_mmvq_q5_0_q8_1",
+            entry_f16: Some("flambeau_mmvq_q5_0_q8_1_f16"),
+            threads: 256,
+            rows_per_block: 1,
+            mmq_tile: (0, 0),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_q5_1_mmvq_dp4a"],
+        recipe: Recipe {
+            kind: RecipeKind::Mmvq,
+            stem: "mmvq_q5_1",
+            entry: "flambeau_mmvq_q5_1_q8_1",
+            entry_f16: Some("flambeau_mmvq_q5_1_q8_1_f16"),
+            threads: 256,
+            rows_per_block: 1,
+            mmq_tile: (0, 0),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_q4_1_mmvq_t128_gfx906"],
+        recipe: Recipe {
+            kind: RecipeKind::Mmvq,
+            stem: "mmvq_q4_1_t128",
+            entry: "flambeau_mmvq_q4_1_t128_q8_1",
+            entry_f16: Some("flambeau_mmvq_q4_1_t128_q8_1_f16"),
+            threads: 128,
+            rows_per_block: 1,
+            mmq_tile: (0, 0),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_q5_K_mmvq_nw1_r2_gfx906"],
+        recipe: Recipe {
+            kind: RecipeKind::Mmvq,
+            stem: "mmvq_q5_k_r2",
+            entry: "flambeau_mmvq_q5_k_r2_q8_1",
+            entry_f16: Some("flambeau_mmvq_q5_k_r2_q8_1_f16"),
+            threads: 64,
+            rows_per_block: 2,
+            mmq_tile: (0, 0),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_q5_k_mmvq_dp4a"],
+        recipe: Recipe {
+            kind: RecipeKind::Mmvq,
+            stem: "mmvq_q5_k_dp4a",
+            entry: "flambeau_mmvq_q5_k_dp4a_q8_1",
+            entry_f16: Some("flambeau_mmvq_q5_k_dp4a_q8_1_f16"),
+            threads: 256,
+            rows_per_block: 1,
+            mmq_tile: (0, 0),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_q6_k_mmvq_dp4a"],
+        recipe: Recipe {
+            kind: RecipeKind::Mmvq,
+            stem: "mmvq_q6_k_dp4a",
+            entry: "flambeau_mmvq_q6_k_dp4a_q8_1",
+            entry_f16: Some("flambeau_mmvq_q6_k_dp4a_q8_1_f16"),
+            threads: 64,
+            rows_per_block: 1,
+            mmq_tile: (0, 0),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_q8_0_mmq_oracle_gfx906"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqOracle,
+            stem: "mmq_q8_0_oracle",
+            entry: "flambeau_mmq_q8_0_oracle_q8_1",
+            entry_f16: None,
+    // i fix: the oracle kernel requires 256 threads / 4
+    // warps — its cross-warp reduce reads `s_warp[0..4]`. Launching
+    // with 64 threads (1 warp) leaves `s_warp[1..4]` uninitialised
+    // and the __shfl_xor reduce inside `if (warp == 0)` then sums
+    // garbage lanes. The sweep harness already launches at 256
+    // (see `sweep_mmq::Dtype::launch_threads`) so the cert didn't
+    // catch it.
+            threads: 256,
+            rows_per_block: 0,
+            mmq_tile: (1, 1),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_q8_0_mmq_wave64_tile16_gfx906"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqWave64,
+            stem: "mmq_q8_0_wave64_tile16",
+            entry: "flambeau_mmq_q8_0_wave64_tile16_q8_1",
+            entry_f16: None,
+            threads: 64,
+            rows_per_block: 0,
+    // MMQ_Y=64 rows × TILE_N=16 — halves weight HBM bandwidth vs
+    // the TILE_N=8 variant at the cost of doubled per-thread
+    // accumulator VGPR (16 floats).
+            mmq_tile: (64, 16),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_q4_1_mmq_4warp_lds_gfx906"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqLdsX64,
+            stem: "mmq_q4_1_4warp_lds",
+            entry: "flambeau_mmq_q4_1_4warp_lds_q8_1",
+            entry_f16: None,
+            threads: 0, // unused for MmqLdsX64 (2D block dims hard-coded in launcher)
+            rows_per_block: 0,
+    // MMQ_Y=128, MMQ_X=64 — used by the launcher to compute the grid
+    // and dynamic LDS bytes. These MUST match mmq_q4_1_4warp_lds.cu.
+            mmq_tile: (128, 64),
+        },
+    },
+    // wave64 MMQ for Q4_1. Same shape family as Q8_0/K-quant
+    // wave64 kernels — MMQ_Y=64, TILE_N=8, 64 threads, DP4A inner.
+    RecipeRow {
+        ids: &["qmatmul_q4_1_mmq_wave64_gfx906"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqWave64,
+            stem: "mmq_q4_1_wave64",
+            entry: "flambeau_mmq_q4_1_wave64_q8_1",
+            entry_f16: None,
+            threads: 64,
+            rows_per_block: 0,
+            mmq_tile: (64, 8),
+        },
+    },
+    // wave64 MMQ for Q4_0. Closes the prefill gap to
+    // llama.cpp on Qwen3.6-35B-A3B-Q4_0 at dense + MoE shapes.
+    RecipeRow {
+        ids: &["qmatmul_q4_0_mmq_wave64_gfx906"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqWave64,
+            stem: "mmq_q4_0_wave64",
+            entry: "flambeau_mmq_q4_0_wave64_q8_1",
+            entry_f16: None,
+            threads: 64,
+            rows_per_block: 0,
+            mmq_tile: (64, 8),
+        },
+    },
+    // 4-warp LDS-tiled Q4_0 MMQ — port of the Q4_1
+    // 4warp_lds structure with bias-correction in the dot. Closes
+    // the 2.5× dense-prefill gap (27B-Q4_0 73 → ~190 tok/s pp4).
+    // MUST match mmq_q4_0_4warp_lds.cu's MMQ_Y=128, MMQ_X=64.
+    RecipeRow {
+        ids: &["qmatmul_q4_0_mmq_4warp_lds_gfx906", "qmatmul_q4_0_mmq_4warp_lds"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqLdsX64,
+            stem: "mmq_q4_0_4warp_lds",
+            entry: "flambeau_mmq_q4_0_4warp_lds_q8_1",
+            entry_f16: None,
+            threads: 0,
+            rows_per_block: 0,
+            mmq_tile: (128, 64),
+        },
+    },
+    // Int8 tensor-core MMQ for Q4_0 (sm_80+). MUST match
+    // mmq_q4_0_mma.cu's mmq_q4_0_mma_row<128, 64, 4, 2>.
+    RecipeRow {
+        ids: &["qmatmul_q4_0_mma"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqMma,
+            stem: "mmq_q4_0_mma",
+            entry: "flambeau_mmq_q4_0_mma_q8_1",
+            entry_f16: None,
+            threads: 0,
+            rows_per_block: 0,
+            mmq_tile: (256, 128),
+        },
+    },
+    // wave64 MMQ for Q5_0. Same tile shape + launch as Q4_0;
+    // inner loop adds the 5th-bit `16·bit·y` DP4A term
+    // (mmvq_q5_0 pattern).
+    RecipeRow {
+        ids: &["qmatmul_q5_0_mmq_wave64_gfx906"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqWave64,
+            stem: "mmq_q5_0_wave64",
+            entry: "flambeau_mmq_q5_0_wave64_q8_1",
+            entry_f16: None,
+            threads: 64,
+            rows_per_block: 0,
+            mmq_tile: (64, 8),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_q5_1_mmq_wave64_gfx906"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqWave64,
+            stem: "mmq_q5_1_wave64",
+            entry: "flambeau_mmq_q5_1_wave64_q8_1",
+            entry_f16: None,
+            threads: 64,
+            rows_per_block: 0,
+            mmq_tile: (64, 8),
+        },
+    },
+    // 128×16-tile Q4_K LDS-tiled MMQ, DS4 Q8_1 activation, 256 threads
+    // per (64, 4, 1) block, 22528 B dynamic LDS. No longer dispatched on
+    // gfx906 (superseded by the 64×64 `_y64` recipe); kept for A/B.
+    RecipeRow {
+        ids: &["qmatmul_q4_K_mmq_lds_tiled_gfx906"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqLdsX64,
+            stem: "mmq_q4_K_lds_tiled",
+            entry: "flambeau_mmq_q4_K_lds_tiled_q8_1",
+            entry_f16: None,
+            threads: 0, // unused for MmqLdsX64
+            rows_per_block: 0,
+    // MMQ_Y=128, MMQ_X=16 (must match mmq_q4_K_lds_tiled.cu).
+            mmq_tile: (128, 16),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_q5_K_mmq_lds_tiled_gfx906"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqLdsX64,
+            stem: "mmq_q5_K_lds_tiled",
+            entry: "flambeau_mmq_q5_K_lds_tiled_q8_1",
+            entry_f16: None,
+            threads: 0,
+            rows_per_block: 0,
+            mmq_tile: (64, 64),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_q6_K_mmq_lds_tiled_gfx906"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqLdsX64,
+            stem: "mmq_q6_K_lds_tiled",
+            entry: "flambeau_mmq_q6_K_lds_tiled_q8_1",
+            entry_f16: None,
+            threads: 0,
+            rows_per_block: 0,
+            mmq_tile: (64, 64),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_iq4_xs_mmq_lds_tiled_gfx906"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqLdsX64,
+            stem: "mmq_iq4_xs_lds_tiled",
+            entry: "flambeau_mmq_iq4_xs_lds_tiled_q8_1",
+            entry_f16: None,
+            threads: 0,
+            rows_per_block: 0,
+            mmq_tile: (64, 64),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_q4_K_mmq_lds_tiled_y64_gfx906"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqLdsX64,
+            stem: "mmq_q4_K_lds_tiled_y64",
+            entry: "flambeau_mmq_q4_K_lds_tiled_y64_q8_1",
+            entry_f16: None,
+            threads: 0,
+            rows_per_block: 0,
+            mmq_tile: (64, 64),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_q3_K_mmq_lds_tiled_gfx906"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqLdsX64,
+            stem: "mmq_q3_K_lds_tiled",
+            entry: "flambeau_mmq_q3_K_lds_tiled_q8_1",
+            entry_f16: None,
+            threads: 0,
+            rows_per_block: 0,
+            mmq_tile: (64, 64),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_iq4_nl_mmq_lds_tiled_gfx906"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqLdsX64,
+            stem: "mmq_iq4_nl_lds_tiled",
+            entry: "flambeau_mmq_iq4_nl_lds_tiled_q8_1",
+            entry_f16: None,
+            threads: 0,
+            rows_per_block: 0,
+            mmq_tile: (64, 64),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_q8_0_mmq_lds_tiled_gfx906"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqLdsX64,
+            stem: "mmq_q8_0_lds_tiled",
+            entry: "flambeau_mmq_q8_0_lds_tiled_q8_1",
+            entry_f16: None,
+            threads: 0,
+            rows_per_block: 0,
+            mmq_tile: (64, 64),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_q5_K_mmq_lds_tiled_x8_gfx906"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqLdsX64,
+            stem: "mmq_q5_K_lds_tiled_x8",
+            entry: "flambeau_mmq_q5_K_lds_tiled_x8_q8_1",
+            entry_f16: None,
+            threads: 0,
+            rows_per_block: 0,
+            mmq_tile: (64, 8),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_q6_K_mmq_lds_tiled_x8_gfx906"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqLdsX64,
+            stem: "mmq_q6_K_lds_tiled_x8",
+            entry: "flambeau_mmq_q6_K_lds_tiled_x8_q8_1",
+            entry_f16: None,
+            threads: 0,
+            rows_per_block: 0,
+            mmq_tile: (64, 8),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_iq4_xs_mmq_lds_tiled_x8_gfx906"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqLdsX64,
+            stem: "mmq_iq4_xs_lds_tiled_x8",
+            entry: "flambeau_mmq_iq4_xs_lds_tiled_x8_q8_1",
+            entry_f16: None,
+            threads: 0,
+            rows_per_block: 0,
+            mmq_tile: (64, 8),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_q4_K_mmq_lds_tiled_y64_x8_gfx906"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqLdsX64,
+            stem: "mmq_q4_K_lds_tiled_y64_x8",
+            entry: "flambeau_mmq_q4_K_lds_tiled_y64_x8_q8_1",
+            entry_f16: None,
+            threads: 0,
+            rows_per_block: 0,
+            mmq_tile: (64, 8),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_q3_K_mmq_lds_tiled_x8_gfx906"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqLdsX64,
+            stem: "mmq_q3_K_lds_tiled_x8",
+            entry: "flambeau_mmq_q3_K_lds_tiled_x8_q8_1",
+            entry_f16: None,
+            threads: 0,
+            rows_per_block: 0,
+            mmq_tile: (64, 8),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_iq4_nl_mmq_lds_tiled_x8_gfx906"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqLdsX64,
+            stem: "mmq_iq4_nl_lds_tiled_x8",
+            entry: "flambeau_mmq_iq4_nl_lds_tiled_x8_q8_1",
+            entry_f16: None,
+            threads: 0,
+            rows_per_block: 0,
+            mmq_tile: (64, 8),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_q4_K_mmq_wave64_gfx906"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqWave64,
+            stem: "mmq_q4_K_wave64",
+            entry: "flambeau_mmq_q4_K_wave64_q8_1",
+            entry_f16: None,
+            threads: 64,
+            rows_per_block: 0,
+    // MMQ_Y = 64 rows, TILE_N = 8 cols per tile
+            mmq_tile: (64, 8),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_q5_K_mmq_wave64_gfx906"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqWave64,
+            stem: "mmq_q5_K_wave64",
+            entry: "flambeau_mmq_q5_K_wave64_q8_1",
+            entry_f16: None,
+            threads: 64,
+            rows_per_block: 0,
+    // MMQ_Y = 64 rows, TILE_N = 8 cols per tile
+            mmq_tile: (64, 8),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_q6_K_mmq_wave64_gfx906"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqWave64,
+            stem: "mmq_q6_K_wave64",
+            entry: "flambeau_mmq_q6_K_wave64_q8_1",
+            entry_f16: None,
+            threads: 64,
+            rows_per_block: 0,
+    // MMQ_Y = 64 rows, TILE_N = 8 cols per tile
+            mmq_tile: (64, 8),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_q8_K_mmq_wave64_gfx906"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqWave64,
+            stem: "mmq_q8_K_wave64",
+            entry: "flambeau_mmq_q8_K_wave64_q8_1",
+            entry_f16: None,
+            threads: 64,
+            rows_per_block: 0,
+            mmq_tile: (64, 8),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_q2_K_mmq_wave64_gfx906"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqWave64,
+            stem: "mmq_q2_K_wave64",
+            entry: "flambeau_mmq_q2_K_wave64_q8_1",
+            entry_f16: None,
+            threads: 64,
+            rows_per_block: 0,
+            mmq_tile: (64, 8),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_q3_K_mmq_wave64_gfx906"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqWave64,
+            stem: "mmq_q3_K_wave64",
+            entry: "flambeau_mmq_q3_K_wave64_q8_1",
+            entry_f16: None,
+            threads: 64,
+            rows_per_block: 0,
+            mmq_tile: (64, 8),
+        },
+    },
+];
 
 /// Resolve a dispatch `impl_id` to its kernel stem (the `.hsaco` / `.cubin`
 /// catalogue name). Test/diagnostic hook: lets a cross-backend check assert that
@@ -2999,5 +2817,55 @@ fn block_elems(dtype: QDtype) -> usize {
         // activation side, which is what the F16 MMVQ kernel iterates over.
         QDtype::F16 => 32,
         other => panic!("qmatmul weight dtype {other:?} not supported"),
+    }
+}
+
+#[cfg(test)]
+mod recipe_table_tests {
+    use super::QMATMUL_RECIPES;
+
+    #[test]
+    fn every_impl_id_names_one_recipe() {
+        let mut seen = std::collections::HashSet::new();
+        for row in QMATMUL_RECIPES {
+            for id in row.ids {
+                assert!(seen.insert(*id), "impl_id {id} listed in two recipe rows");
+            }
+        }
+    }
+
+    #[cfg(feature = "hip")]
+    #[test]
+    fn every_gfx906_descriptor_has_a_recipe() {
+        for d in flambeau_backend_hip::QMATMUL_GFX906 {
+            assert!(super::Recipe::from_impl_id(d.impl_id).is_ok(), "no recipe for {}", d.impl_id);
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn every_sm86_descriptor_has_a_recipe() {
+        for d in flambeau_backend_cuda::impls::QMATMUL_SM86 {
+            assert!(super::Recipe::from_impl_id(d.impl_id).is_ok(), "no recipe for {}", d.impl_id);
+        }
+    }
+
+    /// A recipe no descriptor of either backend can name is dead: the launch
+    /// path only resolves recipes from dispatched descriptors.
+    #[cfg(all(feature = "hip", feature = "cuda"))]
+    #[test]
+    fn every_recipe_serves_a_descriptor() {
+        let descriptors: Vec<&str> = flambeau_backend_hip::QMATMUL_GFX906
+            .iter()
+            .chain(flambeau_backend_cuda::impls::QMATMUL_SM86)
+            .map(|d| d.impl_id)
+            .collect();
+        for row in QMATMUL_RECIPES {
+            assert!(
+                row.ids.iter().any(|id| descriptors.contains(id)),
+                "recipe {:?} is named by no QMatMul descriptor",
+                row.ids
+            );
+        }
     }
 }

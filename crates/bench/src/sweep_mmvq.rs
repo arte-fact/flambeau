@@ -4992,18 +4992,16 @@ fn check_dispatch(
         let (fastest_d, fastest_t) =
             totals.iter().copied().min_by(|a, b| a.1.total_cmp(&b.1)).unwrap();
 
-        // Resolve both incumbent and challenger to the kernel that actually
-        // runs: the launch layer aliases some dispatch impl_ids (e.g. Q8_0
-        // `single_row` → `t128_vdr2`), so the literal impl_id's measured time
-        // can be a kernel that never executes. Compare live kernels, not labels.
-        let live = |id: &str| flambeau_ops::qmatmul::recipe_stem_for(id).ok();
-        let inc_live = live(inc_impl);
+        // Compare kernels, not labels: the launch layer aliases some dispatch
+        // impl_ids (e.g. Q8_0 `single_row` → `t128_vdr2`), so the incumbent is
+        // resolved through its recipe; a challenger is the kernel it timed.
+        let inc_live = flambeau_ops::qmatmul::recipe_stem_for(inc_impl).ok();
         let inc_time = inc_live
             .and_then(|s| totals.iter().find(|(d, _)| d.kernel_stem() == s).map(|&(_, t)| t))
             .or_else(|| totals.iter().find(|(d, _)| d.impl_id() == inc_impl).map(|&(_, t)| t));
         match inc_time {
             Some(inc_t)
-                if live(fastest_d.impl_id()) != inc_live
+                if Some(fastest_d.kernel_stem()) != inc_live
                     && fastest_t < inc_t * (1.0 - AUTOTUNE_HYSTERESIS) =>
             {
                 issues.push(format!(
