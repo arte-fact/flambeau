@@ -1237,6 +1237,13 @@ pub fn standard_attn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
         // Multi-slot or non-contiguous positions → one-shot batched
         // KV-append + batched-decode attention. Caller's pool sized
         // for `max_slots > 1` provided the host→device upload arrays.
+        if !kv.layout.supports_multi_slot_decode() {
+            bail!(
+                "standard_attn: multi-slot decode has no {:?} KV path (n={n} rows); \
+                 decode one slot per forward",
+                kv.layout
+            );
+        }
         if state.pool.attn_slot_k_dst_ptrs.as_usize() == 0 {
             bail!(
                 "standard_attn: non-prefill shape requires max_slots > 1 in ScratchConfig \

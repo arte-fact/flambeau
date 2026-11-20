@@ -405,6 +405,14 @@ pub enum KvLayout {
 pub const Q8_0_BLOCK_BYTES: usize = 34;
 
 impl KvLayout {
+    /// Whether one forward can decode several slots at once with this
+    /// layout. The multi-slot decode branch of `standard_attn` (batched KV
+    /// append + batched decode attention) exists for F16 slabs only; a Q8
+    /// cache must be decoded one slot per forward.
+    pub fn supports_multi_slot_decode(self) -> bool {
+        matches!(self, KvLayout::F16Contig)
+    }
+
     /// Slab byte stride for one (token × n_kv_heads × head_dim) row.
     /// `kv_width = n_kv_heads * head_dim` (elements, per rank).
     pub fn bytes_per_row(self, kv_width: usize) -> usize {
@@ -2009,6 +2017,16 @@ impl ScratchPool {
 #[cfg(test)]
 mod kv_layout_tests {
     use super::*;
+
+    /// The multi-slot decode branch of `standard_attn` writes and reads F16
+    /// rows; a layout without that branch must keep the server from putting
+    /// several slots in one forward (a Q8 cache decoded through it faulted
+    /// the GPU with an illegal memory access).
+    #[test]
+    fn only_f16_slabs_decode_several_slots_per_forward() {
+        assert!(KvLayout::F16Contig.supports_multi_slot_decode());
+        assert!(!KvLayout::Q8Contig.supports_multi_slot_decode());
+    }
 
     #[test]
     fn f16_contig_row_bytes_match_two_times_kv_width() {

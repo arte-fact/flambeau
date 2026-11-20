@@ -316,6 +316,9 @@ pub struct V2Model {
     /// `forward_decode_batched` impl can slice the `[N, vocab]` logits
     /// buffer without re-reading.
     pub vocab: usize,
+    /// KV cache layout of the shared session. Gates the paths that put
+    /// several slots in one forward (scheduler batching, mixed batches).
+    pub kv_layout: flambeau_forward::KvLayout,
 }
 
 impl Model for V2Model {
@@ -326,7 +329,7 @@ impl Model for V2Model {
         self
     }
     fn supports_scheduler_batching(&self) -> bool {
-        true
+        self.kv_layout.supports_multi_slot_decode()
     }
     fn forward_decode_batched(
         &self,
@@ -393,7 +396,8 @@ impl Model for V2Model {
         Ok(())
     }
     fn supports_mixed_batch(&self) -> bool {
-        matches!(
+        self.kv_layout.supports_multi_slot_decode()
+            && matches!(
             self.gguf_arch,
             "qwen35"
                 | "qwen35moe"

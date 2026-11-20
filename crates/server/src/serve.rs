@@ -306,7 +306,16 @@ pub(crate) async fn serve_inner_v2(
         chat_stops,
         shared: Arc::clone(&shared),
         vocab: model_cfg.vocab_size,
+        kv_layout,
     }) as crate::model_handle::LoadedModel;
+    if !kv_layout.supports_multi_slot_decode() && inflight_slots > 1 {
+        info!(
+            ?kv_layout,
+            inflight_slots,
+            "KV layout has no multi-slot decode path: concurrent requests decode one slot per forward \
+             (no scheduler batching, no mixed prefill+decode batches)"
+        );
+    }
 
     let state = crate::serve_common::build_server_state(crate::serve_common::ServerStateInputs {
         model_id: cfg.model_id.clone(),
