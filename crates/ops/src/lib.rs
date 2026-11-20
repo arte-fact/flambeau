@@ -71,7 +71,6 @@ pub use sig::{
     GdnAlphaBetaBuffers, GdnAlphaBetaShape, GdnConvTrioBatchedSlotsBuffers, GdnConvTrioShape,
     GdnSplitQkvBuffers, GdnSplitQkvShape,
     PenaltyBuffers, PenaltyKnobs,
-    MoeMmqQ4KGateUpLdsTiledBuffers, MoeMmqQ4KDownLdsTiledBuffers,
     MoeMmqQ4KBuffers, MoeMmqQ4KShape,
     SplitQGateBuffers, SplitQGateShape,
     ConvCausal1dBuffers, ConvCausal1dShape,

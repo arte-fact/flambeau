@@ -928,28 +928,8 @@ const SIMPLE_SWEEPS: &[(&str, SweepFn)] = &[
         flambeau_bench::sweep_moe::run_indexed_moe_mmq_q4_0_down_tile8_sweep,
     ),
     (
-        "indexed_moe_mmq_q4_1_gate_up_tile8",
-        flambeau_bench::sweep_moe::run_indexed_moe_mmq_q4_1_gate_up_tile8_sweep,
-    ),
-    (
         "indexed_moe_mmq_q4_1_down_tile8",
         flambeau_bench::sweep_moe::run_indexed_moe_mmq_q4_1_down_tile8_sweep,
-    ),
-    (
-        "indexed_moe_mmq_q5_0_gate_up_tile8",
-        flambeau_bench::sweep_moe::run_indexed_moe_mmq_q5_0_gate_up_tile8_sweep,
-    ),
-    (
-        "indexed_moe_mmq_q5_0_down_tile8",
-        flambeau_bench::sweep_moe::run_indexed_moe_mmq_q5_0_down_tile8_sweep,
-    ),
-    (
-        "indexed_moe_mmq_q5_1_gate_up_tile8",
-        flambeau_bench::sweep_moe::run_indexed_moe_mmq_q5_1_gate_up_tile8_sweep,
-    ),
-    (
-        "indexed_moe_mmq_q5_1_down_tile8",
-        flambeau_bench::sweep_moe::run_indexed_moe_mmq_q5_1_down_tile8_sweep,
     ),
     (
         "indexed_moe_mmq_q4_k_gate_up_tile8",
@@ -974,14 +954,6 @@ const SIMPLE_SWEEPS: &[(&str, SweepFn)] = &[
     (
         "indexed_moe_mmq_q6_k_down_tile8",
         flambeau_bench::sweep_moe::run_indexed_moe_mmq_q6_k_down_tile8_sweep,
-    ),
-    (
-        "indexed_moe_mmq_q2_k_gate_up_tile8",
-        flambeau_bench::sweep_moe::run_indexed_moe_mmq_q2_k_gate_up_tile8_sweep,
-    ),
-    (
-        "indexed_moe_mmq_q2_k_down_tile8",
-        flambeau_bench::sweep_moe::run_indexed_moe_mmq_q2_k_down_tile8_sweep,
     ),
     (
         "indexed_moe_mmq_q3_k_gate_up_tile8",
@@ -1540,16 +1512,6 @@ fn moe_mmvq_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::MoeMmvqDtyp
 }
 
 #[cfg(any(feature = "hip_sweep", feature = "cuda_sweep"))]
-fn moe_mmq_lds_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::MoeMmqLdsDtype> {
-    use flambeau_bench::sweep_mmvq::MoeMmqLdsDtype;
-    match dtype {
-        "Q4_K_gate_up_lds_tiled_moe_mmq" => Some(MoeMmqLdsDtype::Q4KGateUp),
-        "Q4_K_down_lds_tiled_moe_mmq" => Some(MoeMmqLdsDtype::Q4KDown),
-        _ => None,
-    }
-}
-
-#[cfg(any(feature = "hip_sweep", feature = "cuda_sweep"))]
 fn moe_mmq_tile8_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::MoeMmqTile8Dtype> {
     use flambeau_bench::sweep_mmvq::MoeMmqTile8Dtype;
     match dtype {
@@ -1557,20 +1519,13 @@ fn moe_mmq_tile8_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::MoeMmq
         "Q8_0_down_tile8_moe_mmq" => Some(MoeMmqTile8Dtype::Q8_0Down),
         "Q4_0_gate_up_tile8_moe_mmq" => Some(MoeMmqTile8Dtype::Q4_0GateUp),
         "Q4_0_down_tile8_moe_mmq" => Some(MoeMmqTile8Dtype::Q4_0Down),
-        "Q4_1_gate_up_tile8_moe_mmq" => Some(MoeMmqTile8Dtype::Q4_1GateUp),
         "Q4_1_down_tile8_moe_mmq" => Some(MoeMmqTile8Dtype::Q4_1Down),
-        "Q5_0_gate_up_tile8_moe_mmq" => Some(MoeMmqTile8Dtype::Q5_0GateUp),
-        "Q5_0_down_tile8_moe_mmq" => Some(MoeMmqTile8Dtype::Q5_0Down),
-        "Q5_1_gate_up_tile8_moe_mmq" => Some(MoeMmqTile8Dtype::Q5_1GateUp),
-        "Q5_1_down_tile8_moe_mmq" => Some(MoeMmqTile8Dtype::Q5_1Down),
         "Q4_K_gate_up_tile8_moe_mmq" => Some(MoeMmqTile8Dtype::Q4KGateUp),
         "Q4_K_down_tile8_moe_mmq" => Some(MoeMmqTile8Dtype::Q4KDown),
         "Q5_K_gate_up_tile8_moe_mmq" => Some(MoeMmqTile8Dtype::Q5KGateUp),
         "Q5_K_down_tile8_moe_mmq" => Some(MoeMmqTile8Dtype::Q5KDown),
         "Q6_K_gate_up_tile8_moe_mmq" => Some(MoeMmqTile8Dtype::Q6KGateUp),
         "Q6_K_down_tile8_moe_mmq" => Some(MoeMmqTile8Dtype::Q6KDown),
-        "Q2_K_gate_up_tile8_moe_mmq" => Some(MoeMmqTile8Dtype::Q2KGateUp),
-        "Q2_K_down_tile8_moe_mmq" => Some(MoeMmqTile8Dtype::Q2KDown),
         "Q3_K_gate_up_tile8_moe_mmq" => Some(MoeMmqTile8Dtype::Q3KGateUp),
         "Q3_K_down_tile8_moe_mmq" => Some(MoeMmqTile8Dtype::Q3KDown),
         "IQ4_NL_gate_up_tile8_moe_mmq" => Some(MoeMmqTile8Dtype::Iq4NlGateUp),
@@ -1655,11 +1610,6 @@ fn named_qmatmul_sweep<B: flambeau_bench::backend::BenchBackend>(
         (
             format!("indexed_moe_mmvq_gate_up ({})", d.name()),
             mmvq::run_moe_gate_up_sweep::<B>(d, root, arch),
-        )
-    } else if let Some(d) = moe_mmq_lds_dtype(dtype) {
-        (
-            format!("indexed_moe_mmq_lds_tiled ({})", d.name()),
-            mmvq::run_moe_mmq_lds_sweep::<B>(d, root, arch),
         )
     } else if let Some(d) = moe_mmq_tile8_dtype(dtype) {
         (format!("indexed_moe_mmq_tile8 ({})", d.name()), mmvq::run_moe_mmq_tile8_sweep::<B>(d, root, arch))

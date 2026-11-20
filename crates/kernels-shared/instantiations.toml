@@ -3047,28 +3047,6 @@ params = """
 body = "indexed_moe_mmq_down_tile8_row<Q4_0>(w, y, expert_ids, sorted_pair_idx_padded, padded_offsets, dst, n_rows, n_tokens, top_k, n_blocks_per_row, n_experts);"
 
 [[kernel]]
-stem = "indexed_moe_mmq_q4_1_gate_up_tile8_dp4a"
-includes = ["indexed_moe_mmq_tile8.cuh"]
-
-[[kernel.entry]]
-name = "flambeau_indexed_moe_mmq_q4_1_gate_up_tile8_dp4a_q8_1"
-params = """
-    const flambeau_block_q4_1* __restrict__ gate_w,
-    const flambeau_block_q4_1* __restrict__ up_w,
-    const flambeau_block_q8_1* __restrict__ y,
-    const int* __restrict__ expert_ids,
-    const int* __restrict__ sorted_pair_idx_padded,
-    const int* __restrict__ padded_offsets,
-    float* __restrict__ gate_out,
-    float* __restrict__ up_out,
-    const int n_rows,
-    const int n_tokens,
-    const int top_k,
-    const int n_blocks_per_row,
-    const int n_experts"""
-body = "indexed_moe_mmq_gate_up_tile8_row<Q4_1>(gate_w, up_w, y, expert_ids, sorted_pair_idx_padded, padded_offsets, gate_out, up_out, n_rows, n_tokens, top_k, n_blocks_per_row, n_experts);"
-
-[[kernel]]
 stem = "indexed_moe_mmq_q4_1_down_tile8_dp4a"
 includes = ["indexed_moe_mmq_tile8.cuh"]
 
@@ -3087,90 +3065,6 @@ params = """
     const int n_blocks_per_row,
     const int n_experts"""
 body = "indexed_moe_mmq_down_tile8_row<Q4_1>(w, y, expert_ids, sorted_pair_idx_padded, padded_offsets, dst, n_rows, n_tokens, top_k, n_blocks_per_row, n_experts);"
-
-[[kernel]]
-stem = "indexed_moe_mmq_q5_0_gate_up_tile8_dp4a"
-includes = ["indexed_moe_mmq_tile8.cuh"]
-
-[[kernel.entry]]
-name = "flambeau_indexed_moe_mmq_q5_0_gate_up_tile8_dp4a_q8_1"
-params = """
-    const flambeau_block_q5_0* __restrict__ gate_w,
-    const flambeau_block_q5_0* __restrict__ up_w,
-    const flambeau_block_q8_1* __restrict__ y,
-    const int* __restrict__ expert_ids,
-    const int* __restrict__ sorted_pair_idx_padded,
-    const int* __restrict__ padded_offsets,
-    float* __restrict__ gate_out,
-    float* __restrict__ up_out,
-    const int n_rows,
-    const int n_tokens,
-    const int top_k,
-    const int n_blocks_per_row,
-    const int n_experts"""
-body = "indexed_moe_mmq_gate_up_tile8_row<Q5_0>(gate_w, up_w, y, expert_ids, sorted_pair_idx_padded, padded_offsets, gate_out, up_out, n_rows, n_tokens, top_k, n_blocks_per_row, n_experts);"
-
-[[kernel]]
-stem = "indexed_moe_mmq_q5_0_down_tile8_dp4a"
-includes = ["indexed_moe_mmq_tile8.cuh"]
-
-[[kernel.entry]]
-name = "flambeau_indexed_moe_mmq_q5_0_down_tile8_dp4a_q8_1"
-params = """
-    const flambeau_block_q5_0* __restrict__ w,
-    const flambeau_block_q8_1* __restrict__ y,
-    const int* __restrict__ expert_ids,
-    const int* __restrict__ sorted_pair_idx_padded,
-    const int* __restrict__ padded_offsets,
-    float* __restrict__ dst,
-    const int n_rows,
-    const int n_tokens,
-    const int top_k,
-    const int n_blocks_per_row,
-    const int n_experts"""
-body = "indexed_moe_mmq_down_tile8_row<Q5_0>(w, y, expert_ids, sorted_pair_idx_padded, padded_offsets, dst, n_rows, n_tokens, top_k, n_blocks_per_row, n_experts);"
-
-[[kernel]]
-stem = "indexed_moe_mmq_q5_1_gate_up_tile8_dp4a"
-includes = ["indexed_moe_mmq_tile8.cuh"]
-
-[[kernel.entry]]
-name = "flambeau_indexed_moe_mmq_q5_1_gate_up_tile8_dp4a_q8_1"
-params = """
-    const flambeau_block_q5_1* __restrict__ gate_w,
-    const flambeau_block_q5_1* __restrict__ up_w,
-    const flambeau_block_q8_1* __restrict__ y,
-    const int* __restrict__ expert_ids,
-    const int* __restrict__ sorted_pair_idx_padded,
-    const int* __restrict__ padded_offsets,
-    float* __restrict__ gate_out,
-    float* __restrict__ up_out,
-    const int n_rows,
-    const int n_tokens,
-    const int top_k,
-    const int n_blocks_per_row,
-    const int n_experts"""
-body = "indexed_moe_mmq_gate_up_tile8_row<Q5_1>(gate_w, up_w, y, expert_ids, sorted_pair_idx_padded, padded_offsets, gate_out, up_out, n_rows, n_tokens, top_k, n_blocks_per_row, n_experts);"
-
-[[kernel]]
-stem = "indexed_moe_mmq_q5_1_down_tile8_dp4a"
-includes = ["indexed_moe_mmq_tile8.cuh"]
-
-[[kernel.entry]]
-name = "flambeau_indexed_moe_mmq_q5_1_down_tile8_dp4a_q8_1"
-params = """
-    const flambeau_block_q5_1* __restrict__ w,
-    const flambeau_block_q8_1* __restrict__ y,
-    const int* __restrict__ expert_ids,
-    const int* __restrict__ sorted_pair_idx_padded,
-    const int* __restrict__ padded_offsets,
-    float* __restrict__ dst,
-    const int n_rows,
-    const int n_tokens,
-    const int top_k,
-    const int n_blocks_per_row,
-    const int n_experts"""
-body = "indexed_moe_mmq_down_tile8_row<Q5_1>(w, y, expert_ids, sorted_pair_idx_padded, padded_offsets, dst, n_rows, n_tokens, top_k, n_blocks_per_row, n_experts);"
 
 # K-quant tile8 — own super-block decode (not quant_traits mmq policy).
 [[kernel]]
@@ -3298,48 +3192,6 @@ params = """
     const int n_sb_per_row,
     const int n_experts"""
 body = "indexed_moe_mmq_q6_k_down_tile8_row<float>(down_w, y, expert_ids, sorted_pair_idx_padded, padded_offsets, dst, n_rows, n_tokens, top_k, n_sb_per_row, n_experts);"
-
-[[kernel]]
-stem = "indexed_moe_mmq_q2_k_gate_up_tile8_dp4a"
-includes = ["indexed_moe_mmq_q2_k_tile8.cuh"]
-
-[[kernel.entry]]
-name = "flambeau_indexed_moe_mmq_q2_k_gate_up_tile8_dp4a_q8_1"
-params = """
-    const flambeau_block_q2_K* __restrict__ gate_w,
-    const flambeau_block_q2_K* __restrict__ up_w,
-    const flambeau_block_q8_1* __restrict__ y,
-    const int* __restrict__ expert_ids,
-    const int* __restrict__ sorted_pair_idx_padded,
-    const int* __restrict__ padded_offsets,
-    float* __restrict__ gate_out,
-    float* __restrict__ up_out,
-    const int n_rows,
-    const int n_tokens,
-    const int top_k,
-    const int n_sb_per_row,
-    const int n_experts"""
-body = "indexed_moe_mmq_q2_k_gate_up_tile8_row<float>(gate_w, up_w, y, expert_ids, sorted_pair_idx_padded, padded_offsets, gate_out, up_out, n_rows, n_tokens, top_k, n_sb_per_row, n_experts);"
-
-[[kernel]]
-stem = "indexed_moe_mmq_q2_k_down_tile8_dp4a"
-includes = ["indexed_moe_mmq_q2_k_tile8.cuh"]
-
-[[kernel.entry]]
-name = "flambeau_indexed_moe_mmq_q2_k_down_tile8_dp4a_q8_1"
-params = """
-    const flambeau_block_q2_K* __restrict__ down_w,
-    const flambeau_block_q8_1* __restrict__ y,
-    const int* __restrict__ expert_ids,
-    const int* __restrict__ sorted_pair_idx_padded,
-    const int* __restrict__ padded_offsets,
-    float* __restrict__ dst,
-    const int n_rows,
-    const int n_tokens,
-    const int top_k,
-    const int n_sb_per_row,
-    const int n_experts"""
-body = "indexed_moe_mmq_q2_k_down_tile8_row<float>(down_w, y, expert_ids, sorted_pair_idx_padded, padded_offsets, dst, n_rows, n_tokens, top_k, n_sb_per_row, n_experts);"
 
 [[kernel]]
 stem = "indexed_moe_mmq_q3_k_gate_up_tile8_dp4a"
@@ -3760,47 +3612,6 @@ params = """
     const int n_sb_per_row,
     const int n_experts"""
 body = "indexed_moe_mmq_iq1_m_down_tile8_row<float>(down_w, y, expert_ids, sorted_pair_idx_padded, padded_offsets, dst, n_rows, n_tokens, top_k, n_sb_per_row, n_experts);"
-
-[[kernel]]
-stem = "indexed_moe_mmq_q4_k_gate_up_lds_tiled"
-includes = ["indexed_moe_mmq_q4_k_lds_tiled.cuh"]
-
-[[kernel.entry]]
-name = "flambeau_indexed_moe_mmq_q4_k_gate_up_lds_tiled_q8_1"
-params = """
-    const flambeau_block_q4_K* __restrict__ gate_w,
-    const flambeau_block_q4_K* __restrict__ up_w,
-    const flambeau_block_q8_1_mmq* __restrict__ y_mmq,
-    const int* __restrict__ expert_ids,
-    const int* __restrict__ sorted_pair_idx_padded,
-    const int* __restrict__ padded_offsets,
-    float* __restrict__ gate_out,
-    float* __restrict__ up_out,
-    const int n_rows,
-    const int n_tokens,
-    const int top_k,
-    const int n_sb_per_row,
-    const int n_experts"""
-body = "indexed_moe_mmq_q4_k_gate_up_lds_tiled_row<8, 128, 4, float>(gate_w, up_w, y_mmq, expert_ids, sorted_pair_idx_padded, padded_offsets, gate_out, up_out, n_rows, n_tokens, top_k, n_sb_per_row, n_experts);"
-
-[[kernel]]
-stem = "indexed_moe_mmq_q4_k_down_lds_tiled"
-includes = ["indexed_moe_mmq_q4_k_lds_tiled.cuh"]
-
-[[kernel.entry]]
-name = "flambeau_indexed_moe_mmq_q4_k_down_lds_tiled_q8_1"
-params = """
-    const flambeau_block_q4_K* __restrict__ down_w,
-    const flambeau_block_q8_1_mmq* __restrict__ y_mmq,
-    const int* __restrict__ expert_ids,
-    const int* __restrict__ sorted_pair_idx_padded,
-    const int* __restrict__ padded_offsets,
-    float* __restrict__ dst,
-    const int n_rows,
-    const int n_pairs,
-    const int n_sb_per_row,
-    const int n_experts"""
-body = "indexed_moe_mmq_q4_k_down_lds_tiled_row<8, 128, 4, float>(down_w, y_mmq, expert_ids, sorted_pair_idx_padded, padded_offsets, dst, n_rows, n_pairs, n_sb_per_row, n_experts);"
 
 # P3 Stream F — Tier-B block-reduce kernels neutralized to shared `.cuh`
 # (block_reduce_sum over the WARP_SIZE seam → correct on wave64 + wave32).

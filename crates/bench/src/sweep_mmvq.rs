@@ -3153,20 +3153,13 @@ pub enum MoeMmqTile8Dtype {
     Q8_0Down,
     Q4_0GateUp,
     Q4_0Down,
-    Q4_1GateUp,
     Q4_1Down,
-    Q5_0GateUp,
-    Q5_0Down,
-    Q5_1GateUp,
-    Q5_1Down,
     Q4KGateUp,
     Q4KDown,
     Q5KGateUp,
     Q5KDown,
     Q6KGateUp,
     Q6KDown,
-    Q2KGateUp,
-    Q2KDown,
     Q3KGateUp,
     Q3KDown,
     Iq4NlGateUp,
@@ -3195,13 +3188,10 @@ impl MoeMmqTile8Dtype {
         match self {
             Q8_0GateUp => "q8_0_gate_up", Q8_0Down => "q8_0_down",
             Q4_0GateUp => "q4_0_gate_up", Q4_0Down => "q4_0_down",
-            Q4_1GateUp => "q4_1_gate_up", Q4_1Down => "q4_1_down",
-            Q5_0GateUp => "q5_0_gate_up", Q5_0Down => "q5_0_down",
-            Q5_1GateUp => "q5_1_gate_up", Q5_1Down => "q5_1_down",
+            Q4_1Down => "q4_1_down",
             Q4KGateUp => "q4_k_gate_up", Q4KDown => "q4_k_down",
             Q5KGateUp => "q5_k_gate_up", Q5KDown => "q5_k_down",
             Q6KGateUp => "q6_k_gate_up", Q6KDown => "q6_k_down",
-            Q2KGateUp => "q2_k_gate_up", Q2KDown => "q2_k_down",
             Q3KGateUp => "q3_k_gate_up", Q3KDown => "q3_k_down",
             Iq4NlGateUp => "iq4_nl_gate_up", Iq4NlDown => "iq4_nl_down",
             Iq4XsGateUp => "iq4_xs_gate_up", Iq4XsDown => "iq4_xs_down",
@@ -3219,13 +3209,10 @@ impl MoeMmqTile8Dtype {
         match self {
             Q8_0GateUp | Q8_0Down => Dtype::Q8_0Dp4a,
             Q4_0GateUp | Q4_0Down => Dtype::Q4_0,
-            Q4_1GateUp | Q4_1Down => Dtype::Q4_1Dp4a,
-            Q5_0GateUp | Q5_0Down => Dtype::Q5_0,
-            Q5_1GateUp | Q5_1Down => Dtype::Q5_1,
+            Q4_1Down => Dtype::Q4_1Dp4a,
             Q4KGateUp | Q4KDown => Dtype::Q4K,
             Q5KGateUp | Q5KDown => Dtype::Q5K,
             Q6KGateUp | Q6KDown => Dtype::Q6K,
-            Q2KGateUp | Q2KDown => Dtype::Q2K,
             Q3KGateUp | Q3KDown => Dtype::Q3K,
             Iq4NlGateUp | Iq4NlDown => Dtype::Iq4Nl,
             Iq4XsGateUp | Iq4XsDown => Dtype::Iq4Xs,
@@ -3241,8 +3228,7 @@ impl MoeMmqTile8Dtype {
     fn gate_up(self) -> bool {
         use MoeMmqTile8Dtype::*;
         matches!(self,
-            Q8_0GateUp | Q4_0GateUp | Q4_1GateUp | Q5_0GateUp | Q5_1GateUp
-            | Q4KGateUp | Q5KGateUp | Q6KGateUp | Q2KGateUp | Q3KGateUp
+            Q8_0GateUp | Q4_0GateUp | Q4KGateUp | Q5KGateUp | Q6KGateUp | Q3KGateUp
             | Iq4NlGateUp | Iq4XsGateUp | Iq2XxsGateUp | Iq2XsGateUp | Iq2SGateUp
             | Iq3XxsGateUp | Iq3SGateUp | Iq1SGateUp | Iq1MGateUp)
     }
@@ -3253,20 +3239,13 @@ impl MoeMmqTile8Dtype {
             Q8_0Down => "indexed_moe_mmq_q8_0_down_tile8",
             Q4_0GateUp => "indexed_moe_mmq_q4_0_gate_up_tile8",
             Q4_0Down => "indexed_moe_mmq_q4_0_down_tile8",
-            Q4_1GateUp => "indexed_moe_mmq_q4_1_gate_up_tile8",
             Q4_1Down => "indexed_moe_mmq_q4_1_down_tile8",
-            Q5_0GateUp => "indexed_moe_mmq_q5_0_gate_up_tile8",
-            Q5_0Down => "indexed_moe_mmq_q5_0_down_tile8",
-            Q5_1GateUp => "indexed_moe_mmq_q5_1_gate_up_tile8",
-            Q5_1Down => "indexed_moe_mmq_q5_1_down_tile8",
             Q4KGateUp => "indexed_moe_mmq_q4_k_gate_up_tile8",
             Q4KDown => "indexed_moe_mmq_q4_k_down_tile8",
             Q5KGateUp => "indexed_moe_mmq_q5_k_gate_up_tile8",
             Q5KDown => "indexed_moe_mmq_q5_k_down_tile8",
             Q6KGateUp => "indexed_moe_mmq_q6_k_gate_up_tile8",
             Q6KDown => "indexed_moe_mmq_q6_k_down_tile8",
-            Q2KGateUp => "indexed_moe_mmq_q2_k_gate_up_tile8",
-            Q2KDown => "indexed_moe_mmq_q2_k_down_tile8",
             Q3KGateUp => "indexed_moe_mmq_q3_k_gate_up_tile8",
             Q3KDown => "indexed_moe_mmq_q3_k_down_tile8",
             Iq4NlGateUp => "indexed_moe_mmq_iq4_nl_gate_up_tile8",
@@ -3296,20 +3275,13 @@ impl MoeMmqTile8Dtype {
             Q8_0Down => "indexed_moe_mmq_q8_0_down_tile8_dp4a",
             Q4_0GateUp => "indexed_moe_mmq_q4_0_gate_up_tile8_dp4a",
             Q4_0Down => "indexed_moe_mmq_q4_0_down_tile8_dp4a",
-            Q4_1GateUp => "indexed_moe_mmq_q4_1_gate_up_tile8_dp4a",
             Q4_1Down => "indexed_moe_mmq_q4_1_down_tile8_dp4a",
-            Q5_0GateUp => "indexed_moe_mmq_q5_0_gate_up_tile8_dp4a",
-            Q5_0Down => "indexed_moe_mmq_q5_0_down_tile8_dp4a",
-            Q5_1GateUp => "indexed_moe_mmq_q5_1_gate_up_tile8_dp4a",
-            Q5_1Down => "indexed_moe_mmq_q5_1_down_tile8_dp4a",
             Q4KGateUp => "indexed_moe_mmq_q4_k_gate_up_tile8_dp4a",
             Q4KDown => "indexed_moe_mmq_q4_k_down_tile8_dp4a",
             Q5KGateUp => "indexed_moe_mmq_q5_k_gate_up_tile8_dp4a",
             Q5KDown => "indexed_moe_mmq_q5_k_down_tile8_dp4a",
             Q6KGateUp => "indexed_moe_mmq_q6_k_gate_up_tile8_dp4a",
             Q6KDown => "indexed_moe_mmq_q6_k_down_tile8_dp4a",
-            Q2KGateUp => "indexed_moe_mmq_q2_k_gate_up_tile8_dp4a",
-            Q2KDown => "indexed_moe_mmq_q2_k_down_tile8_dp4a",
             Q3KGateUp => "indexed_moe_mmq_q3_k_gate_up_tile8_dp4a",
             Q3KDown => "indexed_moe_mmq_q3_k_down_tile8_dp4a",
             Iq4NlGateUp => "indexed_moe_mmq_iq4_nl_gate_up_tile8_dp4a",
@@ -3339,20 +3311,13 @@ impl MoeMmqTile8Dtype {
             Q8_0Down => "flambeau_indexed_moe_mmq_q8_0_down_tile8_dp4a_q8_1",
             Q4_0GateUp => "flambeau_indexed_moe_mmq_q4_0_gate_up_tile8_dp4a_q8_1",
             Q4_0Down => "flambeau_indexed_moe_mmq_q4_0_down_tile8_dp4a_q8_1",
-            Q4_1GateUp => "flambeau_indexed_moe_mmq_q4_1_gate_up_tile8_dp4a_q8_1",
             Q4_1Down => "flambeau_indexed_moe_mmq_q4_1_down_tile8_dp4a_q8_1",
-            Q5_0GateUp => "flambeau_indexed_moe_mmq_q5_0_gate_up_tile8_dp4a_q8_1",
-            Q5_0Down => "flambeau_indexed_moe_mmq_q5_0_down_tile8_dp4a_q8_1",
-            Q5_1GateUp => "flambeau_indexed_moe_mmq_q5_1_gate_up_tile8_dp4a_q8_1",
-            Q5_1Down => "flambeau_indexed_moe_mmq_q5_1_down_tile8_dp4a_q8_1",
             Q4KGateUp => "flambeau_indexed_moe_mmq_q4_k_gate_up_tile8_dp4a_q8_1",
             Q4KDown => "flambeau_indexed_moe_mmq_q4_k_down_tile8_dp4a_q8_1",
             Q5KGateUp => "flambeau_indexed_moe_mmq_q5_k_gate_up_tile8_dp4a_q8_1",
             Q5KDown => "flambeau_indexed_moe_mmq_q5_k_down_tile8_dp4a_q8_1",
             Q6KGateUp => "flambeau_indexed_moe_mmq_q6_k_gate_up_tile8_dp4a_q8_1",
             Q6KDown => "flambeau_indexed_moe_mmq_q6_k_down_tile8_dp4a_q8_1",
-            Q2KGateUp => "flambeau_indexed_moe_mmq_q2_k_gate_up_tile8_dp4a_q8_1",
-            Q2KDown => "flambeau_indexed_moe_mmq_q2_k_down_tile8_dp4a_q8_1",
             Q3KGateUp => "flambeau_indexed_moe_mmq_q3_k_gate_up_tile8_dp4a_q8_1",
             Q3KDown => "flambeau_indexed_moe_mmq_q3_k_down_tile8_dp4a_q8_1",
             Iq4NlGateUp => "flambeau_indexed_moe_mmq_iq4_nl_gate_up_tile8_dp4a_q8_1",
@@ -3382,7 +3347,7 @@ impl MoeMmqTile8Dtype {
         use MoeMmqTile8Dtype::*;
         match self {
             Q4KGateUp | Q4KDown | Q5KGateUp | Q5KDown | Q6KGateUp | Q6KDown
-            | Q2KGateUp | Q2KDown | Q3KGateUp | Q3KDown
+            | Q3KGateUp | Q3KDown
             | Iq4NlGateUp | Iq4NlDown | Iq4XsGateUp | Iq4XsDown
             | Iq2XxsGateUp | Iq2XxsDown | Iq2XsGateUp | Iq2XsDown
             | Iq2SGateUp | Iq2SDown | Iq3XxsGateUp | Iq3XxsDown
@@ -4031,358 +3996,6 @@ fn run_shape_mmq_4warp_lds<B: BenchBackend>(
             }
             reference[c * n_rows + row] = acc as f32;
         }
-    }
-    Ok((got, reference))
-}
-
-/// Q4_K 4-warp LDS-tiled indexed-MoE MMQ (DS4 144-B activation). gate_up fuses
-/// two weights over a per-token activation; down is single-weight per-pair.
-#[derive(Clone, Copy)]
-pub enum MoeMmqLdsDtype {
-    Q4KGateUp,
-    Q4KDown,
-}
-
-impl MoeMmqLdsDtype {
-    pub fn name(self) -> &'static str {
-        match self {
-            MoeMmqLdsDtype::Q4KGateUp => "q4_k_gate_up",
-            MoeMmqLdsDtype::Q4KDown => "q4_k_down",
-        }
-    }
-    fn gate_up(self) -> bool {
-        matches!(self, MoeMmqLdsDtype::Q4KGateUp)
-    }
-    fn impl_id(self) -> &'static str {
-        match self {
-            MoeMmqLdsDtype::Q4KGateUp => "indexed_moe_mmq_q4_k_gate_up_lds_tiled",
-            MoeMmqLdsDtype::Q4KDown => "indexed_moe_mmq_q4_k_down_lds_tiled",
-        }
-    }
-    fn kernel_stem(self) -> &'static str {
-        match self {
-            MoeMmqLdsDtype::Q4KGateUp => "indexed_moe_mmq_q4_k_gate_up_lds_tiled",
-            MoeMmqLdsDtype::Q4KDown => "indexed_moe_mmq_q4_k_down_lds_tiled",
-        }
-    }
-    fn kernel_entry(self) -> &'static str {
-        match self {
-            MoeMmqLdsDtype::Q4KGateUp => "flambeau_indexed_moe_mmq_q4_k_gate_up_lds_tiled_q8_1",
-            MoeMmqLdsDtype::Q4KDown => "flambeau_indexed_moe_mmq_q4_k_down_lds_tiled_q8_1",
-        }
-    }
-    /// Dynamic LDS bytes (MMQ_X=8, MMQ_Y=128, NWARPS=4; gate_up holds two weight
-    /// tiles, down one). tile_y = MMQ_X*36 ints; tile_x = 4880 ints each.
-    fn shared_bytes(self) -> u32 {
-        let tile_y = 8 * 36;
-        let tile_x = 4880;
-        match self {
-            MoeMmqLdsDtype::Q4KGateUp => ((tile_y + 2 * tile_x) * 4) as u32,
-            MoeMmqLdsDtype::Q4KDown => ((tile_y + tile_x) * 4) as u32,
-        }
-    }
-}
-
-pub fn run_moe_mmq_lds_sweep<B: BenchBackend>(
-    dtype: MoeMmqLdsDtype,
-    repo_root: &Path,
-    arch: &str,
-) -> Result<Cert> {
-    let dev = B::new_device(0)?;
-    let pmc = {
-        let bytes = B::image(dtype.kernel_stem())
-            .ok_or_else(|| anyhow!("{} kernel not compiled", dtype.kernel_stem()))?;
-        let module = B::load(&dev, bytes)?;
-        let kernel = B::kernel(&module, dtype.kernel_entry())?;
-        B::attributes(&kernel)?
-    };
-
-    let n_experts = 4usize;
-    // Prefill regime; k % 256 == 0 (ITER_K), n_rows a multiple of MMQ_Y helps but
-    // the kernel guards the tail.
-    let cases = [
-        (32usize, 4usize, 256usize, 2048usize),
-        (128, 4, 512, 2048),
-        (64, 4, 256, 1024),
-    ];
-
-    let mut results = Vec::new();
-    for (n_tokens, top_k, n_rows, k) in cases {
-        let seed = 0x15D5_u64
-            .wrapping_add((n_tokens as u64).wrapping_mul(53))
-            .wrapping_add((top_k as u64).wrapping_mul(17))
-            .wrapping_add((n_rows as u64).wrapping_mul(7));
-        let (got, reference) =
-            run_shape_moe_mmq_lds::<B>(&dev, dtype, n_experts, n_rows, k, top_k, n_tokens, seed)?;
-        let max_rel_err = max_rel_err_with_floor(&got, &reference, (k as f32).sqrt());
-        let tolerance = 5e-2f32;
-        results.push(ShapeResult {
-            m: n_tokens,
-            k,
-            n: n_rows,
-            seed,
-            max_rel_err,
-            tolerance,
-            pass: max_rel_err <= tolerance,
-        });
-    }
-
-    let pass = results.iter().all(|r| r.pass);
-    let cert = Cert {
-        schema_version: SCHEMA_VERSION,
-        impl_id: dtype.impl_id().to_string(),
-        backend: dev.backend().to_string(),
-        arch: arch.to_string(),
-        op: "indexed_moe_mmq_lds_tiled".to_string(),
-        dtype_weight: "Q4_K".to_string(),
-        dtype_activation: "Q8_1_DS4".to_string(),
-        tolerance_formula:
-            "|err| <= 5e-2 * max(|ref|, sqrt(k))  (Q4_K 4-warp LDS-tiled MoE MMQ)".to_string(),
-        results,
-        pass,
-        emitted_at: now_utc_iso8601(),
-        rig: rig_for(arch),
-        pmc: Some(pmc),
-    };
-    let written = cert.write_to_disk(repo_root)?;
-    tracing::info!(
-        target: "flambeau_bench::sweep_mmvq",
-        cert = %written.display(), pass = cert.pass, "indexed-moe lds_tiled cert written"
-    );
-    Ok(cert)
-}
-
-/// One Q4_K LDS-tiled MoE shape. `gate_up`: two weights, per-token DS4
-/// activation, outputs gate then up concatenated. `down`: one weight, per-pair
-/// activation. Returns `(got, reference)`.
-#[expect(clippy::too_many_arguments, reason = "MoE shape carries 7 independent dims")]
-fn run_shape_moe_mmq_lds<B: BenchBackend>(
-    dev: &B::Device,
-    dtype: MoeMmqLdsDtype,
-    n_experts: usize,
-    n_rows: usize,
-    k: usize,
-    top_k: usize,
-    n_tokens: usize,
-    seed: u64,
-) -> Result<(Vec<f32>, Vec<f32>)> {
-    assert_eq!(k % 256, 0, "k {k} must be a multiple of ITER_K (256)");
-    let gate_up = dtype.gate_up();
-    let n_pairs = n_tokens * top_k;
-    let n_act_rows = if gate_up { n_tokens } else { n_pairs };
-
-    let q_bytes = B::image("quantize_q8_1_mmq")
-        .ok_or_else(|| anyhow!("quantize_q8_1_mmq not compiled"))?;
-    let m_bytes = B::image(dtype.kernel_stem())
-        .ok_or_else(|| anyhow!("{} kernel not compiled", dtype.kernel_stem()))?;
-    let q_module = B::load(dev, q_bytes)?;
-    let m_module = B::load(dev, m_bytes)?;
-    let k_quantize = B::kernel(&q_module, "flambeau_quantize_q8_1_mmq")?;
-    let k_mmq = B::kernel(&m_module, dtype.kernel_entry())?;
-
-    let wd = Dtype::Q4K;
-    let block_elems = wd.block_elem_count();
-    let block_bytes = wd.block_size_bytes();
-    let n_blocks = k / block_elems;
-
-    let gate_raw =
-        tame_scales(wd, seeded_bytes(seed, n_experts * n_rows * n_blocks * block_bytes));
-    let mut gate_dq = vec![0.0f32; n_experts * n_rows * k];
-    dequantize_into(wd.ggml(), &gate_raw, &mut gate_dq)?;
-    let d_gate = alloc_and_upload(dev, gate_raw.as_slice());
-    let (up_raw, up_dq, d_up) = if gate_up {
-        let raw = tame_scales(
-            wd,
-            seeded_bytes(seed ^ 0xDEAD_BEEF, n_experts * n_rows * n_blocks * block_bytes),
-        );
-        let mut dq = vec![0.0f32; n_experts * n_rows * k];
-        dequantize_into(wd.ggml(), &raw, &mut dq)?;
-        let d = alloc_and_upload(dev, raw.as_slice());
-        (raw, dq, Some(d))
-    } else {
-        (Vec::new(), Vec::new(), None)
-    };
-
-    // Activation [n_act_rows][k] → DS4 [k/128][n_act_rows][144 B].
-    let act_f32 = seeded_f32_range(seed.wrapping_add(0xA5A5A5A5), n_act_rows * k, -1.0, 1.0);
-    let d_act = alloc_and_upload(dev, act_f32.as_slice());
-    const DS4_BYTES: usize = 144;
-    let n_big = k / 128;
-    let y_bytes = n_big * n_act_rows * DS4_BYTES;
-    let d_y = dev.alloc(y_bytes)?;
-    {
-        let stream = dev.default_stream();
-        let ncols_i = k as i32;
-        let total_b_i = n_act_rows as i32;
-        let d_act_ptr: u64 = d_act.as_usize() as u64;
-        let d_y_ptr: u64 = d_y.as_usize() as u64;
-        let mut args = <B::Args<'_>>::default();
-        args.push_arg(&d_act_ptr);
-        args.push_arg(&d_y_ptr);
-        args.push_arg(&ncols_i);
-        args.push_arg(&total_b_i);
-        let cfg = LaunchCfg {
-            grid: ((k / 128) as u32, n_act_rows as u32, 1),
-            block: (128, 1, 1),
-            shared_bytes: 0,
-        };
-        B::launch(&k_quantize, stream, cfg, args)?;
-        stream.synchronize()?;
-    }
-
-    let expert_ids: Vec<i32> = (0..n_pairs)
-        .map(|i| {
-            let h = (i as u64)
-                .wrapping_mul(0x9E3779B97F4A7C15)
-                .wrapping_add(seed.wrapping_mul(0x12345));
-            ((h >> 32) as u32 % n_experts as u32) as i32
-        })
-        .collect();
-    let (sorted_padded, padded_offsets) = build_padded_sort(&expert_ids, n_experts);
-    let padded_total = *padded_offsets.last().unwrap() as usize;
-    let d_ids = alloc_and_upload(dev, expert_ids.as_slice());
-    let d_sorted = alloc_and_upload(dev, sorted_padded.as_slice());
-    let d_pofs = alloc_and_upload(dev, padded_offsets.as_slice());
-
-    let out_elems = n_pairs * n_rows;
-    let d_out = dev.alloc(out_elems * 4)?;
-    let d_up_out = if gate_up { Some(dev.alloc(out_elems * 4)?) } else { None };
-
-    {
-        let stream = dev.default_stream();
-        let n_rows_i = n_rows as i32;
-        let second_i = if gate_up { n_tokens as i32 } else { n_pairs as i32 };
-        let top_k_i = top_k as i32;
-        let nb_i = n_blocks as i32;
-        let n_experts_i = n_experts as i32;
-        let g_ptr: u64 = d_gate.as_usize() as u64;
-        let y_ptr: u64 = d_y.as_usize() as u64;
-        let e_ptr: u64 = d_ids.as_usize() as u64;
-        let s_ptr: u64 = d_sorted.as_usize() as u64;
-        let po_ptr: u64 = d_pofs.as_usize() as u64;
-        let o_ptr: u64 = d_out.as_usize() as u64;
-        let u_ptr: u64 = d_up.map_or(0, |p| p.as_usize() as u64);
-        let uo_ptr: u64 = d_up_out.map_or(0, |p| p.as_usize() as u64);
-        let mut args = <B::Args<'_>>::default();
-        args.push_arg(&g_ptr);
-        if gate_up {
-            args.push_arg(&u_ptr);
-        }
-        args.push_arg(&y_ptr);
-        args.push_arg(&e_ptr);
-        args.push_arg(&s_ptr);
-        args.push_arg(&po_ptr);
-        args.push_arg(&o_ptr);
-        if gate_up {
-            args.push_arg(&uo_ptr);
-        }
-        args.push_arg(&n_rows_i);
-        args.push_arg(&second_i);
-        if gate_up {
-            args.push_arg(&top_k_i);
-        }
-        args.push_arg(&nb_i);
-        args.push_arg(&n_experts_i);
-        let cfg = LaunchCfg {
-            grid: ((n_rows as u32).div_ceil(128), (padded_total as u32).div_ceil(8).max(1), 1),
-            block: (64, 4, 1),
-            shared_bytes: dtype.shared_bytes(),
-        };
-        B::launch(&k_mmq, stream, cfg, args)?;
-        stream.synchronize()?;
-    }
-
-    let mut got_gate = vec![0.0f32; out_elems];
-    unsafe {
-        dev.memcpy_async(
-            dev.default_stream(),
-            CopyDirection::DeviceToHost,
-            DevicePtr(got_gate.as_mut_ptr() as usize),
-            d_out,
-            out_elems * 4,
-        )?;
-    }
-    let mut got_up = vec![0.0f32; if gate_up { out_elems } else { 0 }];
-    if let Some(uo) = d_up_out {
-        unsafe {
-            dev.memcpy_async(
-                dev.default_stream(),
-                CopyDirection::DeviceToHost,
-                DevicePtr(got_up.as_mut_ptr() as usize),
-                uo,
-                out_elems * 4,
-            )?;
-        }
-    }
-    dev.default_stream().synchronize()?;
-
-    // Q4_K-over-DS4 affine dot, weight at (expert, row), activation column `col`.
-    let q4k_ds4_dot = |w_raw: &[u8], w_dq: &[f32], expert: usize, row: usize, col: usize| -> f32 {
-        let xcol = &act_f32[col * k..(col + 1) * k];
-        let mut acc = 0.0f64;
-        for sup in 0..n_blocks {
-            let bb = ((expert * n_rows + row) * n_blocks + sup) * 144;
-            let dmin = f16::from_le_bytes([w_raw[bb + 2], w_raw[bb + 3]]).to_f32();
-            let scales = &w_raw[bb + 4..bb + 16];
-            for sub in 0..8usize {
-                let m_sub = q4k_min(sub, scales) as f32;
-                let e0 = sup * 256 + sub * 32;
-                let xs = &xcol[e0..e0 + 32];
-                let amax = xs.iter().fold(0.0f32, |mx, &v| mx.max(v.abs()));
-                let d_y = amax / 127.0;
-                let ssum: f32 = xs.iter().sum();
-                let mut sum_wq8 = 0.0f64;
-                let mut sum_q8 = 0.0f64;
-                for e in 0..32usize {
-                    let q8 = if d_y != 0.0 {
-                        (xs[e] / d_y).round().clamp(-127.0, 127.0)
-                    } else {
-                        0.0
-                    };
-                    sum_wq8 += w_dq[(expert * n_rows + row) * k + e0 + e] as f64 * q8 as f64;
-                    sum_q8 += q8 as f64;
-                }
-                acc += d_y as f64 * sum_wq8
-                    + dmin as f64 * m_sub as f64 * (d_y as f64 * sum_q8 - ssum as f64);
-            }
-        }
-        acc as f32
-    };
-
-    let mut ref_gate = vec![0.0f32; out_elems];
-    let mut ref_up = vec![0.0f32; if gate_up { out_elems } else { 0 }];
-    for p in 0..n_pairs {
-        let expert = expert_ids[p] as usize;
-        let col = if gate_up { p / top_k } else { p };
-        for row in 0..n_rows {
-            ref_gate[p * n_rows + row] = q4k_ds4_dot(&gate_raw, &gate_dq, expert, row, col);
-            if gate_up {
-                ref_up[p * n_rows + row] = q4k_ds4_dot(&up_raw, &up_dq, expert, row, col);
-            }
-        }
-    }
-
-    unsafe {
-        dev.dealloc(d_gate, gate_raw.len())?;
-        if let Some(p) = d_up {
-            dev.dealloc(p, up_raw.len())?;
-        }
-        dev.dealloc(d_act, act_f32.len() * 4)?;
-        dev.dealloc(d_y, y_bytes)?;
-        dev.dealloc(d_ids, expert_ids.len() * 4)?;
-        dev.dealloc(d_sorted, sorted_padded.len() * 4)?;
-        dev.dealloc(d_pofs, padded_offsets.len() * 4)?;
-        dev.dealloc(d_out, out_elems * 4)?;
-        if let Some(uo) = d_up_out {
-            dev.dealloc(uo, out_elems * 4)?;
-        }
-    }
-
-    let mut got = got_gate;
-    let mut reference = ref_gate;
-    if gate_up {
-        got.extend_from_slice(&got_up);
-        reference.extend_from_slice(&ref_up);
     }
     Ok((got, reference))
 }

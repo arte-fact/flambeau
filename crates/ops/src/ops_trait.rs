@@ -1086,18 +1086,6 @@ pub trait Ops {
         shape: MoeShape,
     ) -> Result<()>;
 
-    fn indexed_moe_mmq_q4_k_gate_up_lds_tiled(
-        &self,
-        bufs: crate::MoeMmqQ4KGateUpLdsTiledBuffers,
-        shape: MoeShape,
-    ) -> Result<()>;
-
-    fn indexed_moe_mmq_q4_k_down_lds_tiled(
-        &self,
-        bufs: crate::MoeMmqQ4KDownLdsTiledBuffers,
-        shape: MoeShape,
-    ) -> Result<()>;
-
     fn indexed_moe_mmq_q5_k_down_tile8(
         &self,
         buffers: crate::MoeMmqTile8DownBuffers,

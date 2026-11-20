@@ -109,28 +109,8 @@ pub const DIRECT_CALL_KERNELS_GFX906: &[DirectCallKernel] = &[
         cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q4_0_down_tile8_gfx906.json",
     },
     DirectCallKernel {
-        impl_id: "indexed_moe_mmq_q4_1_gate_up_tile8_gfx906",
-        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q4_1_gate_up_tile8_gfx906.json",
-    },
-    DirectCallKernel {
         impl_id: "indexed_moe_mmq_q4_1_down_tile8_gfx906",
         cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q4_1_down_tile8_gfx906.json",
-    },
-    DirectCallKernel {
-        impl_id: "indexed_moe_mmq_q5_0_gate_up_tile8_gfx906",
-        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q5_0_gate_up_tile8_gfx906.json",
-    },
-    DirectCallKernel {
-        impl_id: "indexed_moe_mmq_q5_0_down_tile8_gfx906",
-        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q5_0_down_tile8_gfx906.json",
-    },
-    DirectCallKernel {
-        impl_id: "indexed_moe_mmq_q5_1_gate_up_tile8_gfx906",
-        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q5_1_gate_up_tile8_gfx906.json",
-    },
-    DirectCallKernel {
-        impl_id: "indexed_moe_mmq_q5_1_down_tile8_gfx906",
-        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q5_1_down_tile8_gfx906.json",
     },
     DirectCallKernel {
         impl_id: "indexed_moe_mmq_q4_k_gate_up_tile8_gfx906",
@@ -155,14 +135,6 @@ pub const DIRECT_CALL_KERNELS_GFX906: &[DirectCallKernel] = &[
     DirectCallKernel {
         impl_id: "indexed_moe_mmq_q6_k_down_tile8_gfx906",
         cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q6_k_down_tile8_gfx906.json",
-    },
-    DirectCallKernel {
-        impl_id: "indexed_moe_mmq_q2_k_gate_up_tile8_gfx906",
-        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q2_k_gate_up_tile8_gfx906.json",
-    },
-    DirectCallKernel {
-        impl_id: "indexed_moe_mmq_q2_k_down_tile8_gfx906",
-        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q2_k_down_tile8_gfx906.json",
     },
     DirectCallKernel {
         impl_id: "indexed_moe_mmq_q3_k_gate_up_tile8_gfx906",
@@ -620,28 +592,8 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
         cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q4_0_down_tile8.json",
     },
     DirectCallKernel {
-        impl_id: "indexed_moe_mmq_q4_1_gate_up_tile8",
-        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q4_1_gate_up_tile8.json",
-    },
-    DirectCallKernel {
         impl_id: "indexed_moe_mmq_q4_1_down_tile8",
         cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q4_1_down_tile8.json",
-    },
-    DirectCallKernel {
-        impl_id: "indexed_moe_mmq_q5_0_gate_up_tile8",
-        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q5_0_gate_up_tile8.json",
-    },
-    DirectCallKernel {
-        impl_id: "indexed_moe_mmq_q5_0_down_tile8",
-        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q5_0_down_tile8.json",
-    },
-    DirectCallKernel {
-        impl_id: "indexed_moe_mmq_q5_1_gate_up_tile8",
-        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q5_1_gate_up_tile8.json",
-    },
-    DirectCallKernel {
-        impl_id: "indexed_moe_mmq_q5_1_down_tile8",
-        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q5_1_down_tile8.json",
     },
     DirectCallKernel {
         impl_id: "indexed_moe_mmq_q4_k_gate_up_tile8",
@@ -666,14 +618,6 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
     DirectCallKernel {
         impl_id: "indexed_moe_mmq_q6_k_down_tile8",
         cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q6_k_down_tile8.json",
-    },
-    DirectCallKernel {
-        impl_id: "indexed_moe_mmq_q2_k_gate_up_tile8",
-        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q2_k_gate_up_tile8.json",
-    },
-    DirectCallKernel {
-        impl_id: "indexed_moe_mmq_q2_k_down_tile8",
-        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q2_k_down_tile8.json",
     },
     DirectCallKernel {
         impl_id: "indexed_moe_mmq_q3_k_gate_up_tile8",
@@ -754,14 +698,6 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
     DirectCallKernel {
         impl_id: "indexed_moe_mmq_iq1_m_down_tile8",
         cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_iq1_m_down_tile8.json",
-    },
-    DirectCallKernel {
-        impl_id: "indexed_moe_mmq_q4_k_gate_up_lds_tiled",
-        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q4_k_gate_up_lds_tiled.json",
-    },
-    DirectCallKernel {
-        impl_id: "indexed_moe_mmq_q4_k_down_lds_tiled",
-        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q4_k_down_lds_tiled.json",
     },
     // Cross-backend (neutral impl_id) certs for fixed pointwise kernels, the
     // bit-match baselines against the sm_86 twins under certs/cuda/sm_86/.

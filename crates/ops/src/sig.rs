@@ -777,33 +777,8 @@ pub struct PenaltyKnobs {
 }
 
 // ---------------------------------------------------------------------------
-// MoE Q4_K LDS-tiled aggregates — used by `indexed_moe_mmq_q4_k_*_lds_tiled`
-// and the bucket-sorted `indexed_moe_mmq_q4_k` paths.
+// MoE Q4_K aggregates — used by the bucket-sorted `indexed_moe_mmq_q4_k` path.
 // ---------------------------------------------------------------------------
-
-/// Buffers for [`Ops::indexed_moe_mmq_q4_k_gate_up_lds_tiled`].
-#[derive(Copy, Clone, Debug)]
-pub struct MoeMmqQ4KGateUpLdsTiledBuffers {
-    pub gate_w: DevicePtr,
-    pub up_w: DevicePtr,
-    pub y_mmq: DevicePtr,
-    pub expert_ids: DevicePtr,
-    pub sorted_pair_idx_padded: DevicePtr,
-    pub padded_offsets: DevicePtr,
-    pub gate_out: DevicePtr,
-    pub up_out: DevicePtr,
-}
-
-/// Buffers for [`Ops::indexed_moe_mmq_q4_k_down_lds_tiled`].
-#[derive(Copy, Clone, Debug)]
-pub struct MoeMmqQ4KDownLdsTiledBuffers {
-    pub down_w: DevicePtr,
-    pub y_mmq: DevicePtr,
-    pub expert_ids: DevicePtr,
-    pub sorted_pair_idx_padded: DevicePtr,
-    pub padded_offsets: DevicePtr,
-    pub dst: DevicePtr,
-}
 
 /// Buffers for the bucket-sorted [`Ops::indexed_moe_mmq_q4_k`].
 #[derive(Copy, Clone, Debug)]

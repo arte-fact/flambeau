@@ -266,14 +266,6 @@ pub const BENCH_REFERENCE_KERNELS_SM86: &[DirectCallKernel] = &[
         cert_rel_path: "certs/cuda/sm_86/indexed_moe_mmq_iq4_xs_gate_up_tile8.json",
     },
     DirectCallKernel {
-        impl_id: "indexed_moe_mmq_q2_k_down_tile8",
-        cert_rel_path: "certs/cuda/sm_86/indexed_moe_mmq_q2_k_down_tile8.json",
-    },
-    DirectCallKernel {
-        impl_id: "indexed_moe_mmq_q2_k_gate_up_tile8",
-        cert_rel_path: "certs/cuda/sm_86/indexed_moe_mmq_q2_k_gate_up_tile8.json",
-    },
-    DirectCallKernel {
         impl_id: "indexed_moe_mmq_q3_k_down_tile8",
         cert_rel_path: "certs/cuda/sm_86/indexed_moe_mmq_q3_k_down_tile8.json",
     },
@@ -294,40 +286,12 @@ pub const BENCH_REFERENCE_KERNELS_SM86: &[DirectCallKernel] = &[
         cert_rel_path: "certs/cuda/sm_86/indexed_moe_mmq_q4_1_down_tile8.json",
     },
     DirectCallKernel {
-        impl_id: "indexed_moe_mmq_q4_1_gate_up_tile8",
-        cert_rel_path: "certs/cuda/sm_86/indexed_moe_mmq_q4_1_gate_up_tile8.json",
-    },
-    DirectCallKernel {
-        impl_id: "indexed_moe_mmq_q4_k_down_lds_tiled",
-        cert_rel_path: "certs/cuda/sm_86/indexed_moe_mmq_q4_k_down_lds_tiled.json",
-    },
-    DirectCallKernel {
         impl_id: "indexed_moe_mmq_q4_k_down_tile8",
         cert_rel_path: "certs/cuda/sm_86/indexed_moe_mmq_q4_k_down_tile8.json",
     },
     DirectCallKernel {
-        impl_id: "indexed_moe_mmq_q4_k_gate_up_lds_tiled",
-        cert_rel_path: "certs/cuda/sm_86/indexed_moe_mmq_q4_k_gate_up_lds_tiled.json",
-    },
-    DirectCallKernel {
         impl_id: "indexed_moe_mmq_q4_k_gate_up_tile8",
         cert_rel_path: "certs/cuda/sm_86/indexed_moe_mmq_q4_k_gate_up_tile8.json",
-    },
-    DirectCallKernel {
-        impl_id: "indexed_moe_mmq_q5_0_down_tile8",
-        cert_rel_path: "certs/cuda/sm_86/indexed_moe_mmq_q5_0_down_tile8.json",
-    },
-    DirectCallKernel {
-        impl_id: "indexed_moe_mmq_q5_0_gate_up_tile8",
-        cert_rel_path: "certs/cuda/sm_86/indexed_moe_mmq_q5_0_gate_up_tile8.json",
-    },
-    DirectCallKernel {
-        impl_id: "indexed_moe_mmq_q5_1_down_tile8",
-        cert_rel_path: "certs/cuda/sm_86/indexed_moe_mmq_q5_1_down_tile8.json",
-    },
-    DirectCallKernel {
-        impl_id: "indexed_moe_mmq_q5_1_gate_up_tile8",
-        cert_rel_path: "certs/cuda/sm_86/indexed_moe_mmq_q5_1_gate_up_tile8.json",
     },
     DirectCallKernel {
         impl_id: "indexed_moe_mmq_q5_k_down_tile8",
