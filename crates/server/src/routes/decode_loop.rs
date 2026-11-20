@@ -319,11 +319,9 @@ pub(crate) async fn run_completion_ids(
     .map_err(|e| anyhow!("spawn_blocking join failed: {e}"))?
 }
 
-/// Gate predicate for the scheduler-aware
-/// chat handler. The scheduler path is a focused subset of the full
-/// `run_completion_blocking_ids` flow: greedy, PP topology, no
-/// spec-decode, no GPU sampler, no JSON mode, no logprobs, no tools.
-/// All other configurations fall through to the legacy handler.
+/// Whether a request's decode steps go through the batch scheduler
+/// ([`StepSource::Scheduler`]) rather than direct single-slot forwards. MTP
+/// cycles, JSON-constrained decoding and logprobs keep the direct source.
 fn scheduler_can_engage(state: &ServerState, params: &SamplingParams) -> bool {
     if !state.batched_decode {
         return false;
@@ -341,15 +339,6 @@ fn scheduler_can_engage(state: &ServerState, params: &SamplingParams) -> bool {
     !params.json_mode && params.collect_logprobs.is_none()
 }
 
-/// Chat handler that uses
-/// the scheduler. Engaged when [`scheduler_can_engage`] returns true.
-/// Releases the slot's mutex during the decode loop so the scheduler-
-/// leader can `blocking_lock` other slots' mutexes for batched dispatch.
-/// Supports the full host-sampler feature set: greedy or temp/top_k/
-/// top_p/min_p sampling, repetition / presence / frequency penalties.
-/// Does NOT (yet) support: spec-decode (MTP), JSON-grammar masking,
-/// logprobs, GPU sampler. Those still go through the legacy
-/// `run_completion_blocking_ids`.
 /// Sarathi-Serve style chunked prefill. Splits the prompt into
 /// fixed-size chunks and releases `inflight_pool[slot_idx]`'s mutex
 /// between chunks so concurrent slots' decode steps can interleave,
@@ -523,377 +512,6 @@ fn chunked_prefill_pp(
     Ok(false)
 }
 
-fn run_completion_scheduler_pp_blocking(
-    state: SharedState,
-    prompt_ids: Vec<u32>,
-    params: SamplingParams,
-    relax_stop_mask: bool,
-) -> Result<CompletionOutput> {
-    let request_start = Instant::now();
-    let slot_idx = state.claim_slot_blocking();
-    // Wrap the body in a closure so any error path runs `release_slot`.
-    let result = (|| -> Result<CompletionOutput> {
-        if prompt_ids.is_empty() {
-            bail!("prompt tokenized to 0 tokens");
-        }
-        let prompt_tokens = prompt_ids.len() as u32;
-
-        tracing::info!(
-            target: "server.completion.start",
-            prompt_tokens,
-            max_tokens = params.max_tokens,
-            slot_idx,
-            scheduler = true,
-            "completion request accepted (scheduler path)"
-        );
-
-        let model = &state.model;
-        let stop_ids = &state.tokenizer.stop_ids;
-        let always_stop_ids = &state.tokenizer.always_stop_ids;
-        let is_stop = |t: u32| stop_ids.contains(&t);
-        let vocab = state.cfg.vocab_size;
-        let sampling = &params.sampling;
-
-        // Sampler shared across first-token + decode loop. Mirrors the
-        // legacy handler's setup.
-        let mut sampler = Sampler::from_seed(params.seed);
-        sampler.reserve(vocab);
-
-        let mut logits_buf: Vec<f32> = Vec::with_capacity(vocab);
-        let _ = model;
-        let full_hit = chunked_prefill_pp(&state, slot_idx, &prompt_ids, &mut logits_buf)?;
-        if !full_hit {
-            let mut guard = state.inflight_pool[slot_idx].blocking_lock();
-            state.prefix_cache_try_capture_full(&mut **guard, &prompt_ids, &logits_buf);
-        }
-        if !relax_stop_mask {
-            for &sid in stop_ids {
-                if (sid as usize) < logits_buf.len() {
-                    logits_buf[sid as usize] = f32::NEG_INFINITY;
-                }
-            }
-        }
-        let first_next = sampler.sample(&logits_buf, sampling, &[]);
-        tracing::info!(
-            target: "server.completion.first_token",
-            prompt_tokens,
-            ttft_ms = request_start.elapsed().as_secs_f64() * 1000.0,
-            greedy = sampling.is_greedy(),
-            scheduler = true,
-            "first token produced (time-to-first-token)"
-        );
-
-        let mut generated: Vec<u32> = Vec::with_capacity(params.max_tokens as usize);
-        generated.push(first_next);
-        if is_stop(first_next) {
-            return finalise(
-                &state,
-                prompt_tokens,
-                generated,
-                "stop",
-                &params.stop_strings,
-                None,
-                params.enable_thinking,
-            );
-        }
-
-        let mut last_token = first_next;
-        let mut finish_reason = "length";
-        let min_response_tokens = crate::v2_handle::min_response_tokens_for(&state.cfg.arch);
-        let stop_bias = crate::v2_handle::stop_bias_for(&state.cfg.arch);
-        let mut reasoning_closer = ReasoningCloser::new(reasoning_close_ids(&state, &params));
-        let user_stop_max = params
-            .stop_strings
-            .iter()
-            .map(|s| s.len())
-            .max()
-            .unwrap_or(0);
-
-        // ---------- Stage 2: decode loop via scheduler. NO mutex held.
-        // **Cycle 3** — reuse one logits buffer across the whole decode
-        // loop instead of allocating a fresh ~600 KB Vec per step.
-        let mut logits: Vec<f32> = Vec::with_capacity(vocab);
-        for step in 1..params.max_tokens as usize {
-            let force_mask = step < min_response_tokens && !relax_stop_mask;
-            state
-                .decode_via_scheduler_into(
-                    slot_idx,
-                    last_token,
-                    prompt_ids.len() + step - 1,
-                    &mut logits,
-                )
-                .context("scheduler-path decode step")?;
-            if !relax_stop_mask {
-                for &sid in stop_ids {
-                    if (sid as usize) < logits.len() {
-                        if force_mask || always_stop_ids.contains(&sid) {
-                            logits[sid as usize] = f32::NEG_INFINITY;
-                        } else {
-                            logits[sid as usize] -= stop_bias;
-                        }
-                    }
-                }
-            }
-            // Force the reasoning-close marker once the thinking budget is
-            // spent so the model stops thinking and answers.
-            let next = match reasoning_closer.next_forced(&generated, params.reasoning_budget) {
-                Some(forced) => forced,
-                None => sampler.sample(&logits, sampling, &generated),
-            };
-            if is_stop(next) {
-                finish_reason = "stop";
-                break;
-            }
-            generated.push(next);
-            last_token = next;
-            if generated.len() >= params.max_tokens as usize {
-                break;
-            }
-            // Stop-string detection on the recent decoded window
-            // (mirrors the legacy handler).
-            let need_user_check = !params.stop_strings.is_empty();
-            if (need_user_check || !relax_stop_mask)
-                && (step % 4 == 0 || step >= min_response_tokens)
-            {
-                let n = generated.len();
-                let token_window = 16.max((user_stop_max / 2).min(64));
-                let from = n.saturating_sub(token_window);
-                if let Ok(tail) = state.tokenizer.decode(&generated[from..]) {
-                    let marker_hit = !relax_stop_mask
-                        && !params.enable_thinking
-                        && (tail.contains("</think>")
-                            || tail.contains("<end_thought>")
-                            || tail.contains("<end_think>")
-                            || tail.contains("</thought>"));
-                    let arch_hit = state
-                        .model
-                        .chat_stop_markers()
-                        .iter()
-                        .any(|m| tail.contains(*m));
-                    let user_hit = params
-                        .stop_strings
-                        .iter()
-                        .any(|s| tail.contains(s.as_str()));
-                    if marker_hit || arch_hit || user_hit {
-                        finish_reason = "stop";
-                        break;
-                    }
-                }
-            }
-        }
-
-        tracing::info!(
-            target: "server.completion.finish",
-            prompt_tokens,
-            completion_tokens = generated.len() as u32,
-            finish_reason,
-            total_ms = request_start.elapsed().as_secs_f64() * 1000.0,
-            scheduler = true,
-            "completion request finished (scheduler path)"
-        );
-
-        finalise(
-            &state,
-            prompt_tokens,
-            generated,
-            finish_reason,
-            &params.stop_strings,
-            None,
-            params.enable_thinking,
-        )
-    })();
-    state.release_slot(slot_idx);
-    result
-}
-
-/// Streaming counterpart of [`run_completion_scheduler_pp_blocking`]: the
-/// decode loop coalesces via `decode_via_scheduler_into` (no slot mutex held
-/// across the loop), and each sampled token is streamed through the same
-/// incremental-detokenise `push_and_emit` the legacy streaming path uses.
-/// Engaged from `run_completion_blocking_streaming` when
-/// [`scheduler_can_engage`] holds. Output behaviour matches the legacy
-/// streaming path; only the decode source differs (coalescing vs N=1).
-#[allow(clippy::too_many_lines)]
-fn run_completion_streaming_scheduler_pp_blocking(
-    state: SharedState,
-    prompt_ids: Vec<u32>,
-    params: SamplingParams,
-    relax_stop_mask: bool,
-    emit: &mut dyn FnMut(&str) -> bool,
-) -> Result<(String, u32, u32)> {
-    let request_start = Instant::now();
-    let slot_idx = state.claim_slot_blocking();
-    let result = (|| -> Result<(String, u32, u32)> {
-        if prompt_ids.is_empty() {
-            bail!("prompt tokenized to 0 tokens");
-        }
-        let prompt_tokens = prompt_ids.len() as u32;
-
-        tracing::info!(
-            target: "server.completion.start",
-            prompt_tokens,
-            max_tokens = params.max_tokens,
-            stream = true,
-            slot_idx,
-            scheduler = true,
-            "streaming completion accepted (scheduler path)"
-        );
-
-        let stop_ids = &state.tokenizer.stop_ids;
-        let always_stop_ids = &state.tokenizer.always_stop_ids;
-        let is_stop = |t: u32| stop_ids.contains(&t);
-        let vocab = state.cfg.vocab_size;
-        let sampling = &params.sampling;
-
-        let mut sampler = Sampler::from_seed(params.seed);
-        sampler.reserve(vocab);
-
-        let mut logits_buf: Vec<f32> = Vec::with_capacity(vocab);
-        let prefill_start = Instant::now();
-        let full_hit = chunked_prefill_pp(&state, slot_idx, &prompt_ids, &mut logits_buf)?;
-        // Capture the unmasked prefill logits into the prefix cache under a
-        // brief lock (the decode loop below holds no mutex).
-        if !full_hit {
-            let mut guard = state.inflight_pool[slot_idx].blocking_lock();
-            state.prefix_cache_try_capture_full(&mut **guard, &prompt_ids, &logits_buf);
-        }
-        if !relax_stop_mask {
-            for &sid in stop_ids {
-                if (sid as usize) < logits_buf.len() {
-                    logits_buf[sid as usize] = f32::NEG_INFINITY;
-                }
-            }
-        }
-        let first_next = sampler.sample(&logits_buf, sampling, &[]);
-        tracing::info!(
-            target: "server.completion.first_token",
-            prompt_tokens,
-            ttft_ms = prefill_start.elapsed().as_secs_f64() * 1000.0,
-            scheduler = true,
-            "first token produced (time-to-first-token)"
-        );
-
-        let mut generated: Vec<u32> = Vec::with_capacity(params.max_tokens as usize);
-        let mut emitted_text = String::new();
-        let mut decode_cursor: usize = 0;
-        let mut pending_emitted_in_segment: usize = 0;
-        let mut push_and_emit =
-            |tok: u32, generated: &mut Vec<u32>, emitted_text: &mut String| -> Result<bool> {
-                generated.push(tok);
-                let stop_hit = is_stop(tok);
-                let end = if stop_hit { generated.len() - 1 } else { generated.len() };
-                if end <= decode_cursor {
-                    return Ok(!stop_hit);
-                }
-                let raw = state
-                    .tokenizer
-                    .decode(&generated[decode_cursor..end])
-                    .context("decode")?;
-                let safe = raw.trim_end_matches('\u{FFFD}');
-                if safe.len() > pending_emitted_in_segment {
-                    let delta = &safe[pending_emitted_in_segment..];
-                    if !emit(delta) {
-                        return Ok(false);
-                    }
-                    emitted_text.push_str(delta);
-                    pending_emitted_in_segment = safe.len();
-                }
-                if safe.len() == raw.len() {
-                    decode_cursor = end;
-                    pending_emitted_in_segment = 0;
-                }
-                Ok(!stop_hit)
-            };
-
-        let alive = push_and_emit(first_next, &mut generated, &mut emitted_text)?;
-        if !alive {
-            return Ok(("stop".into(), prompt_tokens, generated.len() as u32));
-        }
-
-        let mut finish_reason: &str = "length";
-        let mut last_token = first_next;
-        let min_response_tokens = crate::v2_handle::min_response_tokens_for(&state.cfg.arch);
-        let stop_bias = crate::v2_handle::stop_bias_for(&state.cfg.arch);
-        let mut reasoning_closer = ReasoningCloser::new(reasoning_close_ids(&state, &params));
-        let user_stop_max = params.stop_strings.iter().map(|s| s.len()).max().unwrap_or(0);
-
-        let mut logits: Vec<f32> = Vec::with_capacity(vocab);
-        for step in 1..params.max_tokens as usize {
-            let force_mask = step < min_response_tokens && !relax_stop_mask;
-            state
-                .decode_via_scheduler_into(
-                    slot_idx,
-                    last_token,
-                    prompt_ids.len() + step - 1,
-                    &mut logits,
-                )
-                .context("scheduler-path decode step")?;
-            if !relax_stop_mask {
-                for &sid in stop_ids {
-                    if (sid as usize) < logits.len() {
-                        if force_mask || always_stop_ids.contains(&sid) {
-                            logits[sid as usize] = f32::NEG_INFINITY;
-                        } else {
-                            logits[sid as usize] -= stop_bias;
-                        }
-                    }
-                }
-            }
-            let next = match reasoning_closer.next_forced(&generated, params.reasoning_budget) {
-                Some(forced) => forced,
-                None => sampler.sample(&logits, sampling, &generated),
-            };
-            let alive = push_and_emit(next, &mut generated, &mut emitted_text)?;
-            last_token = next;
-            if !alive {
-                finish_reason = "stop";
-                break;
-            }
-            if !relax_stop_mask || !params.stop_strings.is_empty() {
-                let window_bytes = 64.max(user_stop_max + 16);
-                let tail_window = if emitted_text.len() > window_bytes {
-                    let mut start = emitted_text.len() - window_bytes;
-                    while start < emitted_text.len() && !emitted_text.is_char_boundary(start) {
-                        start += 1;
-                    }
-                    &emitted_text[start..]
-                } else {
-                    emitted_text.as_str()
-                };
-                let marker_hit = !relax_stop_mask
-                    && !params.enable_thinking
-                    && (tail_window.contains("</think>")
-                        || tail_window.contains("<end_thought>")
-                        || tail_window.contains("<end_think>")
-                        || tail_window.contains("</thought>"));
-                let user_hit = params
-                    .stop_strings
-                    .iter()
-                    .any(|s| tail_window.contains(s.as_str()));
-                if marker_hit || user_hit {
-                    finish_reason = "stop";
-                    break;
-                }
-            }
-        }
-
-        tracing::info!(
-            target: "server.completion.finish",
-            prompt_tokens,
-            completion_tokens = generated.len() as u32,
-            finish_reason,
-            total_ms = request_start.elapsed().as_secs_f64() * 1000.0,
-            stream = true,
-            scheduler = true,
-            "streaming completion finished (scheduler path)"
-        );
-
-        Ok((finish_reason.to_owned(), prompt_tokens, generated.len() as u32))
-    })();
-    state.release_slot(slot_idx);
-    result
-}
-
 /// The token sequence for the arch's reasoning-close marker, resolved once
 /// per request — only when a thinking budget is in play. Empty otherwise.
 /// The marker is often multi-token (qwen `</think>` = `[510, 26003, 29]`),
@@ -955,15 +573,13 @@ fn run_completion_blocking_ids(
     params: SamplingParams,
     relax_stop_mask: bool,
 ) -> Result<CompletionOutput> {
-    if scheduler_can_engage(&state, &params) {
-        return run_completion_scheduler_pp_blocking(state, prompt_ids, params, relax_stop_mask);
-    }
+    let source = StepSource::for_request(&state, &params);
     let out = decode_tokens(
         &state,
         &prompt_ids,
         &params,
         relax_stop_mask,
-        DecodeFeatures { structured: true, stream: false },
+        DecodeFeatures { structured: true, stream: false, source },
         &mut Discard,
     )?;
     let result = finalise(
@@ -1003,21 +619,13 @@ pub(crate) fn run_completion_blocking_streaming(
     if prompt_ids.is_empty() {
         bail!("prompt tokenized to 0 tokens");
     }
-    if scheduler_can_engage(&state, &params) {
-        return run_completion_streaming_scheduler_pp_blocking(
-            state,
-            prompt_ids,
-            params,
-            relax_stop_mask,
-            emit,
-        );
-    }
+    let source = StepSource::for_request(&state, &params);
     let out = decode_tokens(
         &state,
         &prompt_ids,
         &params,
         relax_stop_mask,
-        DecodeFeatures { structured: false, stream: true },
+        DecodeFeatures { structured: false, stream: true, source },
         &mut Forward { emit },
     )?;
     tracing::info!(
@@ -1030,12 +638,36 @@ pub(crate) fn run_completion_blocking_streaming(
     Ok((out.finish.reason().to_owned(), out.prompt_tokens, out.generated.len() as u32))
 }
 
-/// Which request surfaces a decode-loop caller serves. The SSE path has no
-/// JSON-constraint or logprobs output yet, so it decodes without them.
+/// Which request surfaces a decode-loop caller serves, and where its decode
+/// steps come from. The SSE path has no JSON-constraint or logprobs output
+/// yet, so it decodes without them.
 #[derive(Clone, Copy)]
 struct DecodeFeatures {
     structured: bool,
     stream: bool,
+    source: StepSource,
+}
+
+/// Where a request's decode-step logits come from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StepSource {
+    /// Single-slot forwards (and MTP cycles) with the slot mutex held for the
+    /// whole request.
+    Direct,
+    /// `decode_via_scheduler_into`: each step joins the batch scheduler's
+    /// coalescing window, and the slot mutex stays free between steps so the
+    /// batch leader (or a mixed prefill chunk) can lock it.
+    Scheduler,
+}
+
+impl StepSource {
+    fn for_request(state: &ServerState, params: &SamplingParams) -> Self {
+        if scheduler_can_engage(state, params) {
+            Self::Scheduler
+        } else {
+            Self::Direct
+        }
+    }
 }
 
 struct DecodeOutcome {
@@ -1047,9 +679,9 @@ struct DecodeOutcome {
     text: String,
 }
 
-/// The mutex-held single-request decode loop behind both legacy paths:
-/// prefill, first token, then plain steps or MTP cycles until a stop rule
-/// fires. Every token, including each token of an MTP cycle, goes through
+/// The single-request decode loop behind every completion path: prefill,
+/// first token, then plain steps (direct or through the batch scheduler) or
+/// MTP cycles until a stop rule fires. Every token, including each token of an MTP cycle, goes through
 /// `Emitter::accept`, so stop tokens, stop sequences, `max_tokens` and a
 /// gone client end generation at the exact token on both paths.
 fn decode_tokens(
@@ -1076,6 +708,7 @@ fn decode_tokens(
         total_ms = request_start.elapsed().as_secs_f64() * 1000.0,
         mtp_cycles = out.mtp_cycles,
         stream = features.stream,
+        scheduler = features.source == StepSource::Scheduler,
         "completion request finished"
     );
     Ok(out)
@@ -1114,6 +747,7 @@ fn decode_in_slot(
         prompt_tokens,
         max_tokens = params.max_tokens,
         stream = features.stream,
+        scheduler = features.source == StepSource::Scheduler,
         slot_idx,
         "completion request accepted after queue wait"
     );
@@ -1134,8 +768,10 @@ fn decode_in_slot(
     // The prefix-cache snapshot (0.1-2.2 s of DtoH) is taken after the first
     // token is out, from the unmasked prefill logits.
     let prefill_logits_for_cache = if full_hit { Vec::new() } else { logits_buf.clone() };
-    let mut inflight_guard = state.inflight_pool[slot_idx].blocking_lock();
-    let inflight: &mut dyn crate::Session = &mut **inflight_guard;
+    let mut inflight_guard = match features.source {
+        StepSource::Direct => Some(state.inflight_pool[slot_idx].blocking_lock()),
+        StepSource::Scheduler => None,
+    };
     for &sid in stop_ids {
         if (sid as usize) < logits_buf.len() {
             logits_buf[sid as usize] = f32::NEG_INFINITY;
@@ -1186,7 +822,8 @@ fn decode_in_slot(
         }
     }
 
-    let mtp_on = state.mtp_max_draft > 0
+    let mtp_on = features.source == StepSource::Direct
+        && state.mtp_max_draft > 0
         && json_state.is_none()
         && logprobs_acc.is_none()
         && params.reasoning_budget.is_none();
@@ -1209,7 +846,15 @@ fn decode_in_slot(
         return Ok(outcome(emitter, finish, logprobs_acc, 0));
     }
     if !full_hit {
-        state.prefix_cache_try_capture_full(inflight, prompt_ids, &prefill_logits_for_cache);
+        match inflight_guard.as_mut() {
+            Some(guard) => {
+                state.prefix_cache_try_capture_full(&mut ***guard, prompt_ids, &prefill_logits_for_cache);
+            }
+            None => {
+                let mut guard = state.inflight_pool[slot_idx].blocking_lock();
+                state.prefix_cache_try_capture_full(&mut **guard, prompt_ids, &prefill_logits_for_cache);
+            }
+        }
     }
 
     let min_response_tokens = crate::v2_handle::min_response_tokens_for(&state.cfg.arch);
@@ -1232,7 +877,7 @@ fn decode_in_slot(
         } else {
             state.mtp_max_draft
         };
-        if mtp_on && n_draft > 0 {
+        if let Some(inflight) = inflight_guard.as_mut().filter(|_| mtp_on && n_draft > 0) {
             let factory = mtp_sample_factory(
                 sampling,
                 &emitter.generated,
@@ -1257,9 +902,11 @@ fn decode_in_slot(
                 continue;
             }
         }
-        state
-            .dispatch_decode_one(&mut *inflight, last_token, pos, &mut logits_buf)
-            .context("decode step logits")?;
+        match inflight_guard.as_mut() {
+            Some(inflight) => state.dispatch_decode_one(&mut ***inflight, last_token, pos, &mut logits_buf),
+            None => state.decode_via_scheduler_into(slot_idx, last_token, pos, &mut logits_buf),
+        }
+        .context("decode step logits")?;
         if !relax_stop_mask {
             for &sid in stop_ids {
                 if (sid as usize) < logits_buf.len() {

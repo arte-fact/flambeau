@@ -384,6 +384,36 @@ mod tests {
         assert_eq!(sink.0, "Helloé!");
     }
 
+    /// Streamed (forwarding) and non-streamed (discarding) requests run the
+    /// same `Emitter`: for every way a run can end they keep the same tokens
+    /// (hence the same `completion_tokens`) and the streamed text is the
+    /// tracked text, without the stop sequence.
+    #[test]
+    fn streamed_and_collected_runs_keep_the_same_tokens() {
+        let runs: [(&[u32], usize, Finish); 3] = [
+            (&[0, 1, STOP_TOKEN, 4], 100, Finish::Stop),
+            (&[0, 1, 2, 3], 100, Finish::Stop),
+            (&[0, 1, 4, 1], 3, Finish::Length),
+        ];
+        for (run, max_tokens, expected) in runs {
+            let stops = [STOP_TOKEN];
+            let mut discard = Discard;
+            let mut collected = Emitter::new(vec!["END".into()], None, &stops, max_tokens, &mut discard);
+            assert_eq!(feed(&mut collected, run), Some(expected));
+
+            let mut sink = Collect(String::new(), 0);
+            let mut streamed = Emitter::new(vec!["END".into()], None, &stops, max_tokens, &mut sink);
+            assert_eq!(feed(&mut streamed, run), Some(expected));
+
+            assert_eq!(collected.generated, streamed.generated, "run {run:?}");
+            let text = streamed.text.text().to_owned();
+            assert_eq!(collected.text.text(), text, "run {run:?}");
+            drop(streamed);
+            assert_eq!(sink.0, text, "run {run:?}");
+            assert!(!sink.0.contains("END"), "run {run:?}");
+        }
+    }
+
     #[test]
     fn client_gone_ends_generation() {
         struct Gone;
