@@ -30,10 +30,6 @@
 #   - Most-specific predicate wins. "any" is the fallback.
 #   - No env-flag gating. Runtime overrides go in gfx906.local.toml (gitignored).
 #
-# Dormant A/B candidates in `impls.rs` (registered with m_range=(MAX,MAX) so
-# shape-dispatch never picks them; listed here for discoverability):
-#   - qmatmul_q4_K_mmq_lds_tiled_gfx906    (promote pending A/B)
-#
 # Single-row and nw1_r2 reference MMVQ kernels (`*_single_row_gfx906`,
 # `*_nw1_r2_gfx906`) are kept in-tree as cert oracles; they are not
 # dispatched from.

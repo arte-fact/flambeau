@@ -44,11 +44,6 @@ pub enum Dtype {
     Q8_04Warp,
     /// Wave64 Q8_0 MMQ (). MMQ_Y=64, TILE_N=8, 64 threads.
     Q8_0Wave64,
-    /// Wave64 Q8_0 MMQ TILE_N=16 (). MMQ_Y=64, TILE_N=16, 64 threads.
-    /// Halves weight HBM fetches vs TILE_N=8 (each weight tile reused across
-    /// 16 activations instead of 8). Targets the 97 % MemBusy bottleneck
-    /// measured on Qwen3.6-35B Mesh<2> pp=512.
-    Q8_0Wave64Tile16,
     /// 4-warp LDS-tiled Q4_1 MMQ, MMQ_Y=32, MMQ_X=8, 256 threads.
     Q4_14Warp,
     /// Wave64 Q4_1 MMQ. MMQ_Y=64, TILE_N=8, 64 threads. DP4A inner.
@@ -70,10 +65,6 @@ pub enum Dtype {
     Q5_1Wave64,
     /// 4-warp LDS-tiled Q4_K MMQ, MMQ_Y=16, MMQ_X=8, 128 threads.
     Q4K4Warp,
-    /// llamacpp-turbo Q4_K MMQ port. 256 threads (4 warps × 64),
-    /// MMQ_Y=16, MMQ_X=16, double-buffered Y LDS per super-block. DS4 Q8_1
-    /// activation layout.
-    Q4KLdsTiled,
     /// Generic LDS-tiled MMQ (`mmq_lds_tiled.cuh`), DS4 activation, (128, 16) tile.
     Q5KLdsTiled,
     Q6KLdsTiled,
@@ -89,29 +80,16 @@ pub enum Dtype {
     Q4KLdsTiledY64X8,
     Q3KLdsTiledX8,
     Iq4NlLdsTiledX8,
-    /// Wave64 Q4_K MMQ. MMQ_Y=64, TILE_N=8, 64 threads.
-    Q4KWave64,
-    /// Wave64 Q5_K MMQ. MMQ_Y=64, TILE_N=8, 64 threads.
-    Q5KWave64,
     /// 4-warp LDS-tiled Q6_K MMQ, MMQ_Y=16, MMQ_X=8, 128 threads.
     Q6K4Warp,
-    /// Wave64 Q6_K MMQ.
-    /// MMQ_Y=64, TILE_N=8, 64 threads. DP4A inner.
-    Q6KWave64,
     /// Wave64 Q8_K MMQ. MMQ_Y=64, TILE_N=8, 64 threads. DP4A inner.
     /// Simplest K-quant MMQ: no nibble unpack, no sub-block scale, no min.
     Q8KWave64,
     /// Wave64 Q2_K MMQ. Affine quant; bias correction via -m·Σy.
     Q2KWave64,
-    /// Wave64 Q3_K MMQ. Byte-wise u32 loads on qs/hmask/scales.
-    Q3KWave64,
-    /// Wave64 IQ4_XS MMQ. LUT-pre-applied dp4a.
-    Iq4XsWave64,
     /// Wave64 IQ3_S MMQ. 9-bit codebook lookup + per-byte sign-mask packing
     /// + dp4a.
     Iq3SWave64,
-    /// wave64 MMQ for IQ4_NL.
-    Iq4NlWave64,
     /// wave64 MMQ for IQ3_XXS.
     Iq3XxsWave64,
     /// wave64 MMQ for IQ2_XXS.
@@ -134,7 +112,6 @@ fn tile_shape(dtype: Dtype) -> (u32, u32) {
         Dtype::Q8_0Oracle => (1, 1),         // one output element per block
         Dtype::Q8_04Warp => (32, 8),         // MMQ_Y × MMQ_X
         Dtype::Q8_0Wave64 => (64, 8),        // MMQ_Y × TILE_N — wave64 ()
-        Dtype::Q8_0Wave64Tile16 => (64, 16), // MMQ_Y × TILE_N — wave64 ()
         Dtype::Q4_14Warp => (128, 64),       // 5 — candle turbo tile shape
         Dtype::Q4_1Wave64 => (64, 8),        // wave64 MMQ for Q4_1
         Dtype::Q4_0Wave64 => (64, 8),        // wave64 MMQ for Q4_0
@@ -142,7 +119,6 @@ fn tile_shape(dtype: Dtype) -> (u32, u32) {
         Dtype::Q5_0Wave64 => (64, 8),        // wave64 MMQ for Q5_0
         Dtype::Q5_1Wave64 => (64, 8),
         Dtype::Q4K4Warp => (16, 8), // MMQ_Y × MMQ_X (Q4_K uses 16 rows to fit LDS)
-        Dtype::Q4KLdsTiled => (128, 16), // turbo-ported Q4_K (MMQ_Y=128, MMQ_X=16)
         Dtype::Q5KLdsTiledX8
         | Dtype::Q6KLdsTiledX8
         | Dtype::Iq4XsLdsTiledX8
@@ -156,16 +132,10 @@ fn tile_shape(dtype: Dtype) -> (u32, u32) {
         | Dtype::Q3KLdsTiled
         | Dtype::Iq4NlLdsTiled
         | Dtype::Q8_0LdsTiled => (64, 64),
-        Dtype::Q4KWave64 => (64, 8), // MMQ_Y × TILE_N — wave64 MMQ for Q4_K (candle port)
-        Dtype::Q5KWave64 => (64, 8), // MMQ_Y × TILE_N — wave64 MMQ for Q5_K (candle port)
         Dtype::Q6K4Warp => (16, 8), // MMQ_Y × MMQ_X (Q6_K same tile as Q4_K)
-        Dtype::Q6KWave64 => (64, 8), // MMQ_Y × TILE_N — wave64 MMQ for Q6_K ()
         Dtype::Q8KWave64 => (64, 8),
         Dtype::Q2KWave64 => (64, 8),
-        Dtype::Q3KWave64 => (64, 8),
-        Dtype::Iq4XsWave64 => (64, 8),
         Dtype::Iq3SWave64 => (64, 8),
-        Dtype::Iq4NlWave64 => (64, 8),
         Dtype::Iq3XxsWave64 => (64, 8),
         Dtype::Iq2XxsWave64 => (64, 8),
         Dtype::Iq2XsWave64 => (64, 8),
@@ -178,22 +148,22 @@ fn tile_shape(dtype: Dtype) -> (u32, u32) {
 impl Dtype {
     pub fn name(self) -> &'static str {
         match self {
-            Dtype::Q8_0Oracle | Dtype::Q8_04Warp | Dtype::Q8_0Wave64 | Dtype::Q8_0Wave64Tile16 | Dtype::Q8_0LdsTiled => {
+            Dtype::Q8_0Oracle | Dtype::Q8_04Warp | Dtype::Q8_0Wave64 | Dtype::Q8_0LdsTiled => {
                 "Q8_0"
             }
             Dtype::Q4_14Warp | Dtype::Q4_1Wave64 => "Q4_1",
             Dtype::Q4_0Wave64 | Dtype::Q4_04Warp => "Q4_0",
             Dtype::Q5_0Wave64 => "Q5_0",
             Dtype::Q5_1Wave64 => "Q5_1",
-            Dtype::Q4K4Warp | Dtype::Q4KWave64 | Dtype::Q4KLdsTiled | Dtype::Q4KLdsTiledY64 | Dtype::Q4KLdsTiledY64X8 => "Q4_K",
-            Dtype::Q5KWave64 | Dtype::Q5KLdsTiled | Dtype::Q5KLdsTiledX8 => "Q5_K",
-            Dtype::Q6K4Warp | Dtype::Q6KWave64 | Dtype::Q6KLdsTiled | Dtype::Q6KLdsTiledX8 => "Q6_K",
+            Dtype::Q4K4Warp | Dtype::Q4KLdsTiledY64 | Dtype::Q4KLdsTiledY64X8 => "Q4_K",
+            Dtype::Q5KLdsTiled | Dtype::Q5KLdsTiledX8 => "Q5_K",
+            Dtype::Q6K4Warp | Dtype::Q6KLdsTiled | Dtype::Q6KLdsTiledX8 => "Q6_K",
             Dtype::Q8KWave64 => "Q8_K",
             Dtype::Q2KWave64 => "Q2_K",
-            Dtype::Q3KWave64 | Dtype::Q3KLdsTiled | Dtype::Q3KLdsTiledX8 => "Q3_K",
-            Dtype::Iq4XsWave64 | Dtype::Iq4XsLdsTiled | Dtype::Iq4XsLdsTiledX8 => "IQ4_XS",
+            Dtype::Q3KLdsTiled | Dtype::Q3KLdsTiledX8 => "Q3_K",
+            Dtype::Iq4XsLdsTiled | Dtype::Iq4XsLdsTiledX8 => "IQ4_XS",
             Dtype::Iq3SWave64 => "IQ3_S",
-            Dtype::Iq4NlWave64 | Dtype::Iq4NlLdsTiled | Dtype::Iq4NlLdsTiledX8 => "IQ4_NL",
+            Dtype::Iq4NlLdsTiled | Dtype::Iq4NlLdsTiledX8 => "IQ4_NL",
             Dtype::Iq3XxsWave64 => "IQ3_XXS",
             Dtype::Iq2XxsWave64 => "IQ2_XXS",
             Dtype::Iq2XsWave64 => "IQ2_XS",
@@ -205,22 +175,22 @@ impl Dtype {
 
     pub fn ggml(self) -> GgmlDType {
         match self {
-            Dtype::Q8_0Oracle | Dtype::Q8_04Warp | Dtype::Q8_0Wave64 | Dtype::Q8_0Wave64Tile16 | Dtype::Q8_0LdsTiled => {
+            Dtype::Q8_0Oracle | Dtype::Q8_04Warp | Dtype::Q8_0Wave64 | Dtype::Q8_0LdsTiled => {
                 GgmlDType::Q8_0
             }
             Dtype::Q4_14Warp | Dtype::Q4_1Wave64 => GgmlDType::Q4_1,
             Dtype::Q4_0Wave64 | Dtype::Q4_04Warp => GgmlDType::Q4_0,
             Dtype::Q5_0Wave64 => GgmlDType::Q5_0,
             Dtype::Q5_1Wave64 => GgmlDType::Q5_1,
-            Dtype::Q4K4Warp | Dtype::Q4KWave64 | Dtype::Q4KLdsTiled | Dtype::Q4KLdsTiledY64 | Dtype::Q4KLdsTiledY64X8 => GgmlDType::Q4K,
-            Dtype::Q5KWave64 | Dtype::Q5KLdsTiled | Dtype::Q5KLdsTiledX8 => GgmlDType::Q5K,
-            Dtype::Q6K4Warp | Dtype::Q6KWave64 | Dtype::Q6KLdsTiled | Dtype::Q6KLdsTiledX8 => GgmlDType::Q6K,
+            Dtype::Q4K4Warp | Dtype::Q4KLdsTiledY64 | Dtype::Q4KLdsTiledY64X8 => GgmlDType::Q4K,
+            Dtype::Q5KLdsTiled | Dtype::Q5KLdsTiledX8 => GgmlDType::Q5K,
+            Dtype::Q6K4Warp | Dtype::Q6KLdsTiled | Dtype::Q6KLdsTiledX8 => GgmlDType::Q6K,
             Dtype::Q8KWave64 => GgmlDType::Q8K,
             Dtype::Q2KWave64 => GgmlDType::Q2K,
-            Dtype::Q3KWave64 | Dtype::Q3KLdsTiled | Dtype::Q3KLdsTiledX8 => GgmlDType::Q3K,
-            Dtype::Iq4XsWave64 | Dtype::Iq4XsLdsTiled | Dtype::Iq4XsLdsTiledX8 => GgmlDType::Iq4Xs,
+            Dtype::Q3KLdsTiled | Dtype::Q3KLdsTiledX8 => GgmlDType::Q3K,
+            Dtype::Iq4XsLdsTiled | Dtype::Iq4XsLdsTiledX8 => GgmlDType::Iq4Xs,
             Dtype::Iq3SWave64 => GgmlDType::Iq3S,
-            Dtype::Iq4NlWave64 | Dtype::Iq4NlLdsTiled | Dtype::Iq4NlLdsTiledX8 => GgmlDType::Iq4Nl,
+            Dtype::Iq4NlLdsTiled | Dtype::Iq4NlLdsTiledX8 => GgmlDType::Iq4Nl,
             Dtype::Iq3XxsWave64 => GgmlDType::Iq3Xxs,
             Dtype::Iq2XxsWave64 => GgmlDType::Iq2Xxs,
             Dtype::Iq2XsWave64 => GgmlDType::Iq2Xs,
@@ -235,7 +205,6 @@ impl Dtype {
             Dtype::Q8_0Oracle => "qmatmul_q8_0_mmq_oracle_gfx906",
             Dtype::Q8_04Warp => "qmatmul_q8_0_mmq_4warp_lds_gfx906",
             Dtype::Q8_0Wave64 => "qmatmul_q8_0_mmq_wave64_gfx906",
-            Dtype::Q8_0Wave64Tile16 => "qmatmul_q8_0_mmq_wave64_tile16_gfx906",
             Dtype::Q4_14Warp => "qmatmul_q4_1_mmq_4warp_lds_gfx906",
             Dtype::Q4_1Wave64 => "qmatmul_q4_1_mmq_wave64_gfx906",
             Dtype::Q4_0Wave64 => "qmatmul_q4_0_mmq_wave64_gfx906",
@@ -243,7 +212,6 @@ impl Dtype {
             Dtype::Q5_0Wave64 => "qmatmul_q5_0_mmq_wave64_gfx906",
             Dtype::Q5_1Wave64 => "qmatmul_q5_1_mmq_wave64_gfx906",
             Dtype::Q4K4Warp => "qmatmul_q4_K_mmq_4warp_lds_gfx906",
-            Dtype::Q4KLdsTiled => "qmatmul_q4_K_mmq_lds_tiled_gfx906",
             Dtype::Q5KLdsTiled => "qmatmul_q5_K_mmq_lds_tiled_gfx906",
             Dtype::Q5KLdsTiledX8 => "qmatmul_q5_K_mmq_lds_tiled_x8_gfx906",
             Dtype::Q6KLdsTiled => "qmatmul_q6_K_mmq_lds_tiled_gfx906",
@@ -257,16 +225,10 @@ impl Dtype {
             Dtype::Iq4NlLdsTiled => "qmatmul_iq4_nl_mmq_lds_tiled_gfx906",
             Dtype::Iq4NlLdsTiledX8 => "qmatmul_iq4_nl_mmq_lds_tiled_x8_gfx906",
             Dtype::Q8_0LdsTiled => "qmatmul_q8_0_mmq_lds_tiled_gfx906",
-            Dtype::Q4KWave64 => "qmatmul_q4_K_mmq_wave64_gfx906",
-            Dtype::Q5KWave64 => "qmatmul_q5_K_mmq_wave64_gfx906",
             Dtype::Q6K4Warp => "qmatmul_q6_K_mmq_4warp_lds_gfx906",
-            Dtype::Q6KWave64 => "qmatmul_q6_K_mmq_wave64_gfx906",
             Dtype::Q8KWave64 => "qmatmul_q8_K_mmq_wave64_gfx906",
             Dtype::Q2KWave64 => "qmatmul_q2_K_mmq_wave64_gfx906",
-            Dtype::Q3KWave64 => "qmatmul_q3_K_mmq_wave64_gfx906",
-            Dtype::Iq4XsWave64 => "qmatmul_iq4_xs_mmq_wave64_gfx906",
             Dtype::Iq3SWave64 => "qmatmul_iq3_s_mmq_wave64_gfx906",
-            Dtype::Iq4NlWave64 => "qmatmul_iq4_nl_mmq_wave64_gfx906",
             Dtype::Iq3XxsWave64 => "qmatmul_iq3_xxs_mmq_wave64_gfx906",
             Dtype::Iq2XxsWave64 => "qmatmul_iq2_xxs_mmq_wave64_gfx906",
             Dtype::Iq2XsWave64 => "qmatmul_iq2_xs_mmq_wave64_gfx906",
@@ -281,7 +243,6 @@ impl Dtype {
             Dtype::Q8_0Oracle => "mmq_q8_0_oracle",
             Dtype::Q8_04Warp => "mmq_q8_0_4warp",
             Dtype::Q8_0Wave64 => "mmq_q8_0_wave64",
-            Dtype::Q8_0Wave64Tile16 => "mmq_q8_0_wave64_tile16",
             Dtype::Q4_14Warp => "mmq_q4_1_4warp_lds",
             Dtype::Q4_1Wave64 => "mmq_q4_1_wave64",
             Dtype::Q4_0Wave64 => "mmq_q4_0_wave64",
@@ -289,7 +250,6 @@ impl Dtype {
             Dtype::Q5_0Wave64 => "mmq_q5_0_wave64",
             Dtype::Q5_1Wave64 => "mmq_q5_1_wave64",
             Dtype::Q4K4Warp => "mmq_q4_K_4warp",
-            Dtype::Q4KLdsTiled => "mmq_q4_K_lds_tiled",
             Dtype::Q5KLdsTiled => "mmq_q5_K_lds_tiled",
             Dtype::Q5KLdsTiledX8 => "mmq_q5_K_lds_tiled_x8",
             Dtype::Q6KLdsTiled => "mmq_q6_K_lds_tiled",
@@ -303,16 +263,10 @@ impl Dtype {
             Dtype::Iq4NlLdsTiled => "mmq_iq4_nl_lds_tiled",
             Dtype::Iq4NlLdsTiledX8 => "mmq_iq4_nl_lds_tiled_x8",
             Dtype::Q8_0LdsTiled => "mmq_q8_0_lds_tiled",
-            Dtype::Q4KWave64 => "mmq_q4_K_wave64",
-            Dtype::Q5KWave64 => "mmq_q5_K_wave64",
             Dtype::Q6K4Warp => "mmq_q6_K_4warp",
-            Dtype::Q6KWave64 => "mmq_q6_K_wave64",
             Dtype::Q8KWave64 => "mmq_q8_K_wave64",
             Dtype::Q2KWave64 => "mmq_q2_K_wave64",
-            Dtype::Q3KWave64 => "mmq_q3_K_wave64",
-            Dtype::Iq4XsWave64 => "mmq_iq4_xs_wave64",
             Dtype::Iq3SWave64 => "mmq_iq3_s_wave64",
-            Dtype::Iq4NlWave64 => "mmq_iq4_nl_wave64",
             Dtype::Iq3XxsWave64 => "mmq_iq3_xxs_wave64",
             Dtype::Iq2XxsWave64 => "mmq_iq2_xxs_wave64",
             Dtype::Iq2XsWave64 => "mmq_iq2_xs_wave64",
@@ -327,7 +281,6 @@ impl Dtype {
             Dtype::Q8_0Oracle => "flambeau_mmq_q8_0_oracle_q8_1",
             Dtype::Q8_04Warp => "flambeau_mmq_q8_0_4warp_q8_1",
             Dtype::Q8_0Wave64 => "flambeau_mmq_q8_0_wave64_q8_1",
-            Dtype::Q8_0Wave64Tile16 => "flambeau_mmq_q8_0_wave64_tile16_q8_1",
             Dtype::Q4_14Warp => "flambeau_mmq_q4_1_4warp_lds_q8_1",
             Dtype::Q4_1Wave64 => "flambeau_mmq_q4_1_wave64_q8_1",
             Dtype::Q4_0Wave64 => "flambeau_mmq_q4_0_wave64_q8_1",
@@ -335,7 +288,6 @@ impl Dtype {
             Dtype::Q5_0Wave64 => "flambeau_mmq_q5_0_wave64_q8_1",
             Dtype::Q5_1Wave64 => "flambeau_mmq_q5_1_wave64_q8_1",
             Dtype::Q4K4Warp => "flambeau_mmq_q4_K_4warp_q8_1",
-            Dtype::Q4KLdsTiled => "flambeau_mmq_q4_K_lds_tiled_q8_1",
             Dtype::Q5KLdsTiled => "flambeau_mmq_q5_K_lds_tiled_q8_1",
             Dtype::Q5KLdsTiledX8 => "flambeau_mmq_q5_K_lds_tiled_x8_q8_1",
             Dtype::Q6KLdsTiled => "flambeau_mmq_q6_K_lds_tiled_q8_1",
@@ -349,16 +301,10 @@ impl Dtype {
             Dtype::Iq4NlLdsTiled => "flambeau_mmq_iq4_nl_lds_tiled_q8_1",
             Dtype::Iq4NlLdsTiledX8 => "flambeau_mmq_iq4_nl_lds_tiled_x8_q8_1",
             Dtype::Q8_0LdsTiled => "flambeau_mmq_q8_0_lds_tiled_q8_1",
-            Dtype::Q4KWave64 => "flambeau_mmq_q4_K_wave64_q8_1",
-            Dtype::Q5KWave64 => "flambeau_mmq_q5_K_wave64_q8_1",
             Dtype::Q6K4Warp => "flambeau_mmq_q6_K_4warp_q8_1",
-            Dtype::Q6KWave64 => "flambeau_mmq_q6_K_wave64_q8_1",
             Dtype::Q8KWave64 => "flambeau_mmq_q8_K_wave64_q8_1",
             Dtype::Q2KWave64 => "flambeau_mmq_q2_K_wave64_q8_1",
-            Dtype::Q3KWave64 => "flambeau_mmq_q3_K_wave64_q8_1",
-            Dtype::Iq4XsWave64 => "flambeau_mmq_iq4_xs_wave64_q8_1",
             Dtype::Iq3SWave64 => "flambeau_mmq_iq3_s_wave64_q8_1",
-            Dtype::Iq4NlWave64 => "flambeau_mmq_iq4_nl_wave64_q8_1",
             Dtype::Iq3XxsWave64 => "flambeau_mmq_iq3_xxs_wave64_q8_1",
             Dtype::Iq2XxsWave64 => "flambeau_mmq_iq2_xxs_wave64_q8_1",
             Dtype::Iq2XsWave64 => "flambeau_mmq_iq2_xs_wave64_q8_1",
@@ -372,29 +318,21 @@ impl Dtype {
         match self {
             Dtype::Q8_0Oracle | Dtype::Q8_04Warp | Dtype::Q4_14Warp | Dtype::Q4_04Warp => 256,
             Dtype::Q8_0Wave64
-            | Dtype::Q8_0Wave64Tile16
             | Dtype::Q4_1Wave64
             | Dtype::Q4_0Wave64
             | Dtype::Q5_0Wave64
             | Dtype::Q5_1Wave64 => 64,
             Dtype::Q4K4Warp | Dtype::Q6K4Warp => 128,
-            Dtype::Q4KLdsTiled
-            | Dtype::Q5KLdsTiled | Dtype::Q5KLdsTiledX8
+            Dtype::Q5KLdsTiled | Dtype::Q5KLdsTiledX8
             | Dtype::Q6KLdsTiled | Dtype::Q6KLdsTiledX8
             | Dtype::Iq4XsLdsTiled | Dtype::Iq4XsLdsTiledX8
             | Dtype::Q4KLdsTiledY64 | Dtype::Q4KLdsTiledY64X8
             | Dtype::Q3KLdsTiled | Dtype::Q3KLdsTiledX8
             | Dtype::Iq4NlLdsTiled | Dtype::Iq4NlLdsTiledX8
             | Dtype::Q8_0LdsTiled => 256,
-            Dtype::Q4KWave64
-            | Dtype::Q5KWave64
-            | Dtype::Q6KWave64
-            | Dtype::Q8KWave64
+            Dtype::Q8KWave64
             | Dtype::Q2KWave64
-            | Dtype::Q3KWave64
-            | Dtype::Iq4XsWave64
             | Dtype::Iq3SWave64
-            | Dtype::Iq4NlWave64
             | Dtype::Iq3XxsWave64
             | Dtype::Iq2XxsWave64
             | Dtype::Iq2XsWave64
@@ -410,22 +348,22 @@ impl Dtype {
 
     fn weight_block_bytes(self) -> usize {
         match self {
-            Dtype::Q8_0Oracle | Dtype::Q8_04Warp | Dtype::Q8_0Wave64 | Dtype::Q8_0Wave64Tile16 | Dtype::Q8_0LdsTiled => {
+            Dtype::Q8_0Oracle | Dtype::Q8_04Warp | Dtype::Q8_0Wave64 | Dtype::Q8_0LdsTiled => {
                 std::mem::size_of::<BlockQ8_0>()
             }
             Dtype::Q4_14Warp | Dtype::Q4_1Wave64 => std::mem::size_of::<BlockQ4_1>(),
             Dtype::Q4_0Wave64 | Dtype::Q4_04Warp => std::mem::size_of::<BlockQ4_0>(),
             Dtype::Q5_0Wave64 => std::mem::size_of::<BlockQ5_0>(),
             Dtype::Q5_1Wave64 => std::mem::size_of::<BlockQ5_1>(),
-            Dtype::Q4K4Warp | Dtype::Q4KWave64 | Dtype::Q4KLdsTiled | Dtype::Q4KLdsTiledY64 | Dtype::Q4KLdsTiledY64X8 => std::mem::size_of::<BlockQ4K>(),
-            Dtype::Q5KWave64 | Dtype::Q5KLdsTiled | Dtype::Q5KLdsTiledX8 => std::mem::size_of::<BlockQ5K>(),
-            Dtype::Q6K4Warp | Dtype::Q6KWave64 | Dtype::Q6KLdsTiled | Dtype::Q6KLdsTiledX8 => std::mem::size_of::<BlockQ6K>(),
+            Dtype::Q4K4Warp | Dtype::Q4KLdsTiledY64 | Dtype::Q4KLdsTiledY64X8 => std::mem::size_of::<BlockQ4K>(),
+            Dtype::Q5KLdsTiled | Dtype::Q5KLdsTiledX8 => std::mem::size_of::<BlockQ5K>(),
+            Dtype::Q6K4Warp | Dtype::Q6KLdsTiled | Dtype::Q6KLdsTiledX8 => std::mem::size_of::<BlockQ6K>(),
             Dtype::Q8KWave64 => std::mem::size_of::<BlockQ8K>(),
             Dtype::Q2KWave64 => std::mem::size_of::<BlockQ2K>(),
-            Dtype::Q3KWave64 | Dtype::Q3KLdsTiled | Dtype::Q3KLdsTiledX8 => std::mem::size_of::<BlockQ3K>(),
-            Dtype::Iq4XsWave64 | Dtype::Iq4XsLdsTiled | Dtype::Iq4XsLdsTiledX8 => std::mem::size_of::<BlockIq4Xs>(),
+            Dtype::Q3KLdsTiled | Dtype::Q3KLdsTiledX8 => std::mem::size_of::<BlockQ3K>(),
+            Dtype::Iq4XsLdsTiled | Dtype::Iq4XsLdsTiledX8 => std::mem::size_of::<BlockIq4Xs>(),
             Dtype::Iq3SWave64 => std::mem::size_of::<BlockIq3S>(),
-            Dtype::Iq4NlWave64 | Dtype::Iq4NlLdsTiled | Dtype::Iq4NlLdsTiledX8 => std::mem::size_of::<BlockIq4Nl>(),
+            Dtype::Iq4NlLdsTiled | Dtype::Iq4NlLdsTiledX8 => std::mem::size_of::<BlockIq4Nl>(),
             Dtype::Iq3XxsWave64 => std::mem::size_of::<BlockIq3Xxs>(),
             Dtype::Iq2XxsWave64 => std::mem::size_of::<BlockIq2Xxs>(),
             Dtype::Iq2XsWave64 => std::mem::size_of::<BlockIq2Xs>(),
@@ -447,7 +385,6 @@ impl Dtype {
             Dtype::Q5_0Wave64 => "wave64",
             Dtype::Q5_1Wave64 => "wave64",
             Dtype::Q4K4Warp => "4warp_lds",
-            Dtype::Q4KLdsTiled => "turbo",
             Dtype::Q5KLdsTiled
             | Dtype::Q6KLdsTiled
             | Dtype::Iq4XsLdsTiled
@@ -461,23 +398,16 @@ impl Dtype {
             | Dtype::Q4KLdsTiledY64X8
             | Dtype::Q3KLdsTiledX8
             | Dtype::Iq4NlLdsTiledX8 => "lds_tiled_x8",
-            Dtype::Q4KWave64
-            | Dtype::Q5KWave64
-            | Dtype::Q6KWave64
-            | Dtype::Q8KWave64
+            Dtype::Q8KWave64
             | Dtype::Q2KWave64
-            | Dtype::Q3KWave64
             | Dtype::Q8_0Wave64
-            | Dtype::Iq4XsWave64
             | Dtype::Iq3SWave64
-            | Dtype::Iq4NlWave64
             | Dtype::Iq3XxsWave64
             | Dtype::Iq2XxsWave64
             | Dtype::Iq2XsWave64
             | Dtype::Iq2SWave64
             | Dtype::Iq1SWave64
             | Dtype::Iq1MWave64 => "wave64",
-            Dtype::Q8_0Wave64Tile16 => "wave64_tile16",
             Dtype::Q6K4Warp => "4warp_lds",
         }
     }
@@ -659,15 +589,9 @@ pub fn run_sweep(spec: &SweepSpec, repo_root: &Path) -> Result<Cert> {
         dtype_weight: spec.dtype.name().to_string(),
         dtype_activation: "Q8_1".to_string(),
         tolerance_formula: match spec.dtype {
-            Dtype::Q4KWave64
-            | Dtype::Q5KWave64
-            | Dtype::Q6KWave64
-            | Dtype::Q8KWave64
+            Dtype::Q8KWave64
             | Dtype::Q2KWave64
-            | Dtype::Q3KWave64
-            | Dtype::Iq4XsWave64
             | Dtype::Iq3SWave64
-            | Dtype::Iq4NlWave64
             | Dtype::Iq3XxsWave64
             | Dtype::Iq2XxsWave64
             | Dtype::Iq2XsWave64
@@ -726,7 +650,6 @@ fn run_shape(
         dtype,
         Dtype::Q4_14Warp
             | Dtype::Q4_04Warp
-            | Dtype::Q4KLdsTiled
             | Dtype::Q5KLdsTiled | Dtype::Q5KLdsTiledX8
             | Dtype::Q6KLdsTiled | Dtype::Q6KLdsTiledX8
             | Dtype::Iq4XsLdsTiled | Dtype::Iq4XsLdsTiledX8
@@ -859,7 +782,6 @@ fn run_shape(
             // = 576 + 4224 + 128 + 528 = 5456 ints = 21824 B (mmq_y=128)
             let shared_bytes: u32 = match dtype {
                 Dtype::Q4_14Warp | Dtype::Q4_04Warp => 7584 * 4, // same MMQ_Y/MMQ_X tile
-                Dtype::Q4KLdsTiled => 22528,                        // 22 KiB, rounded up
                 // 4 * (MMQ_X * 36 + Tr::x_ints(128)), see mmq_lds_tiled.cuh.
                 Dtype::Q5KLdsTiled => 4 * (64 * 36 + 4488),
                 Dtype::Q5KLdsTiledX8 => 4 * (8 * 36 + 4488),
@@ -882,21 +804,14 @@ fn run_shape(
                 shared_bytes,
             };
             unsafe { k_mmq.launch(stream, cfg, args)? };
-        } else if dtype == Dtype::Q4KWave64
-            || dtype == Dtype::Q5KWave64
-            || dtype == Dtype::Q6KWave64
-            || dtype == Dtype::Q8KWave64
+        } else if dtype == Dtype::Q8KWave64
             || dtype == Dtype::Q2KWave64
-            || dtype == Dtype::Q3KWave64
             || dtype == Dtype::Q8_0Wave64
-            || dtype == Dtype::Q8_0Wave64Tile16
             || dtype == Dtype::Q4_1Wave64
             || dtype == Dtype::Q4_0Wave64
             || dtype == Dtype::Q5_0Wave64
             || dtype == Dtype::Q5_1Wave64
-            || dtype == Dtype::Iq4XsWave64
             || dtype == Dtype::Iq3SWave64
-            || dtype == Dtype::Iq4NlWave64
             || dtype == Dtype::Iq3XxsWave64
             || dtype == Dtype::Iq2XxsWave64
             || dtype == Dtype::Iq2XsWave64
@@ -1003,7 +918,7 @@ fn tame_weight_scales(dtype: Dtype, mut raw: Vec<u8>) -> Vec<u8> {
     for i in 0..nblocks {
         let block = &mut raw[i * bs..(i + 1) * bs];
         match dtype {
-            Dtype::Q8_0Oracle | Dtype::Q8_04Warp | Dtype::Q8_0Wave64 | Dtype::Q8_0Wave64Tile16 | Dtype::Q8_0LdsTiled => {
+            Dtype::Q8_0Oracle | Dtype::Q8_04Warp | Dtype::Q8_0Wave64 | Dtype::Q8_0LdsTiled => {
                 let d = f16::from_f32((block[0] as f32 / 255.0) * 0.1 + 0.01);
                 block[0..2].copy_from_slice(&d.to_bits().to_le_bytes());
             }
@@ -1040,7 +955,7 @@ fn tame_weight_scales(dtype: Dtype, mut raw: Vec<u8>) -> Vec<u8> {
                 block[2..4].copy_from_slice(&m.to_bits().to_le_bytes());
                 let _ = QK5_1;
             }
-            Dtype::Q4K4Warp | Dtype::Q4KWave64 | Dtype::Q4KLdsTiled | Dtype::Q4KLdsTiledY64 | Dtype::Q4KLdsTiledY64X8 => {
+            Dtype::Q4K4Warp | Dtype::Q4KLdsTiledY64 | Dtype::Q4KLdsTiledY64X8 => {
                 // Q4_K: d(fp16), dmin(fp16), scales[12], qs[128]. Tame d/dmin
                 // so the reference stays well-conditioned (same shaping the
                 // MMVQ sweep uses).
@@ -1049,7 +964,7 @@ fn tame_weight_scales(dtype: Dtype, mut raw: Vec<u8>) -> Vec<u8> {
                 block[0..2].copy_from_slice(&d.to_bits().to_le_bytes());
                 block[2..4].copy_from_slice(&dmin.to_bits().to_le_bytes());
             }
-            Dtype::Q5KWave64 | Dtype::Q5KLdsTiled | Dtype::Q5KLdsTiledX8 => {
+            Dtype::Q5KLdsTiled | Dtype::Q5KLdsTiledX8 => {
                 // Q5_K: d(fp16), dmin(fp16), scales[12], qh[32], qs[128].
                 // Same scale taming shape as Q4_K — d/dmin at offset 0..4.
                 let d = f16::from_f32((block[0] as f32 / 255.0) * 0.1 + 0.01);
@@ -1057,7 +972,7 @@ fn tame_weight_scales(dtype: Dtype, mut raw: Vec<u8>) -> Vec<u8> {
                 block[0..2].copy_from_slice(&d.to_bits().to_le_bytes());
                 block[2..4].copy_from_slice(&dmin.to_bits().to_le_bytes());
             }
-            Dtype::Q6K4Warp | Dtype::Q6KWave64 | Dtype::Q6KLdsTiled | Dtype::Q6KLdsTiledX8 => {
+            Dtype::Q6K4Warp | Dtype::Q6KLdsTiled | Dtype::Q6KLdsTiledX8 => {
                 // Q6_K: ql[128], qh[64], scales[16] (i8), d(fp16) at offset 208.
                 // Clamp scales into a small signed range and set d modest.
                 for s in 0..16 {
@@ -1081,7 +996,7 @@ fn tame_weight_scales(dtype: Dtype, mut raw: Vec<u8>) -> Vec<u8> {
                 block[80..82].copy_from_slice(&d.to_bits().to_le_bytes());
                 block[82..84].copy_from_slice(&dmin.to_bits().to_le_bytes());
             }
-            Dtype::Q3KWave64 | Dtype::Q3KLdsTiled | Dtype::Q3KLdsTiledX8 => {
+            Dtype::Q3KLdsTiled | Dtype::Q3KLdsTiledX8 => {
                 // Q3_K: hmask[32] + qs[64] + scales[12] + d (f16 @ 108).
                 // Scales bytes are signed 6-bit packed; mod-32 keeps them
                 // in-range. d tamed small.
@@ -1092,7 +1007,7 @@ fn tame_weight_scales(dtype: Dtype, mut raw: Vec<u8>) -> Vec<u8> {
                 let d = f16::from_f32((block[d_off] as f32 / 255.0) * 0.05 + 0.005);
                 block[d_off..d_off + 2].copy_from_slice(&d.to_bits().to_le_bytes());
             }
-            Dtype::Iq4XsWave64 | Dtype::Iq4XsLdsTiled | Dtype::Iq4XsLdsTiledX8 => {
+            Dtype::Iq4XsLdsTiled | Dtype::Iq4XsLdsTiledX8 => {
                 // IQ4_XS: d (f16 @ 0..2) + scales_h (u16 @ 2..4) + scales_l[4]
                 // (4..8) + qs[128] (8..136). 6-bit signed scale per sub-block
                 // ∈ [-32, 31] — random bytes already span the full range.
@@ -1106,7 +1021,7 @@ fn tame_weight_scales(dtype: Dtype, mut raw: Vec<u8>) -> Vec<u8> {
                 let d = f16::from_f32((block[0] as f32 / 255.0) * 0.001 + 0.0001);
                 block[0..2].copy_from_slice(&d.to_bits().to_le_bytes());
             }
-            Dtype::Iq4NlWave64 | Dtype::Iq4NlLdsTiled | Dtype::Iq4NlLdsTiledX8 => {
+            Dtype::Iq4NlLdsTiled | Dtype::Iq4NlLdsTiledX8 => {
                 let d = f16::from_f32((block[0] as f32 / 255.0) * 0.05 + 0.005);
                 block[0..2].copy_from_slice(&d.to_bits().to_le_bytes());
             }
@@ -1177,20 +1092,13 @@ fn cert_tol(dtype: Dtype, _k: usize) -> f32 {
         // Q5_K has compound super-block × sub-block scale errors; at large M the
         // extreme-value distribution of per-element errors crosses the 3e-2 bar
         // even for a correct kernel. Candle's Q5_K MMQ accepts ~5e-2 at m=2048.
-        // Q4_K wave64 shares the same super/sub-block decomposition as Q5_K.
-        Dtype::Q4KWave64
-        | Dtype::Q5KWave64
-        | Dtype::Q6KWave64
-        | Dtype::Q4KLdsTiled
-        | Dtype::Q5KLdsTiled | Dtype::Q5KLdsTiledX8
+        Dtype::Q5KLdsTiled | Dtype::Q5KLdsTiledX8
         | Dtype::Q6KLdsTiled | Dtype::Q6KLdsTiledX8
         | Dtype::Iq4XsLdsTiled | Dtype::Iq4XsLdsTiledX8
         | Dtype::Q4KLdsTiledY64 | Dtype::Q4KLdsTiledY64X8
         | Dtype::Q3KLdsTiled | Dtype::Q3KLdsTiledX8
         | Dtype::Iq4NlLdsTiled | Dtype::Iq4NlLdsTiledX8 => 5e-2,
-        Dtype::Iq4XsWave64
-        | Dtype::Iq3SWave64
-        | Dtype::Iq4NlWave64
+        Dtype::Iq3SWave64
         | Dtype::Iq3XxsWave64
         | Dtype::Iq2XxsWave64
         | Dtype::Iq2XsWave64

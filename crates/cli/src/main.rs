@@ -1055,14 +1055,12 @@ fn sweep(root: &std::path::Path, arch: &str, op: Option<&str>, dtype: &str) -> R
                     "Q8_0_dp4a" => vec![Dtype::Q8_0Dp4a],
                     "Q8_0_r2" => vec![Dtype::Q8_0R2],
                     "Q8_0_r4" => vec![Dtype::Q8_0R4],
-                    "Q4_K" => vec![Dtype::Q4K, Dtype::Q4KR2, Dtype::Q4KR2Dp4a, Dtype::Q4KDp4aT128Vdr2],
-                    "Q4_K_r2_dp4a" => vec![Dtype::Q4KR2Dp4a],
+                    "Q4_K" => vec![Dtype::Q4K, Dtype::Q4KR2, Dtype::Q4KDp4aT128Vdr2],
                     "Q4_K_dp4a_t128_vdr2" => vec![Dtype::Q4KDp4aT128Vdr2],
-                    "Q5_K" => vec![Dtype::Q5K, Dtype::Q5KR2, Dtype::Q5KDp4a, Dtype::Q5KR2Dp4a, Dtype::Q5KDp4aT128Vdr2],
+                    "Q5_K" => vec![Dtype::Q5K, Dtype::Q5KR2, Dtype::Q5KR2Dp4a, Dtype::Q5KDp4aT128Vdr2],
                     "Q6_K" => vec![Dtype::Q6K],
                     "Q4_K_r2" => vec![Dtype::Q4KR2],
                     "Q5_K_r2" => vec![Dtype::Q5KR2],
-                    "Q5_K_dp4a" => vec![Dtype::Q5KDp4a],
                     "Q5_K_dp4a_t128_vdr2" => vec![Dtype::Q5KDp4aT128Vdr2],
                     "Q5_K_r2_dp4a" => vec![Dtype::Q5KR2Dp4a],
                     "Q6_K_r4" => vec![Dtype::Q6KR4],
@@ -1081,9 +1079,8 @@ fn sweep(root: &std::path::Path, arch: &str, op: Option<&str>, dtype: &str) -> R
                     "IQ4_NL" => vec![Dtype::Iq4Nl, Dtype::Iq4NlR2, Dtype::Iq4NlDp4a],
                     "IQ4_NL_r2" => vec![Dtype::Iq4NlR2],
                     "IQ4_NL_dp4a" => vec![Dtype::Iq4NlDp4a],
-                    "IQ4_XS" => vec![Dtype::Iq4Xs, Dtype::Iq4XsR2, Dtype::Iq4XsDp4a, Dtype::Iq4XsDp4aT128Vdr4],
+                    "IQ4_XS" => vec![Dtype::Iq4Xs, Dtype::Iq4XsR2, Dtype::Iq4XsDp4aT128Vdr4],
                     "IQ4_XS_r2" => vec![Dtype::Iq4XsR2],
-                    "IQ4_XS_dp4a" => vec![Dtype::Iq4XsDp4a],
                     "IQ4_XS_dp4a_t128_vdr4" => vec![Dtype::Iq4XsDp4aT128Vdr4],
                     "IQ3_XXS" => vec![Dtype::Iq3Xxs, Dtype::Iq3XxsR2, Dtype::Iq3XxsDp4a],
                     "IQ3_XXS_r2" => vec![Dtype::Iq3XxsR2],
@@ -1129,9 +1126,6 @@ fn sweep(root: &std::path::Path, arch: &str, op: Option<&str>, dtype: &str) -> R
                     "Q8_0" | "Q8_0_oracle" => (vec![MmqDtype::Q8_0Oracle], SweepSpec::v1_4_oracle),
                     "Q8_0_4warp" => (vec![MmqDtype::Q8_04Warp], SweepSpec::v1_4_prefill),
                     "Q8_0_wave64" => (vec![MmqDtype::Q8_0Wave64], SweepSpec::v1_4_prefill),
-                    "Q8_0_wave64_tile16" => {
-                        (vec![MmqDtype::Q8_0Wave64Tile16], SweepSpec::v1_4_prefill)
-                    }
                     "Q4_1" | "Q4_1_4warp" => (vec![MmqDtype::Q4_14Warp], SweepSpec::v1_4_prefill),
                     "Q4_1_wave64" => (vec![MmqDtype::Q4_1Wave64], SweepSpec::v1_4_prefill),
                     "Q4_0" | "Q4_0_wave64" => (vec![MmqDtype::Q4_0Wave64], SweepSpec::v1_4_prefill),
@@ -1139,35 +1133,24 @@ fn sweep(root: &std::path::Path, arch: &str, op: Option<&str>, dtype: &str) -> R
                     "Q5_0" | "Q5_0_wave64" => (vec![MmqDtype::Q5_0Wave64], SweepSpec::v1_4_prefill),
                     "Q5_1" | "Q5_1_wave64" => (vec![MmqDtype::Q5_1Wave64], SweepSpec::v1_4_prefill),
                     "Q4_K" | "Q4_K_4warp" => (vec![MmqDtype::Q4K4Warp], SweepSpec::v1_4_prefill),
-                    "Q4_K_wave64" => (vec![MmqDtype::Q4KWave64], SweepSpec::v1_4_prefill),
-                    "Q4_K_lds_tiled" => (vec![MmqDtype::Q4KLdsTiled], SweepSpec::v1_4_prefill),
-                    "Q5_K_lds_tiled" => (vec![MmqDtype::Q5KLdsTiled], SweepSpec::v1_4_prefill),
+                    "Q5_K" | "Q5_K_lds_tiled" => (vec![MmqDtype::Q5KLdsTiled], SweepSpec::v1_4_prefill),
                     "Q5_K_lds_tiled_x8" => (vec![MmqDtype::Q5KLdsTiledX8], SweepSpec::v1_4_prefill),
                     "Q6_K_lds_tiled" => (vec![MmqDtype::Q6KLdsTiled], SweepSpec::v1_4_prefill),
                     "Q6_K_lds_tiled_x8" => (vec![MmqDtype::Q6KLdsTiledX8], SweepSpec::v1_4_prefill),
-                    "IQ4_XS_lds_tiled" => (vec![MmqDtype::Iq4XsLdsTiled], SweepSpec::v1_4_prefill),
+                    "IQ4_XS" | "IQ4_XS_lds_tiled" => (vec![MmqDtype::Iq4XsLdsTiled], SweepSpec::v1_4_prefill),
                     "IQ4_XS_lds_tiled_x8" => (vec![MmqDtype::Iq4XsLdsTiledX8], SweepSpec::v1_4_prefill),
                     "Q4_K_lds_tiled_y64" => (vec![MmqDtype::Q4KLdsTiledY64], SweepSpec::v1_4_prefill),
                     "Q4_K_lds_tiled_y64_x8" => (vec![MmqDtype::Q4KLdsTiledY64X8], SweepSpec::v1_4_prefill),
-                    "Q3_K_lds_tiled" => (vec![MmqDtype::Q3KLdsTiled], SweepSpec::v1_4_prefill),
+                    "Q3_K" | "Q3_K_lds_tiled" => (vec![MmqDtype::Q3KLdsTiled], SweepSpec::v1_4_prefill),
                     "Q3_K_lds_tiled_x8" => (vec![MmqDtype::Q3KLdsTiledX8], SweepSpec::v1_4_prefill),
-                    "IQ4_NL_lds_tiled" => (vec![MmqDtype::Iq4NlLdsTiled], SweepSpec::v1_4_prefill),
+                    "IQ4_NL" | "IQ4_NL_lds_tiled" => (vec![MmqDtype::Iq4NlLdsTiled], SweepSpec::v1_4_prefill),
                     "IQ4_NL_lds_tiled_x8" => (vec![MmqDtype::Iq4NlLdsTiledX8], SweepSpec::v1_4_prefill),
                     "Q8_0_lds_tiled" => (vec![MmqDtype::Q8_0LdsTiled], SweepSpec::v1_4_prefill),
-                    "Q5_K" | "Q5_K_wave64" => (vec![MmqDtype::Q5KWave64], SweepSpec::v1_4_prefill),
                     "Q6_K" | "Q6_K_4warp" => (vec![MmqDtype::Q6K4Warp], SweepSpec::v1_4_prefill),
-                    "Q6_K_wave64" => (vec![MmqDtype::Q6KWave64], SweepSpec::v1_4_prefill),
                     "Q8_K" | "Q8_K_wave64" => (vec![MmqDtype::Q8KWave64], SweepSpec::v1_4_prefill),
                     "Q2_K" | "Q2_K_wave64" => (vec![MmqDtype::Q2KWave64], SweepSpec::v1_4_prefill),
-                    "Q3_K" | "Q3_K_wave64" => (vec![MmqDtype::Q3KWave64], SweepSpec::v1_4_prefill),
-                    "IQ4_XS" | "IQ4_XS_wave64" => {
-                        (vec![MmqDtype::Iq4XsWave64], SweepSpec::v1_4_prefill)
-                    }
                     "IQ3_S" | "IQ3_S_wave64" => {
                         (vec![MmqDtype::Iq3SWave64], SweepSpec::v1_4_prefill)
-                    }
-                    "IQ4_NL" | "IQ4_NL_wave64" => {
-                        (vec![MmqDtype::Iq4NlWave64], SweepSpec::v1_4_prefill)
                     }
                     "IQ3_XXS" | "IQ3_XXS_wave64" => {
                         (vec![MmqDtype::Iq3XxsWave64], SweepSpec::v1_4_prefill)
@@ -1192,7 +1175,6 @@ fn sweep(root: &std::path::Path, arch: &str, op: Option<&str>, dtype: &str) -> R
                             MmqDtype::Q8_0Oracle,
                             MmqDtype::Q8_04Warp,
                             MmqDtype::Q8_0Wave64,
-                            MmqDtype::Q8_0Wave64Tile16,
                             MmqDtype::Q4_14Warp,
                             MmqDtype::Q4_1Wave64,
                             MmqDtype::Q4_0Wave64,
@@ -1200,27 +1182,21 @@ fn sweep(root: &std::path::Path, arch: &str, op: Option<&str>, dtype: &str) -> R
                             MmqDtype::Q5_0Wave64,
                             MmqDtype::Q5_1Wave64,
                             MmqDtype::Q4K4Warp,
-                            MmqDtype::Q4KWave64,
-                            MmqDtype::Q5KWave64,
                             MmqDtype::Q6K4Warp,
-                            MmqDtype::Q6KWave64,
                             MmqDtype::Q8KWave64,
                             MmqDtype::Q2KWave64,
-                            MmqDtype::Q3KWave64,
                         ],
                         // Oracle uses its small grid, 4warp uses the prefill grid.
                         |d| match d {
                             MmqDtype::Q8_0Oracle => SweepSpec::v1_4_oracle(d),
                             MmqDtype::Q8_04Warp
                             | MmqDtype::Q8_0Wave64
-                            | MmqDtype::Q8_0Wave64Tile16
                             | MmqDtype::Q4_14Warp
                             | MmqDtype::Q4_1Wave64
                             | MmqDtype::Q4_0Wave64
                             | MmqDtype::Q4_04Warp
                             | MmqDtype::Q5_0Wave64
                             | MmqDtype::Q5_1Wave64
-                            | MmqDtype::Q4KLdsTiled
                             | MmqDtype::Q5KLdsTiled
                             | MmqDtype::Q5KLdsTiledX8
                             | MmqDtype::Q6KLdsTiled
@@ -1235,16 +1211,10 @@ fn sweep(root: &std::path::Path, arch: &str, op: Option<&str>, dtype: &str) -> R
                             | MmqDtype::Iq4NlLdsTiledX8
                             | MmqDtype::Q8_0LdsTiled
                             | MmqDtype::Q4K4Warp
-                            | MmqDtype::Q4KWave64
-                            | MmqDtype::Q5KWave64
                             | MmqDtype::Q6K4Warp
-                            | MmqDtype::Q6KWave64
                             | MmqDtype::Q8KWave64
                             | MmqDtype::Q2KWave64
-                            | MmqDtype::Q3KWave64
-                            | MmqDtype::Iq4XsWave64
                             | MmqDtype::Iq3SWave64
-                            | MmqDtype::Iq4NlWave64
                             | MmqDtype::Iq3XxsWave64
                             | MmqDtype::Iq2XxsWave64
                             | MmqDtype::Iq2XsWave64
@@ -1813,15 +1783,15 @@ fn sweep_cuda(root: &std::path::Path, op: &str, dtype: &str) -> Result<()> {
         "IQ1_M_dp4a" => vec![Dtype::Iq1MDp4a],
         "Q6_K" => vec![Dtype::Q6KDP4A],
         "Q8_K" => vec![Dtype::Q8K],
-        "IQ4_NL" => vec![Dtype::Iq4Nl, Dtype::Iq4NlR2, Dtype::Iq4NlDp4a],
-        "IQ4_XS" => vec![Dtype::Iq4Xs, Dtype::Iq4XsR2, Dtype::Iq4XsDp4a, Dtype::Iq4XsDp4aT128Vdr4],
-        "IQ2_XXS" => vec![Dtype::Iq2Xxs, Dtype::Iq2XxsR2, Dtype::Iq2XxsDp4a],
-        "IQ3_XXS" => vec![Dtype::Iq3Xxs, Dtype::Iq3XxsR2, Dtype::Iq3XxsDp4a],
-        "IQ3_S" => vec![Dtype::Iq3S, Dtype::Iq3SR2, Dtype::Iq3SDp4a],
-        "IQ2_XS" => vec![Dtype::Iq2Xs, Dtype::Iq2XsR2, Dtype::Iq2XsDp4a],
-        "IQ2_S" => vec![Dtype::Iq2S, Dtype::Iq2SR2, Dtype::Iq2SDp4a],
-        "IQ1_S" => vec![Dtype::Iq1S, Dtype::Iq1SR2, Dtype::Iq1SDp4a],
-        "IQ1_M" => vec![Dtype::Iq1M, Dtype::Iq1MR2, Dtype::Iq1MDp4a],
+        "IQ4_NL" => vec![Dtype::Iq4NlDp4a],
+        "IQ4_XS" => vec![Dtype::Iq4XsDp4a, Dtype::Iq4XsDp4aT128Vdr4],
+        "IQ2_XXS" => vec![Dtype::Iq2XxsDp4a],
+        "IQ3_XXS" => vec![Dtype::Iq3XxsDp4a],
+        "IQ3_S" => vec![Dtype::Iq3SDp4a],
+        "IQ2_XS" => vec![Dtype::Iq2XsDp4a],
+        "IQ2_S" => vec![Dtype::Iq2SDp4a],
+        "IQ1_S" => vec![Dtype::Iq1SDp4a],
+        "IQ1_M" => vec![Dtype::Iq1MDp4a],
         "all" => vec![
             Dtype::Q8_0Dp4a,
             Dtype::Q4_0,
@@ -1925,13 +1895,6 @@ fn pmc_refresh(arch: &str) -> Result<()> {
                 64,
             ),
             (
-                "qmatmul_q4_k_mmvq_dp4a",
-                "mmvq_q4_k_r2_dp4a",
-                1,
-                2048,
-                64,
-            ),
-            (
                 "qmatmul_q4_k_mmvq_dp4a_t128_vdr2",
                 "mmvq_q4_k_dp4a_t128_vdr2",
                 1,
@@ -1958,13 +1921,6 @@ fn pmc_refresh(arch: &str) -> Result<()> {
                 1,
                 2048,
                 64,
-            ),
-            (
-                "qmatmul_q5_k_mmvq_dp4a",
-                "mmvq_q5_k_dp4a",
-                1,
-                2048,
-                256,
             ),
             (
                 "qmatmul_q6_K_mmvq_nw1_r4_gfx906",
@@ -1997,27 +1953,6 @@ fn pmc_refresh(arch: &str) -> Result<()> {
             (
                 "qmatmul_q4_1_mmq_4warp_lds_gfx906",
                 "mmq_q4_1_4warp_lds",
-                128,
-                2048,
-                4096,
-            ),
-            (
-                "qmatmul_q4_K_mmq_wave64_gfx906",
-                "mmq_q4_K_wave64",
-                128,
-                2048,
-                4096,
-            ),
-            (
-                "qmatmul_q5_K_mmq_wave64_gfx906",
-                "mmq_q5_K_wave64",
-                128,
-                2048,
-                4096,
-            ),
-            (
-                "qmatmul_q6_K_mmq_wave64_gfx906",
-                "mmq_q6_K_wave64",
                 128,
                 2048,
                 4096,

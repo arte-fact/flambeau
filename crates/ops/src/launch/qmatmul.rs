@@ -1966,38 +1966,12 @@ const QMATMUL_RECIPES: &[RecipeRow] = &[
             mmq_tile: (0, 0),
         },
     },
-    //— dense MMQ wave64 for IQ family.
-    // MMQ_Y=64, TILE_N=8 (same tile shape as the K-quant wave64 MMQ).
-    RecipeRow {
-        ids: &["qmatmul_iq4_xs_mmq_wave64_gfx906"],
-        recipe: Recipe {
-            kind: RecipeKind::MmqWave64,
-            stem: "mmq_iq4_xs_wave64",
-            entry: "flambeau_mmq_iq4_xs_wave64_q8_1",
-            entry_f16: None,
-            threads: 64,
-            rows_per_block: 0,
-            mmq_tile: (64, 8),
-        },
-    },
     RecipeRow {
         ids: &["qmatmul_iq3_s_mmq_wave64_gfx906"],
         recipe: Recipe {
             kind: RecipeKind::MmqWave64,
             stem: "mmq_iq3_s_wave64",
             entry: "flambeau_mmq_iq3_s_wave64_q8_1",
-            entry_f16: None,
-            threads: 64,
-            rows_per_block: 0,
-            mmq_tile: (64, 8),
-        },
-    },
-    RecipeRow {
-        ids: &["qmatmul_iq4_nl_mmq_wave64_gfx906"],
-        recipe: Recipe {
-            kind: RecipeKind::MmqWave64,
-            stem: "mmq_iq4_nl_wave64",
-            entry: "flambeau_mmq_iq4_nl_wave64_q8_1",
             entry_f16: None,
             threads: 64,
             rows_per_block: 0,
@@ -2196,21 +2170,6 @@ const QMATMUL_RECIPES: &[RecipeRow] = &[
         },
     },
     RecipeRow {
-        ids: &["qmatmul_q8_0_mmq_wave64_tile16_gfx906"],
-        recipe: Recipe {
-            kind: RecipeKind::MmqWave64,
-            stem: "mmq_q8_0_wave64_tile16",
-            entry: "flambeau_mmq_q8_0_wave64_tile16_q8_1",
-            entry_f16: None,
-            threads: 64,
-            rows_per_block: 0,
-    // MMQ_Y=64 rows × TILE_N=16 — halves weight HBM bandwidth vs
-    // the TILE_N=8 variant at the cost of doubled per-thread
-    // accumulator VGPR (16 floats).
-            mmq_tile: (64, 16),
-        },
-    },
-    RecipeRow {
         ids: &["qmatmul_q4_1_mmq_4warp_lds_gfx906"],
         recipe: Recipe {
             kind: RecipeKind::MmqLdsX64,
@@ -2307,22 +2266,6 @@ const QMATMUL_RECIPES: &[RecipeRow] = &[
             threads: 64,
             rows_per_block: 0,
             mmq_tile: (64, 8),
-        },
-    },
-    // 128×16-tile Q4_K LDS-tiled MMQ, DS4 Q8_1 activation, 256 threads
-    // per (64, 4, 1) block, 22528 B dynamic LDS. No longer dispatched on
-    // gfx906 (superseded by the 64×64 `_y64` recipe); kept for A/B.
-    RecipeRow {
-        ids: &["qmatmul_q4_K_mmq_lds_tiled_gfx906"],
-        recipe: Recipe {
-            kind: RecipeKind::MmqLdsX64,
-            stem: "mmq_q4_K_lds_tiled",
-            entry: "flambeau_mmq_q4_K_lds_tiled_q8_1",
-            entry_f16: None,
-            threads: 0, // unused for MmqLdsX64
-            rows_per_block: 0,
-    // MMQ_Y=128, MMQ_X=16 (must match mmq_q4_K_lds_tiled.cu).
-            mmq_tile: (128, 16),
         },
     },
     RecipeRow {
@@ -2482,45 +2425,6 @@ const QMATMUL_RECIPES: &[RecipeRow] = &[
         },
     },
     RecipeRow {
-        ids: &["qmatmul_q4_K_mmq_wave64_gfx906"],
-        recipe: Recipe {
-            kind: RecipeKind::MmqWave64,
-            stem: "mmq_q4_K_wave64",
-            entry: "flambeau_mmq_q4_K_wave64_q8_1",
-            entry_f16: None,
-            threads: 64,
-            rows_per_block: 0,
-    // MMQ_Y = 64 rows, TILE_N = 8 cols per tile
-            mmq_tile: (64, 8),
-        },
-    },
-    RecipeRow {
-        ids: &["qmatmul_q5_K_mmq_wave64_gfx906"],
-        recipe: Recipe {
-            kind: RecipeKind::MmqWave64,
-            stem: "mmq_q5_K_wave64",
-            entry: "flambeau_mmq_q5_K_wave64_q8_1",
-            entry_f16: None,
-            threads: 64,
-            rows_per_block: 0,
-    // MMQ_Y = 64 rows, TILE_N = 8 cols per tile
-            mmq_tile: (64, 8),
-        },
-    },
-    RecipeRow {
-        ids: &["qmatmul_q6_K_mmq_wave64_gfx906"],
-        recipe: Recipe {
-            kind: RecipeKind::MmqWave64,
-            stem: "mmq_q6_K_wave64",
-            entry: "flambeau_mmq_q6_K_wave64_q8_1",
-            entry_f16: None,
-            threads: 64,
-            rows_per_block: 0,
-    // MMQ_Y = 64 rows, TILE_N = 8 cols per tile
-            mmq_tile: (64, 8),
-        },
-    },
-    RecipeRow {
         ids: &["qmatmul_q8_K_mmq_wave64_gfx906"],
         recipe: Recipe {
             kind: RecipeKind::MmqWave64,
@@ -2538,18 +2442,6 @@ const QMATMUL_RECIPES: &[RecipeRow] = &[
             kind: RecipeKind::MmqWave64,
             stem: "mmq_q2_K_wave64",
             entry: "flambeau_mmq_q2_K_wave64_q8_1",
-            entry_f16: None,
-            threads: 64,
-            rows_per_block: 0,
-            mmq_tile: (64, 8),
-        },
-    },
-    RecipeRow {
-        ids: &["qmatmul_q3_K_mmq_wave64_gfx906"],
-        recipe: Recipe {
-            kind: RecipeKind::MmqWave64,
-            stem: "mmq_q3_K_wave64",
-            entry: "flambeau_mmq_q3_K_wave64_q8_1",
             entry_f16: None,
             threads: 64,
             rows_per_block: 0,
