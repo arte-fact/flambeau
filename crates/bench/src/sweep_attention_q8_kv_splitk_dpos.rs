@@ -100,7 +100,7 @@ fn splitk_chunk_size(n: usize) -> usize {
 }
 
 /// CPU-side Q8_0 quantise — matches the on-device quantize_f16_q8_0 path.
-fn quantize_row_q8_0(xs: &[f32]) -> Vec<BlockQ8_0> {
+pub(crate) fn quantize_row_q8_0(xs: &[f32]) -> Vec<BlockQ8_0> {
     assert_eq!(xs.len() % QK8_0, 0);
     let nb = xs.len() / QK8_0;
     let mut out = Vec::with_capacity(nb);
@@ -118,7 +118,7 @@ fn quantize_row_q8_0(xs: &[f32]) -> Vec<BlockQ8_0> {
     out
 }
 
-fn dequantize_row_q8_0(xs: &[BlockQ8_0]) -> Vec<f32> {
+pub(crate) fn dequantize_row_q8_0(xs: &[BlockQ8_0]) -> Vec<f32> {
     let mut out = vec![0.0f32; xs.len() * QK8_0];
     for (i, b) in xs.iter().enumerate() {
         let d = b.d.to_f32();

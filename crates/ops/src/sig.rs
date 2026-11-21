@@ -240,6 +240,16 @@ pub struct AttnSplitkShape {
 /// buffer) using the baked [`AttnDposKnobs`] regime, so only the capture-time
 /// grid (`n_chunks`) and `chunk_size` are host constants here.
 #[derive(Copy, Clone, Debug)]
+pub struct AttnVecDposShape {
+    pub n_heads_q: usize,
+    pub n_heads_kv: usize,
+    pub head_dim: usize,
+    /// gridDim.y: KV tiles strided over this many blocks per head; above 1
+    /// each writes a split-K partial and the shared combine runs.
+    pub n_par: usize,
+}
+
+#[derive(Copy, Clone, Debug)]
 pub struct AttnSplitkDposShape {
     pub n_heads_q: usize,
     pub n_heads_kv: usize,

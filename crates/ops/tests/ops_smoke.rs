@@ -60,6 +60,7 @@ const CUDA_ONLY_STEMS: &[&str] = &[
     "mmq_q4_0_mma",
     "attention_decode_f16_splitk_dpos",
     "attention_decode_q8_kv_splitk_dpos",
+    "attention_decode_q8_kv_vec_dpos",
     "attention_decode_batched_splitk",
     "embed_gather_f16_dpos",
     "kv_append_v_unit_norm_f16_dpos",

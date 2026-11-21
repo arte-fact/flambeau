@@ -382,6 +382,18 @@ pub trait Ops {
     /// build does not map to a path.
     fn attention_decode_variant(&self, kv_dtype: QDtype, m: usize) -> Result<crate::AttnDecodeVariant>;
 
+    /// Device-position Q8_0-KV decode attention, 128-thread warp-per-token
+    /// blocks (`attention_decode_q8_kv_vec_dpos`, CUDA-only). Global layers;
+    /// `partials` are used only when `shape.n_par > 1`.
+    fn attention_decode_q8_kv_vec_dpos(
+        &self,
+        buffers: crate::AttnBuffers,
+        partials: crate::AttnSplitkPartials,
+        shape: crate::AttnVecDposShape,
+        scale: f32,
+        pos_ptr: DevicePtr,
+    ) -> Result<()>;
+
     fn attention_decode_q8_kv_splitk_dpos(
         &self,
         buffers: crate::AttnBuffers,

@@ -541,6 +541,19 @@ impl<B: KernelBackend> Ops for OpsImpl<'_, B> {
         }
     }
 
+    fn attention_decode_q8_kv_vec_dpos(
+        &self,
+        buffers: crate::AttnBuffers,
+        partials: crate::AttnSplitkPartials,
+        shape: crate::AttnVecDposShape,
+        scale: f32,
+        pos_ptr: DevicePtr,
+    ) -> Result<()> {
+        crate::launch::attention::attention_decode_q8_kv_vec_dpos(
+            self.reg, self.stream, buffers, partials, shape, scale, pos_ptr,
+        )
+    }
+
     fn attention_decode_q8_kv_splitk_dpos(
         &self,
         buffers: crate::AttnBuffers,
