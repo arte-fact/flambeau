@@ -22,6 +22,7 @@ serde = { workspace = true, features = ["derive"] }
 libc = "0.2"
 
 [dev-dependencies]
+flambeau-test-models = { path = "../test-models" }
 byteorder.workspace = true
 
 [features]

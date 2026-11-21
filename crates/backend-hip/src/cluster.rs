@@ -107,12 +107,7 @@ pub struct HipCluster {
     /// hot path — see [`RankBounce`]. Used by the blocking
     /// `peer_copy_via_host` path.
     bounces: Vec<RankBounce>,
-    /// 5.a — per-rank auxiliary streams for pipeline-parallel ubatch
-    /// pipelining. `aux_streams[rank][lane]` is an independent HIP stream on
-    /// rank `rank`. Populated lazily by [`HipCluster::reserve_aux_streams`].
-    /// Empty by default so the non-pipelined path stays byte-identical.
-    aux_streams: Vec<std::sync::Mutex<Vec<HipStream>>>,
-    /// 5.g — per-rank × per-lane pinned bounces for the async
+    /// Per-rank × per-lane pinned bounces for the async
     /// peer-copy path. Previously shared one bounce per rank, which
     /// serialised concurrent async peer-copies across lanes. Each lane
     /// now gets its own pinned slab. Populated via
@@ -167,9 +162,6 @@ impl HipCluster {
             devices.push(HipDevice::new(id)?);
         }
         let bounces = (0..device_ids.len()).map(|_| RankBounce::empty()).collect();
-        let aux_streams = (0..device_ids.len())
-            .map(|_| std::sync::Mutex::new(Vec::new()))
-            .collect();
         let lane_bounces = (0..device_ids.len())
             .map(|_| std::sync::Mutex::new(Vec::new()))
             .collect();
@@ -183,7 +175,6 @@ impl HipCluster {
         Ok(Self {
             devices,
             bounces,
-            aux_streams,
             lane_bounces,
             peer_access,
             peer_copy_lock,
@@ -226,7 +217,7 @@ impl HipCluster {
         true
     }
 
-    /// 5.g — reserve `n_lanes` per-lane pinned bounce slabs per rank,
+    /// Reserve `n_lanes` per-lane pinned bounce slabs per rank,
     /// each pre-grown to `bytes_per_rank` bytes. Required before using
     /// [`Self::peer_copy_via_host_async_laned`] at multiple lanes
     /// concurrently, so each lane has its own pinned memory (no
@@ -252,92 +243,6 @@ impl HipCluster {
             }
         }
         Ok(())
-    }
-
-    /// 5.a — ensure each rank has at least `n_lanes` auxiliary streams
-    /// beyond its default stream. Used by the ubatch-pipelined prefill path
-    /// so rank `r` can drive ubatch lane `lane` on its own stream without
-    /// serialising behind the default stream. Idempotent: growing from 2 to
-    /// 4 lanes creates 2 new streams; shrinking does nothing.
-    pub fn reserve_aux_streams(&self, n_lanes: usize) -> DeviceResult<()> {
-        for rank in 0..self.devices.len() {
-            let device = &self.devices[rank];
-            device.bind()?;
-            let mut slot = self.aux_streams[rank]
-                .lock()
-                .map_err(|_| DeviceError::Backend {
-                    backend: "hip",
-                    code: -1,
-                    message: "aux_streams mutex poisoned".into(),
-                })?;
-            while slot.len() < n_lanes {
-                // 5.g — non-blocking so lanes truly overlap on the same
-                // device (blocking streams serialise via the null stream).
-                slot.push(HipStream::new_non_blocking(device.id())?);
-            }
-        }
-        Ok(())
-    }
-
-    /// 5.a — run `f` with rank `r`'s aux stream for ubatch lane `lane`.
-    /// The lane must have been pre-reserved via
-    /// [`HipCluster::reserve_aux_streams`] or this returns an error.
-    /// Closure API (rather than returning `&HipStream`) so the aux-streams
-    /// Mutex stays held for the duration of the borrow — the `HipStream` is
-    /// Send+Sync, but its lifetime is tied to the Vec entry, which is behind
-    /// the mutex.
-    pub fn with_aux_stream<F, T>(&self, rank: usize, lane: usize, f: F) -> DeviceResult<T>
-    where
-        F: FnOnce(&HipStream) -> DeviceResult<T>,
-    {
-        if rank >= self.devices.len() {
-            return Err(DeviceError::Backend {
-                backend: "hip",
-                code: -1,
-                message: format!(
-                    "aux_stream: rank {rank} out of range (N={})",
-                    self.devices.len()
-                ),
-            });
-        }
-        let guard = self.aux_streams[rank]
-            .lock()
-            .map_err(|_| DeviceError::Backend {
-                backend: "hip",
-                code: -1,
-                message: "aux_streams mutex poisoned".into(),
-            })?;
-        if lane >= guard.len() {
-            return Err(DeviceError::Backend {
-                backend: "hip",
-                code: -1,
-                message: format!(
-                    "aux_stream: lane {lane} not reserved on rank {rank} (have {}); call reserve_aux_streams first",
-                    guard.len()
-                ),
-            });
-        }
-        f(&guard[lane])
-    }
-
-    /// 5.a — number of aux streams currently reserved on rank `r`.
-    /// Useful for assertions at the ubatch-loop site.
-    pub fn aux_stream_count(&self, rank: usize) -> DeviceResult<usize> {
-        if rank >= self.devices.len() {
-            return Err(DeviceError::Backend {
-                backend: "hip",
-                code: -1,
-                message: format!("aux_stream_count: rank {rank} out of range"),
-            });
-        }
-        let guard = self.aux_streams[rank]
-            .lock()
-            .map_err(|_| DeviceError::Backend {
-                backend: "hip",
-                code: -1,
-                message: "aux_streams mutex poisoned".into(),
-            })?;
-        Ok(guard.len())
     }
 
     /// Pre-grow every rank's pinned bounce buffer to `bytes_per_rank`.
@@ -371,20 +276,10 @@ impl HipCluster {
     /// cluster without an explicit call leaks the pinned host memory (we
     /// log a warn from `Drop` in that case).
     pub fn dispose(mut self) -> DeviceResult<()> {
-        // 5.a — drop aux streams first; each rank binds its device
-        // before hipStreamDestroy implicit-runs in HipStream's Drop.
-        for (rank, slot) in self.aux_streams.drain(..).enumerate() {
-            if let Ok(streams) = slot.into_inner() {
-                if !streams.is_empty() {
-                    self.devices[rank].bind()?;
-                }
-                drop(streams); // explicit — HipStream::Drop calls hipStreamDestroy
-            }
-        }
         for bounce in self.bounces.drain(..) {
             Self::free_bounce(&bounce)?;
         }
-        // 5.g — also free per-lane bounces.
+        // Also free per-lane bounces.
         for slot in self.lane_bounces.drain(..) {
             if let Ok(bounces) = slot.into_inner() {
                 for bounce in bounces {
@@ -418,7 +313,7 @@ impl HipCluster {
         self.ensure_bounce_in(&self.bounces[rank], rank, need)
     }
 
-    /// 5.g — helper that grows an arbitrary `RankBounce` slot
+    /// Helper that grows an arbitrary `RankBounce` slot
     /// associated with `rank` (used for both the default per-rank bounce
     /// and the per-lane lane_bounces).
     fn ensure_bounce_in(
@@ -758,12 +653,12 @@ impl HipCluster {
         Ok(())
     }
 
-    /// 5.b — fully-asynchronous PCIe peer copy.
+    /// Fully-asynchronous PCIe peer copy.
     /// Unlike [`Self::peer_copy_via_host`] which blocks the CPU between DtoH
     /// and HtoD via `hipStreamSynchronize`, this variant records a HIP event
     /// after the DtoH and has the destination stream wait on it driver-side.
     /// The caller's `src_stream` and `dst_stream` continue receiving work
-    /// without host round-trips — essential for the 5.d async ubatch
+    /// without host round-trips — essential for the async ubatch
     /// pipeline where rank k's next ubatch should start before rank k+1's
     /// current ubatch finishes.
     /// `done_event` is optional: if `Some`, recorded on `dst_stream` after
@@ -779,8 +674,9 @@ impl HipCluster {
     ///   In practice this means: do not issue two overlapping async peer
     ///   copies from the SAME source rank on different lanes without
     ///   per-lane bounce buffers — the current impl has one bounce per rank.
-    ///   5.d works around this by pacing: each ubatch stage completes
-    ///   its DtoH before the next stage starts its DtoH on the same rank.
+    ///   The async pipeline works around this by pacing: each ubatch stage
+    ///   completes its DtoH before the next stage starts its DtoH on the same
+    ///   rank.
     pub unsafe fn peer_copy_via_host_async(
         &self,
         spec: PeerCopySpec,
@@ -793,7 +689,7 @@ impl HipCluster {
         unsafe { self.peer_copy_via_host_async_laned(spec, streams, events, None) }
     }
 
-    /// 5.g — async peer copy with an optional `lane` for per-lane
+    /// Async peer copy with an optional `lane` for per-lane
     /// bounce buffer selection. When `lane = Some(L)`, the DtoH writes to
     /// `lane_bounces[src_rank][L]` (must have been reserved via
     /// [`Self::reserve_lane_bounces`]). When `None`, falls back to the
@@ -917,6 +813,22 @@ impl HipCluster {
         }
 
         Ok(())
+    }
+}
+
+impl flambeau_runtime::Cluster for HipCluster {
+    type Device = HipDevice;
+
+    fn ranks(&self) -> usize {
+        HipCluster::ranks(self)
+    }
+
+    fn device(&self, rank: usize) -> &HipDevice {
+        HipCluster::device(self, rank)
+    }
+
+    fn peer_access_full(&self) -> bool {
+        HipCluster::peer_access_full(self)
     }
 }
 

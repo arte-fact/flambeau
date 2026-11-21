@@ -145,7 +145,7 @@ fn run_shape(
     // kernel expects (per the layout fix — the kernel comment
     // calls out that L=1 silently papered over the bug until L>1 surfaced
     // it). Previous revision of this reference used head-outer indexing
-    // which passed L=1 but drifted at L>1 — see task #22.
+    // which passed L=1 but drifted at L>1.
     let mut state_ref = state_init.clone();
     let mut attn_ref = vec![0.0f32; attn_elems];
     for bi in 0..b {

@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "impl_id": "rmsnorm_rope_neox_partial_f16",
+  "backend": "cuda",
+  "arch": "sm_86",
+  "op": "rmsnorm_rope_neox_partial_f16",
+  "dtype_weight": "F16",
+  "dtype_activation": "F16",
+  "tolerance_formula": "|err| <= 1e-2 * max(|ref|, sqrt(head_dim)) vs F64 oracle",
+  "results": [
+    {
+      "m": 1,
+      "k": 4,
+      "n": 128,
+      "seed": 12646007,
+      "max_rel_err": 0.0,
+      "tolerance": 0.01,
+      "pass": true
+    },
+    {
+      "m": 8,
+      "k": 2,
+      "n": 256,
+      "seed": 12637222,
+      "max_rel_err": 0.000023841858,
+      "tolerance": 0.01,
+      "pass": true
+    },
+    {
+      "m": 2,
+      "k": 4,
+      "n": 64,
+      "seed": 12645660,
+      "max_rel_err": 0.0,
+      "tolerance": 0.01,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-06-18T13:07:08Z",
+  "rig": "threadreaper-sm_86",
+  "pmc": {
+    "vgpr_count": 26,
+    "sgpr_count": null,
+    "waves_per_simd": null,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

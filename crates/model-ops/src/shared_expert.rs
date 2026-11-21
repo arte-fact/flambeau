@@ -114,8 +114,8 @@ impl OwnedSharedExpertPrefillScratch {
 pub struct SharedExpert {
     /// F16 `[hidden]` per-token gate weights. `Some` for qwen3next-style
     /// shared experts (sigmoid-scaled output); `None` for qwen35moe-style
-    /// (plain down output, no per-token gate). When `None`, step 7 of
-    /// the pipeline (`shared_expert_scale_f32`) is skipped and the
+    /// (plain down output, no per-token gate). When `None`, the
+    /// pipeline scale step (`shared_expert_scale_f32`) is skipped and the
     /// `x_norm_f32` scratch field is unused.
     pub ffn_gate_inp_shexp: Option<DevicePtr>,
     pub ffn_gate_shexp: WeightHandle, // [intermediate, hidden]

@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "impl_id": "indexed_moe_mmq_q6_k_down_tile8",
+  "backend": "hip",
+  "arch": "gfx906",
+  "op": "indexed_moe_mmq_tile8",
+  "dtype_weight": "Q8_0",
+  "dtype_activation": "Q8_1",
+  "tolerance_formula": "|err| <= 3e-2 * max(|ref|, sqrt(k))  (tile8 register-tiled MoE MMQ)",
+  "results": [
+    {
+      "m": 32,
+      "k": 2048,
+      "n": 256,
+      "seed": 14601922,
+      "max_rel_err": 0.0072984854,
+      "tolerance": 0.05,
+      "pass": true
+    },
+    {
+      "m": 128,
+      "k": 2048,
+      "n": 256,
+      "seed": 14607010,
+      "max_rel_err": 0.009337635,
+      "tolerance": 0.05,
+      "pass": true
+    },
+    {
+      "m": 32,
+      "k": 768,
+      "n": 64,
+      "seed": 14600578,
+      "max_rel_err": 0.0051014884,
+      "tolerance": 0.05,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-06-17T13:58:32Z",
+  "rig": "threadreaper-gfx906",
+  "pmc": {
+    "vgpr_count": 64,
+    "sgpr_count": null,
+    "waves_per_simd": 4,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

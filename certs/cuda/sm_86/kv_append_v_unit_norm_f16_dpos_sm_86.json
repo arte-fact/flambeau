@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "impl_id": "kv_append_v_unit_norm_f16_dpos_sm_86",
+  "backend": "cuda",
+  "arch": "sm_86",
+  "op": "kv_append",
+  "dtype_weight": "F16",
+  "dtype_activation": "F16",
+  "tolerance_formula": "|err| <= 2e-2 * max(|ref|, 1)",
+  "results": [
+    {
+      "m": 4,
+      "k": 300,
+      "n": 64,
+      "seed": 505602,
+      "max_rel_err": 0.0,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 8,
+      "k": 511,
+      "n": 128,
+      "seed": 1033349,
+      "max_rel_err": 0.0,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 8,
+      "k": 1641,
+      "n": 256,
+      "seed": 1839859,
+      "max_rel_err": 0.0,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 4,
+      "k": 2126,
+      "n": 512,
+      "seed": 4121176,
+      "max_rel_err": 0.0,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 8,
+      "k": 4000,
+      "n": 256,
+      "seed": 1606974,
+      "max_rel_err": 0.0,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 8,
+      "k": 1200,
+      "n": 256,
+      "seed": 2061934,
+      "max_rel_err": 0.0,
+      "tolerance": 0.02,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-07-08T07:42:29Z",
+  "rig": "threadreaper-sm_86",
+  "pmc": {
+    "vgpr_count": 19,
+    "sgpr_count": null,
+    "waves_per_simd": null,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

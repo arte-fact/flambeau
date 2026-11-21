@@ -57,7 +57,7 @@ pub struct HipModule {
     /// `RUST-PERF-CORRECTIONS.md`]. V2 continuous batching will contend the
     /// read lock at most N (num-ranks) ways; a `Mutex` would be fine today
     /// but `RwLock` is forward-compatible for cheap.
-    kernel_cache: RwLock<HashMap<&'static str, HipFunctionT>>,
+    kernel_cache: RwLock<HashMap<&'static str, (HipFunctionT, Option<usize>)>>,
 }
 
 impl std::fmt::Debug for HipModule {
@@ -121,7 +121,7 @@ impl HipModule {
     /// Returns `DeviceError::Backend` if the name contains a NUL byte or
     /// the driver reports `hipModuleGetFunction` failure.
     pub fn kernel(&self, name: &'static str) -> DeviceResult<HipKernel<'_>> {
-        if let Some(raw) = self
+        if let Some((raw, params)) = self
             .kernel_cache
             .read()
             .ok()
@@ -130,18 +130,21 @@ impl HipModule {
             return Ok(HipKernel {
                 raw,
                 name,
+                params,
                 _module: PhantomData,
             });
         }
         let raw = self.resolve(name)?;
+        let params = flambeau_kernels_hip::param_count(name);
         if let Ok(mut guard) = self.kernel_cache.write() {
             // `entry` not `insert` — tolerates a concurrent resolve during
             // the brief window between the read-miss and the write-acquire.
-            guard.entry(name).or_insert(raw);
+            guard.entry(name).or_insert((raw, params));
         }
         Ok(HipKernel {
             raw,
             name,
+            params,
             _module: PhantomData,
         })
     }
@@ -160,6 +163,7 @@ impl HipModule {
             // a per-call allocation while the kernel handle itself carries
             // the identifying address.
             name: "<dyn>",
+            params: flambeau_kernels_hip::param_count(name),
             _module: PhantomData,
         })
     }
@@ -204,6 +208,10 @@ impl Drop for HipModule {
 pub struct HipKernel<'m> {
     raw: HipFunctionT,
     pub name: &'static str,
+    /// Parameter count of the entry point, from its source
+    /// ([`flambeau_kernels_hip::param_count`]); `launch` refuses any other
+    /// argument count. `None` skips the check.
+    params: Option<usize>,
     _module: PhantomData<&'m HipModule>,
 }
 
@@ -216,27 +224,11 @@ impl std::fmt::Debug for HipKernel<'_> {
     }
 }
 
-/// Launch configuration — grid + block dimensions + dynamic shared mem.
-#[derive(Debug, Clone, Copy)]
-pub struct LaunchCfg {
-    pub grid: (u32, u32, u32),
-    pub block: (u32, u32, u32),
-    pub shared_bytes: u32,
-}
-
-impl LaunchCfg {
-    pub fn one_d(grid_x: u32, block_x: u32) -> Self {
-        Self {
-            grid: (grid_x, 1, 1),
-            block: (block_x, 1, 1),
-            shared_bytes: 0,
-        }
-    }
-}
+pub use flambeau_core::LaunchCfg;
 
 /// Kernel argument buffer. Pushes pointer to each arg's storage; the
 /// underlying storage must outlive the launch.
-/// 6.a-i3 adds `push_slot`: tag a pushed arg with a
+/// `push_slot` tags a pushed arg with a
 /// [`ScalarSlot`](crate::graph_capture::ScalarSlot) so post-capture we
 /// can bind the slot to its kernel-node arg index for later
 /// `hipGraphExecKernelNodeSetParams` updates. `push` (untagged) is
@@ -405,7 +397,20 @@ impl HipKernel<'_> {
         cfg: LaunchCfg,
         mut args: KernelArgs<'_>,
     ) -> DeviceResult<()> {
-        // 6.a-i3 — if a capture is active on this thread, record the
+        if let Some(expected) = self.params {
+            if args.len() != expected {
+                return Err(DeviceError::Backend {
+                    backend: BACKEND,
+                    code: -1,
+                    message: format!(
+                        "launch({}): {} arguments pushed, the kernel takes {expected}",
+                        self.name,
+                        args.len()
+                    ),
+                });
+            }
+        }
+        // If a capture is active on this thread, record the
         // launch's arity + tagged slots so post-capture the exec can build
         // a SlotMap. Outside capture this is a no-op.
         crate::graph_capture::record_launch(args.len(), &args.tagged_slots);

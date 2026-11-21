@@ -2,9 +2,8 @@
 //! sharded helper falls back to dequant→Q8_0 for non-native dtypes.
 
 use anyhow::{bail, Context, Result};
-use flambeau_backend_hip::HipDevice;
 use flambeau_core::op::QDtype;
-use flambeau_core::DevicePtr;
+use flambeau_core::{Device, DevicePtr};
 use flambeau_quant::{GgmlDType, GgufFile};
 
 use crate::ctx::QuantWeight;
@@ -31,7 +30,7 @@ pub struct ShardSpec {
 /// Q8_0 (the F16 / BF16 / F32 path).
 pub fn upload_quant_weight(
     file: &GgufFile,
-    device: &HipDevice,
+    device: &impl Device,
     name: &str,
     n_elems: usize,
     allocs: &mut Vec<(DevicePtr, usize)>,
@@ -65,7 +64,7 @@ pub fn upload_quant_weight(
 /// MoE router (`ffn_gate_inp`).
 pub fn upload_router_f16(
     file: &GgufFile,
-    device: &HipDevice,
+    device: &impl Device,
     name: &str,
     n_elems: usize,
     allocs: &mut Vec<(DevicePtr, usize)>,
@@ -83,7 +82,7 @@ pub fn upload_router_f16(
 /// dequant → row-slice → Q8_0.
 pub fn upload_col_sharded_quant(
     file: &GgufFile,
-    device: &HipDevice,
+    device: &impl Device,
     name: &str,
     spec: ShardSpec,
     allocs: &mut Vec<(DevicePtr, usize)>,
@@ -146,7 +145,7 @@ pub fn upload_col_sharded_quant(
 /// policy as `upload_col_sharded_quant`.
 pub fn upload_row_sharded_quant(
     file: &GgufFile,
-    device: &HipDevice,
+    device: &impl Device,
     name: &str,
     spec: ShardSpec,
     allocs: &mut Vec<(DevicePtr, usize)>,
@@ -211,7 +210,7 @@ pub fn upload_row_sharded_quant(
 /// Replicate or col-shard along dim-0 based on `shard`.
 pub(super) fn upload_col(
     file: &GgufFile,
-    device: &HipDevice,
+    device: &impl Device,
     name: &str,
     n_rows: usize,
     n_cols: usize,
@@ -238,7 +237,7 @@ pub(super) fn upload_col(
 /// Replicate or row-shard along dim-1 based on `shard`.
 pub(super) fn upload_row(
     file: &GgufFile,
-    device: &HipDevice,
+    device: &impl Device,
     name: &str,
     n_rows: usize,
     n_cols: usize,

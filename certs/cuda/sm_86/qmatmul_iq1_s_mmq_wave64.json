@@ -1,0 +1,184 @@
+{
+  "schema_version": 1,
+  "impl_id": "qmatmul_iq1_s_mmq_wave64",
+  "backend": "cuda",
+  "arch": "sm_86",
+  "op": "qmatmul_mmq",
+  "dtype_weight": "IQ1_S",
+  "dtype_activation": "Q8_1",
+  "tolerance_formula": "|err| <= 3e-2 * max(|ref|, sqrt(k))",
+  "results": [
+    {
+      "m": 64,
+      "k": 2048,
+      "n": 1,
+      "seed": 13532696734808853529,
+      "max_rel_err": 0.0000013454064,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 64,
+      "k": 4096,
+      "n": 1,
+      "seed": 8618649392427004953,
+      "max_rel_err": 0.0000011953525,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 64,
+      "k": 2048,
+      "n": 8,
+      "seed": 13532696750536611078,
+      "max_rel_err": 0.0000021135986,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 64,
+      "k": 4096,
+      "n": 8,
+      "seed": 8618649408154762502,
+      "max_rel_err": 0.0000017383136,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 64,
+      "k": 2048,
+      "n": 16,
+      "seed": 13532696768511191134,
+      "max_rel_err": 0.0000019539016,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 64,
+      "k": 4096,
+      "n": 16,
+      "seed": 8618649426129342558,
+      "max_rel_err": 0.0000018854626,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 256,
+      "k": 2048,
+      "n": 1,
+      "seed": 13532696738473892185,
+      "max_rel_err": 0.000002083141,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 256,
+      "k": 4096,
+      "n": 1,
+      "seed": 8618649396092043609,
+      "max_rel_err": 0.000001812994,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 256,
+      "k": 2048,
+      "n": 8,
+      "seed": 13532696754201649734,
+      "max_rel_err": 0.0000024458343,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 256,
+      "k": 4096,
+      "n": 8,
+      "seed": 8618649411819801158,
+      "max_rel_err": 0.0000020754524,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 256,
+      "k": 2048,
+      "n": 16,
+      "seed": 13532696772176229790,
+      "max_rel_err": 0.000001969048,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 256,
+      "k": 4096,
+      "n": 16,
+      "seed": 8618649429794381214,
+      "max_rel_err": 0.0000019876752,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 4096,
+      "k": 2048,
+      "n": 1,
+      "seed": 13532696811774665305,
+      "max_rel_err": 0.0000021725384,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 4096,
+      "k": 4096,
+      "n": 1,
+      "seed": 8618649469392816729,
+      "max_rel_err": 0.000002101995,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 4096,
+      "k": 2048,
+      "n": 8,
+      "seed": 13532696827502422854,
+      "max_rel_err": 0.0000024068156,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 4096,
+      "k": 4096,
+      "n": 8,
+      "seed": 8618649485120574278,
+      "max_rel_err": 0.0000026635826,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 4096,
+      "k": 2048,
+      "n": 16,
+      "seed": 13532696845477002910,
+      "max_rel_err": 0.0000031747454,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 4096,
+      "k": 4096,
+      "n": 16,
+      "seed": 8618649503095154334,
+      "max_rel_err": 0.0000024352921,
+      "tolerance": 0.03,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-06-17T09:02:29Z",
+  "rig": "threadreaper-sm_86",
+  "pmc": {
+    "vgpr_count": 54,
+    "sgpr_count": null,
+    "waves_per_simd": null,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

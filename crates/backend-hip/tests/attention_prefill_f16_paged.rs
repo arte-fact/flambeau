@@ -151,6 +151,9 @@ fn run_case(case: Case) -> (Vec<f16>, Vec<f16>) {
     args.push(&q_off_i);
     args.push(&scale);
     args.push(&window_size_i);
+    // ring_depth (absolute addressing) — the contiguous kernel's last param.
+    let ring_depth_i: i32 = 0;
+    args.push(&ring_depth_i);
     let cfg = LaunchCfg {
         grid: (n_q_tokens as u32, n_heads_q as u32, 1),
         block: (head_dim as u32, 1, 1),

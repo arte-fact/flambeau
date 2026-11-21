@@ -12,7 +12,7 @@
 use std::os::raw::c_int;
 use std::ptr;
 
-use flambeau_core::{CopyDirection, Device, DeviceError, DevicePtr, DeviceResult, Stream};
+use flambeau_core::{CopyDirection, Device, DeviceError, DevicePtr, DeviceResult, Event, Stream};
 
 use crate::sys::{
     self, error_string, hipFree, hipGetDevice, hipGetDeviceCount, hipMalloc, hipMemcpyAsync,
@@ -109,12 +109,10 @@ impl HipStream {
         Ok(Self { ptr: s, device_id })
     }
 
-    /// 5.g — create a non-blocking stream (`hipStreamNonBlocking` = 1).
+    /// Create a non-blocking stream (`hipStreamNonBlocking` = 1).
     /// These streams do NOT serialise with the null stream and can run
     /// concurrently with each other on the same device, subject to
-    /// occupancy. Used by `HipCluster::reserve_aux_streams` so the
-    /// 5.d async ubatch pipeline truly overlaps lanes on the same
-    /// device.
+    /// occupancy.
     pub fn new_non_blocking(device_id: i32) -> DeviceResult<Self> {
         let mut s: HipStreamT = ptr::null_mut();
         const HIP_STREAM_NON_BLOCKING: std::os::raw::c_uint = 1;
@@ -163,7 +161,7 @@ impl Stream for HipStream {
     }
 }
 
-/// 5.b — HIP event for cross-stream DAG scheduling. Used by the async
+/// HIP event for cross-stream DAG scheduling. Used by the async
 /// peer-copy pipeline in `HipCluster::peer_copy_via_host_async`.
 /// Created with `HIP_EVENT_DISABLE_TIMING` — we never call `hipEventElapsedTime`,
 /// just `hipEventRecord` / `hipStreamWaitEvent`. Drop destroys the handle.
@@ -269,6 +267,24 @@ impl HipEvent {
     }
 }
 
+impl Event<HipStream> for HipEvent {
+    fn record(&self, stream: &HipStream) -> DeviceResult<()> {
+        HipEvent::record(self, stream)
+    }
+
+    fn stream_wait(&self, stream: &HipStream) -> DeviceResult<()> {
+        HipEvent::stream_wait(self, stream)
+    }
+
+    fn synchronize(&self) -> DeviceResult<()> {
+        HipEvent::synchronize(self)
+    }
+
+    fn elapsed_ms_since(&self, start: &Self) -> DeviceResult<f32> {
+        HipEvent::elapsed_ms_since(self, start)
+    }
+}
+
 impl Drop for HipEvent {
     fn drop(&mut self) {
         if !self.ptr.is_null() {
@@ -280,7 +296,7 @@ impl Drop for HipEvent {
     }
 }
 
-/// 6.a — executable HIP graph, instantiated from a stream-capture
+/// Executable HIP graph, instantiated from a stream-capture
 /// recording. Replay issues the whole captured sequence to a stream with
 /// a single driver call, collapsing per-kernel launch overhead.
 /// Construction flow: `HipGraphExec::capture(stream, |s| { ...enqueue work on s... })`.
@@ -301,13 +317,13 @@ pub struct HipGraphExec {
     /// doesn't implement Send/Sync out of the box; we cast back when
     /// calling the param-update FFI.
     kernel_nodes: Vec<usize>,
-    /// 6.a-i5b — memcpy-type graph nodes in dispatch order. Same
+    /// Memcpy-type graph nodes in dispatch order. Same
     /// `Vec<usize>` trick as `kernel_nodes`.
     memcpy_nodes: Vec<usize>,
-    /// 6.a-i3 — slot → (kernel_node_idx, arg_idx, arity) bindings
+    /// Slot → (kernel_node_idx, arg_idx, arity) bindings
     /// accumulated from tagged pushes during capture.
     slot_map: crate::graph_capture::SlotMap,
-    /// 6.a-i4 — shadow of each kernel node's current `kernelParams`
+    /// Shadow of each kernel node's current `kernelParams`
     /// pointer array, kept in sync with the exec. Without this, every
     /// `set_slot` would read from `hipGraphKernelNodeGetParams` (which
     /// returns the *source graph* params — unchanged across exec
@@ -316,7 +332,7 @@ pub struct HipGraphExec {
     /// `hipKernelNodeParams` metadata (func, dims, sharedMemBytes) is
     /// stored alongside so we don't re-fetch on every update.
     node_shadows: std::cell::RefCell<Vec<NodeShadow>>,
-    /// 6.a-i5b — shadow of each memcpy node's current params
+    /// Shadow of each memcpy node's current params
     /// (dst, src, count, kind). Same motivation as `node_shadows`:
     /// `hipGraphMemcpyNodeGetParams` returns the source-graph params,
     /// not the exec's. Indexed by memcpy-node ordinal.
@@ -384,7 +400,7 @@ impl HipGraphExec {
     where
         F: FnOnce(&HipStream) -> DeviceResult<()>,
     {
-        // 6.a-i3 — enable the thread-local capture recorder for the
+        // Enable the thread-local capture recorder for the
         // duration of this capture. Every `HipKernel::launch` issued
         // inside `f` will append a LaunchRecord that we later zip with
         // the graph's kernel nodes to build a SlotMap.
@@ -460,7 +476,7 @@ impl HipGraphExec {
             message: format!("HipGraphExec::capture slot-map: {msg}"),
         })?;
 
-        // 6.a-i4 — initialise the per-node shadow so `set_slot`
+        // Initialise the per-node shadow so `set_slot`
         // reads state that survives across consecutive updates. We only
         // populate shadows for nodes that have at least one slot bound
         // (lazy init for others happens on first set_slot — see `set_slot`).
@@ -502,7 +518,7 @@ impl HipGraphExec {
             node_shadows.push(NodeShadow { ptrs, meta: params });
         }
 
-        // 6.a-i5b — seed the memcpy shadows from the recorded
+        // Seed the memcpy shadows from the recorded
         // memcpy params. Index into shadows == memcpy-node ordinal.
         let mut memcpy_shadows: Vec<MemcpyShadow> = Vec::with_capacity(memcpy_nodes.len());
         for rec in memcpys.iter() {
@@ -684,7 +700,7 @@ impl HipGraphExec {
                  usable graph (last end-capture code {last_end_code}). \
                  hipStreamBeginCaptureToGraph is documented beta with \
                  'outstanding issues' — confirmed broken on multi-device \
-                 captures here. Disable FLAMBEAU_DECODE_GRAPH on \
+                 captures here. Graph capture stays off on HIP \
                  TP/hybrid topologies; revisit on newer ROCm."
             ),
         })
@@ -1012,7 +1028,7 @@ impl HipDevice {
         bind(self.id)
     }
 
-    /// 6.a-i5b — graph-captureable variant of `memcpy_async` that
+    /// Graph-captureable variant of `memcpy_async` that
     /// tags the memcpy with a [`MemcpySlot`]
     /// (from `crate::graph_capture`). Under a capture scope, the memcpy
     /// is recorded with `slot`; post-capture the exec's `SlotMap` binds
@@ -1060,6 +1076,7 @@ impl HipDevice {
 
 impl Device for HipDevice {
     type Stream = HipStream;
+    type Event = HipEvent;
 
     fn backend(&self) -> &'static str {
         BACKEND
@@ -1127,7 +1144,7 @@ impl Device for HipDevice {
             CopyDirection::DeviceToHost => hipMemcpyKind::DeviceToHost,
             CopyDirection::DeviceToDevice => hipMemcpyKind::DeviceToDevice,
         };
-        // 6.a-i5b — record the memcpy for graph-slot binding when
+        // Record the memcpy for graph-slot binding when
         // inside a capture scope. `slot: None` here — the Device trait
         // surface doesn't carry per-call slot info; callers that want
         // a tagged memcpy go through `HipDevice::memcpy_async_slot`.
@@ -1149,6 +1166,21 @@ impl Device for HipDevice {
         check(code, "hipMemcpyAsync")
     }
 
+    unsafe fn memcpy_async_slot(
+        &self,
+        stream: &Self::Stream,
+        dir: CopyDirection,
+        dst: DevicePtr,
+        src: DevicePtr,
+        bytes: usize,
+        slot: crate::graph_capture::MemcpySlot,
+    ) -> DeviceResult<()> {
+        // Delegate to the inherent recording implementation so the generic
+        // `Device` surface records the tag under an active capture scope.
+        // SAFETY: forwarded verbatim under the caller's contract.
+        unsafe { HipDevice::memcpy_async_slot(self, stream, dir, dst, src, bytes, slot) }
+    }
+
     fn synchronize(&self) -> DeviceResult<()> {
         self.bind()?;
         check(
@@ -1157,6 +1189,45 @@ impl Device for HipDevice {
             unsafe { sys::hipDeviceSynchronize() },
             "hipDeviceSynchronize",
         )
+    }
+
+    fn new_event(&self) -> DeviceResult<Self::Event> {
+        self.bind()?;
+        HipEvent::new(self.id)
+    }
+
+    fn new_timing_event(&self) -> DeviceResult<Self::Event> {
+        self.bind()?;
+        HipEvent::new_timing(self.id)
+    }
+
+    fn bind(&self) -> DeviceResult<()> {
+        HipDevice::bind(self)
+    }
+
+    unsafe fn memcpy_peer_async(
+        &self,
+        stream: &Self::Stream,
+        dst: DevicePtr,
+        dst_device_id: i32,
+        src: DevicePtr,
+        bytes: usize,
+    ) -> DeviceResult<()> {
+        // SAFETY: forwarded to the inherent method (path form resolves to the
+        // inherent, not this trait method); caller upholds its contract.
+        unsafe { HipDevice::memcpy_peer_async(self, stream, dst, dst_device_id, src, bytes) }
+    }
+
+    unsafe fn memcpy_peer_in_async(
+        &self,
+        stream: &Self::Stream,
+        dst: DevicePtr,
+        src: DevicePtr,
+        src_device_id: i32,
+        bytes: usize,
+    ) -> DeviceResult<()> {
+        // SAFETY: forwarded to the inherent method; caller upholds its contract.
+        unsafe { HipDevice::memcpy_peer_in_async(self, stream, dst, src, src_device_id, bytes) }
     }
 }
 

@@ -12,7 +12,7 @@
 //!   may appear back-to-back in a turn.
 //! - The body is a JSON object with a `name` string and an `arguments`
 //!   object. `arguments` is re-serialized to a JSON **string** for the
-//!   OpenAI wire contract (never an object — llama.cpp #20198).
+//!   OpenAI wire contract (never an object).
 //! - `<think>...</think>` reasoning surfaces as
 //!   [`ParserEvent::ThinkDelta`] and is dropped from `content`.
 //!

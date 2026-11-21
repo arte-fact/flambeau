@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "impl_id": "gdn_conv_trio_decode_f32_batched_slots",
+  "backend": "cuda",
+  "arch": "sm_86",
+  "op": "gdn_conv_trio_decode_f32_batched_slots",
+  "dtype_weight": "F32",
+  "dtype_activation": "F32",
+  "tolerance_formula": "conv_out + shifted history |err| <= 1e-4 vs F64 oracle",
+  "results": [
+    {
+      "m": 1,
+      "k": 512,
+      "n": 4,
+      "seed": 12644835,
+      "max_rel_err": 5.9604645e-8,
+      "tolerance": 0.0001,
+      "pass": true
+    },
+    {
+      "m": 4,
+      "k": 2048,
+      "n": 4,
+      "seed": 12634074,
+      "max_rel_err": 1.1558016e-7,
+      "tolerance": 0.0001,
+      "pass": true
+    },
+    {
+      "m": 8,
+      "k": 1024,
+      "n": 3,
+      "seed": 12641158,
+      "max_rel_err": 1.15112364e-7,
+      "tolerance": 0.0001,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-06-18T13:12:21Z",
+  "rig": "threadreaper-sm_86",
+  "pmc": {
+    "vgpr_count": 40,
+    "sgpr_count": null,
+    "waves_per_simd": null,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

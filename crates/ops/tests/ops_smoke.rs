@@ -19,7 +19,7 @@ use anyhow::Result;
 use flambeau_backend_hip::{device_count, HipDevice};
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_ops::{
-    mlp, norm, pe, softmax, OpCtx, OpsRegistry, SoftmaxMaskedBuffers, SoftmaxMaskedKnobs,
+    mlp, norm, pe, softmax, OpsRegistry, SoftmaxMaskedBuffers, SoftmaxMaskedKnobs,
 };
 use half::f16;
 
@@ -50,14 +50,41 @@ fn upload<T: Copy>(dev: &HipDevice, data: &[T]) -> DevicePtr {
     d
 }
 
+/// Stems in the cross-backend `KERNEL_STEMS` union with no gfx906 HIP source:
+/// tensor-core `mma` prefill/qmatmul and the CUDA-only device-position /
+/// batched split-K decode kernels (HIP decode graphs are null on gfx906, so the
+/// `_dpos` path is never built there). The HIP registry legitimately skips
+/// these; every other stem must load.
+const CUDA_ONLY_STEMS: &[&str] = &[
+    "attention_prefill_mma",
+    "mmq_q4_0_mma",
+    "attention_decode_f16_splitk_dpos",
+    "attention_decode_q8_kv_splitk_dpos",
+    "attention_decode_q8_kv_vec_dpos",
+    "attention_decode_batched_splitk",
+    "embed_gather_f16_dpos",
+    "kv_append_v_unit_norm_f16_dpos",
+    "kv_append_f16_dpos",
+    "quantize_f16_q8_0_dpos",
+];
+
 #[test]
 fn registry_loads_all_kernel_stems() -> Result<()> {
     let Some(dev) = dev_or_skip() else {
         return Ok(());
     };
     let reg = OpsRegistry::new(&dev).expect("OpsRegistry::new");
-    // Sanity: every stem declared in KERNEL_STEMS is resolvable.
+    // Every stem this backend is expected to carry must be resolvable; the
+    // CUDA-only stems are skipped by construction (no gfx906 catalogue entry).
     for stem in flambeau_ops::hip::KERNEL_STEMS {
+        if CUDA_ONLY_STEMS.contains(stem) {
+            assert!(
+                reg.module(stem).is_none(),
+                "{stem} is allow-listed CUDA-only but loaded on gfx906 — port \
+                 landed, drop it from CUDA_ONLY_STEMS"
+            );
+            continue;
+        }
         assert!(reg.module(stem).is_some(), "missing module {stem}");
     }
     Ok(())
@@ -119,10 +146,8 @@ fn rmsnorm_f16_runs() -> Result<()> {
     let d_w = upload(&dev, &w);
     let d_y = dev.alloc(m * k * 2)?;
     norm::rmsnorm_f16(
-        flambeau_ops::OpCtx {
-            reg: &reg,
-            stream: dev.default_stream(),
-        },
+        &reg,
+        dev.default_stream(),
         flambeau_ops::NormBuffers {
             input: d_x,
             weight: d_w,
@@ -168,10 +193,8 @@ fn rope_f16_runs() -> Result<()> {
     let d_x = upload(&dev, &x);
     let d_p = upload(&dev, &positions);
     pe::rope_f16(
-        flambeau_ops::OpCtx {
-            reg: &reg,
-            stream: dev.default_stream(),
-        },
+        &reg,
+        dev.default_stream(),
         flambeau_ops::RopeBuffers {
             x: d_x,
             positions: d_p,
@@ -210,7 +233,8 @@ fn softmax_masked_runs_with_zero_mask() -> Result<()> {
     let d_m = upload(&dev, &mask);
     let d_o = dev.alloc(m * k * 2)?;
     softmax::softmax_masked_f16(
-        OpCtx { reg: &reg, stream: dev.default_stream() },
+        &reg,
+        dev.default_stream(),
         SoftmaxMaskedBuffers { scores: d_s, mask: d_m, out: d_o },
         SoftmaxMaskedKnobs { m, k, scale: 1.0 },
     )?;

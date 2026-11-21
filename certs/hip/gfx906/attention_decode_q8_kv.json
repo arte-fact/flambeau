@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "impl_id": "attention_decode_q8_kv",
+  "backend": "hip",
+  "arch": "gfx906",
+  "op": "attention_decode_q8_kv",
+  "dtype_weight": "F16",
+  "dtype_activation": "Q8_0",
+  "tolerance_formula": "|err| <= 3e-2 * max(|ref|, 1) vs F64 dequant oracle (Q8 envelope)",
+  "results": [
+    {
+      "m": 1,
+      "k": 128,
+      "n": 16,
+      "seed": 12646007,
+      "max_rel_err": 0.00012207031,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 64,
+      "n": 24,
+      "seed": 12646711,
+      "max_rel_err": 0.00012207031,
+      "tolerance": 0.03,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-06-18T14:00:30Z",
+  "rig": "threadreaper-gfx906",
+  "pmc": {
+    "vgpr_count": 24,
+    "sgpr_count": null,
+    "waves_per_simd": 10,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

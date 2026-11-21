@@ -3,7 +3,7 @@
 //! Used by qwen3.5 / qwen3.6 / qwen3-Next full-attention layers.
 
 use anyhow::bail;
-use flambeau_ops::{HipOps, Ops};
+use flambeau_ops::Ops;
 
 use crate::dtype::F16;
 use crate::error::Result;
@@ -20,7 +20,7 @@ pub fn split_q_gate_f16(
     n_tokens: usize,
     n_heads: usize,
     head_dim: usize,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     let fused_need = n_tokens * n_heads * 2 * head_dim;
     let split_need = n_tokens * n_heads * head_dim;
@@ -60,7 +60,7 @@ pub fn sigmoid_mul_f16(
     x: &Tensor<F16>,
     y: &mut Tensor<F16>,
     n: usize,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     if gate.n_elems < n {
         bail!(
@@ -115,6 +115,7 @@ fn cpu_split_q_gate_f16(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flambeau_ops::HipOps;
     use crate::testing::{
         alloc, assert_close_f16, download, free, test_device, test_ops_registry, upload,
     };

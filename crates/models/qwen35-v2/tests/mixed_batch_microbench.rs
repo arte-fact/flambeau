@@ -8,7 +8,7 @@
 //! v1's 1.06-1.17x ceiling.
 //!
 //! Run:
-//!   FLAMBEAU_MIXED_MICROBENCH_GGUF=/artefact/models/Qwen3.5-9B-Q4_1.gguf \
+//!   FLAMBEAU_MIXED_MICROBENCH_GGUF=~/models/Qwen3.5-9B-Q4_1.gguf \
 //!     cargo test --release -p flambeau-qwen35-v2 --test mixed_batch_microbench -- --nocapture
 
 #![cfg(feature = "hip")]
@@ -61,6 +61,8 @@ fn bench_one(
         max_slots,
         None,
         flambeau_forward::KvLayout::F16Contig,
+
+        0,
     );
     let max_seq_len = cfg.max_seq_len;
     let mut pool = ScratchPool::new(device, cfg).expect("ScratchPool::new");

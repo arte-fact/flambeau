@@ -1,4 +1,4 @@
-// mmvq_q4_1_t128 — 4.a.3 thin-block Q4_1 MMVQ.
+// mmvq_q4_1_t128 — thin-block Q4_1 MMVQ.
 // Same DP4A structure as `mmvq_q4_1.cu` but 128 threads/block instead of
 // 256. Halves the total thread count per launch → less kernel dispatch
 // overhead + higher CU occupancy (more blocks running concurrently on
@@ -8,7 +8,7 @@
 // thread loops 160/32 = 5 iterations — ~5 DP4A pairs per thread, still
 // small per-thread work but amortised across more grid.x blocks.
 //
-// Two output dtypes via templated __device__ body (#120):
+// Two output dtypes via templated __device__ body:
 //   flambeau_mmvq_q4_1_t128_q8_1      → F32 dst (legacy scratch-then-cast)
 //   flambeau_mmvq_q4_1_t128_q8_1_f16  → F16 dst (saturating; direct store)
 

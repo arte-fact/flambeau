@@ -7,19 +7,18 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
-use flambeau_backend_hip::{HipDevice, HipEvent, HipStream};
-use flambeau_core::{CopyDirection, Device, DevicePtr};
+use flambeau_backend::{Backend, HipBackend};
+use flambeau_backend_hip::{HipDevice, HipStream};
+use flambeau_core::{CopyDirection, Device, DevicePtr, Event};
 use flambeau_model_ops::{Tensor, F16};
-use flambeau_ops::OpsRegistry;
+use flambeau_ops::{Ops, OpsRegistry};
 
-use crate::core::{composites, CoreState, NoopHooks, ScratchPool, TopologyHooks};
+use crate::core::{composites, CoreState, DecodeCapture, NoopHooks, ScratchPool, TopologyHooks};
 use crate::ctx::{
     AttnWeights, EmbeddingWeights, FfnWeights, ForwardCtx, LmHeadWeights, ModelLayout, MoeWeights,
 };
-use crate::runtime::ar::{
-    bar_ar_postattn_residual_rmsnorm_f32_to_f16, bar_ar_residual_f16, bar_ar_residual_rmsnorm_f16,
-    bar_ar_sum_f16, BarArCoordinator,
-};
+use crate::runtime::ar::{BarArCoordinator, BarArRank};
+use flambeau_runtime::FusedAllReduce;
 
 pub type ArCallback =
     Box<dyn FnMut(usize, usize, DevicePtr, usize, &HipDevice, &HipStream) -> Result<()> + Send>;
@@ -61,15 +60,12 @@ impl TopologyHooks for TpHooks {
             .bar
             .as_ref()
             .ok_or_else(|| anyhow!("TpHooks::ar_residual_f16: bar coordinator not configured"))?;
-        bar_ar_residual_f16(
-            bar,
-            self.rank,
-            residual_inout,
-            partial_f16,
-            n_elems,
-            device,
-            stream,
-        )
+        BarArRank {
+            coord: Arc::clone(bar),
+            rank: self.rank,
+        }
+        .ar_residual_f16(residual_inout, partial_f16, n_elems, device, stream)
+        .map_err(|e| anyhow!("{e}"))
     }
 
     fn supports_ar_residual_rmsnorm_f16(&self) -> bool {
@@ -87,7 +83,12 @@ impl TopologyHooks for TpHooks {
         let bar = self.bar.as_ref().ok_or_else(|| {
             anyhow!("TpHooks::ar_residual_rmsnorm_f16: bar coordinator not configured")
         })?;
-        bar_ar_residual_rmsnorm_f16(bar, self.rank, bufs, n_elems, eps, device, stream)
+        BarArRank {
+            coord: Arc::clone(bar),
+            rank: self.rank,
+        }
+        .ar_residual_rmsnorm_f16(bufs, n_elems, eps, device, stream)
+        .map_err(|e| anyhow!("{e}"))
     }
 
     fn supports_ar_sum_f16(&self) -> bool {
@@ -105,7 +106,12 @@ impl TopologyHooks for TpHooks {
             .bar
             .as_ref()
             .ok_or_else(|| anyhow!("TpHooks::ar_sum_f16: bar coordinator not configured"))?;
-        bar_ar_sum_f16(bar, self.rank, buf, n_elems, device, stream)
+        BarArRank {
+            coord: Arc::clone(bar),
+            rank: self.rank,
+        }
+        .ar_sum_f16(buf, n_elems, device, stream)
+        .map_err(|e| anyhow!("{e}"))
     }
 
     fn supports_ar_postattn_residual_rmsnorm_f32_to_f16(&self) -> bool {
@@ -124,14 +130,12 @@ impl TopologyHooks for TpHooks {
         let bar = self.bar.as_ref().ok_or_else(|| {
             anyhow!("TpHooks::ar_postattn_residual_rmsnorm_f32_to_f16: bar coordinator not configured")
         })?;
-        bar_ar_postattn_residual_rmsnorm_f32_to_f16(
-            bar,
-            self.rank,
-            bufs,
-            crate::runtime::ar::BarArPostAttnNormParams { n_rows, n, eps },
-            device,
-            stream,
-        )
+        BarArRank {
+            coord: Arc::clone(bar),
+            rank: self.rank,
+        }
+        .ar_postattn_residual_rmsnorm_f32_to_f16(bufs, n_rows, n, eps, device, stream)
+        .map_err(|e| anyhow!("{e}"))
     }
 }
 
@@ -178,15 +182,12 @@ impl TopologyHooks for HybridHooks {
         let bar = self.bar.as_ref().ok_or_else(|| {
             anyhow!("HybridHooks::ar_residual_f16: bar coordinator not configured")
         })?;
-        bar_ar_residual_f16(
-            bar,
-            self.rank_in_stage,
-            residual_inout,
-            partial_f16,
-            n_elems,
-            device,
-            stream,
-        )
+        BarArRank {
+            coord: Arc::clone(bar),
+            rank: self.rank_in_stage,
+        }
+        .ar_residual_f16(residual_inout, partial_f16, n_elems, device, stream)
+        .map_err(|e| anyhow!("{e}"))
     }
 
     fn supports_ar_residual_rmsnorm_f16(&self) -> bool {
@@ -204,7 +205,12 @@ impl TopologyHooks for HybridHooks {
         let bar = self.bar.as_ref().ok_or_else(|| {
             anyhow!("HybridHooks::ar_residual_rmsnorm_f16: bar coordinator not configured")
         })?;
-        bar_ar_residual_rmsnorm_f16(bar, self.rank_in_stage, bufs, n_elems, eps, device, stream)
+        BarArRank {
+            coord: Arc::clone(bar),
+            rank: self.rank_in_stage,
+        }
+        .ar_residual_rmsnorm_f16(bufs, n_elems, eps, device, stream)
+        .map_err(|e| anyhow!("{e}"))
     }
 
     fn supports_ar_sum_f16(&self) -> bool {
@@ -222,7 +228,12 @@ impl TopologyHooks for HybridHooks {
             .bar
             .as_ref()
             .ok_or_else(|| anyhow!("HybridHooks::ar_sum_f16: bar coordinator not configured"))?;
-        bar_ar_sum_f16(bar, self.rank_in_stage, buf, n_elems, device, stream)
+        BarArRank {
+            coord: Arc::clone(bar),
+            rank: self.rank_in_stage,
+        }
+        .ar_sum_f16(buf, n_elems, device, stream)
+        .map_err(|e| anyhow!("{e}"))
     }
 
     fn supports_ar_postattn_residual_rmsnorm_f32_to_f16(&self) -> bool {
@@ -241,25 +252,23 @@ impl TopologyHooks for HybridHooks {
         let bar = self.bar.as_ref().ok_or_else(|| {
             anyhow!("HybridHooks::ar_postattn_residual_rmsnorm_f32_to_f16: bar coordinator not configured")
         })?;
-        bar_ar_postattn_residual_rmsnorm_f32_to_f16(
-            bar,
-            self.rank_in_stage,
-            bufs,
-            crate::runtime::ar::BarArPostAttnNormParams { n_rows, n, eps },
-            device,
-            stream,
-        )
+        BarArRank {
+            coord: Arc::clone(bar),
+            rank: self.rank_in_stage,
+        }
+        .ar_postattn_residual_rmsnorm_f32_to_f16(bufs, n_rows, n, eps, device, stream)
+        .map_err(|e| anyhow!("{e}"))
     }
 }
 
-pub trait StageHooks {
+pub trait StageHooks<B: Backend = HipBackend> {
     fn is_first(&self) -> bool;
     fn is_last(&self) -> bool;
     fn layer_range(&self, layout: &ModelLayout) -> Range<usize>;
-    fn peer_recv(&mut self, core: &mut CoreState<'_>, n_tokens: usize) -> Result<Tensor<F16>>;
+    fn peer_recv(&mut self, core: &mut CoreState<'_, B>, n_tokens: usize) -> Result<Tensor<F16>>;
     fn peer_send(
         &mut self,
-        core: &mut CoreState<'_>,
+        core: &mut CoreState<'_, B>,
         input: &Tensor<F16>,
         n_tokens: usize,
     ) -> Result<()>;
@@ -267,7 +276,7 @@ pub trait StageHooks {
 
 pub struct SoloStage;
 
-impl StageHooks for SoloStage {
+impl<B: Backend> StageHooks<B> for SoloStage {
     fn is_first(&self) -> bool {
         true
     }
@@ -277,12 +286,12 @@ impl StageHooks for SoloStage {
     fn layer_range(&self, layout: &ModelLayout) -> Range<usize> {
         0..layout.num_layers
     }
-    fn peer_recv(&mut self, _core: &mut CoreState<'_>, _n_tokens: usize) -> Result<Tensor<F16>> {
+    fn peer_recv(&mut self, _core: &mut CoreState<'_, B>, _n_tokens: usize) -> Result<Tensor<F16>> {
         bail!("SoloStage::peer_recv unreachable — is_first() is true")
     }
     fn peer_send(
         &mut self,
-        _core: &mut CoreState<'_>,
+        _core: &mut CoreState<'_, B>,
         _input: &Tensor<F16>,
         _n_tokens: usize,
     ) -> Result<()> {
@@ -290,20 +299,20 @@ impl StageHooks for SoloStage {
     }
 }
 
-pub struct PpStage<'a> {
+pub struct PpStage<'a, B: Backend = HipBackend> {
     pub rank: usize,
     pub n_ranks: usize,
     pub layer_start: usize,
     pub layer_end: usize,
     /// Edge that this rank produces TO (rank → rank+1). `None` on the
     /// final rank, which has no downstream consumer.
-    pub send_edge: Option<&'a crate::runtime::ar::PeerSlot>,
+    pub send_edge: Option<&'a crate::runtime::ar::PeerSlot<B::Device>>,
     /// Edge that this rank consumes FROM (rank-1 → rank). `None` on
     /// rank 0, which feeds itself from the embedding.
-    pub recv_edge: Option<&'a crate::runtime::ar::PeerSlot>,
+    pub recv_edge: Option<&'a crate::runtime::ar::PeerSlot<B::Device>>,
 }
 
-impl<'a> StageHooks for PpStage<'a> {
+impl<'a, B: Backend> StageHooks<B> for PpStage<'a, B> {
     fn is_first(&self) -> bool {
         self.rank == 0
     }
@@ -313,7 +322,7 @@ impl<'a> StageHooks for PpStage<'a> {
     fn layer_range(&self, _layout: &ModelLayout) -> Range<usize> {
         self.layer_start..self.layer_end
     }
-    fn peer_recv(&mut self, core: &mut CoreState<'_>, n_tokens: usize) -> Result<Tensor<F16>> {
+    fn peer_recv(&mut self, core: &mut CoreState<'_, B>, n_tokens: usize) -> Result<Tensor<F16>> {
         let edge = self
             .recv_edge
             .ok_or_else(|| anyhow!("PpStage::peer_recv: rank 0 has no recv_edge"))?;
@@ -351,7 +360,7 @@ impl<'a> StageHooks for PpStage<'a> {
     }
     fn peer_send(
         &mut self,
-        core: &mut CoreState<'_>,
+        core: &mut CoreState<'_, B>,
         input: &Tensor<F16>,
         n_tokens: usize,
     ) -> Result<()> {
@@ -443,8 +452,10 @@ impl<'a> StageHooks for PpStage<'a> {
 
         // Record producer-side done event; consumer's peer_recv will
         // stream_wait on it.
-        let event = HipEvent::new(flambeau_core::Device::id(core.device))
-            .map_err(|e| anyhow!("PpStage peer_send HipEvent::new: {e}"))?;
+        let event = core
+            .device
+            .new_event()
+            .map_err(|e| anyhow!("PpStage peer_send new_event: {e}"))?;
         event
             .record(core.stream)
             .map_err(|e| anyhow!("PpStage peer_send event.record: {e}"))?;
@@ -460,7 +471,7 @@ impl<'a> StageHooks for PpStage<'a> {
 /// event-based DtoD peer copy on a per-rank edge (rank_in_stage k of
 /// stage i ↔ rank k of stage i+1) — same shape as [`PpStage`]. No
 /// CPU barrier, no host bounce.
-pub struct HybStage<'a> {
+pub struct HybStage<'a, B: Backend = HipBackend> {
     pub stage_idx: usize,
     pub n_stages: usize,
     pub rank_in_stage: usize,
@@ -468,13 +479,13 @@ pub struct HybStage<'a> {
     pub layer_end: usize,
     /// Edge this rank produces TO (stage i / rank k → stage i+1 / rank k).
     /// `None` on the final stage.
-    pub send_edge: Option<&'a crate::runtime::ar::PeerSlot>,
+    pub send_edge: Option<&'a crate::runtime::ar::PeerSlot<B::Device>>,
     /// Edge this rank consumes FROM (stage i-1 / rank k → stage i / rank k).
     /// `None` on the first stage.
-    pub recv_edge: Option<&'a crate::runtime::ar::PeerSlot>,
+    pub recv_edge: Option<&'a crate::runtime::ar::PeerSlot<B::Device>>,
 }
 
-impl<'a> StageHooks for HybStage<'a> {
+impl<'a, B: Backend> StageHooks<B> for HybStage<'a, B> {
     fn is_first(&self) -> bool {
         self.stage_idx == 0
     }
@@ -484,7 +495,7 @@ impl<'a> StageHooks for HybStage<'a> {
     fn layer_range(&self, _layout: &ModelLayout) -> Range<usize> {
         self.layer_start..self.layer_end
     }
-    fn peer_recv(&mut self, core: &mut CoreState<'_>, n_tokens: usize) -> Result<Tensor<F16>> {
+    fn peer_recv(&mut self, core: &mut CoreState<'_, B>, n_tokens: usize) -> Result<Tensor<F16>> {
         let edge = self
             .recv_edge
             .ok_or_else(|| anyhow!("HybStage::peer_recv: first stage has no recv_edge"))?;
@@ -541,7 +552,7 @@ impl<'a> StageHooks for HybStage<'a> {
     }
     fn peer_send(
         &mut self,
-        core: &mut CoreState<'_>,
+        core: &mut CoreState<'_, B>,
         input: &Tensor<F16>,
         n_tokens: usize,
     ) -> Result<()> {
@@ -629,8 +640,10 @@ impl<'a> StageHooks for HybStage<'a> {
                 .map_err(|e| anyhow!("HybStage peer_send memcpy_peer_async: {e}"))?;
         }
 
-        let event = HipEvent::new(flambeau_core::Device::id(core.device))
-            .map_err(|e| anyhow!("HybStage peer_send HipEvent::new: {e}"))?;
+        let event = core
+            .device
+            .new_event()
+            .map_err(|e| anyhow!("HybStage peer_send new_event: {e}"))?;
         event
             .record(core.stream)
             .map_err(|e| anyhow!("HybStage peer_send event.record: {e}"))?;
@@ -642,17 +655,18 @@ impl<'a> StageHooks for HybStage<'a> {
     }
 }
 
-pub struct ForwardEngine<'a, H: TopologyHooks, S: StageHooks> {
-    pub core: CoreState<'a>,
+pub struct ForwardEngine<'a, B: Backend = HipBackend, H: TopologyHooks<B> = NoopHooks, S: StageHooks<B> = SoloStage>
+{
+    pub core: CoreState<'a, B>,
     pub hooks: H,
     pub stage: S,
 }
 
-impl<'a, H: TopologyHooks, S: StageHooks> ForwardEngine<'a, H, S> {
+impl<'a, B: Backend, H: TopologyHooks<B>, S: StageHooks<B>> ForwardEngine<'a, B, H, S> {
     fn build(
-        device: &'a HipDevice,
-        stream: &'a HipStream,
-        reg: &'a OpsRegistry,
+        device: &'a B::Device,
+        stream: &'a B::Stream,
+        reg: &'a B::Registry,
         pool: &'a mut ScratchPool,
         hooks: H,
         stage: S,
@@ -664,7 +678,7 @@ impl<'a, H: TopologyHooks, S: StageHooks> ForwardEngine<'a, H, S> {
     }
 }
 
-impl<'a> ForwardEngine<'a, NoopHooks, SoloStage> {
+impl<'a> ForwardEngine<'a, HipBackend, NoopHooks, SoloStage> {
     pub fn new(
         device: &'a HipDevice,
         stream: &'a HipStream,
@@ -675,7 +689,41 @@ impl<'a> ForwardEngine<'a, NoopHooks, SoloStage> {
     }
 }
 
-impl<'a> ForwardEngine<'a, TpHooks, SoloStage> {
+impl<'a, B: Backend> ForwardEngine<'a, B, NoopHooks, SoloStage> {
+    /// Single-device engine over any backend bundle. The HIP `new` above is the
+    /// inference-friendly alias (`B` is inferred from the concrete arg types);
+    /// this one is called with an explicit `B` (`ForwardEngine::<CudaBackend>::
+    /// new_solo(…)`) where associated-type inference can't pick `B` on its own.
+    pub fn new_solo(
+        device: &'a B::Device,
+        stream: &'a B::Stream,
+        reg: &'a B::Registry,
+        pool: &'a mut ScratchPool,
+    ) -> Self {
+        Self::build(device, stream, reg, pool, NoopHooks, SoloStage, 0)
+    }
+
+    /// Capturing single-device engine: threads a [`DecodeCapture`] handle into
+    /// [`CoreState`] so the per-token composites (`embed` / `standard_attn` /
+    /// `output_head`) take the graph-capture branch — allocating slots +
+    /// recording rebind rules and skipping the trailing logits D2H. Identical
+    /// to [`Self::new_solo`] otherwise. The session driver runs `A::forward`
+    /// through this once, reads back the [`crate::core::DecodeRebindPlan`], and
+    /// replays the captured graph for subsequent tokens.
+    pub fn new_solo_capturing(
+        device: &'a B::Device,
+        stream: &'a B::Stream,
+        reg: &'a B::Registry,
+        pool: &'a mut ScratchPool,
+        capture: &'a mut DecodeCapture,
+    ) -> Self {
+        let mut engine = Self::build(device, stream, reg, pool, NoopHooks, SoloStage, 0);
+        engine.core.capture = Some(capture);
+        engine
+    }
+}
+
+impl<'a> ForwardEngine<'a, HipBackend, TpHooks, SoloStage> {
     pub fn new(
         device: &'a HipDevice,
         stream: &'a HipStream,
@@ -687,7 +735,7 @@ impl<'a> ForwardEngine<'a, TpHooks, SoloStage> {
     }
 }
 
-impl<'a> ForwardEngine<'a, NoopHooks, PpStage<'a>> {
+impl<'a> ForwardEngine<'a, HipBackend, NoopHooks, PpStage<'a>> {
     pub fn new(
         device: &'a HipDevice,
         stream: &'a HipStream,
@@ -700,7 +748,7 @@ impl<'a> ForwardEngine<'a, NoopHooks, PpStage<'a>> {
     }
 }
 
-impl<'a> ForwardEngine<'a, HybridHooks, HybStage<'a>> {
+impl<'a> ForwardEngine<'a, HipBackend, HybridHooks, HybStage<'a>> {
     pub fn new(
         device: &'a HipDevice,
         stream: &'a HipStream,
@@ -714,7 +762,7 @@ impl<'a> ForwardEngine<'a, HybridHooks, HybStage<'a>> {
     }
 }
 
-impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
+impl<B: Backend, H: TopologyHooks<B>, S: StageHooks<B>> ForwardCtx for ForwardEngine<'_, B, H, S> {
     fn embed(&mut self, weights: &EmbeddingWeights, tokens: &[u32]) -> Result<Tensor<F16>> {
         if self.stage.is_first() {
             composites::embed_local(&mut self.core, &mut self.hooks, weights, tokens)
@@ -957,31 +1005,28 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
         let per_token = pe * n_layer;
         let total = n_tokens * per_token;
         if n_tokens == 1 {
-            flambeau_ops::hip::router::dense_gemv_f16_f16(
-                self.core.reg,
-                stream,
-                model_proj_f16_dev,
-                main_embd_scratch_dev,
-                proj_matmul_f32_dev,
-                per_token,
-                hidden,
-            )
-            .context("per_layer_embd build: dense_gemv_f16_f16")?;
+            self.core
+                .ops()
+                .dense_gemv_f16_f16(
+                    model_proj_f16_dev,
+                    main_embd_scratch_dev,
+                    proj_matmul_f32_dev,
+                    per_token,
+                    hidden,
+                )
+                .context("per_layer_embd build: dense_gemv_f16_f16")?;
         } else {
-            flambeau_ops::hip::router::dense_gemv_f16_f16_batched(
-                flambeau_ops::OpCtx { reg: self.core.reg, stream },
-                flambeau_ops::DenseGemvBatchedBuffers {
-                    w: model_proj_f16_dev,
-                    x: main_embd_scratch_dev,
-                    y: proj_matmul_f32_dev,
-                },
-                flambeau_ops::DenseGemvBatchedShape {
-                    n_rows: per_token,
-                    k: hidden,
+            self.core
+                .ops()
+                .dense_gemv_f16_f16_batched(
+                    model_proj_f16_dev,
+                    main_embd_scratch_dev,
+                    proj_matmul_f32_dev,
+                    per_token,
+                    hidden,
                     n_tokens,
-                },
-            )
-            .context("per_layer_embd build: dense_gemv_f16_f16_batched")?;
+                )
+                .context("per_layer_embd build: dense_gemv_f16_f16_batched")?;
         }
 
         let mut proj_matmul_host = vec![0.0f32; total];
@@ -1033,10 +1078,402 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
         slot_ids: &[usize],
     ) -> Result<()> {
         if self.stage.is_last() {
-            composites::output_head_local(&mut self.core, &mut self.hooks, input, lm_head, slot_ids)
+            composites::output_head_local(&mut self.core, &mut self.hooks, input, lm_head, slot_ids, false, true)
         } else {
             self.stage.peer_send(&mut self.core, input, slot_ids.len())
         }
+    }
+
+    fn capture_hidden_from(
+        &mut self,
+        resid: &Tensor<F16>,
+        row: usize,
+        norm: &Tensor<F16>,
+        eps: f32,
+        dst: &mut Tensor<F16>,
+    ) -> Result<()> {
+        let hidden = self.core.hidden();
+        let n_tokens = resid.n_elems / hidden;
+        if row >= n_tokens {
+            anyhow::bail!("capture_hidden_from: row {row} >= n_tokens {n_tokens}");
+        }
+        let src = unsafe {
+            Tensor::<F16>::from_raw(resid.ptr.offset_bytes(row * hidden * 2), hidden)
+        };
+        let ops = self.core.ops();
+        flambeau_model_ops::rmsnorm_f16(&src, norm, dst, 1, hidden, eps, &ops)
+            .context("capture_hidden_from: rmsnorm")
+    }
+
+    fn mtp_draft(
+        &mut self,
+        w: &crate::ctx::MtpWeights,
+        lm_head: &crate::ctx::LmHeadWeights,
+        embedding: &crate::ctx::EmbeddingWeights,
+        anchor_token: u32,
+        anchor_h: &Tensor<F16>,
+        start_pos: usize,
+        slot_id: usize,
+        mtp_layer_idx: usize,
+        n_draft: usize,
+        sample: &mut flambeau_runtime::MtpSampler,
+        drafts: &mut Vec<crate::ctx::MtpDraft>,
+    ) -> Result<()> {
+        if !self.stage.is_first() || !self.stage.is_last() {
+            anyhow::bail!("mtp_draft: only single-device stage supported (PP/TP MTP is a follow-up)");
+        }
+        composites::mtp_draft_local(
+            &mut self.core,
+            &mut self.hooks,
+            w,
+            lm_head,
+            embedding,
+            anchor_token,
+            anchor_h,
+            start_pos,
+            slot_id,
+            mtp_layer_idx,
+            n_draft,
+            sample,
+            drafts,
+        )
+    }
+
+    fn output_head_all(
+        &mut self,
+        input: &Tensor<F16>,
+        lm_head: &crate::ctx::LmHeadWeights,
+        slot_ids: &[usize],
+        _n_rows: usize,
+    ) -> Result<()> {
+        if !self.stage.is_last() {
+            anyhow::bail!("output_head_all: only on the last stage");
+        }
+        composites::output_head_local(&mut self.core, &mut self.hooks, input, lm_head, slot_ids, true, true)
+    }
+
+    fn output_head_argmax_rows(
+        &mut self,
+        input: &Tensor<F16>,
+        lm_head: &crate::ctx::LmHeadWeights,
+        slot_ids: &[usize],
+        n_rows: usize,
+        plan: &flambeau_runtime::MtpArgmax,
+    ) -> Result<Option<Vec<u32>>> {
+        if !self.stage.is_last() {
+            anyhow::bail!("output_head_argmax_rows: only on the last stage");
+        }
+        let fits = composites::argmax_plan_fits(&self.core, plan, n_rows);
+        composites::output_head_local(&mut self.core, &mut self.hooks, input, lm_head, slot_ids, true, !fits)?;
+        if !fits {
+            return Ok(None);
+        }
+        composites::argmax_rows_local(&mut self.core, plan, n_rows, lm_head.vocab_size).map(Some)
+    }
+
+    fn logits_row_to_host(&mut self, row: usize, vocab: usize, out: &mut Vec<f32>) -> Result<()> {
+        out.resize(vocab, 0.0);
+        // SAFETY: `out` holds `vocab` f32; the source is row `row` of
+        // logits_f32_dev (>= logits_rows * vocab f32); synced below.
+        unsafe {
+            self.core.device.memcpy_async(
+                self.core.stream,
+                flambeau_core::CopyDirection::DeviceToHost,
+                flambeau_core::DevicePtr(out.as_mut_ptr() as usize),
+                self.core.pool.logits_f32_dev.offset_bytes(row * vocab * 4),
+                vocab * 4,
+            )?;
+        }
+        flambeau_core::Stream::synchronize(self.core.stream)?;
+        Ok(())
+    }
+
+    fn gdn_snapshot(&mut self, slot_id: usize) -> Result<Vec<u8>> {
+        let Some(g) = self.core.pool.config.gdn else {
+            return Ok(Vec::new());
+        };
+        // MTP fast path: snapshot stays on device (D2D) — no host round trip.
+        if self.core.pool.mtp_gdn_snap != DevicePtr::NULL {
+            let f32b = 4usize;
+            let state_b = g.num_v_heads * g.head_k_dim * g.head_v_dim * f32b;
+            let hist_b = (g.conv_kernel - 1) * g.conv_channels * f32b;
+            let mut off = 0usize;
+            for ls in &self.core.pool.gdn_state {
+                unsafe {
+                    self.core
+                        .device
+                        .memcpy_async(
+                            self.core.stream,
+                            CopyDirection::DeviceToDevice,
+                            self.core.pool.mtp_gdn_snap.offset_bytes(off),
+                            ls.state.offset_bytes(slot_id * state_b),
+                            state_b,
+                        )
+                        .context("gdn_snapshot dev state")?;
+                }
+                off += state_b;
+                unsafe {
+                    self.core
+                        .device
+                        .memcpy_async(
+                            self.core.stream,
+                            CopyDirection::DeviceToDevice,
+                            self.core.pool.mtp_gdn_snap.offset_bytes(off),
+                            ls.conv_history.offset_bytes(slot_id * hist_b),
+                            hist_b,
+                        )
+                        .context("gdn_snapshot dev hist")?;
+                }
+                off += hist_b;
+            }
+            flambeau_core::Stream::synchronize(self.core.stream)?;
+            self.core.pool.mtp_snap_valid = true;
+            return Ok(Vec::new());
+        }
+        let n_slots = self.core.pool.config.max_slots.max(1);
+        if slot_id >= n_slots {
+            anyhow::bail!("gdn_snapshot: slot_id {slot_id} >= max_slots {n_slots}");
+        }
+        let f32b = 4usize;
+        let state_b = g.num_v_heads * g.head_k_dim * g.head_v_dim * f32b;
+        let hist_b = (g.conv_kernel - 1) * g.conv_channels * f32b;
+        let mut out = Vec::new();
+        for ls in &self.core.pool.gdn_state {
+            let mut buf = vec![0u8; state_b.max(hist_b)];
+            unsafe {
+                self.core
+                    .device
+                    .memcpy_async(
+                        self.core.stream,
+                        CopyDirection::DeviceToHost,
+                        DevicePtr(buf.as_mut_ptr() as usize),
+                        ls.state.offset_bytes(slot_id * state_b),
+                        state_b,
+                    )
+                    .context("gdn_snapshot state")?;
+            }
+            out.extend_from_slice(&buf[..state_b]);
+            unsafe {
+                self.core
+                    .device
+                    .memcpy_async(
+                        self.core.stream,
+                        CopyDirection::DeviceToHost,
+                        DevicePtr(buf.as_mut_ptr() as usize),
+                        ls.conv_history.offset_bytes(slot_id * hist_b),
+                        hist_b,
+                    )
+                    .context("gdn_snapshot hist")?;
+            }
+            out.extend_from_slice(&buf[..hist_b]);
+        }
+        flambeau_core::Stream::synchronize(self.core.stream)?;
+        Ok(out)
+    }
+
+    fn mtp_anchor_ptr(&self) -> flambeau_core::DevicePtr {
+        self.core.pool.mtp_anchor_f16
+    }
+
+    fn mtp_stage_hidden(
+        &mut self,
+        lm_head: &crate::ctx::LmHeadWeights,
+        resid: &Tensor<F16>,
+        n_rows: usize,
+        lead: composites::MtpLead,
+    ) -> Result<()> {
+        composites::mtp_stage_hidden_local(&mut self.core, lm_head, resid, n_rows, lead)
+    }
+
+    fn mtp_catchup(
+        &mut self,
+        w: &crate::ctx::MtpWeights,
+        embedding: &crate::ctx::EmbeddingWeights,
+        tokens: &[u32],
+        positions: &[usize],
+        slot_id: usize,
+        mtp_layer_idx: usize,
+    ) -> Result<()> {
+        composites::mtp_catchup_local(
+            &mut self.core,
+            &mut self.hooks,
+            w,
+            embedding,
+            tokens,
+            positions,
+            slot_id,
+            mtp_layer_idx,
+        )
+    }
+
+    fn mtp_spec_rows(&mut self, on: bool) {
+        self.core.pool.mtp_spec_rows = on;
+    }
+
+    fn mtp_set_pending(&mut self, pending: Option<(usize, usize)>) {
+        self.core.pool.mtp_pending = pending;
+    }
+
+    fn mtp_pending(&self) -> Option<(usize, usize)> {
+        self.core.pool.mtp_pending
+    }
+
+    fn gdn_replay_rows(
+        &mut self,
+        weights: &crate::ctx::GdnWeights,
+        layer_idx: usize,
+        slot_id: usize,
+        n_keep: usize,
+    ) -> Result<()> {
+        let pool = &self.core.pool;
+        let Some(g) = pool.config.gdn else {
+            return Ok(());
+        };
+        if !pool.mtp_snap_valid {
+            anyhow::bail!("gdn_replay_rows: no device snapshot");
+        }
+        let dims = weights.dims;
+        let local_idx = layer_idx
+            .checked_sub(self.core.layer_idx_offset)
+            .filter(|&i| i < pool.gdn_state.len())
+            .ok_or_else(|| anyhow::anyhow!("gdn_replay_rows: layer {layer_idx} not owned"))?;
+        let rows = pool
+            .gdn_spec_rows(local_idx, &dims)
+            .ok_or_else(|| anyhow::anyhow!("gdn_replay_rows: pool has no MTP row store"))?;
+        if n_keep == 0 || n_keep > pool.mtp_verify_rows() {
+            anyhow::bail!("gdn_replay_rows: n_keep {n_keep} out of range");
+        }
+        let attn_out = pool
+            .gdn_prefill_scratch
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("gdn_replay_rows: no prefill scratch"))?
+            .state_out;
+        let snap_state_b = g.num_v_heads * g.head_k_dim * g.head_v_dim * 4;
+        let snap_hist_b = (g.conv_kernel - 1) * g.conv_channels * 4;
+        let snap = pool
+            .mtp_gdn_snap
+            .offset_bytes(local_idx * (snap_state_b + snap_hist_b));
+        let ls = pool.gdn_state[local_idx];
+        let state_b = dims.num_v_heads * dims.head_k_dim * dims.head_v_dim * 4;
+        let row_b = dims.conv_channels * 4;
+        let hist_b = (dims.conv_kernel - 1) * row_b;
+        let ops = self.core.ops();
+        ops.gdn_state_step_alphabeta_f32_s128(
+            flambeau_ops::GdnStepAlphaBetaBuffers {
+                q: rows.q,
+                k: rows.k,
+                v: rows.v,
+                alpha_in: rows.alpha,
+                beta_in: rows.beta,
+                ssm_dt_bias: weights.ssm_dt_bias.ptr,
+                ssm_a: weights.ssm_a.ptr,
+                state_in: snap,
+                state_out: ls.state.offset_bytes(slot_id * state_b),
+                attn_out,
+            },
+            flambeau_ops::GdnStepShape {
+                b: 1,
+                h_v: dims.num_v_heads,
+                l: n_keep,
+                n_rep: dims.num_v_heads / dims.num_k_heads,
+                rep_inner_layout: weights.rep_inner_layout,
+            },
+        )
+        .context("gdn_replay_rows: state step")?;
+        unsafe {
+            self.core
+                .device
+                .memcpy_async(
+                    self.core.stream,
+                    CopyDirection::DeviceToDevice,
+                    ls.conv_history.offset_bytes(slot_id * hist_b),
+                    rows.conv_input.offset_bytes(n_keep * row_b),
+                    hist_b,
+                )
+                .context("gdn_replay_rows: conv history")?;
+        }
+        Ok(())
+    }
+
+    fn gdn_restore(&mut self, slot_id: usize, snap: &[u8]) -> Result<()> {
+        let Some(g) = self.core.pool.config.gdn else {
+            return Ok(());
+        };
+        if self.core.pool.mtp_snap_valid && snap.is_empty() {
+            let f32b = 4usize;
+            let state_b = g.num_v_heads * g.head_k_dim * g.head_v_dim * f32b;
+            let hist_b = (g.conv_kernel - 1) * g.conv_channels * f32b;
+            let mut off = 0usize;
+            for ls in &self.core.pool.gdn_state {
+                unsafe {
+                    self.core
+                        .device
+                        .memcpy_async(
+                            self.core.stream,
+                            CopyDirection::DeviceToDevice,
+                            ls.state.offset_bytes(slot_id * state_b),
+                            self.core.pool.mtp_gdn_snap.offset_bytes(off),
+                            state_b,
+                        )
+                        .context("gdn_restore dev state")?;
+                }
+                off += state_b;
+                unsafe {
+                    self.core
+                        .device
+                        .memcpy_async(
+                            self.core.stream,
+                            CopyDirection::DeviceToDevice,
+                            ls.conv_history.offset_bytes(slot_id * hist_b),
+                            self.core.pool.mtp_gdn_snap.offset_bytes(off),
+                            hist_b,
+                        )
+                        .context("gdn_restore dev hist")?;
+                }
+                off += hist_b;
+            }
+            flambeau_core::Stream::synchronize(self.core.stream)?;
+            self.core.pool.mtp_snap_valid = false;
+            return Ok(());
+        }
+        let f32b = 4usize;
+        let state_b = g.num_v_heads * g.head_k_dim * g.head_v_dim * f32b;
+        let hist_b = (g.conv_kernel - 1) * g.conv_channels * f32b;
+        let need = self.core.pool.gdn_state.len() * (state_b + hist_b);
+        if snap.len() != need {
+            anyhow::bail!("gdn_restore: snap {} bytes, expected {need}", snap.len());
+        }
+        let mut off = 0usize;
+        for ls in &self.core.pool.gdn_state {
+            unsafe {
+                self.core
+                    .device
+                    .memcpy_async(
+                        self.core.stream,
+                        CopyDirection::HostToDevice,
+                        ls.state.offset_bytes(slot_id * state_b),
+                        DevicePtr(snap.as_ptr().add(off) as usize),
+                        state_b,
+                    )
+                    .context("gdn_restore state")?;
+            }
+            off += state_b;
+            unsafe {
+                self.core
+                    .device
+                    .memcpy_async(
+                        self.core.stream,
+                        CopyDirection::HostToDevice,
+                        ls.conv_history.offset_bytes(slot_id * hist_b),
+                        DevicePtr(snap.as_ptr().add(off) as usize),
+                        hist_b,
+                    )
+                    .context("gdn_restore hist")?;
+            }
+            off += hist_b;
+        }
+        flambeau_core::Stream::synchronize(self.core.stream)?;
+        Ok(())
     }
 
     fn layer_range<'b>(
@@ -1051,10 +1488,10 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
     }
 }
 
-pub type SingleDeviceEngine<'a> = ForwardEngine<'a, NoopHooks, SoloStage>;
-pub type TpEngine<'a> = ForwardEngine<'a, TpHooks, SoloStage>;
-pub type PpEngine<'a> = ForwardEngine<'a, NoopHooks, PpStage<'a>>;
-pub type HybridEngine<'a> = ForwardEngine<'a, HybridHooks, HybStage<'a>>;
+pub type SingleDeviceEngine<'a> = ForwardEngine<'a, HipBackend, NoopHooks, SoloStage>;
+pub type TpEngine<'a> = ForwardEngine<'a, HipBackend, TpHooks, SoloStage>;
+pub type PpEngine<'a> = ForwardEngine<'a, HipBackend, NoopHooks, PpStage<'a>>;
+pub type HybridEngine<'a> = ForwardEngine<'a, HipBackend, HybridHooks, HybStage<'a>>;
 
 pub type SingleDeviceForwardCtx<'a> = SingleDeviceEngine<'a>;
 pub type TpForwardCtx<'a> = TpEngine<'a>;

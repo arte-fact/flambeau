@@ -27,7 +27,8 @@ pub use gdn_layer::{
     gdn_tp_mode_for, load_gdn_layer, per_rank_gdn_dims, GdnLayerSpec, GdnTpMode,
 };
 pub use gdn_shard::{
-    upload_f32_array_sharded, upload_gdn_fused_qkv_f32, upload_gdn_fused_qkv_quant,
+    gdn_v_head_runs, upload_f32_heads, upload_gdn_fused_qkv_f32, upload_gdn_fused_qkv_quant,
+    upload_head_cols_quant, upload_head_rows_quant,
 };
 pub use globals::{load_embedding, load_lm_head, EmbeddingSpec, LmHeadSpec};
 pub use moe::{

@@ -59,10 +59,19 @@ before writing or reviewing any code in this crate.
    safety notes, or non-obvious choices. They do not narrate refactors
    or reference tasks/PRs.
 
-9. **No backend abstraction yet.** V1 is HIP-only. The op
-   signatures take HIP-specific types directly (`&HipOps`, `&Stream`).
-   A CUDA-port sibling crate or a backend trait is a later phase. Do
-   not pre-emptively abstract.
+9. **Backend-generic through the portable trait seams — never through
+   a new abstraction defined here.** The CUDA decouple has landed the
+   seams in their proper homes: `Ops` (portable, in `flambeau-ops`),
+   `Device`/`Stream`/`Event` (`flambeau-core`), `Cluster`
+   (`flambeau-runtime`). Op signatures take those traits, not concrete
+   HIP types: `ops: &impl Ops` (not `&HipOps`), kernel-free memcpy ops
+   `<D: Device>(… device: &D, stream: &D::Stream)` (not `&HipDevice`).
+   This crate still defines **no** backend trait of its own (that's
+   `flambeau-backend`'s `Backend`) — rule 2 stands: the ops stay free
+   functions, now generic over the seam traits instead of pinned to
+   HIP. A concrete `HipOps`/`CudaOps` is chosen by the caller (the
+   model crate / executor); the co-located tests construct `HipOps`
+   because they run on the HIP rig.
 
 10. **Re-export every op from `src/lib.rs`.** Consumers `use
     flambeau_model_ops::{rmsnorm_f16, qmatmul_q4_0, ...};` — flat

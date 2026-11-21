@@ -107,7 +107,7 @@ fn render_without_generation_prompt_closes_last_turn() {
     );
 }
 
-/// T1.2: Qwen3.6 `<tool_call>` / `</tool_call>` are textual tags, not
+/// Qwen3.6 `<tool_call>` / `</tool_call>` are textual tags, not
 /// single vocab tokens — they tokenise as normal BPE sequences and must
 /// round-trip cleanly through encode/decode. If the vocab-scan in
 /// `tokenizer::load_from_gguf` ever auto-registers them as specials by
@@ -126,8 +126,8 @@ fn tool_call_tags_roundtrip_through_tokenizer() {
         "</tool_call>",
         "<tool_call>\n{\"name\":\"get_weather\",\"arguments\":\"{}\"}\n</tool_call>",
         "prefix text <tool_call>{\"name\":\"f\",\"arguments\":\"{}\"}</tool_call> suffix",
-        // Qwen3.6 can emit think + tool_call together (llama.cpp #21118
-        // guards the newline-less variant here):
+        // Qwen3.6 can emit think + tool_call together; the newline-less
+        // variant is guarded here:
         "<think>reasoning</think><tool_call>{\"name\":\"f\",\"arguments\":\"{}\"}</tool_call>",
     ];
     for f in fixtures {
@@ -142,7 +142,7 @@ fn tool_call_tags_roundtrip_through_tokenizer() {
     }
 }
 
-/// T1.2: `render_with_tools` threads a non-empty `tools[]` through the
+/// `render_with_tools` threads a non-empty `tools[]` through the
 /// Jinja context. Uses a hand-rolled minimal template so the test does
 /// not need a GGUF file.
 #[test]

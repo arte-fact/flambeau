@@ -1,8 +1,8 @@
-//! #288 microbench — wall-clock A/B between per-row `qmatmul(m=1)` ×N
+//! Microbench — wall-clock A/B between per-row `qmatmul(m=1)` ×N
 //! and the new batched `mmvq_q4_1_batched` kernel via `qmatmul(m=N)`.
 //! Goal: confirm the weight-HBM amortization lever delivers a real
 //! speedup at the GDN matmul shapes used by Qwen3.6-27B (k=4096,
-//! n_rows in [3584, 14336]). Not the perf gate — that's #292 / live
+//! n_rows in [3584, 14336]). Not the perf gate — that's the live
 //! cert. This bench just sanity-checks direction-of-win.
 //! Run with:
 //! cargo test --release -p flambeau-ops --features hip \
@@ -184,7 +184,7 @@ fn mmvq_q4_1_batched_perf_sweep() -> Result<()> {
         // N=1 single-row baseline (m=1 falls through to per-row MMVQ).
         let single_us = time_us(stream, iters, || {
             qmatmul(
-                flambeau_ops::OpCtx { reg: &reg, stream },
+                &reg, stream,
                 flambeau_ops::QmatmulBuffers {
                     weights: d_w,
                     act_q8_1: d_act_q8_1,
@@ -212,7 +212,7 @@ fn mmvq_q4_1_batched_perf_sweep() -> Result<()> {
                     let act_row = DevicePtr(d_act_q8_1.as_usize() + s * act_row_bytes);
                     let dst_row = DevicePtr(d_dst.as_usize() + s * dst_row_bytes);
                     qmatmul(
-                        flambeau_ops::OpCtx { reg: &reg, stream },
+                        &reg, stream,
                         flambeau_ops::QmatmulBuffers {
                             weights: d_w,
                             act_q8_1: act_row,
@@ -238,7 +238,7 @@ fn mmvq_q4_1_batched_perf_sweep() -> Result<()> {
         for &n in slot_counts {
             let us = time_us(stream, iters, || {
                 qmatmul(
-                    flambeau_ops::OpCtx { reg: &reg, stream },
+                    &reg, stream,
                     flambeau_ops::QmatmulBuffers {
                         weights: d_w,
                         act_q8_1: d_act_q8_1,

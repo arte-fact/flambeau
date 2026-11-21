@@ -9,6 +9,9 @@
 
 use std::sync::{Arc, Barrier, Mutex};
 
+use flambeau_core::device::Device;
+use flambeau_core::DevicePtr;
+
 use crate::mesh::{CollectiveCfg, CollectiveDType, Mesh, RankId, ReduceOp};
 
 /// Error surface for the collective layer.
@@ -166,6 +169,105 @@ pub trait AllToAll {
 /// Fan rank `root`'s buffer out to every rank.
 pub trait Broadcast {
     fn broadcast(&self, buf: &mut [u8], root: RankId, cfg: &CollectiveCfg) -> CollectiveResult<()>;
+}
+
+/// On-device AllReduce-sum: the device-pointer analog of [`AllReduce`].
+/// Reduces `n_elems` `dtype` elements in place at `buf` across all ranks
+/// without a host bounce. Implemented on a per-rank handle (HIP BAR1 P2P,
+/// later NCCL on CUDA) carrying the rank's identity, mirroring how
+/// [`RefRankHandle`] carries its rank for the byte-buffer path. `op` is
+/// always `Sum` — the only reduction the forward AR path issues.
+pub trait DeviceAllReduce {
+    /// Per-rank device type (`HipDevice`, `CudaDevice`).
+    type Device: Device;
+
+    fn all_reduce_sum(
+        &self,
+        buf: DevicePtr,
+        n_elems: usize,
+        dtype: CollectiveDType,
+        device: &Self::Device,
+        stream: &<Self::Device as Device>::Stream,
+    ) -> CollectiveResult<()>;
+}
+
+/// Buffer set for [`FusedAllReduce::ar_residual_rmsnorm_f16`].
+#[derive(Copy, Clone, Debug)]
+pub struct ArResidualRmsNormHookBuffers {
+    pub residual_inout: DevicePtr,
+    pub partial_f16: DevicePtr,
+    pub rms_weight: DevicePtr,
+    pub out_norm: DevicePtr,
+}
+
+/// Buffer set for [`FusedAllReduce::ar_postattn_residual_rmsnorm_f32_to_f16`].
+#[derive(Copy, Clone, Debug)]
+pub struct ArPostAttnRmsNormHookBuffers {
+    pub proj_local_f32: DevicePtr,
+    pub post_norm_w_f16: DevicePtr,
+    pub resid_in_f16: DevicePtr,
+    pub resid_out_f16: DevicePtr,
+}
+
+/// BAR1-class fused collectives: AllReduce composed with the residual-add and
+/// RMSNorm epilogues into single kernels, plus an F16-payload AR-sum. A
+/// capability layered on [`DeviceAllReduce`] that only a fully-peer-connected
+/// device backend provides — HIP BAR1 P2P here; on CUDA, NCCL-allreduce plus a
+/// separate epilogue kernel. The host-bounce path does NOT implement it;
+/// callers gate on the `supports_*` predicates and fall back to the unfused
+/// `ar_sum_f32 + cast + add/rmsnorm` sequence. `supports_*` is rank-based
+/// (TP=2 for the residual fusions, TP ∈ {2,4} for the F16 sum / post-attn).
+pub trait FusedAllReduce: DeviceAllReduce {
+    fn supports_ar_sum_f16(&self) -> bool;
+
+    /// F16-payload AR-sum: `buf = Σ peer buf[rank]` in F16, halving BAR1
+    /// traffic vs the F32 `all_reduce_sum`.
+    fn ar_sum_f16(
+        &self,
+        buf: DevicePtr,
+        n_elems: usize,
+        device: &Self::Device,
+        stream: &<Self::Device as Device>::Stream,
+    ) -> CollectiveResult<()>;
+
+    fn supports_ar_residual_f16(&self) -> bool;
+
+    /// In-place fused AR + residual-add: `residual_inout += Σ partial_f16`.
+    fn ar_residual_f16(
+        &self,
+        residual_inout: DevicePtr,
+        partial_f16: DevicePtr,
+        n_elems: usize,
+        device: &Self::Device,
+        stream: &<Self::Device as Device>::Stream,
+    ) -> CollectiveResult<()>;
+
+    fn supports_ar_residual_rmsnorm_f16(&self) -> bool;
+
+    /// Fused AR + residual-add + RMSNorm, F16 throughout.
+    fn ar_residual_rmsnorm_f16(
+        &self,
+        bufs: ArResidualRmsNormHookBuffers,
+        n_elems: usize,
+        eps: f32,
+        device: &Self::Device,
+        stream: &<Self::Device as Device>::Stream,
+    ) -> CollectiveResult<()>;
+
+    fn supports_ar_postattn_residual_rmsnorm_f32_to_f16(&self) -> bool;
+
+    /// Fused post-attn / post-ffn path:
+    /// `resid_out = resid_in + rmsnorm(Σ proj_partial_f32, w, eps)`.
+    /// `resid_out` must not alias `resid_in`.
+    fn ar_postattn_residual_rmsnorm_f32_to_f16(
+        &self,
+        bufs: ArPostAttnRmsNormHookBuffers,
+        n_rows: usize,
+        n: usize,
+        eps: f32,
+        device: &Self::Device,
+        stream: &<Self::Device as Device>::Stream,
+    ) -> CollectiveResult<()>;
 }
 
 // Generic element-wise reduction over a dtype, in place on rank 0 then

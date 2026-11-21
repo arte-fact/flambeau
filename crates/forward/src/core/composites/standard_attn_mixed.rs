@@ -1,4 +1,4 @@
-//! Sarathi-Serve mixed-batch standard_attn (Phase K1a).
+//! Sarathi-Serve mixed-batch standard_attn.
 //!
 //! Rows `[0..K)` are a prefill chunk for slot `slot_p` at contiguous
 //! positions `[pos0, pos0 + K)`. Rows `[K..K+N)` are batched decodes
@@ -8,9 +8,8 @@
 //! prefill rows + existing `attn_decode_f16_batched` over the N decode
 //! rows. No new device kernels.
 //!
-//! K1a slice: bail on paged / kv-shared / `attn_v_unit_norm_w` /
-//! `attn_q_gated` / `post_attn_norm` paths. Future slices handle
-//! those. Clean Qwen3.5-9B-class dense path only.
+//! Bails on paged / kv-shared / `attn_v_unit_norm_w` / `attn_q_gated` /
+//! `post_attn_norm` paths. Clean Qwen3.5-9B-class dense path only.
 //!
 //! See `doc/MIXED_BATCH_V2_PLAN.md`.
 
@@ -21,8 +20,8 @@ use flambeau_model_ops::{Tensor, F16, F32, I32, Q8_1};
 use crate::core::{CoreState, MixedBatch, TopologyHooks};
 use crate::ctx::AttnWeights;
 
-pub fn standard_attn_mixed_local<H: TopologyHooks>(
-    state: &mut CoreState<'_>,
+pub fn standard_attn_mixed_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
+    state: &mut CoreState<'_, B>,
     hooks: &mut H,
     input: &Tensor<F16>,
     weights: &AttnWeights,
@@ -70,9 +69,9 @@ pub fn standard_attn_mixed_local<H: TopologyHooks>(
         }
     }
 
-    // Remaining bails: paged KV (Phase K-paged) and gemma 4n's
-    // shared-KV layers. SWA / V-unit-norm / post_attn_norm / V-from-K
-    // ship in this slice for gemma4 dense and 26B-A4B MoE.
+    // Bails on paged KV and gemma 4n's shared-KV layers. SWA /
+    // V-unit-norm / post_attn_norm / V-from-K are handled for gemma4 dense
+    // and 26B-A4B MoE.
     if state.pool.paged_kv_caches.is_some() {
         bail!("standard_attn_mixed: paged KV not yet supported (Phase K-paged)");
     }
@@ -451,7 +450,7 @@ pub fn standard_attn_mixed_local<H: TopologyHooks>(
     let v_dec_ptr = v_pref_ptr.offset_bytes(k * kv_width * 2);
     let out_dec_ptr = out_pref_ptr.offset_bytes(k * q_width * 2);
     {
-        // Per-slot SWA window-offset mirror of standard_attn.rs.
+        // Per-slot SWA window-offset, same scheme as standard_attn.rs.
         // kv_append writes at absolute slot positions; attention
         // reads from each slot's window start. When any slot has
         // pos+1 > window we re-upload offset ptrs before attention.
@@ -579,27 +578,64 @@ pub fn standard_attn_mixed_local<H: TopologyHooks>(
             }
             flambeau_core::Stream::synchronize(state.stream)?;
         }
-        flambeau_model_ops::attn_decode_f16_batched(
-            flambeau_ops::AttnBatchedBuffers {
-                q_batched: q_dec_ptr,
-                k_cache_ptrs: state.pool.attn_slot_k_dst_ptrs,
-                v_cache_ptrs: state.pool.attn_slot_v_dst_ptrs,
-                out_batched: out_dec_ptr,
-                n_tokens_kv_ptrs: state.pool.attn_slot_n_kv,
-            },
-            flambeau_ops::AttnDecodeBatchedShape {
-                n_heads_q: weights.n_heads,
-                n_heads_kv: weights.n_kv_heads,
-                head_dim: weights.head_dim,
-                n_slots: n_dec,
-            },
-            flambeau_ops::AttnKnobs {
-                scale,
-                window_size: kernel_window,
-                ring_depth: ring_depth_i,
-            },
-            &ops,
-        )?;
+        let batched_bufs = flambeau_ops::AttnBatchedBuffers {
+            q_batched: q_dec_ptr,
+            k_cache_ptrs: state.pool.attn_slot_k_dst_ptrs,
+            v_cache_ptrs: state.pool.attn_slot_v_dst_ptrs,
+            out_batched: out_dec_ptr,
+            n_tokens_kv_ptrs: state.pool.attn_slot_n_kv,
+        };
+        let knobs = flambeau_ops::AttnKnobs {
+            scale,
+            window_size: kernel_window,
+            ring_depth: ring_depth_i,
+        };
+        // Split-K the batched decode when the longest slot is deep enough that
+        // the serial (one block per head×slot) kernel starves the GPU. chunk_base
+        // stays 0 (full causal range); ring layers above MAX_SPLITK_CHUNKS fall
+        // back to serial.
+        let max_dec_kv = host_n_kv.iter().copied().max().unwrap_or(0) as usize;
+        let batched_chunk_budget =
+            crate::core::scratch::MAX_SPLITK_CHUNKS.div_ceil(host_n_kv.len().max(1));
+        let chunk_size = flambeau_model_ops::splitk_chunk_size(max_dec_kv, batched_chunk_budget);
+        let n_chunks = max_dec_kv.div_ceil(chunk_size.max(1));
+        let use_splitk = !is_ring_layer
+            && max_dec_kv > 256
+            && n_chunks > 1
+            && n_chunks <= crate::core::scratch::MAX_SPLITK_CHUNKS
+            && state.pool.splitk_partials_m.as_usize() != 0;
+        if use_splitk {
+            flambeau_model_ops::attn_decode_f16_batched_splitk(
+                batched_bufs,
+                flambeau_ops::AttnSplitkPartials {
+                    partials_m: state.pool.splitk_partials_m,
+                    partials_s: state.pool.splitk_partials_s,
+                    partials_o: state.pool.splitk_partials_o,
+                },
+                flambeau_ops::AttnDecodeBatchedSplitkShape {
+                    n_heads_q: weights.n_heads,
+                    n_heads_kv: weights.n_kv_heads,
+                    head_dim: weights.head_dim,
+                    n_slots: n_dec,
+                    max_n_tokens_kv: max_dec_kv,
+                    chunk_size,
+                },
+                knobs,
+                &ops,
+            )?;
+        } else {
+            flambeau_model_ops::attn_decode_f16_batched(
+                batched_bufs,
+                flambeau_ops::AttnDecodeBatchedShape {
+                    n_heads_q: weights.n_heads,
+                    n_heads_kv: weights.n_kv_heads,
+                    head_dim: weights.head_dim,
+                    n_slots: n_dec,
+                },
+                knobs,
+                &ops,
+            )?;
+        }
     }
 
     // ---- Apply Q-gate sigmoid·mul if gated, then output proj on K+N rows ----

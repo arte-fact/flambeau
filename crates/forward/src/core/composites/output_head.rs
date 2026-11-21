@@ -5,16 +5,19 @@
 use anyhow::{bail, Context, Result};
 use flambeau_core::{CopyDirection, Device, DevicePtr};
 use flambeau_model_ops::{Tensor, F16, F32, Q8_1};
+use flambeau_ops::Ops;
 
 use crate::core::{CoreState, TopologyHooks};
 use crate::ctx::LmHeadWeights;
 
-pub fn output_head_local<H: TopologyHooks>(
-    state: &mut CoreState<'_>,
+pub fn output_head_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
+    state: &mut CoreState<'_, B>,
     _hooks: &mut H,
     input: &Tensor<F16>,
     lm_head: &LmHeadWeights,
     slot_ids: &[usize],
+    force_emit_all: bool,
+    download: bool,
 ) -> Result<()> {
     let hidden = state.hidden();
     if hidden != lm_head.hidden {
@@ -29,12 +32,24 @@ pub fn output_head_local<H: TopologyHooks>(
     }
     let vocab = lm_head.vocab_size;
     let ops = state.ops();
-    let emit_all = n_tokens > 1 && slot_ids.iter().any(|&s| s != slot_ids[0]);
+    let emit_all = force_emit_all || (n_tokens > 1 && slot_ids.iter().any(|&s| s != slot_ids[0]));
     let n_emit = if emit_all { n_tokens } else { 1 };
-    if n_emit > state.pool.config.max_slots.max(1) {
+    if n_emit > state.pool.logits_rows {
         bail!(
-            "output_head: n_emit {n_emit} > max_slots {} (pool.logits_f32_dev too small)",
-            state.pool.config.max_slots.max(1)
+            "output_head: n_emit {n_emit} > {} rows in pool.logits_f32_dev",
+            state.pool.logits_rows
+        );
+    }
+    let head_shape = flambeau_ops::MatmulShape {
+        m: n_emit,
+        k: hidden,
+        n: vocab,
+    };
+    if n_emit > 1 && lm_head.lm_head.reads_mmq_activation(head_shape, &ops) {
+        bail!(
+            "output_head: {:?} lm_head at {n_emit} rows dispatches to an MMQ kernel; \
+             only the standard Q8_1 activation is prepared here",
+            lm_head.lm_head.dtype
         );
     }
 
@@ -71,12 +86,7 @@ pub fn output_head_local<H: TopologyHooks>(
         && hidden % 256 == 0;
     if use_r4_lmhead {
         let n_superblocks = hidden / 256;
-        flambeau_ops::hip::qmatmul::mmvq_simple_launch(
-            flambeau_ops::OpCtx { reg: state.reg, stream: state.stream },
-            flambeau_ops::hip::qmatmul::KernelEntry {
-                stem: "mmvq_q4_k_r4",
-                entry: "flambeau_mmvq_q4_k_r4_q8_1",
-            },
+        ops.mmvq_q4_k_r4(
             flambeau_ops::MmvqBuffers {
                 weights: lm_head.lm_head.ptr,
                 act_q8_1: state.pool.norm_q8_1,
@@ -84,7 +94,6 @@ pub fn output_head_local<H: TopologyHooks>(
             },
             vocab,
             n_superblocks,
-            flambeau_ops::hip::qmatmul::MmvqLaunchTune { threads: 64, rows_per_block: 4 },
         )?;
     } else {
         lm_head.lm_head.qmatmul(
@@ -110,6 +119,14 @@ pub fn output_head_local<H: TopologyHooks>(
             cap,
             &ops,
         )?;
+    }
+
+    // Under decode-graph capture the softcap above wrote the final logits into
+    // `pool.logits_f32_dev` (captured); the trailing D2H + stream sync are the
+    // graph's split point and run UNCAPTURED in the session driver after
+    // `cuGraphLaunch`. Skip them here so they don't land inside the graph.
+    if state.capture.is_some() || !download {
+        return Ok(());
     }
 
     let n_elems = n_emit * vocab;

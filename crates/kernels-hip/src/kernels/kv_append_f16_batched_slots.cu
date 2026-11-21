@@ -1,7 +1,7 @@
 // kv_append_f16_batched_slots — single-launch K+V append across N
 // decode slots, each writing one new token row into its own KV cache.
 //
-// Replaces the 2N `hipMemcpyAsync(DtoD)` calls in step 8 of
+// Replaces the 2N `hipMemcpyAsync(DtoD)` calls in
 // `forward_full_attn_layer_decode_batched_tp`. Each slot owns an
 // independent KV cache buffer; the kernel takes `[N] u64` device
 // arrays of per-slot K/V cache base pointers + a `[N] i32` array of

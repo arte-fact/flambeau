@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "impl_id": "attention_prefill_mma",
+  "backend": "cuda",
+  "arch": "sm_86",
+  "op": "attention_prefill_mma",
+  "dtype_weight": "F16",
+  "dtype_activation": "F16",
+  "tolerance_formula": "|err| <= 5e-3 * max(|ref|, 1) vs F64 attention oracle",
+  "results": [
+    {
+      "m": 16,
+      "k": 128,
+      "n": 16,
+      "seed": 57446,
+      "max_rel_err": 0.00024414062,
+      "tolerance": 0.005,
+      "pass": true
+    },
+    {
+      "m": 300,
+      "k": 128,
+      "n": 300,
+      "seed": 292258,
+      "max_rel_err": 0.00024414062,
+      "tolerance": 0.005,
+      "pass": true
+    },
+    {
+      "m": 16,
+      "k": 256,
+      "n": 16,
+      "seed": 60374,
+      "max_rel_err": 0.00024414062,
+      "tolerance": 0.005,
+      "pass": true
+    },
+    {
+      "m": 128,
+      "k": 256,
+      "n": 128,
+      "seed": 176358,
+      "max_rel_err": 0.00024414062,
+      "tolerance": 0.005,
+      "pass": true
+    },
+    {
+      "m": 300,
+      "k": 256,
+      "n": 300,
+      "seed": 294682,
+      "max_rel_err": 0.00024414062,
+      "tolerance": 0.005,
+      "pass": true
+    },
+    {
+      "m": 16,
+      "k": 512,
+      "n": 16,
+      "seed": 61670,
+      "max_rel_err": 0.00024414062,
+      "tolerance": 0.005,
+      "pass": true
+    },
+    {
+      "m": 200,
+      "k": 512,
+      "n": 200,
+      "seed": 257774,
+      "max_rel_err": 0.00024414062,
+      "tolerance": 0.005,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-11-21T13:55:14Z",
+  "rig": "threadreaper-sm_86",
+  "pmc": {
+    "vgpr_count": 255,
+    "sgpr_count": null,
+    "waves_per_simd": null,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

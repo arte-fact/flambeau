@@ -1,0 +1,838 @@
+# Handoff — resume on the combined MI50 + 3090 rig
+
+Transient working note. Start here when the dev rig (2× MI50 gfx906 + 1× RTX 3090
+sm_86) is built and `feature/cuda-decouple` is pulled in.
+
+> **CURRENT STATUS (2026-06-18, tip `7d5c84e`): P2 (Stream M) COMPLETE. P3
+> (Stream F) COMPLETE.** Every cross-backend-eligible fixed kernel is on HIP
+> gfx906 + CUDA sm_86 — the full attention surface (decode/prefill/splitk +
+> Q8-KV + paged + batched + flash-tile), GDN (8), norms/rope/sampler/gemv/MoE
+> glue, activation quantizers. The two decode-attention kernels are bit-identical
+> (all 14 attention parity tests green); the rest cert vs F64/dequant oracles.
+> **The only HIP-only kernels left are the 3 `p2p_allreduce_*` collectives —
+> HIP-only by design** (CUDA implements the Collectives seam with NCCL in P4/B6,
+> not by porting the BAR1 P2P kernels). cert-check green hip 82 / cuda 20
+> throughout; all HIP parity/smoke/impls tests green. **P3 done → P4 (CUDA
+> multi-GPU NCCL/graph) + P5 (end-to-end CUDA decode parity) are the next gates.**
+> - **Reusable cross-backend reduce seams** (`kernels-shared/include/`):
+>   `block_reduce.cuh` (`block_reduce_sum<THREADS>` + `_dyn` runtime-blockDim +
+>   `block_tree_sum` power-of-2 LDS tree for sub-warp blocks), `block_reduce_softmax.cuh`
+>   (online (max,sum)), `topk.cuh` (argmax). The codegen gained a per-entry
+>   `launch_bounds` field; gfx906.cuh gained neutral `fast_exp`/`fast_rcp` aliases.
+> - **P3 Wave 2/3/4 (this session, after the decode spine):** activations
+>   (gelu/swiglu_f32 ×4, moe_combine_f32 — MIRROR), dense_gemv ×4 + v_unit_norm +
+>   kv_append_v_unit_norm (block_reduce), rmsnorm_rope (launch-bounds deferral
+>   cleared), GDN ×8 (5 MIRROR + 3 state-step NEUTRALIZE via the WARP_SIZE seam),
+>   paged kv_append ×2 (MIRROR), f16 attention ×4 (prefill/batched/paged via the
+>   attn_qk_reduce __shfl_xor recipe — bit-identical), flash_tile_f16 (5 entries,
+>   WARP_SIZE seam), Q8-KV attention ×4 (decode/prefill/splitk/flash_tile via
+>   block_tree_sum + neutral dp4a + load_int_b2 for the offset-2 qs), and the
+>   quantize_f16_q8_1_mmq orphan. **Test-bug fix:** the f16 paged parity tests
+>   pushed incomplete kernel args (UB the hand kernels tolerated) — now explicit.
+> - *(Wave 1 decode-spine detail below.)*
+> - **Three reusable cross-backend reduce seams landed** (all in
+>   `kernels-shared/include/`): `block_reduce.cuh` (`block_reduce_sum<THREADS>` —
+>   sum + broadcast), `block_reduce_softmax.cuh` (`block_reduce_softmax<THREADS>` —
+>   the NaN-safe online (max, sum_exp) rescaling merge; backs softmax_masked +
+>   sampler_topk + attention), and the **argmax** pattern in `topk.cuh`
+>   (value+index butterfly). All close the wave64 reduce leak (`tid>>6`,
+>   `__shfl_xor(...,64)`, `WARPS=THREADS/64`) over the `WARP_SIZE` seam.
+> - **BIT-IDENTITY LESSON (attention):** for kernels guarded by a bit-exact
+>   parity test, the neutral body must use the SAME reduce the hand kernel used —
+>   a plain `__shfl_xor` butterfly over `WARP_SIZE`, NOT gfx906's DPP
+>   `warp_reduce_sum` (different intermediate rounding → ~1e-6 drift). Also match
+>   the exact FP form (`norm = 1/sum; out*norm`, not `out/sum`). `block_reduce_sum`
+>   uses the DPP reduce, so it's fine where the cert tolerance is ≥1e-5 (norms),
+>   but attention needed the inline `__shfl_xor`. The
+>   `attention_decode_f16_batched_parity` test (batched == serial, bit-for-bit) is
+>   the guard.
+> - **P3 Wave 1c (attention) — 4/4 DONE** (`96a4cad`, `7ac397f`, `4c24bef`,
+>   `5a18f9c`): attention_decode_f16 (online softmax, Q·K dot over WARP_SIZE,
+>   bit-identical) + attention_decode_f16_splitk (2 entries: chunk tile-4 reduce +
+>   per-lane combine, bit-identical) + softmax_masked_f16 (block_reduce_softmax,
+>   NaN-safe) + kv_append_f16_batched_slots (MIRROR gather/scatter).
+> - **P3 Wave 1d (MoE glue + sampler) — 9/9 DONE** (`a3c2ca5`…`517e6e3`,
+>   `305ac1b`): moe_combine ×3, apply_per_expert_scale, shared_expert_scale, topk,
+>   sampler_apply_penalties, sampler_topk_softmax (block_reduce_softmax Phase-1 +
+>   wave-agnostic bitonic sort), moe_sort_by_expert (MIRROR — atomics + LDS scan,
+>   no warp ops).
+> - **P3 Wave 1b (Tier-B) — 11/13 DONE** (`6cff4c7`…`c2f87bf`): full norm family
+>   (rmsnorm_f16/f32/f32_to_f16 ×3/f16_add_residual/q8_1_fused, l2_norm_f32) via
+>   `block_reduce_sum`, F16→Q8 activation quantizers (q8_0/q8_1), rope_f16/
+>   rope_neox_partial_f16 (MIRROR). Deferred: **rmsnorm_rope_neox_partial_f16**
+>   (4 HEAD_DIM entries carry per-entry `__launch_bounds__` the manifest can't
+>   emit + perf-critical on gfx906) and **quantize_f16_q8_1_mmq** (orphan).
+> - **P3 Wave 1d (MoE glue + sampler) — 7/9 DONE** (`a3c2ca5`…`ec0aa8e`):
+>   moe_combine ×3 (no-resid/resid/two-resid fan-in, MIRROR),
+>   apply_per_expert_scale_f32 (MIRROR, bit-exact), shared_expert_scale_f32
+>   (NEUTRALIZE, block_reduce_sum dot + sigmoid), **topk_f32** (NEUTRALIZE, the
+>   router top-k — per-token block argmax×k + softmax over the WARP_SIZE seam),
+>   sampler_apply_penalties_f32 (MIRROR; F64-oracle 1e-5 not bit-exact — device
+>   contracts `l-freq*count` to an FMA). Remaining: **moe_sort_by_expert**
+>   (Tier-C segmented sort; CUDA may want `cub`) + **sampler_topk_softmax_f32**.
+> - **NEXT (the coherent unit): the online-softmax block reduce.**
+>   sampler_topk_softmax_f32 Phase-1, softmax_masked_f16, AND attention_decode all
+>   share the **online (max, sum_exp) tree reduce** (rescaling recurrence). Build
+>   `block_reduce_softmax<THREADS>(max, sum, scratch)` (the (max,sum) sibling of
+>   `block_reduce_sum`) ONCE, then sampler_topk (Phase-2..5 bitonic sort is
+>   already wave-agnostic) + softmax_masked fall out, and attention reuses it for
+>   the online-softmax core. Then the rest of **Wave 1c attention**
+>   (attention_decode_f16 +splitk, kv_append_f16_batched_slots) — the cp.async↔
+>   prefetch seam + LDS tiles; **some attention sweeps are HIP-only and need
+>   BenchBackend-genericizing first** (budget that as the family's first kernel,
+>   like the MoE-lds sweep in P2d). moe_sort_by_expert is a separate segmented-
+>   sort problem. See `doc/P3-STREAM-F-PORT.md` Waves 1c/1d.
+> - **Spine helpers** (all in `crates/bench/src/sweep_pointwise_cb.rs`):
+>   `run_pointwise_sweep<B>(op,…)` dispatcher (both cli arms call it — one wiring
+>   site per kernel); `run_unary_sweep<B,IE,OE>`, `run_binary_f16_sweep<B>`,
+>   `run_rmsnorm_add_residual_sweep` (both delta dtypes), `run_rope_f16_sweep`
+>   (interleaved+neox), `run_moe_combine_sweep` (0/1/2 residuals),
+>   `run_quantize_f16_q8_sweep`, `finish_cert` (shared cert tail). **Recipe per
+>   kernel:** MIRROR (CUDA `.cu` copy, kept HIP hand `.cu`) if already
+>   backend-neutral / no wave64 leak; NEUTRALIZE (shared `.cuh` + manifest cell,
+>   retire hand `.cu`) if it has the leak. Either way: neutral-impl_id cert both
+>   rigs, register in `BENCH_REFERENCE_KERNELS_GFX906`, frozen `_gfx906` dispatch
+>   row untouched. Gotchas: `uintptr_t`→`size_t` (nvcc); `__shfl_xor` shim needs
+>   `backend_compat.cuh` in the manifest `includes`.
+> - *(spine + Wave 1a + 1b-pilot detail below.)*
+> - **P3 harness spine DONE.** `crates/bench/src/sweep_pointwise_cb.rs` —
+>   BenchBackend-generic pointwise sweeps, one driver certs HIP gfx906 AND CUDA
+>   sm_86. A `run_pointwise_sweep<B>(op, …)` dispatcher both cli arms (HIP `match
+>   op` + `sweep_cuda`) call → a ported kernel is wired in one place. add_f16
+>   pilot certed both rigs (the earlier `cuInit 999` was the missing
+>   `/dev/nvidia-uvm`, recovered). Spine commit `846bd94` left
+>   `every_cert_on_disk_is_registered` red (neutral add_f16 cert unregistered) —
+>   FIXED (`cf7f9c5`): neutral Stream F certs register in
+>   `BENCH_REFERENCE_KERNELS_GFX906`.
+> - **P3 Wave 1a (Tier-A leaves) DONE — all 11 cross-backend** (`e986b5c` +
+>   `5905998`): add_f16, cast_f16_f32, cast_f32_f16, scale_f32, scale_f16,
+>   silu_f32, apply_softcap_f32, swiglu_f16, sigmoid_mul_f16, swiglu_f32_to_q8_1,
+>   split_q_gate_f16. **Approach = MIRROR** (trivial / identical body): keep the
+>   HIP hand `.cu` + its frozen `_gfx906` dispatch cert, add a CUDA `.cu` mirror
+>   in `kernels-cuda/src/kernels/` (auto-globbed by build.rs), emit a NEUTRAL
+>   cert on both rigs registered as a bench-ref. Shared drivers:
+>   `run_unary_sweep<B,IE,OE>` (1 input + optional f32 scalar),
+>   `run_binary_f16_sweep<B>` (2 F16 in). swiglu→q8_1 uses width-32 `__shfl_xor`
+>   (quantizer seam); split_q_gate is a 3D-grid copy. Casts/scales/split
+>   bit-exact; silu/softcap 1e-5 vs F64 (fast __expf/tanhf hold); swiglu/sigmoid
+>   5e-3 F16 envelope; swiglu→q8_1 dequant-vs-oracle 5e-3.
+> - **P3 Wave 1b (Tier-B block-reduce) UNDERWAY** (`6cff4c7` + `41ffad7`):
+>   rmsnorm_f16, rmsnorm_f32, l2_norm_f32 cross-backend. **Approach =
+>   NEUTRALIZE** (these carry the wave64 reduce leak: `tid>>6`,
+>   `__shfl_xor(...,64)`, `WARPS=THREADS/64`). New
+>   `kernels-shared/include/block_reduce.cuh`:
+>   `block_reduce_sum<THREADS>(val, lds_scratch)` reduces block-wide + broadcasts
+>   via the `WARP_SIZE` seam + neutral `warp_reduce_sum` — correct on wave64
+>   (NWARPS=4) AND wave32 (NWARPS=8). Each body moved to a shared `.cuh`
+>   (`rmsnorm.cuh` / `rmsnorm_f16.cuh` / `l2_norm.cuh`) + `instantiations.toml`
+>   cell (generated wrapper injects the arch header), hand `.cu` RETIRED. Neutral
+>   certs registered as bench-refs; frozen `_gfx906` dispatch rows untouched.
+>   `registry_loads_all_kernel_stems` + `rmsnorm_f16_runs` confirm the generated
+>   wrappers load via the real runtime registry. Gotcha: `uintptr_t` is undefined
+>   in the generated CUDA wrapper → use `size_t` for the float4 alignment check.
+> - **NEXT P3:** rest of Wave 1b — rmsnorm_f32_to_f16 (3 entries: _to_f16,
+>   _to_f16_add_residual, _f16_to_f16_add_residual), rmsnorm_f16_add_residual
+>   (2 outputs), rmsnorm_q8_1_fused, rope_f16, rope_neox_partial_f16,
+>   rmsnorm_rope_neox_partial_f16, quantize_f16_q8_1/_q8_0/_q8_1_mmq. All reuse
+>   `block_reduce_sum`; residual/q8_1 variants add an epilogue (rule 14: keep
+>   separate bodies). Then **Wave 1c attention** (hard tier: online softmax +
+>   cp.async↔prefetch seam). Build cli `--features "hip_sweep cuda_sweep"` +
+>   `RAYON_NUM_THREADS=8`; `flambeau sweep --arch {gfx906,sm_86} --op <k>`.
+>
+> ---
+>
+> *(P2 status — historical, below)*
+>
+> **(2026-06-17, tip `873f05f`): dense mmvq + ENTIRE dense mmq family COMPLETE
+> cross-backend. P2d indexed_moe STARTED.**
+> - **P2d plain-row indexed-MoE MMVQ — DONE.** Foundational
+>   `indexed_moe_mmvq.cuh` skeleton (`indexed_moe_mmvq_row` /
+>   `indexed_moe_mmvq_vdr_row` / `indexed_moe_mmvq_nrow_row`), the MoE sibling of
+>   `mmvq.cuh`: identical inner product (`quant_traits<Q>::partial`/`partial_vdr`
+>   + the warp-agnostic `mmvq_reduce_store` family), only the addressing differs
+>   (weight row by `expert_ids[token,slot]`, per-token activation `y[token,:]`,
+>   output `dst[token,slot,row]`; grid (n_rows, n_tokens*top_k, 1)). Q8_0
+>   (`f976831`, 256t VDR=2) + Q4_0/Q4_1/Q5_0/Q5_1 (`8d91b12`, plain
+>   `indexed_moe_mmvq_row<Q,256>` re-instantiation, zero new C++). Stems/entries
+>   kept identical to the ops launchers (`crates/ops/src/hip/moe.rs`) →
+>   ops/runtime untouched; hand `.cu` retired; neutral bench-reference impl_ids
+>   `indexed_moe_mmvq_<dt>`. Harness `MoeMmvqDtype` / `run_moe_mmvq_sweep<B>` /
+>   `run_shape_moe_mmvq<B>` in `sweep_mmvq.rs` (8-arg ABI, expert-routed
+>   reference); `--dtype <dt>_moe_mmvq`. HIP↔CUDA errs match ~1e-7 (reduce
+>   lane-order, same as dense mmvq).
+> - **P2d K-quant r2/r4 MoE MMVQ — DONE.** Q4_K r2+r4 (`ec9bcc3`) + Q5_K/Q6_K/
+>   Q2_K/Q3_K r2 (`2b087df`). Each a faithful port of the hand r2_dp4a kernel
+>   (2 rows/64t, 32-lane groups; Q4_K-r4 = 4 rows/16-lane) into one neutral
+>   `indexed_moe_mmvq_q*_k.cuh`. Cross-backend fixes vs the hand kernels: every
+>   int read → `load_int_b2` (NVIDIA faults on misaligned 4-byte ql/qh/qs); the
+>   half/quarter-warp DPP reduce → `mmvq_reduce_store_group<32/16>` (width-N
+>   within-warp shuffle, correct on wave64 sub-warp AND wave32 full-warp). Q4_K
+>   shares `flambeau_q4k_subblock_dot` across r2+r4. All HIP↔CUDA BIT-IDENTICAL
+>   (group reduce is shuffle-only). `--dtype Q{4,5,6,2,3}_K_r{2,4}_moe_mmvq`,
+>   neutral bench-refs `indexed_moe_mmvq_q*_k_r{2,4}`. **The entire indexed-MoE
+>   MMVQ DECODE family (plain-row + K-quant r2/r4) is now cross-backend.**
+> - **P2d IQ\* MoE MMVQ — DONE.** All 9 IQ r2_dp4a kernels (iq4_nl `f976831`…
+>   pilot, then iq4_xs/iq2_xxs/iq2_xs/iq2_s/iq3_xxs/iq3_s/iq1_s/iq1_m — `8ba750e`).
+>   Each `indexed_moe_mmvq_iq*.cuh` `#include`s its dense `mmvq_iq*.cuh` to reuse
+>   the codebook/sign helpers (zero duplicated grid/LUT math). Cross-backend
+>   fixes: `__builtin_amdgcn_perm` → neutral `byte_perm` (via the dense LUT
+>   helpers), every int read → `load_int_b2`, half-warp DPP reduce →
+>   `mmvq_reduce_store_group<32>`. Only the `_r2_dp4a` entries are templated (the
+>   ops layer calls only those; the 9 plain scalar IQ MoE `.cu` are unused
+>   orphans — `cfg(unverified)`/delete candidates, NOT yet templated). All 9 IQ
+>   HIP↔CUDA BIT-IDENTICAL. `--dtype <IQ>_r2_moe_mmvq`. **The ENTIRE indexed-MoE
+>   MMVQ family (plain-row + K-quant r2/r4 + IQ\* r2) is now cross-backend.**
+> - **P2d gate_up MMVQ fusion — DONE (all live).** Q8_0 + Q4_0 `_gate_up_dp4a`
+>   (`aa0e16d`), Q4_K plain `_gate_up` (`338da13`, dispatch row), Q4_K
+>   `_gate_up_r4_sorted_dp4a` (`cb935c4`, ops). Q8_0 rides a new
+>   `indexed_moe_mmvq_gate_up_vdr_row<Q,THREADS,VDR>` skeleton (foundational
+>   header; `load_q8_1_ints` once + `partial_vdr_y` ×2 + `mmvq_reduce_store_gate_up`);
+>   Q4_0 its own nibble body; Q4_K plain scalar (64t, `mmvq_reduce_store_gate_up<64>`);
+>   r4_sorted reuses `flambeau_q4k_subblock_dot` for both weights + 2× width-16
+>   group reduce + a `sorted_pair_idx` remap. New 10/11-arg harness
+>   `MoeGateUpDtype` / `run_moe_gate_up_sweep<B>` / `run_shape_moe_gate_up<B>`
+>   (two weights/outputs, expert-routed 2-weight reference, `launch_threads()` /
+>   `rows_per_block()` / `sorted()` hooks). `--dtype <dt>_gate_up_moe_mmvq`
+>   (+`_r4_sorted`). q8_0/q4_0/q4_k-plain ~1e-7/1e-6 (cross-warp FP accum order);
+>   r4_sorted BIT-IDENTICAL. The unreferenced q4_k gate_up variants
+>   (`_dp4a`/`_r2_dp4a`/`_r4_dp4a`/`_r8_dp4a`) are autotune orphans, NOT templated.
+> - **P2d tile8 MMQ prefill — STARTED.** Q8_0 gate_up + down (`b2a6b54`). The
+>   tile8 kernels are **register-tiled** (MMQ_Y=64 rows × TILE_N=8 sorted
+>   slot-cols, each thread computes its row's 8 outputs from registers) — NO LDS,
+>   NO cross-thread comms, so the cleanest cross-backend case (both BIT-IDENTICAL).
+>   Fixes: `WARP_SIZE` block constant → kernel-local `MMQ_Y=64`; neutral `dp4a`;
+>   weight qs → `load_int_b2`. New generic harness `MoeMmqTile8Dtype` /
+>   `run_moe_mmq_tile8_sweep<B>` / `run_shape_moe_mmq_tile8<B>` (gate_up 13-arg +
+>   down 11-arg via a `gate_up()` flag) + host `build_padded_sort` (pad-to-8
+>   expert sort). `--dtype Q8_0_{gate_up,down}_tile8_moe_mmq`.
+> - **NAMING:** the MMQ "turbo" family was renamed **`turbo` → `lds_tiled`**
+>   (`910c3e7`, coordinated across kernels/ops/dispatch/certs); the
+>   `mmq_q4_k_lds_tiled.cuh` + `indexed_moe_mmq_q4_k_{gate_up,down}_lds_tiled.cu`
+>   are the 4-warp LDS-tiled prefill kernels (block (64,4)). KV-cache turbo-quant
+>   is a separate concept, untouched.
+>   - **Simple-dtype tile8 DONE** (`3428838`): generalized the scaffold into the
+>     `quant_traits`-driven skeleton `indexed_moe_mmq_{gate_up,down}_tile8_row<Q>`
+>     (`indexed_moe_mmq_tile8.cuh`) riding `mmq_decode`/`mmq_partial` — covers
+>     Q8_0/Q4_0/Q4_1/Q5_0/Q5_1 × {gate_up,down} (10 kernels) with ZERO per-dtype
+>     C++. Q8_0 refactored onto it (per-dtype headers deleted). 19/20 BIT-IDENTICAL.
+>     `MoeMmqTile8Dtype` (10 variants) / `run_moe_mmq_tile8_sweep<B>`.
+>   - **K-quant tile8 DONE** (5/5): Q4_K (`3dc039b`) + Q5_K (`873f05f`) + Q6_K
+>     (`73c03b3`) + Q2_K/Q3_K (`86d0b4c`), each a per-dtype body (super-block
+>     decoded into registers — NOT the `quant_traits` mmq policy):
+>     `indexed_moe_mmq_q{4,5,6,2,3}_k_tile8.cuh`, gate_up + down. Q4_K/Q5_K affine
+>     via `flambeau_q4k_scale_min`; Q5_K adds qh 5th bit + `sumf_d/sumf_m` fold;
+>     Q6_K 4-bit ql + 2-bit qh, 16 int8 scales, -32 bias via (v-32)·y = v·y-32·Σy;
+>     Q2_K 2-bit qs + 4-bit-packed (scale,min) affine fold; Q3_K 2-bit qs + 1 hmask
+>     bit, scales unpacked biased -32, -4 bias fold. All `load_int_b2`; Q3_K uses
+>     unsigned shift for the hmask field. All 10 kernels BIT-IDENTICAL HIP↔CUDA.
+>     **Tile8 cert tolerance is dtype-aware** (`MoeMmqTile8Dtype::tolerance()`):
+>     K-quants 5e-2 (documented Q8_1-activation noise on cancellation-heavy prefill
+>     rows — Q5_K down hit 0.0315; Q6_K/Q2_K/Q3_K all well within at ≤1.7e-3),
+>     simple block quants 3e-2. `MoeMmqTile8Dtype` now 20 variants.
+>   - **IQ\* tile8 DONE** (9/9, `4776f7f`): iq4_nl/iq4_xs/iq2_xxs/iq2_xs/iq2_s/
+>     iq3_xxs/iq3_s/iq1_s/iq1_m × {gate_up,down} = 18 kernels, each a verbatim
+>     port of the hand codebook decode (LUT/grid/KSIGNS/apply_signs, IQ1 delta,
+>     IQ1_M scale reassembly) onto the register-tiled tile8 scaffold. File-local
+>     helpers lifted with `flambeau_<dt>_` prefixes; raw 4-byte qs/aux/y →
+>     load_int_b2; neutral dp4a. Generic shape driver already sizes per block
+>     (iq4_nl 32-elem, rest super-block) — no driver change. All 18 BIT-IDENTICAL
+>     (worst max_rel_err 0.015, inside the 5e-2 IQ envelope). `MoeMmqTile8Dtype`
+>     now 38 variants. **The ENTIRE tile8 MMQ prefill family (simple + K-quant +
+>     IQ\*) is now cross-backend.**
+>   - **Q4_K `_lds_tiled` MoE DONE** (`9ca14d6`): the 2 4-warp LDS-tiled MoE
+>     kernels (gate_up + down) as `indexed_moe_mmq_q4_k_lds_tiled.cuh`, reusing
+>     the dense header's neutral helpers; `WARP_SIZE` → logical `MMQ_LDS_LANES`
+>     (LDS + __syncthreads only, no __shfl). MoE addressing (expert offset, DS4
+>     per-column gather by token/pair, dual gate/up tiles), templated
+>     `<MMQ_X=8, MMQ_Y=128, NWARPS=4, OutT>`. These were UNCERTIFIED hand kernels
+>     — closed the rule-2 gap with a NEW MoE-DS4 sweep (`MoeMmqLdsDtype` /
+>     `run_moe_mmq_lds_sweep` / `run_shape_moe_mmq_lds`: per-expert Q4_K weights,
+>     DS4 144-B activation, padded sort, per-expert-gather Q4_K-over-DS4 affine
+>     reference). Both BIT-IDENTICAL (max_rel_err ≤0.015). **The ENTIRE P2d
+>     indexed-MoE MMQ surface (MMVQ + tile8 simple/K-quant/IQ\* + Q4_K
+>     lds_tiled) is now cross-backend.**
+>   - **P2d cleanup DONE** (`58d73b0`): removed 12 dead hand kernels + 1 stale
+>     test + their `KERNEL_STEMS` entries — 9 scalar `indexed_moe_mmvq_iq*.cu`
+>     (superseded by templated `_r2_dp4a`), the `iq4_xs` parity test, and 3
+>     built-but-undispatched q4_k gate_up variants (`dp4a`/`r2_dp4a`/`r8_dp4a`).
+>     **The handoff's earlier cleanup list was WRONG** — audit found `r4_dp4a`
+>     (ops `moe.rs:2884`) and `quantize_f16_q8_1_mmq.cu` (ops `norm.rs:368`) are
+>     LIVE, not orphans; left untouched. `KERNEL_STEMS` now 254, every entry
+>     backed by a `.cu`/instantiations stem.
+> - **P2d STRUCTURALLY COMPLETE.** The entire indexed-MoE MMQ surface (MMVQ
+>   plain/K-quant/IQ\* + tile8 simple/K-quant/IQ\* + Q4_K lds_tiled) is
+>   cross-backend (HIP gfx906 ↔ CUDA sm_86, bit-identical), hand `.cu` retired,
+>   dead orphans removed. Remaining P2-series work (if any) is dispatch-table /
+>   perf, not templating.
+> - **DS4 4-warp_lds — Q4_0 (`3867eab`) + Q4_1 (`2ce63cc`) + Q4_K turbo
+>   (`58f52f0`) DONE.** The hardest sub-family (MMQ_Y=128, DS4 144-B activation,
+>   dynamic LDS, double-buffered Y). **The breakthrough: the hand kernels'
+>   "wave64" is a LOGICAL 64-wide tile, not a hardware warp** — all cross-thread
+>   comms are LDS + `__syncthreads`, NO `__shfl`/warp ops, so a kernel-local
+>   `MMQ_LDS_LANES=64` (decoupled from the arch `WARP_SIZE`) + block `(64,4)` is
+>   correct on wave64 AND wave32. Validated: HIP↔CUDA bit-identical (err 3e-4 /
+>   1e-2). Neutralizations: `__half2` pairs → two `fb_fp16_t`; gfx906 prefetch →
+>   the neutral `mmq_prefetch_*` seam (`6746b2f`, gfx906.cuh real / sm_80.cuh
+>   no-op); DS4 quantizer templated (`quantize_q8_1_mmq.cuh`, warp-agnostic);
+>   Q4_K 6-bit scale unpack is pure int ops. Harness `Mmq4WarpLdsDtype
+>   {Q4_0,Q4_1,Q4K}` / `run_mmq_4warp_lds_sweep<B>` (9-arg ABI, DS4 quantize +
+>   kernel-faithful reference — Q4_0 −8·ssum / Q4_1 +m·ssum / Q4_K super-block
+>   affine reusing `w_dequant` for the dot + decoding dmin/m from raw bytes; a
+>   `launch()` hook carries MMQ_X 64-or-16 + LDS 30336-or-21824 B). `--dtype
+>   Q4_{0,1}_mmq_4warp_lds` / `Q4_K_mmq_lds_tiled`. impl_ids
+>   `qmatmul_q4_{0,1}_mmq_4warp_lds` / `qmatmul_q4_k_mmq_lds_tiled`.
+> - **Orphan:** `quantize_f16_q8_1_mmq.cu` (F16-activation DS4 quantizer) is the
+>   last un-templated dense `.cu` — no consumer (only an F16 turbo path would use
+>   it). Template it (same recipe as `quantize_q8_1_mmq.cuh`) if/when that lands.
+> - **P2a mmvq** (20 dtypes + Q8_0 t128/vdr2/r2/r4 configs) — DONE.
+> - **P2b mmvq FUSION** — **COMPLETE.** gate_up ×4 (Q8_0/Q4_0/Q4_1/Q5_K) +
+>   batched ×6 (Q8_0/Q4_0/Q4_1/Q4_K/Q6_K/Q5_K-r2) + row_tile ×3
+>   (Q8_0/Q4_0/Q5_K) + gate_up×row_tile ×1 (Q4_0). All templated cross-backend,
+>   hand `.cu` retired, ops/runtime untouched. Reusable: the reduce family
+>   (`mmvq_reduce_store{,_group,_2row,_gate_up,_batched,_2row_batched,
+>   _rowtile_batched,_rowtile_gate_up_batched}`) + `GateUpDtype`/`BatchedDtype`/
+>   `GateUpBatchedDtype` harness paths in `sweep_mmvq.rs`.
+> - **P2c single-pass tiled mmq (`mmq_<dt>_wave64`) — COMPLETE.** All 21 kernels
+>   templated cross-backend, HIP↔CUDA bit-identical, hand `.cu` retired,
+>   ops/runtime untouched, neutral impl_ids registered as bench-references:
+>   - oracle pilot (`a014f31`);
+>   - **5 simple dtypes** Q8_0/Q4_0/Q4_1/Q5_0/Q5_1 via the shared
+>     **`mmq_wave64_row<Q,64,8>`** skeleton + `quant_traits<Q>` mmq policy
+>     (`3dab36e`);
+>   - **7 K-quants** Q6_K (`e9ad87a`) Q4_K (`a24ccf7`) Q5_K (`0dcd641`) Q2_K
+>     (`503f799`) Q3_K (`3e4c968`) Q8_K (`944f1f8`) — own super-block bodies;
+>   - **9 IQ\*** IQ4_NL (`711625b`) IQ4_XS (`085c044`) IQ2_XXS (`bea4cf1`)
+>     IQ2_XS (`013e4c2`) IQ2_S (`a792781`) IQ3_XXS (`ee0fc04`) IQ3_S (`a67d95b`)
+>     IQ1_S + IQ1_M (`6d50c7a`) — grid-codebook bodies reusing the neutral
+>     `iq_grid.cuh` + shared sign/pack helpers (`flambeau_iq2xxs_apply_signs_
+>     packed`, `flambeau_pack_iq4_lut`, `flambeau_iq2s_apply_signs_byte`,
+>     `flambeau_iq1m_reassemble_d`).
+>   All ride the `MmqGemmDtype` harness path (no per-K-quant skeleton — rule 14
+>   respected; each decode differs). `--dtype <DT>_mmq_wave64`.
+> - **tile16 + F16 family — COMPLETE.**
+>   - **Q8_0 wave64 tile16** (`d68ec34`): pure skeleton re-instantiation
+>     `mmq_wave64_row<Q8_0,64,16>` (doubles activation cols/block); zero new C++.
+>     `MmqGemmDtype::Q8_0Wave64Tile16` (`tile()=(64,16)`), `--dtype
+>     Q8_0_mmq_wave64_tile16`, impl_id `qmatmul_q8_0_mmq_wave64_tile16`.
+>   - **F16-weight family** (`0fbeccf`): `mmvq_f16` + `mmq_f16` (multi-row) +
+>     `mmq_f16_tile` (register-resident tile-M). New `mmvq_f16.cuh` (shared
+>     `flambeau_f16_q8_1_acc` dot + `mmvq_f16_q8_1_row<THREADS>` via the
+>     warp-agnostic `mmvq_reduce_store`) + `mmq_f16.cuh` (`mmq_f16_q8_1_tile`,
+>     `mmq_f16_tile_row<MMQ_Y,TILE_N>`). **Required genericizing
+>     `sweep_mmvq_f16.rs` over `BenchBackend`** (`run_f16_{mmvq,mmq,mmq_tile}_
+>     sweep<B>` + `F16SweepKind` dispatcher + shared CPU `f16_q8_1_reference`;
+>     dropped the HIP-only gate + the 3 legacy `OP_SWEEPS` entries; routed
+>     `--dtype F16_{mmvq,mmq,mmq_tile}` through the gfx906 arm AND `sweep_cuda`).
+>     Certed both backends (err ~1e-6 vs F32 ref; tile bit-identical, mmvq/mmq
+>     differ only in wave64-vs-wave32 reduce lane order), impl_ids
+>     `qmatmul_f16_{mmvq,mmq,mmq_tile}`.
+> - **Standard-Q8_1 4-warp LDS-tiled — COMPLETE** (these read the standard 36-B
+>   `flambeau_block_q8_1`, NOT DS4). New dedicated **`Mmq4WarpDtype` +
+>   `run_mmq_4warp_sweep<B>`** harness path in `sweep_mmvq.rs` — the 4-warp ABI is
+>   the runtime's **6-arg** `(vx,vy,dst,n_rows,n_batches,n_blocks_per_row)` + a
+>   full `MMQ_Y×MMQ_X` output tile per block, so it can't ride the 8-arg
+>   one-thread-per-row `MmqGemmDtype` path. `--dtype <DT>_mmq_4warp`. 3rd ABI arg
+>   = weight-blocks-per-row (`k/block_elems`). The wave-leak in all three was the
+>   **thread→tile map** (`warp*8+lane/8` / `if(warp==0)`); since the output tile
+>   is exactly `MMQ_Y*MMQ_X` = block threads, a **tid-based map**
+>   (`tid/MMQ_X`, `tid%MMQ_X`) is warp-agnostic.
+>   - **Q8_0** (`f118837`): dp4a-tiled, MMQ_Y=32/MMQ_X=8/256t, `mmq_q8_0_4warp.cuh`
+>     (`load_int_b2` staged LDS). impl_id `qmatmul_q8_0_mmq_4warp`.
+>   - **Q4_K** (`d7b9bf6`) + **Q6_K** (`0cf00e6`): **F32-tile** variants
+>     (dequant super-block into LDS as F32, then F32 dot), MMQ_Y=16/MMQ_X=8/128t,
+>     `mmq_q{4,6}_k_4warp.cuh`. These had **no wave-leak at all** (already
+>     tid-based + byte reads) — trivial templates. impl_ids
+>     `qmatmul_q{4,6}_k_mmq_4warp`.
+> - **NEXT: P2d indexed_moe** (85 hand `.cu` under `kernels-hip/src/kernels/
+>   indexed_moe_*`). The MoE expert-gather/bucket mmvq + mmq kernels. Expect the
+>   same playbook to apply: most reuse the dense decode math + the reduce family;
+>   the `indexed_moe_mmq_*_tile8` and `*_turbo` variants are the DS4/LDS-tiled
+>   ones (the logical-lanes + `fb_fp16_t`-pair + `mmq_prefetch_*` seam from the
+>   dense DS4 work transfers directly). Add a `MoeDtype`/harness path mirroring
+>   `Mmq4WarpLdsDtype`. See `PORTABILITY-ROADMAP.md` §P2d. Build with
+>   `RAYON_NUM_THREADS=8` (thermal); rebuild the cli before each sweep.
+>   **Per-slice recipe + harness details in the P2c section below (the dense
+>   playbook carries over).**
+>
+> *(detailed completion log — gate_up/batched/row_tile/mmq slices, recipes, rig
+> gotchas — follows below; the per-section text is current.)*
+>
+> **P2b = mmvq FUSION (`gate_up`/`batched`/`row_tile`).** **All dense `gate_up`
+> DONE** — Q8_0 (`dcac582`) + Q4_0 (`eb4e1c7`) + Q4_1 (`fa6e752`) + Q5_K — each
+> its own neutral body reusing the shared two-output reduce
+> `mmvq_reduce_store_gate_up` (Q8_0 via the generic VDR skeleton; Q4_0/Q4_1
+> `mmvq_q4_{0,1}_gate_up.cuh` 4-lane nibble, `(q-8)` vs `+m·s_y`; Q5_K
+> `mmvq_q5_k_gate_up.cuh` super-block 5-bit, 256t/32-per-sb, scales+dmin). All
+> certed cross-backend (`--dtype <dt>_gate_up`; max_rel_err 2e-3 / 2.6e-4 /
+> 1.8e-4 / 1.3e-2, HIP↔CUDA equal), same stem/entry → ops/runtime untouched, hand
+> `.cu` retired, bench-reference registered (`GateUpDtype` + `run_gate_up_sweep`
+> in `sweep_mmvq.rs`).
+>
+> **`batched` (N>1 columns) STARTED — Q8_0 done.** Generic
+> `mmvq_dp4a_batched_row<Q,THREADS,N,OutT>` (one weight row × N slot-major Q8_1
+> columns → slot-major out; the weight load is slot-invariant so LICM hoists it
+> out of the unrolled N-loop = read-once amortization, the mirror of gate_up) +
+> N-way reduce `mmvq_reduce_store_batched<THREADS,N>`. n2/n3/n4 entries, same
+> stem/entry (`mmvq_q8_0_batched`) → ops untouched, hand `.cu` retired. New
+> harness path `BatchedDtype`/`run_batched_sweep` (sweeps m×k×n_slots = 45
+> shapes; `--dtype Q8_0_batched`); cert both backends err 2.3e-3, HIP↔CUDA equal,
+> bench-reference registered. The CUDA port also fixes the hand kernel's
+> NVIDIA-unsafe `((int*)qs)[i]` (now `load_int_b2` via `partial`).
+> **ALL plain `batched` DONE** — Q8_0 (`60d5483`) + Q4_0/Q4_1 (`934df12`, zero
+> new C++ via `quant_traits::partial`) + Q4_K (`463157c`) + Q6_K + Q5_K-r2. The
+> 3 K-quants are scalar-FP32 super-block bodies (Q4_K/Q6_K 64t single-row reuse
+> `mmvq_reduce_store_batched`; Q5_K is r2 2-rows/block → new
+> `mmvq_reduce_store_2row_batched<N>`, grid ceil(m/2)). All byte/fp16 loads (no
+> `load_int_b2`). Certed both backends (err ≤1.5e-2, HIP↔CUDA equal); all 6 hand
+> `.cu` retired, ops/runtime untouched, bench-references registered. Harness
+> `BatchedDtype` now carries `launch_threads` (256/64) + `rows_per_block` (1/2).
+> **ALL plain `row_tile` DONE** — Q8_0 (`a534367`) + Q4_0 (`a534367`-next) +
+> Q5_K. R rows/block share an LDS-staged activation strip across N columns.
+> **These are the wave-size-restructured slices (rule 5):** the hand kernels'
+> lane→block-coverage assumes wave64. Q8_0/Q4_0: neutral body strides
+> `bi += WARP_SIZE/INT32_PER_BLOCK` (8/16 staged blocks in 1 pass wave64 / 2
+> wave32); R is backend-dependent (4/8 at 256t) so the sweep launches
+> `grid=ceil(m/4)` (covers both, wave32 over-launches harmlessly, guarded by
+> `row>=n_rows`); reduce `mmvq_reduce_store_rowtile_batched<N>`. Q5_K cleaner —
+> restructured to 32-lane row-groups (`tid/32`, 8 groups in 256t → **R=8 on both
+> backends**, no over-launch, grid ceil(m/8)), reuses the r2 `mmvq_reduce_store_
+> 2row_batched<N>`, and drops the hand kernel's dead `s_y_s` staging. All certed
+> both backends (err ≤1.5e-2, HIP↔CUDA equal); 3 hand `.cu` retired,
+> `BatchedDtype::{Q8_0,Q4_0,Q5K}RowTile`. NB the manifest can't carry the hand
+> `__launch_bounds__(256,1)` (perf-only; revisit if hot). The
+> `*_gate_up_row_tile_*` combo is also **DONE** — `mmvq_q4_0_gate_up_row_tile.cuh`
+> (triple fusion: 2 outputs × R rows × N cols) + 2-output rowtile reduce
+> `mmvq_reduce_store_rowtile_gate_up_batched<N>` + new harness path
+> `GateUpBatchedDtype`/`run_gate_up_batched_sweep` (got = gate `[N][m]` ++ up
+> `[N][m]`); cert both backends err 4.4e-4, HIP↔CUDA equal.
+>
+> ### **mmvq FUSION COMPLETE (all P2a + P2b mmvq done).**
+> Every dense mmvq kernel — 20 single-row dtypes + Q8_0 {t128,vdr2,r2,r4} configs
+> (P2a) + 14 fusion kernels (P2b: gate_up ×4, batched ×6, row_tile ×3, gate_up×
+> row_tile ×1) — is templated cross-backend, certed HIP+CUDA, hand `.cu` retired,
+> ops/runtime untouched. cert-check hip 82 / cuda 20. Reusable infra: skeletons
+> `mmvq_dp4a_row`/`_vdr_row`/`_nrow_row`/`_batched_row`, `mmvq_gate_up.cuh`, the
+> reduce family (`mmvq_reduce_store`/`_group`/`_2row`/`_gate_up`/`_batched`/
+> `_2row_batched`/`_rowtile_batched`/`_rowtile_gate_up_batched`), `load_int_b2`/
+> `load_q8_1_ints`, multi-entry codegen, and the sweep
+> `GateUpDtype`/`BatchedDtype`/`GateUpBatchedDtype` harness paths.
+>
+> **P2c mmq STARTED — Q8_0 oracle (cross-backend pilot) done.** The MMQ
+> correctness oracle (`dst[batch,row]=Σ_k x·y`, 2D `{n_rows,n_batches}` grid, one
+> output element/block — a batched dot) templated to `mmq_q8_0_oracle.cuh`:
+> `sub=tid/32` equals the wave64 `warp*2+lane_hi`, so it reuses the warp-agnostic
+> `mmvq_reduce_store<256>` and **bit-matches on HIP**. Proves the cross-backend
+> mmq path — the 2D-grid generic launch (`LaunchCfg{grid:(m,n,1)}` via
+> `B::launch`) and the wave32 reduce. Added a small additive generic sweep path
+> (`MmqOracleDtype`/`run_mmq_oracle_sweep` in `sweep_mmvq.rs`, `--dtype
+> Q8_0_mmq_oracle`); cert both backends err 2.0e-3, HIP↔CUDA equal,
+> impl_id neutralized (`qmatmul_q8_0_mmq_oracle`), bench-reference registered.
+>
+> **Q8_0 `wave64` tiled GEMM done — first REAL cross-backend mmq kernel.** The
+> single-pass tiled MMQ (`mmq_q8_0_wave64`, dense-attention prefill ~19% of 35B
+> prefill): a `MMQ_Y×TILE_N` (64×8) output tile per block, **each thread owns one
+> weight row and loops its TILE_N cols — no LDS, no cross-lane reduce, so it's
+> embarrassingly parallel.** The only wave-leak was `tile_m = blockIdx.x *
+> WARP_SIZE`; templating on `MMQ_Y` (tile height = block thread count, a design
+> constant) makes it warp-agnostic (`mmq_q8_0_wave64.cuh`, neutral `dp4a` +
+> `load_int_b2`). New full-GEMM harness path `MmqGemmDtype`/`run_mmq_gemm_sweep`
+> (`--dtype Q8_0_mmq_wave64`, sweeps n_rows×n_cols×k); cert both backends err
+> 2.8e-3, HIP↔CUDA equal, impl_id `qmatmul_q8_0_mmq_wave64`, bench-ref. **The
+> whole `mmq_<dt>_wave64` family should template the same clean way** (independent
+> threads; just swap the per-block dequant — Q4_0 nibble+bias, K-quants
+> super-block — into the inner loop). Do those next; they're NOT the hard part.
+>
+> **NEXT P2c (the real work — multi-session):**
+> 0. **`mmq_<dt>_wave64` — all 5 simple 32-elem dtypes DONE** (Q8_0/Q4_0/Q4_1/
+>    Q5_0/Q5_1) via the shared skeleton `mmq_wave64_row<Q,MMQ_Y=64,TILE_N=8>`
+>    (`mmq_wave64.cuh`) + a `quant_traits<Q>` mmq policy (`mmq_weight` struct +
+>    `mmq_decode` once/row + `mmq_partial` per-col, encapsulating the 1-dp4a
+>    Q8_0/Q4_0/Q4_1 vs 2-dp4a Q5_0/Q5_1 nibble+5th-bit). Refactor validated
+>    non-regressive (Q8_0/Q4_0 certs byte-identical). All certed both backends
+>    (err ≤2.8e-3, HIP↔CUDA equal), `MmqGemmDtype::{...}Wave64`, impl_ids
+>    neutralized, hand `.cu` retired. **K-quants started — Q6_K done**
+>    (`mmq_q6_k_wave64.cuh`, own body: 8 sub-blocks/super-block, `q=ql|qh<<4`,
+>    `(raw−32)·y` bias, per-16 i8 scales; `MmqGemmDtype::Q6KWave64`, cert both
+>    backends err 6.0e-3, HIP↔CUDA equal). **The harness already handles K-quants**
+>    (any weight block size — `run_shape_mmq_gemm` uses `weight_dtype` block size +
+>    k/32 activation). The wave-leak is just `tile_m=blockIdx.x*WARP_SIZE` →
+>    `MMQ_Y`; loads → `load_int_b2` (block_q6_K 210 B → odd super-blocks non-mul-4).
+>    **Q4_K also done** (`mmq_q4_k_wave64.cuh`, `d·Σd − dmin·Σm` super-block,
+>    `flambeau_q4k_scale_min`; cert both backends err 1.1e-2). **Remaining wave64:**
+>    Q5_K/Q2_K/Q3_K/Q8_K (own bodies, port from the hand `mmq_<dt>_wave64.cu` the
+>    same mechanical way — WARP_SIZE→MMQ_Y, dp4a, load_int_b2) + **IQ\***. Then the
+>    genuinely-hard
+>    **4-warp LDS-tiled** kernels (`mmq_q8_0_4warp` / `mmq_q4_K_lds_tiled`, real LDS
+>    tiling + cp.async-vs-prefetch seaming — the prefill perf lever).
+> 1. **Genericize `sweep_mmq.rs` over `BenchBackend`** (`run_sweep<B>`/
+>    `run_shape<B>`/`capture_static_pmc<B>` — currently HIP-bound via `HipDevice`/
+>    `kernels::hsaco`). It's large + branchy (mmq-layout 4warp/turbo, wave64
+>    family, oracle launch variants); keep every HIP `Dtype` green (regression
+>    test = HIP certs unchanged). The additive oracle path proved the harness
+>    primitives; this folds mmq proper onto them.
+> 2. **Template the real kernels** — `mmq_<dt>_wave64` (single-pass tiled) then
+>    the 4-warp LDS-tiled (`mmq_q8_0_4warp` / `mmq_q4_K_lds_tiled`, the gold-standard
+>    prefill lever per CLAUDE.md). These are **heavily wave64-LDS** → expect a
+>    warp-restructure per kernel (the roadmap's "two tiling skeletons"; cp.async
+>    on CUDA vs prefetch on HIP, seamed). NOT one-session ports.
+> 3. **Neutralize the legacy `_gfx906` mmq impl_ids** (the oracle's old
+>    `qmatmul_q8_0_mmq_oracle_gfx906` in `sweep_mmq.rs` + git mv cert; batch with
+>    the wave64 ids) as each kernel goes cross-backend.
+>
+> Then **P2d** indexed_moe (expert gather/bucket). See `PORTABILITY-ROADMAP.md`.
+>
+> *(first gate_up slice writeup)*
+> **Q8_0 `gate_up`** (dense FFN decode kernel) templated onto a neutral skeleton
+> `mmvq_gate_up_dp4a_vdr_row<Q,THREADS,VDR,OutT>` (`mmvq_gate_up.cuh`) + new
+> two-output reduce `mmvq_reduce_store_gate_up<THREADS>` + a shared `load_q8_1_
+> ints<VDR>` / `quant_traits<Q8_0>::partial_vdr_y` split so the fused caller
+> reads the Q8_1 activation ONCE and reuses it across gate+up (the bandwidth win)
+> — the single-row `partial_vdr` routes through it and stays bit-identical. Same
+> stem/entry (`mmvq_q8_0_gate_up_t128_vdr2`) → ops launcher + runtime untouched;
+> hand `.cu` retired. **First formal cert for this kernel** (it had no test/cert
+> before) on BOTH backends via a new sweep gate_up path (`run_gate_up_sweep` /
+> `GateUpDtype` in `sweep_mmvq.rs`, `--dtype Q8_0_gate_up`); max_rel_err ~2e-3,
+> HIP↔CUDA numerically equal. Registered as a bench-reference (launched directly,
+> not via a dispatch row). cert-check green (hip 82 / cuda 20).
+> **NEXT P2b:** other dense `gate_up` dtypes (Q4_0/Q4_1/Q5_K hand kernels exist),
+> then `batched` (N>1 columns) + `row_tile` (separate skeletons — different op
+> signature). Then **P2c mmq** (4-warp LDS-tiled prefill lever) + **P2d**
+> indexed_moe. Build kernels with `RAYON_NUM_THREADS=8` (thermal). Detailed phase
+> log + per-slice recipe + rig gotchas below. (Historical detail follows.)
+>
+> ---
+>
+> *(history)* **P1 CLOSED. P2a was UNDERWAY at tip `10d210a`.** Q4_0 was the first
+> P2a dtype slice, proven end-to-end exactly like the Q8_0 pilot: templated
+> `quant_traits<Q4_0>` (nibble unpack + (q-8) bias correction) on the now
+> `OutT`-generic `mmvq_dp4a_row` skeleton → HIP **bit-match** (cert max_rel_err
+> byte-identical to the retired hand `mmvq_q4_0.cu`) → CUDA cert (pass/15 on the
+> 3090) → `dispatch/cuda/sm_86.toml` Q4_0 row. cert-check green both
+> (cuda/sm_86 **2 rows**, hip/gfx906 82). Two enabling refactors landed with it
+> (reused by every later dtype): **multi-entry codegen** (a `[[kernel]]` cell now
+> carries N `[[kernel.entry]]` blocks → one module holds both the F32 and
+> F16-dst entries) and **emit_dispatch merge-by-dtype** (autotune `--emit` now
+> preserves other dtypes' rows instead of rewriting the whole table).
+>
+> **The per-dtype loop is now fully mechanical** — for the next Stream-M dtype:
+> 1. add a `quant_traits<Qx>` specialization (`kernels-shared/include/quant_traits.cuh`);
+> 2. add a `[[kernel]]` cell (F32 + F16 entries) to `instantiations.toml`;
+> 3. move the hand `mmvq_qx*.cu` out of `kernels-hip/src/kernels/`, build HIP,
+>    re-cert via its sweep, confirm bit-match (cert max_rel_err unchanged), `git rm`;
+> 4. add `Dtype::Qx` to `sweep_mmvq.rs` (name/ggml/impl_id/stem/entry/bytes/threads
+>    + `tame_scales` arm) and the cli `sweep_cuda`/`autotune` match arms;
+> 5. build CUDA, `sweep --arch sm_86 --dtype Qx`, `autotune --arch sm_86 --emit`,
+>    `cert-check` both.
+>
+> **All four legacy quants done** (Q4_0 `17d2f8d`/`10d210a`; Q4_1/Q5_0/Q5_1
+> `3bd4e94`/`ffe53ce`). `dispatch/cuda/sm_86.toml` now has 5 mmvq rows; hip
+> dispatch unchanged (HIP bit-matched via the bespoke sweeps). Shared
+> `expand_bits4` handles the Q5 5th-bit plane; `load_int_b2` is the CUDA-safe
+> reader for every odd-offset field (Q5_0's `qh` at block-offset 2 faults a
+> 4-byte read on NVIDIA). Bit-match held for all (Q5_0/Q5_1 cert max_rel_err
+> byte-identical despite the templated kernel using fewer VGPRs — 23 vs 29).
+>
+> **NEXT = K-quants (Q2_K…Q6_K, Q8_K) — a genuine multi-session sub-phase, NOT
+> the mechanical legacy loop.** Assessed 2026-06-16 by reading
+> `mmvq_q6_k_dp4a.cu` (the cleanest K-quant). Four structural facts the legacy
+> slices did not have — read these before starting:
+>
+> 1. **Wave-size leak (rule 5) — the blocker.** The K-quant dp4a kernels use a
+>    64-thread/super-block layout (`lane=threadIdx.x`, `iqs=lane&31`,
+>    `super_hi=lane>>5`) and finish with `gfx906_warp_reduce_sum(acc)` +
+>    `if(lane==0) store`. That assumes a **64-wide** warp — on CUDA wave32 it
+>    sums only the first 32 lanes → silently wrong. Every K-quant CUDA port
+>    needs the reduce made warp-size-agnostic: `WARPS = 64/WARP_SIZE`,
+>    warp_reduce then an inter-warp LDS rendezvous (exactly the tail of the flat
+>    `mmvq_dp4a_row`). On HIP WARPS=1 → degenerates to the current code →
+>    bit-match preserved. **Recommended first step: extract that reduce tail
+>    into a shared `mmvq_reduce_store<THREADS, OutT>(acc, dst, row)` helper
+>    (refactor the flat skeleton to use it too — 2nd site, justified), then each
+>    K-quant body just calls it.**
+> 2. **No single cross-K-quant template (rule 14).** Each K-quant has a distinct
+>    `iqs`/scale-offset decode (Q2_K/Q3_K 2–3-bit + min; Q4_K/Q5_K 6-bit packed
+>    scales + dmin; Q6_K int8 scales + the (raw−32)·y = raw·y − 32·Σy bias trick
+>    with `dp4a(0x01010101,u,0)`). Do NOT abstract a shared super-block skeleton
+>    from one example. Port each as its **own** backend-neutral shared `.cuh`
+>    (body moved out of the hand `.cu`, intrinsics → neutral `dp4a`/
+>    `warp_reduce_sum`, misaligned `((int*)ql)[i]`/`((int*)qh)[i]` →
+>    `load_int_b2`) + a manifest cell (F32+F16 entries). Only after ≥2–3 are
+>    ported and the shared shape is visible, consider a skeleton.
+> 3. **Misalignment.** Super-block fields sit at non-mul-4 block offsets
+>    (block_q6_K is 210 B; `ql`@0, `qh`@128, `d`@208) → 4-byte reads fault on
+>    NVIDIA for odd super-blocks. Use `load_int_b2` for every `int`-cast load,
+>    same as the legacy quants. fp16 `d` reads are 2-byte and fine.
+> 4. **impl_id naming debt — batch it.** The K-quant mmvq dp4a impl_ids are
+>    legacy `_gfx906`-suffixed (e.g. `qmatmul_q6_K_mmvq_dp4a_gfx906`, 6 refs:
+>    hip dispatch + `backend-hip/src/impls/qmatmul.rs` registry + an `impls.rs`
+>    test assert + an `ops` recipe arm + the `sweep_mmvq` enum + cert file). A
+>    `cuda/sm_86` row must NOT carry `_gfx906`. **Do a single dedicated rename
+>    pass** neutralizing all K-quant mmvq dp4a ids (`_gfx906` → drop, `q6_K` →
+>    `q6_k`) across those refs + `git mv` the certs, cert-check HIP green, commit
+>    — THEN port, reusing the now-neutral `Dtype` variants for both backends.
+>    Don't add parallel neutral `Dtype` variants (the Q4_1Dp4a trick doesn't
+>    scale to 6 K-quants).
+>
+> **Q6_K DONE** (`c10cf1f` HIP + `cb5745c` CUDA) — the K-quant pilot. Validated
+> the whole approach: shared `mmvq_reduce_store<THREADS,OutT>` (warp-size
+> agnostic — bit-match on gfx906 wave64 WARPS=1, AND CUDA wave32 cert green = the
+> inter-warp LDS path sums all 64 threads); neutral `mmvq_q6_k.cuh` body;
+> `load_int_b2` for misaligned `ql`/`qh`; impl_id neutralized
+> (`qmatmul_q6_k_mmvq_dp4a`). cuda/sm_86 now 6 rows. CUDA max_rel_err matches HIP
+> to ~1e-6 (integer-exact dp4a). Also fixed a P1 orphan-cert test failure
+> (`every_cert_on_disk_is_registered`, red since `76e17bc`).
+>
+> **Q2_K / Q3_K / Q5_K / Q6_K ALL DONE** — every single-row dp4a K-quant is
+> templated on both backends (`c10cf1f`+`cb5745c` Q6_K, `d93f16d` Q5_K,
+> `2c156cb` Q3_K, `4ac1ed7` Q2_K). All reuse `mmvq_reduce_store<256>` (Q6_K uses
+> `<64>`); each its own neutral `mmvq_q{2,3,5,6}_k.cuh`; `load_int_b2` for the
+> misaligned super-block loads; impl_ids neutralized. Q3_K/Q2_K weren't
+> dispatched on HIP / had no prior cert → HIP correctness certs registered as
+> bench-references in `direct_call.rs`. **cuda/sm_86 = 9 mmvq rows**; cert-check
+> green (cuda 9, hip 82). Also fixed the P1 orphan-cert test + removed a stray
+> cert copy.
+>
+> **ALL K-quants DONE** — Q4_K (`a6cb930`) + Q8_K (`cf4efaa`) landed.
+> - **Q4_K** (production decode kernel, `r2`/2-row) bit-matched **byte-identical**:
+>   the `__shfl_xor(v, off, 32)` butterfly in *ascending* offset order
+>   (1,2,4,8,16) exactly reproduces gfx906's DPP `half_warp_reduce_sum` add
+>   order — no ULP shift. New shared `mmvq_reduce_store_2row<OutT>` in
+>   `mmvq_reduce.cuh` (width-32 = sub-warp on wave64, full warp on wave32 since
+>   the 2 rows are 2 warps; no LDS). CUDA pass validated wave32.
+> - **Q8_K** (simplest K-quant) reused `mmvq_reduce_store<256>`, byte-identical.
+>
+> **+ IQ4 family DONE** — IQ4_NL (`e4526c3`) + IQ4_XS (`334d8bd`). Needed a new
+> neutral **`byte_perm`** primitive (codebook LUT permute) in both
+> arch_primitives headers: HIP = `__builtin_amdgcn_perm`; CUDA =
+> `__byte_perm(b,a,packed)` with the byte-per-output selector repacked to
+> nibble-per-output + source operands swapped (valid for selectors 0..7, which
+> is all the LUTs use). HIP byte-identical, CUDA cert validated the translation.
+> IQ4_XS reuses `iq4_nl_table_4` + the shared neutral `flambeau_iq4_xs_scale`.
+>
+> **cuda/sm_86 = 13 mmvq rows** (Q2/Q3/Q4/Q5/Q6/Q8_K + Q4_0/Q4_1/Q5_0/Q5_1/Q8_0
+> + IQ4_NL/IQ4_XS); cert-check green (cuda 13, hip 82). Every standard GGUF
+> weight quant **and** the IQ4 family is now templated on both backends.
+>
+> **+ ALL IQ DONE — the entire mmvq weight-quant family is templated on both
+> backends.** IQ2_XXS (`134e225`/`6949ff1`, first grid-codebook), IQ3_XXS/IQ3_S
+> (`a5e2bf1`), IQ2_XS/IQ2_S (`325846a`), IQ1_S/IQ1_M (`699f0c3`). The grid kernels
+> all reuse the IQ2_XXS sign helpers (`iq2xxs_apply_signs`/`unpack_ksigns`) +
+> `mmvq_reduce_store<256>` + `load_int_b2` + the already-neutral `iq_grid.cuh`
+> (proven on nvcc). IQ1 uses a direct grid + `delta·Σu` bias (no sign LUT).
+> All HIP bit-matched byte-identical; all CUDA certs pass/15 (IQ1 reproduced
+> identical after a rig restart — see the rig note below).
+>
+> **`cuda/sm_86` = 20 mmvq rows — every GGUF weight quant** (Q4_0/Q4_1/Q5_0/Q5_1/
+> Q8_0 · Q2_K/Q3_K/Q4_K/Q5_K/Q6_K/Q8_K · IQ4_NL/XS · IQ3_XXS/S · IQ2_XXS/XS/S ·
+> IQ1_S/M); cert-check green (cuda 20, hip 82). **P2a mmvq is DONE.**
+>
+> Rig notes (memory `reference-dev-rig-nvidia-sandbox`): (1) `cuInit 999` =
+> sandbox missing `/dev/nvidia-uvm` (host modprobe + sandbox restart). (2) The
+> box hard-reset under all-core compile load — CPU-thermal (cooler swapped +
+> 3090↔MI50 PSU rails rebalanced; CPU now 64–66°C vs 85°C). **Build kernels with
+> `RAYON_NUM_THREADS=8`** (build.rs rayon pool runs `hipcc` on all 32 cores
+> otherwise; `cargo -j` doesn't reach it). (3) A cuda-feature binary built while
+> uvm was absent segfaults at startup forever — force a relink (`touch
+> crates/cli/src/main.rs`) after the GPU returns.
+>
+> **P2b STARTED (`ad68761`)** — config variants + the autotune fix that makes
+> multi-candidate selection actually work. Q8_0 `t128` templated as the trivial
+> `mmvq_dp4a_row<Q8_0,128>` (skeleton already has THREADS); first real
+> multi-candidate CUDA autotune (dp4a-256 vs t128-128). **Key fix: the runtime
+> dispatch is m-only** (`KernelDescriptor.m_range`, NO k-range) — a config
+> variant that wins at one k and loses at another can't be two rows (that's the
+> "two rows match the same shape" build error). The autotune now picks the per-m
+> winner by **best total time across the k-grid**, not per-(m,k). Candidate sets
+> are **arch-aware** (`sm_86` = CUDA-ported subset). Mechanics for the rest:
+> - **`vdr2` DONE (`29258e1`)** — added a **VDR template param**:
+>   `quant_traits<Q8_0>::partial_vdr<VDR>` + `mmvq_dp4a_vdr_row<Q,THREADS,VDR,OutT>`
+>   (`IPB/VDR` threads/block, VDR dp4a chained → one scale multiply; VDR=1 ==
+>   `mmvq_dp4a_row`). Both Q8_0 vdr2 kernels templated (bit-identical); t128_vdr2
+>   is the production decode kernel via the runtime alias (gate_up parity test
+>   verifies it). **Second emit fix:** non-monotonic winners in m
+>   (dp4a@1, t128_vdr2@8, dp4a@16) made the impl-grouped emit produce OVERLAPPING
+>   rows; `emit_dispatch` now builds **disjoint contiguous m-runs**. Q8_0 sm_86
+>   variants are within noise (~0.3%) on the 3090 → dp4a wins (single row).
+> - **`r2`/`r4` DONE — NULL for Q8_0.** Generic `mmvq_dp4a_nrow_row<Q,THREADS,
+>   ROWS,OutT>` (one block = ROWS output rows, `THREADS/ROWS` lanes/row, shares
+>   the Q8_1 activation reads) + width-templated `mmvq_reduce_store_group<GROUP>`
+>   (generalises the Q4_K `_2row`; 32 for r2, 16 for r4). Certed both backends
+>   (`r2`/`r4` max_rel_err ~1.6e-3, HIP↔CUDA bit-identical). Autotune null on
+>   BOTH: dp4a/t128_vdr2 win at every m (Q8_0 dense + cheap-decode → 256-thread
+>   MLP beats the 64-thread wave64-DPP layout). Kept as bench-reference /
+>   autotune candidates; no dispatch row earned (tables unchanged). The skeleton
+>   is the reusable template path for the heavy-decode K-quant r2/r4 (Q4KR2 /
+>   Q6KR4 hand kernels DO win — porting them onto the nrow skeleton is the
+>   consolidation follow-up). `gate_up`/`batched`/`row_tile` change the op
+>   signature (2 outputs / N columns) — separate skeletons, later.
+> - Because dispatch is m-only, a config variant only earns a dispatch row if it
+>   wins the **per-m aggregate**; otherwise it stays a certified bench-reference
+>   candidate (like t128/t128_vdr2 on the 3090). Two emit bugs are now fixed
+>   (per-m k-collapse + disjoint m-runs) — the autotune emit handles
+>   multi-candidate config variants correctly.
+> - Then **P2c mmq** (4-warp LDS-tiled — the big prefill lever) and **P2d**
+>   indexed_moe. See `PORTABILITY-ROADMAP.md`.
+>
+> Per-slice pattern: own neutral `.cuh` (intrinsics → neutral `dp4a`/reduce,
+> misaligned loads → `load_int_b2`), manifest cell (F32+F16), neutralize the
+> `_gfx906` impl_id (full ref set: dispatch + backend registry + any `impls.rs`
+> test assert + `ops` recipe + sweep enum + cli PMC list + cert `git mv`), HIP
+> bit-match (cert max_rel_err unchanged; non-dispatched/uncerted dtypes →
+> register the HIP cert as a bench-reference in `direct_call.rs`), CUDA cert +
+> `autotune --emit`, `cert-check` both. **Rebuild the cli before each sweep** — a
+> stale binary re-emits the pre-rename impl_id cert (hit this on Q8_K).
+
+## Where we are
+
+- **Program:** `doc/PORTABILITY-ROADMAP.md` (one program: templating + CUDA port +
+  autotune as per-family vertical slices). Sub-plans: `CUDA-PORT-PLAN.md`,
+  `KERNEL-TEMPLATING.md`, `AUTOTUNE.md`.
+### Done since the rig came up (2026-06-16)
+
+- **NVIDIA driver is up.** Was nouveau-bound + a kernel-module mismatch; the user
+  set it up on the host (the Claude sandbox can't load modules — see memory
+  `reference-dev-rig-nvidia-sandbox`). Now driver 610.43.02 / CUDA 13.3, nvcc 13.3
+  at `/usr/local/cuda`. Both backends green on one box: `cargo test -p
+  flambeau-backend-cuda` (3090) + gfx906 qmatmul sweep (2× MI50).
+- **P1 remaining items 1–3 DONE** (commit `e900ba3`): neutral primitive aliases in
+  `gfx906.cuh`; `mmvq_q8_0_dp4a.cu` is now the `mmvq_dp4a_row<Q8_0,256>`
+  instantiation, proven **bit-identical** to the retired hand-written kernel on the
+  gfx906 grid; scalar parity + qmatmul sweep green.
+- **`quantize_q8_1` CUDA port DONE** (commit `36b7a18`): extracted to a shared
+  `kernels-shared/include/quantize_q8_1.cuh` device fn; HIP kernel + new CUDA
+  kernel are thin wrappers (same `flambeau_quantize_row_q8_1` entry). CUDA
+  bit-exact vs CPU ref on the 3090. The CUDA activation path is real.
+
+- **Instantiation manifest + codegen DONE** (commit `49ee597`): a manifest cell
+  generates the wrapper `.cu` for both backends; the `mmvq_q8_0_dp4a` wrappers are
+  now generated, not hand-written.
+
+- **Bench genericization DONE** (commits `968f6a3` + `76e17bc`): `LaunchCfg` hoisted
+  to `core`; new bench-local `BenchBackend` trait (`crates/bench/src/backend.rs`,
+  impls `Hip`/`Cuda`) abstracts module-load + launch + static attrs; `harness.rs` +
+  `sweep_mmvq.rs` are generic over it; bench `cuda` feature + cli `cuda_sweep` feature
+  + `sweep --arch sm_86` routing (`sweep_cuda`). New `Dtype::Q8_0Dp4a` (arch-neutral
+  impl_id `qmatmul_q8_0_mmvq_dp4a`). **First-ever CUDA cert emitted** —
+  `sweep --arch sm_86 --op qmatmul --dtype Q8_0_dp4a` pass=true/15 on the 3090;
+  gfx906 dp4a sweep also green; gfx906 refactor check holds (single-row cert results
+  byte-identical, only PMC/timestamp churn). Build the combined binary with
+  `--features "hip_sweep cuda_sweep"`. (BenchBackend → `core::Device` promotion still
+  deferred to P5.)
+
+**Next P1 item = the autotune rank-and-emit loop** (the last P1 gate): on top of the
+generic harness, time the certified mmvq Q8_0 candidate variants per shape bucket and
+write `dispatch/<backend>/<arch>.toml` rows. Run on gfx906 (must REPRODUCE the
+hand-tuned `dispatch/hip/gfx906.toml` rows — a real correctness check) and sm_86 (emit
+`dispatch/cuda/sm_86.toml`, currently an empty placeholder). CUDA has one mmvq
+candidate today (dp4a → trivial rank); HIP has ~10. See `AUTOTUNE.md`. After that P1
+closes and P2 (mmvq all dtypes → fusion → mmq → MoE) is mechanical via manifest cells.
+
+- **Branch `feature/cuda-decouple`** (pushed, tip ~`76e17bc`) has it all:
+  - Decoupling A0–A3 — `ForwardEngine<B>`, the backend seams, models/server
+    backend-clean. **Validated on gfx906** before this work.
+  - CUDA backend B0/B1 + B2-foundation — `cu*` driver core, `add_f32`,
+    `arch_primitives/sm_80.cuh`. **Validated on the 3090.**
+  - **P1 pilot — templated `mmvq_q8_0`** (`quant_traits.cuh` + `mmvq.cuh` +
+    `kernels-cuda/.../mmvq_q8_0_dp4a.cu`). **Validated on the 3090** (vs CPU ref,
+    max rel err 1.7e-7).
+  - Comment cleanup (426→0) + the `scripts/lint/comment_lint.py` linter.
+- **`main`** untouched (decoupling not landed there yet, by choice).
+
+## First: verify the rig
+
+```
+nvidia-smi            # 3090 present, CUDA 13.x driver
+rocm-smi              # 2× MI50 present
+nvcc --version        # 13.x
+/opt/rocm*/bin/hipcc --version   # ROCm 7.1.1 pin
+```
+- IOMMU/BAR grub tweaks (`scripts/setup/grub_*`, tuned for MI50 BAR1 P2P) must
+  tolerate the 3090; scope toolkits with `ROCR_VISIBLE_DEVICES` (ROCm) /
+  `CUDA_VISIBLE_DEVICES` (CUDA) if anything cross-talks.
+- Build gate: `export RUSTFLAGS="-C link-arg=-fuse-ld=gold"` (or install mold and
+  drop the override). HIP-feature Rust needs hipcc; CUDA needs nvcc.
+- **Re-add the comment-lint hook** — `.claude/settings.json` is gitignored, so it
+  won't pull in. Recreate it (a `PostToolUse` `Write|Edit|MultiEdit` hook running
+  `python3 $CLAUDE_PROJECT_DIR/scripts/lint/comment_lint.py`; see
+  `scripts/lint/README.md`).
+
+## Sanity checks (both backends, one box now)
+
+```
+# CUDA half still green on the 3090:
+cargo test -p flambeau-backend-cuda            # add_f32_smoke + mmvq_q8_0_cuda
+
+# HIP daily driver still green (FIRST hip build is a FULL recompile — the
+# comment cleanup edited .cu comments and build.rs now hashes headers; behaviour
+# unchanged, certs should stay green):
+cargo run -p bench -- sweep --arch gfx906      # confirm gfx906 certs green
+```
+
+## P1 remaining — the HIP half that needed this rig  — ✅ DONE (commit e900ba3)
+
+The three items below are complete; kept for context. The HIP twin is the
+canonical `mmvq_q8_0_dp4a`, bit-identical to the old hand-written kernel.
+
+1. **Neutral primitive aliases in `kernels-hip/src/arch_primitives/gfx906.cuh`** so
+   the shared `quant_traits.cuh` / `mmvq.cuh` compile under hipcc (CUDA's
+   `sm_80.cuh` already exposes these neutral names; HIP exposes `gfx906_*`). Add:
+   ```c
+   static __device__ __forceinline__ float warp_reduce_sum(float x)        { return gfx906_warp_reduce_sum(x); }
+   static __device__ __forceinline__ float half_warp_reduce_sum(float x)   { return gfx906_half_warp_reduce_sum(x); }
+   static __device__ __forceinline__ float quarter_warp_reduce_sum(float x){ return gfx906_quarter_warp_reduce_sum(x); }
+   static __device__ __forceinline__ float eighth_warp_reduce_sum(float x) { return gfx906_eighth_warp_reduce_sum(x); }
+   static __device__ __forceinline__ int   dp4a(int a, int b, int c)       { return gfx906_dp4a(a, b, c); }
+   ```
+   (`__shfl_xor` is native on hipcc — no shim needed on HIP.) `mmvq_q8_0` only uses
+   `warp_reduce_sum` + `dp4a`; the rest are for the next families.
+2. **HIP instantiation** — a `kernels-hip/src/kernels/mmvq_q8_0_dp4a.cu` that calls
+   `mmvq_dp4a_row<Q8_0, 256>` (include order: `block_quant.cuh`, `gfx906.cuh`,
+   `quant_traits.cuh`, `mmvq.cuh`). It must keep the entry-point name
+   `flambeau_mmvq_q8_0_dp4a_q8_1`.
+3. **Bit-match** — cert the templated instantiation produces output **bit-identical**
+   to the hand-written `mmvq_q8_0_dp4a` on the gfx906 sweep grid (the migration
+   safety net). `load_int_b2` reconstructs the same int32 bits the direct read
+   gave, and `dp4a` is exact, so it *should* be bit-identical (only fp accumulation
+   order could differ — verify it doesn't on this shape). If identical → delete the
+   hand-written `.cu`. If not → diagnose before deleting.
+
+## Then continue P1 (now trivial to do both-backends on one box)
+
+- ~~Port `quantize_q8_1` (CUDA) so the activation path is real.~~ ✅ DONE (commit
+  `36b7a18`) — now a shared `kernels-shared/include/quantize_q8_1.cuh` device fn
+  with thin HIP + CUDA wrappers; CUDA bit-exact vs CPU ref on the 3090.
+- ~~Instantiation manifest + codegen~~ ✅ DONE (commit `49ee597`):
+  `crates/kernels-shared/instantiations.toml` declares cells (stem/entry/includes/
+  params/body); both `build.rs` generate the wrapper `.cu` into `OUT_DIR/generated/`
+  (arch header injected: `gfx906.cuh` HIP / `sm_80.cuh` CUDA) and compile them. The
+  hand-written `mmvq_q8_0_dp4a` wrappers are gone. **P2 = add cells to the manifest,
+  not pairs of files.** The codegen helper lives in `flambeau-kernels-shared`
+  (`codegen` module, next to the manifest); both `build.rs` use it as a
+  build-dependency — one source of truth, a third backend reuses it for free.
+- **Backend-generic `bench` + `bench autotune`** (rank-and-emit): genericize bench
+  over `core::Device` (it still hard-names `HipDevice`), then the rank/emit loop.
+  Run on gfx906 (must reproduce the hand-tuned rows) and sm_86 (emit
+  `dispatch/cuda/sm_86.toml`). See `AUTOTUNE.md`.
+
+After that the loop is proven end-to-end; P2 (mmvq all dtypes → fusion → mmq → MoE)
+is mechanical.
+
+## Gotchas (don't relearn — see also memory `cuda-port-decoupling`)
+
+- **Misaligned load**: Q8_0's offset-2 `qs` faults a 4-byte read on NVIDIA
+  (`CUDA_ERROR_MISALIGNED_ADDRESS`); `load_int_b2` (2× `uint16`) is the fix and is
+  bit-identical on AMD. Recurs for any odd-offset quant.
+- **build.rs header cache**: both `kernels-{hip,cuda}/build.rs` now fold header
+  contents into the per-kernel cache key, so header edits recompile (they didn't
+  before).
+- **Naming**: CUDA code uses neutral primitive names (`warp_reduce_sum`, `dp4a`) —
+  no `gfx906_*` in CUDA. Comments stay minimal (the lint hook enforces it).
+- **Entry-point name is the dispatch contract**: identical on both backends.
+- **Oracles**: CUDA correctness vs the CPU dequant reference (`flambeau-quant`) /
+  the `mmvq_q8_0_cuda` pattern; HIP via bit-match + the gfx906 certs; end-to-end
+  (P5) vs llama.cpp at `/home/artefact/Workspace/llama.cpp`.
+
+## Rig fallback
+
+2× MI50 validates 2-GPU TP/PP (BAR1 pairs). For 4-GPU `forward` scaling, pop the
+two MI50s back in temporarily (reversible) — see `PORTABILITY-ROADMAP.md` §"Dev rig".

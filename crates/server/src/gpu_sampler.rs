@@ -1,10 +1,10 @@
 //! Sampler helpers used by the decode loop.
 //!
-//! After #221 dropped the legacy GPU-side topk-with-penalties path
-//! (which was qwen3-moe-typed end-to-end), only the JSON grammar mask
-//! helper remains. The decode loop runs the host sampler for v2.
+//! After the legacy GPU-side topk-with-penalties path was dropped
+//! (it was qwen3-moe-typed end-to-end), only the JSON grammar mask
+//! helper remains. The decode loop runs the host sampler.
 
-#![cfg(feature = "hip")]
+#![cfg(any(feature = "hip", feature = "cuda"))]
 
 /// Stub kept so `decode_loop.rs` can carry an `Option<GpuSamplerScratch>`
 /// without changing its shape. The GPU sampler is disabled on v2 until

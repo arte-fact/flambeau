@@ -4,7 +4,7 @@
 //! over the last N tokens.
 
 use anyhow::bail;
-use flambeau_ops::{HipOps, Ops};
+use flambeau_ops::Ops;
 
 use crate::dtype::F16;
 use crate::error::Result;
@@ -18,7 +18,7 @@ pub fn attn_decode_f16(
     out: &mut Tensor<F16>,
     shape: flambeau_ops::AttnDecodeShape,
     knobs: flambeau_ops::AttnKnobs,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     let flambeau_ops::AttnDecodeShape { n_heads_q, n_heads_kv, head_dim, n_tokens_kv } = shape;
     if !matches!(head_dim, 64 | 128 | 256 | 512) {
@@ -109,6 +109,7 @@ fn cpu_attn_decode(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flambeau_ops::HipOps;
     use crate::testing::{
         alloc, assert_close_f16, download, free, test_device, test_ops_registry, upload,
     };

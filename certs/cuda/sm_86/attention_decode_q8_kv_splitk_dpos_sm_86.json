@@ -1,0 +1,148 @@
+{
+  "schema_version": 1,
+  "impl_id": "attention_decode_q8_kv_splitk_dpos_sm_86",
+  "backend": "cuda",
+  "arch": "sm_86",
+  "op": "attention_decode_q8_kv",
+  "dtype_weight": "Q8_0",
+  "dtype_activation": "F16",
+  "tolerance_formula": "|err| <= 5e-2 * max(|ref|, sqrt(head_dim))  (correctness; delta-ppl quality cert)",
+  "results": [
+    {
+      "m": 4,
+      "k": 301,
+      "n": 128,
+      "seed": 168333,
+      "max_rel_err": 0.00026973983,
+      "tolerance": 0.05,
+      "pass": true
+    },
+    {
+      "m": 16,
+      "k": 1642,
+      "n": 256,
+      "seed": 1177660,
+      "max_rel_err": 0.00009536743,
+      "tolerance": 0.05,
+      "pass": true
+    },
+    {
+      "m": 16,
+      "k": 901,
+      "n": 256,
+      "seed": 1186885,
+      "max_rel_err": 0.00009536743,
+      "tolerance": 0.05,
+      "pass": true
+    },
+    {
+      "m": 24,
+      "k": 33,
+      "n": 256,
+      "seed": 1274865,
+      "max_rel_err": 0.00076293945,
+      "tolerance": 0.05,
+      "pass": true
+    },
+    {
+      "m": 24,
+      "k": 301,
+      "n": 256,
+      "seed": 1247501,
+      "max_rel_err": 0.00019073486,
+      "tolerance": 0.05,
+      "pass": true
+    },
+    {
+      "m": 24,
+      "k": 1642,
+      "n": 256,
+      "seed": 1177660,
+      "max_rel_err": 0.00009536743,
+      "tolerance": 0.05,
+      "pass": true
+    },
+    {
+      "m": 24,
+      "k": 1,
+      "n": 256,
+      "seed": 1277777,
+      "max_rel_err": 0.0,
+      "tolerance": 0.05,
+      "pass": true
+    },
+    {
+      "m": 24,
+      "k": 8,
+      "n": 256,
+      "seed": 1277330,
+      "max_rel_err": 0.00096618355,
+      "tolerance": 0.05,
+      "pass": true
+    },
+    {
+      "m": 24,
+      "k": 32,
+      "n": 256,
+      "seed": 1274730,
+      "max_rel_err": 0.00076293945,
+      "tolerance": 0.05,
+      "pass": true
+    },
+    {
+      "m": 24,
+      "k": 1024,
+      "n": 256,
+      "seed": 1240266,
+      "max_rel_err": 0.00009536743,
+      "tolerance": 0.05,
+      "pass": true
+    },
+    {
+      "m": 16,
+      "k": 1301,
+      "n": 256,
+      "seed": 1133493,
+      "max_rel_err": 0.00009536743,
+      "tolerance": 0.05,
+      "pass": true
+    },
+    {
+      "m": 16,
+      "k": 4001,
+      "n": 256,
+      "seed": 1401201,
+      "max_rel_err": 0.00009536743,
+      "tolerance": 0.05,
+      "pass": true
+    },
+    {
+      "m": 16,
+      "k": 1101,
+      "n": 256,
+      "seed": 1243821,
+      "max_rel_err": 0.0,
+      "tolerance": 0.05,
+      "pass": true
+    },
+    {
+      "m": 16,
+      "k": 1152,
+      "n": 256,
+      "seed": 1215818,
+      "max_rel_err": 0.0,
+      "tolerance": 0.05,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-11-21T09:27:07Z",
+  "rig": "threadreaper-sm_86",
+  "pmc": {
+    "vgpr_count": 36,
+    "sgpr_count": null,
+    "waves_per_simd": null,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

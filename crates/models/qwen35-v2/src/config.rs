@@ -30,6 +30,10 @@ pub struct Qwen35V2Config {
     pub gdn: GdnDims,
     /// Layer `il` is recurrent (GDN) iff `(il + 1) % full_attention_interval != 0`.
     pub full_attention_interval: usize,
+    /// Number of embedded MTP/nextn draft layers (GGUF
+    /// `nextn_predict_layers`). Excluded from `num_layers`; loaded as the
+    /// draft head when MTP is enabled.
+    pub nextn_layers: usize,
 }
 
 impl Qwen35V2Config {
@@ -56,7 +60,10 @@ impl Qwen35V2Config {
         let n_heads = req_u32("attention.head_count")?;
         let n_kv_heads = req_u32("attention.head_count_kv")?;
         let head_dim = opt_u32("attention.key_length").unwrap_or(hidden / n_heads);
-        let num_layers = req_u32("block_count")?;
+        let nextn_layers = opt_u32("nextn_predict_layers").unwrap_or(0);
+        let num_layers = file
+            .forward_block_count("qwen35")
+            .ok_or_else(|| mk_missing("block_count"))?;
         let intermediate = req_u32("feed_forward_length")?;
         let rms_eps = req_f32("attention.layer_norm_rms_epsilon")?;
         let context_length = req_u32("context_length")?;
@@ -105,6 +112,7 @@ impl Qwen35V2Config {
                 conv_kernel,
             },
             full_attention_interval,
+            nextn_layers,
         })
     }
 

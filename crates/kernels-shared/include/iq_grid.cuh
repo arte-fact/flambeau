@@ -1,8 +1,8 @@
 #pragma once
 // Codebook + sign-mask tables for the IQ3_XXS and IQ3_S MMVQ kernels.
 // Byte-for-byte port of llama.cpp's `iq3xxs_grid`, `iq3s_grid`,
-// `ksigns_iq2xs`, and `kmask_iq2xs` from `ggml-common.h`. Mirror of the
-// host-side `crates/quant/src/iq_tables.rs` — used by both sides so we
+// `ksigns_iq2xs`, and `kmask_iq2xs` from `ggml-common.h`. The host-side
+// `crates/quant/src/iq_tables.rs` carries the same tables — both sides
 // share one source of truth for the wire format.
 //
 // Sizes (used by per-kernel constant-mem budgets):
@@ -13,7 +13,7 @@
 // Each kernel TU gets its own copy via the `__device__ static constexpr`
 // declarations; HIP places them in constant memory (per-CU 16 KB cache).
 
-#include <hip/hip_runtime.h>
+#include "backend_compat.cuh"
 #include <stdint.h>
 
 // IQ3_XXS codebook — 256 entries, each entry packs 4 unsigned i8 magnitudes

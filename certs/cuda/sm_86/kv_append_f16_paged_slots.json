@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "impl_id": "kv_append_f16_paged_slots",
+  "backend": "cuda",
+  "arch": "sm_86",
+  "op": "kv_append_f16_paged_slots",
+  "dtype_weight": "F16",
+  "dtype_activation": "F16",
+  "tolerance_formula": "exact (paged gather/scatter copy)",
+  "results": [
+    {
+      "m": 2,
+      "k": 1024,
+      "n": 1,
+      "seed": 12641268,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 4,
+      "k": 2048,
+      "n": 1,
+      "seed": 12634074,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 8,
+      "k": 512,
+      "n": 1,
+      "seed": 12644742,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-06-18T13:26:37Z",
+  "rig": "threadreaper-sm_86",
+  "pmc": {
+    "vgpr_count": 18,
+    "sgpr_count": null,
+    "waves_per_simd": null,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

@@ -147,6 +147,7 @@ fn kv_parity(layout: KvLayout, swa: bool) {
     }
 
     let cfg = ScratchConfig {
+        mtp: None,
         hidden: HIDDEN,
         intermediate: INTERMEDIATE,
         q_width,
@@ -343,6 +344,7 @@ fn gdn_snapshot_restore_decode_parity() {
     }
 
     let cfg = ScratchConfig {
+        mtp: None,
         hidden: HIDDEN,
         intermediate: 0,
         q_width: 0,
@@ -369,12 +371,12 @@ fn gdn_snapshot_restore_decode_parity() {
     let fwd = |pool: &mut ScratchPool, token: u32| -> Vec<f32> {
         let mut ctx = SingleDeviceForwardCtx::new(&device, stream, &reg, pool);
         let mut resid = ctx.embed(&embd, &[token]).expect("embed");
-        for li in 0..NUM_LAYERS {
+        for (li, w) in gdn_weights.iter().enumerate().take(NUM_LAYERS) {
             let normed = ctx
-                .rmsnorm(&resid, &gdn_weights[li].attn_norm, RMS_EPS, 1)
+                .rmsnorm(&resid, &w.attn_norm, RMS_EPS, 1)
                 .expect("attn_norm");
             let delta = ctx
-                .gdn_layer(&normed, &gdn_weights[li], li, &[0], None)
+                .gdn_layer(&normed, w, li, &[0], None)
                 .expect("gdn_layer")
                 .expect("delta");
             resid = ctx.residual_add(resid, delta, 1).expect("residual_add");

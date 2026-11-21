@@ -30,6 +30,14 @@ half.workspace = true
 path = "../backend-hip"
 optional = true
 
+[dependencies.flambeau-backend-cuda]
+path = "../backend-cuda"
+optional = true
+
+[dependencies.flambeau-backend]
+path = "../backend"
+optional = true
+
 [features]
 default = []
 # HIP inference backend. Off by default so `cargo check` works without ROCm.
@@ -46,12 +54,31 @@ hip = [
   "flambeau-qwen35moe-v2/hip",
   "flambeau-gemma4-v2/hip",
 ]
+# CUDA single-device backend (RTX). Additive on top of `hip` on the dual rig —
+# `flambeau-forward` is hip-gated, so the server is built `--features hip,cuda`;
+# `--backend cuda` then drives the single-device CUDA path at runtime.
+cuda = [
+  "dep:flambeau-backend-cuda",
+  "dep:flambeau-backend",
+  "dep:flambeau-forward",
+  "dep:flambeau-qwen35-v2",
+  "dep:flambeau-qwen35moe-v2",
+  "dep:flambeau-gemma4-v2",
+  "flambeau-ops/cuda",
+  "flambeau-server-core/cuda",
+  "flambeau-backend/cuda",
+  "flambeau-forward/cuda",
+  "flambeau-qwen35-v2/cuda",
+  "flambeau-qwen35moe-v2/cuda",
+  "flambeau-gemma4-v2/cuda",
+]
 # Enables debug FLAMBEAU_* env-var reads (TRACE_BATCH, DUMP_PROMPT,
 # DUMP_RAW_REQ, DEBUG_TOOL_RAW, PROFILE_DECODE, HOST_PROFILE) in release
 # builds. Off by default; production binaries elide them.
 dev_trace = ["flambeau-quant/dev_trace"]
 
 [dev-dependencies]
+flambeau-test-models = { path = "../test-models" }
 axum.workspace = true
 tokio-util = "0.7"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

@@ -6,14 +6,14 @@
   "op": "attention_decode_q8_kv",
   "dtype_weight": "Q8_0",
   "dtype_activation": "F16",
-  "tolerance_formula": "|err| <= 5e-2 * max(|ref|, sqrt(head_dim))  (correctness; V1.7 adds delta-ppl quality cert)",
+  "tolerance_formula": "|err| <= 5e-2 * max(|ref|, sqrt(head_dim))  (correctness; delta-ppl quality cert)",
   "results": [
     {
       "m": 32,
       "k": 16,
       "n": 128,
       "seed": 13744910,
-      "max_rel_err": 0.00053947966,
+      "max_rel_err": 0.00097370986,
       "tolerance": 0.05,
       "pass": true
     },
@@ -22,7 +22,7 @@
       "k": 128,
       "n": 128,
       "seed": 13733854,
-      "max_rel_err": 0.00013486992,
+      "max_rel_err": 0.00053947966,
       "tolerance": 0.05,
       "pass": true
     },
@@ -31,7 +31,7 @@
       "k": 1024,
       "n": 128,
       "seed": 13642078,
-      "max_rel_err": 0.00000842937,
+      "max_rel_err": 0.00013486992,
       "tolerance": 0.05,
       "pass": true
     },
@@ -40,7 +40,7 @@
       "k": 4096,
       "n": 128,
       "seed": 14151006,
-      "max_rel_err": 0.00003371748,
+      "max_rel_err": 0.00006743496,
       "tolerance": 0.05,
       "pass": true
     },
@@ -49,7 +49,7 @@
       "k": 16,
       "n": 256,
       "seed": 12592014,
-      "max_rel_err": 0.0000014901161,
+      "max_rel_err": 0.00076293945,
       "tolerance": 0.05,
       "pass": true
     },
@@ -58,7 +58,7 @@
       "k": 128,
       "n": 256,
       "seed": 12588894,
-      "max_rel_err": 0.00019073486,
+      "max_rel_err": 0.00038146973,
       "tolerance": 0.05,
       "pass": true
     },
@@ -67,7 +67,7 @@
       "k": 1024,
       "n": 256,
       "seed": 12693982,
-      "max_rel_err": 0.000023841858,
+      "max_rel_err": 0.00019073486,
       "tolerance": 0.05,
       "pass": true
     },
@@ -76,18 +76,18 @@
       "k": 4096,
       "n": 256,
       "seed": 13006302,
-      "max_rel_err": 0.000023841858,
+      "max_rel_err": 0.000047683716,
       "tolerance": 0.05,
       "pass": true
     }
   ],
   "pass": true,
-  "emitted_at": "2026-04-27T21:44:12Z",
+  "emitted_at": "2026-11-20T04:16:12Z",
   "rig": "threadreaper-gfx906",
   "pmc": {
-    "vgpr_count": 26,
+    "vgpr_count": 24,
     "sgpr_count": null,
-    "waves_per_simd": 9,
+    "waves_per_simd": 10,
     "mem_busy_pct": null,
     "valu_busy_pct": null
   }

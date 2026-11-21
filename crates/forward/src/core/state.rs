@@ -2,28 +2,35 @@
 //! Fields are `pub` so composites read/write without accessor noise;
 //! external crates see only the `ForwardCtx` trait surface.
 
-use flambeau_backend_hip::{HipDevice, HipStream};
-use flambeau_ops::{HipOps, OpsRegistry};
+use flambeau_backend::{Backend, HipBackend};
 
+use super::capture::DecodeCapture;
 use super::ScratchPool;
 
-pub struct CoreState<'a> {
-    pub device: &'a HipDevice,
-    pub stream: &'a HipStream,
-    pub reg: &'a OpsRegistry,
+pub struct CoreState<'a, B: Backend = HipBackend> {
+    pub device: &'a B::Device,
+    pub stream: &'a B::Stream,
+    pub reg: &'a B::Registry,
     pub pool: &'a mut ScratchPool,
     pub logits_host: Vec<f32>,
     /// First global layer index this rank owns. Composites that index
     /// `pool.kv_caches` subtract this so the model can pass a global
     /// `layer_idx` and PP/Hybrid hit slot 0 of their owned-slice pool.
     pub layer_idx_offset: usize,
+    /// `Some` only during a decode-graph capture forward. When set, the
+    /// per-token composites (`embed`, `standard_attn`, `output_head`) allocate
+    /// graph slots + record their rebind rules here and take the capture
+    /// branch (tag args via the `_slots` op variants, skip the trailing logits
+    /// D2H+sync). `None` is today's path, byte-identical. Backend-neutral:
+    /// the handle is plain data, not a `Cuda*` type (rule 9).
+    pub capture: Option<&'a mut DecodeCapture>,
 }
 
-impl<'a> CoreState<'a> {
+impl<'a, B: Backend> CoreState<'a, B> {
     pub fn new(
-        device: &'a HipDevice,
-        stream: &'a HipStream,
-        reg: &'a OpsRegistry,
+        device: &'a B::Device,
+        stream: &'a B::Stream,
+        reg: &'a B::Registry,
         pool: &'a mut ScratchPool,
     ) -> Self {
         Self {
@@ -33,11 +40,12 @@ impl<'a> CoreState<'a> {
             pool,
             logits_host: Vec::new(),
             layer_idx_offset: 0,
+            capture: None,
         }
     }
 
-    pub fn ops(&self) -> HipOps<'a> {
-        HipOps::new(self.reg, self.stream)
+    pub fn ops(&self) -> B::Ops<'a> {
+        B::ops(self.reg, self.stream)
     }
 
     pub fn hidden(&self) -> usize {

@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "impl_id": "attention_decode_f16_batched_splitk_sm_86",
+  "backend": "cuda",
+  "arch": "sm_86",
+  "op": "attention_decode",
+  "dtype_weight": "F16",
+  "dtype_activation": "F16",
+  "tolerance_formula": "|err| <= 2e-2 * max(|ref|, sqrt(head_dim))",
+  "results": [
+    {
+      "m": 4,
+      "k": 16,
+      "n": 64,
+      "seed": 188774744,
+      "max_rel_err": 0.0000029802322,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 16,
+      "k": 2127,
+      "n": 512,
+      "seed": 192503267,
+      "max_rel_err": 0.00003371748,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 16,
+      "k": 1642,
+      "n": 512,
+      "seed": 192453914,
+      "max_rel_err": 0.0000021073424,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 16,
+      "k": 1242,
+      "n": 256,
+      "seed": 190379466,
+      "max_rel_err": 0.000023841858,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 16,
+      "k": 1382,
+      "n": 256,
+      "seed": 190529270,
+      "max_rel_err": 0.000023841858,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 16,
+      "k": 1642,
+      "n": 256,
+      "seed": 190552090,
+      "max_rel_err": 0.000023841858,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 32,
+      "k": 2127,
+      "n": 256,
+      "seed": 190470284,
+      "max_rel_err": 0.000047683716,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 32,
+      "k": 2043,
+      "n": 512,
+      "seed": 192494752,
+      "max_rel_err": 0.00006743496,
+      "tolerance": 0.02,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-07-07T16:32:37Z",
+  "rig": "threadreaper-sm_86",
+  "pmc": {
+    "vgpr_count": 40,
+    "sgpr_count": null,
+    "waves_per_simd": null,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

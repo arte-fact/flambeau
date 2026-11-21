@@ -7,8 +7,8 @@ use flambeau_model_ops::{Tensor, F16, F32, Q8_1};
 use crate::core::{CoreState, TopologyHooks};
 use crate::ctx::{Activation, FfnWeights};
 
-pub fn dense_ffn_local<H: TopologyHooks>(
-    state: &mut CoreState<'_>,
+pub fn dense_ffn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
+    state: &mut CoreState<'_, B>,
     hooks: &mut H,
     input: &Tensor<F16>,
     weights: &FfnWeights,
@@ -21,6 +21,16 @@ pub fn dense_ffn_local<H: TopologyHooks>(
     let m = state.pool.config.intermediate;
     let ops = state.ops();
     let n = n_tokens;
+
+    // Which activation layout each gate/up projection reads at this shape.
+    // `norm_q8_1` (standard) is dead when both use the DS4 MMQ path;
+    // `norm_q8_1_mmq` is dead when neither does. At n==1 both are MMVQ, so
+    // this reduces to standard-only — byte-identical to the pre-gate path.
+    let gateup_shape = flambeau_ops::MatmulShape { m: n, k: hidden, n: m };
+    let gate_reads_mmq = weights.ffn_gate.reads_mmq_activation(gateup_shape, &ops);
+    let up_reads_mmq = weights.ffn_up.reads_mmq_activation(gateup_shape, &ops);
+    let need_norm_std = !(gate_reads_mmq && up_reads_mmq);
+    let need_norm_mmq = gate_reads_mmq || up_reads_mmq;
 
     let mut norm_q8_1 = unsafe { Tensor::<Q8_1>::from_raw(state.pool.norm_q8_1, n * hidden) };
     let act_mmq_null = unsafe { Tensor::<Q8_1>::from_raw(DevicePtr::NULL, 0) };
@@ -41,12 +51,18 @@ pub fn dense_ffn_local<H: TopologyHooks>(
             weights.rms_eps,
             &ops,
         )?;
-        flambeau_model_ops::quantize_f16_to_q8_1(&norm_f16, &mut norm_q8_1, n * hidden, &ops)?;
-        let mut norm_mmq =
-            unsafe { Tensor::<Q8_1>::from_raw(state.pool.norm_q8_1_mmq, n * hidden) };
-        flambeau_model_ops::quantize_f16_to_q8_1_mmq(&norm_f16, &mut norm_mmq, hidden, n, &ops)?;
-        norm_mmq_t = norm_mmq;
-        &norm_mmq_t
+        if need_norm_std {
+            flambeau_model_ops::quantize_f16_to_q8_1(&norm_f16, &mut norm_q8_1, n * hidden, &ops)?;
+        }
+        if need_norm_mmq {
+            let mut norm_mmq =
+                unsafe { Tensor::<Q8_1>::from_raw(state.pool.norm_q8_1_mmq, n * hidden) };
+            flambeau_model_ops::quantize_f16_to_q8_1_mmq(&norm_f16, &mut norm_mmq, hidden, n, &ops)?;
+            norm_mmq_t = norm_mmq;
+            &norm_mmq_t
+        } else {
+            &act_mmq_null
+        }
     } else {
         flambeau_model_ops::rmsnorm_quant_q8_1(
             input,
@@ -137,39 +153,58 @@ pub fn dense_ffn_local<H: TopologyHooks>(
         )?;
     }
 
-    let mut gated_f16 = unsafe { Tensor::<F16>::from_raw(state.pool.gated_f16, n * m) };
-    match weights.activation {
-        Activation::SwiGLU => {
-            flambeau_model_ops::swiglu_f32_to_f16(&gate_f32, &up_f32, &mut gated_f16, n * m, &ops)?;
-        }
-        Activation::GeluTanh => {
-            flambeau_model_ops::gelu_mul_f32_to_f16(
-                &gate_f32,
-                &up_f32,
-                &mut gated_f16,
-                n * m,
-                &ops,
-            )?;
-        }
-    }
+    // Which activation layout the down projection reads. `gated_q8_1`
+    // (standard) is dead when down uses the DS4 MMQ path; the F16 `gated`
+    // intermediate is only needed when we don't fuse straight to MMQ. At
+    // n==1 down is MMVQ, so this stays the standard path, byte-identical.
+    let down_shape = flambeau_ops::MatmulShape { m: n, k: m, n: hidden };
+    let down_reads_mmq = weights.ffn_down.reads_mmq_activation(down_shape, &ops);
+    let use_fused_gelu_mmq =
+        down_reads_mmq && matches!(weights.activation, Activation::GeluTanh);
 
     let mut gated_q8_1 = unsafe { Tensor::<Q8_1>::from_raw(state.pool.gated_q8_1, n * m) };
-    flambeau_model_ops::quantize_f16_to_q8_1(&gated_f16, &mut gated_q8_1, n * m, &ops)?;
     let gated_mmq_t;
-    let act_gated_mmq: &Tensor<Q8_1> = if n > 1 {
+    let act_gated_mmq: &Tensor<Q8_1>;
+    if use_fused_gelu_mmq {
+        // Gemma-4 prefill: GELU(gate)*up → DS4 MMQ activation in one launch,
+        // skipping the F16 gated write + re-read.
         let mut gated_mmq = unsafe { Tensor::<Q8_1>::from_raw(state.pool.gated_q8_1_mmq, n * m) };
-        flambeau_model_ops::quantize_f16_to_q8_1_mmq(&gated_f16, &mut gated_mmq, m, n, &ops)?;
+        flambeau_model_ops::gelu_mul_f32_to_q8_1_mmq(
+            &gate_f32, &up_f32, &mut gated_mmq, m, n, &ops,
+        )?;
         gated_mmq_t = gated_mmq;
-        &gated_mmq_t
+        act_gated_mmq = &gated_mmq_t;
     } else {
-        &act_mmq_null
-    };
+        let mut gated_f16 = unsafe { Tensor::<F16>::from_raw(state.pool.gated_f16, n * m) };
+        match weights.activation {
+            Activation::SwiGLU => {
+                flambeau_model_ops::swiglu_f32_to_f16(
+                    &gate_f32, &up_f32, &mut gated_f16, n * m, &ops,
+                )?;
+            }
+            Activation::GeluTanh => {
+                flambeau_model_ops::gelu_mul_f32_to_f16(
+                    &gate_f32, &up_f32, &mut gated_f16, n * m, &ops,
+                )?;
+            }
+        }
+        if !down_reads_mmq {
+            flambeau_model_ops::quantize_f16_to_q8_1(&gated_f16, &mut gated_q8_1, n * m, &ops)?;
+            act_gated_mmq = &act_mmq_null;
+        } else {
+            let mut gated_mmq =
+                unsafe { Tensor::<Q8_1>::from_raw(state.pool.gated_q8_1_mmq, n * m) };
+            flambeau_model_ops::quantize_f16_to_q8_1_mmq(&gated_f16, &mut gated_mmq, m, n, &ops)?;
+            gated_mmq_t = gated_mmq;
+            act_gated_mmq = &gated_mmq_t;
+        }
+    }
     // Decode F16-direct fast path: at n=1 under AR-fold the down
     // projection writes straight to `pool.delta` via mmvq's saturating
     // F16-cast — skips one `cast_f32_to_f16` launch per layer per token.
     let f16_fast = n == 1
         && weights.post_ffn_norm.is_none()
-        && weights.ffn_down.supports_decode_to_f16()
+        && weights.ffn_down.supports_decode_to_f16(&ops)
         && (hooks.supports_ar_residual_rmsnorm_f16() || hooks.supports_ar_residual_f16());
     let mut down_f32 = unsafe { Tensor::<F32>::from_raw(state.pool.down_f32, n * hidden) };
     if !f16_fast {

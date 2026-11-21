@@ -141,7 +141,7 @@ fn run_shape(
         args.push(&n_rows_i);
         args.push(&k_i);
         args.push(&eps_f);
-        let cfg = LaunchCfg::one_d(m as u32, 256);
+        let cfg = LaunchCfg::one_d(m as u32, 1024);
         unsafe { kernel.launch(stream, cfg, args)? };
         stream.synchronize()?;
     }

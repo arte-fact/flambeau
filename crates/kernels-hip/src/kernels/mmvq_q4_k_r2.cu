@@ -1,4 +1,4 @@
-// mmvq_q4_k_r2 — Q4_K MMVQ, multi-row r2 DPP-reduce (candle P29 pattern).
+// mmvq_q4_k_r2 — Q4_K MMVQ, multi-row r2 DPP-reduce.
 // Compared to the single-row oracle in `mmvq_q4_k.cu`:
 // - 64 threads per block STILL = one wave64, but the wavefront computes
 // two output rows simultaneously. Lanes 0..31 own row R+0; lanes 32..63
@@ -13,7 +13,7 @@
 // stops at xor-16, skipping the cross-half swap).
 // This is the primary decode-path dtype for Qwen3.6 Q4_K_M.
 
-// Two output dtypes via templated __device__ body (#120):
+// Two output dtypes via templated __device__ body:
 //   flambeau_mmvq_q4_k_r2_q8_1      → F32 dst
 //   flambeau_mmvq_q4_k_r2_q8_1_f16  → F16 dst (saturating)
 

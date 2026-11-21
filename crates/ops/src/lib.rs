@@ -25,33 +25,52 @@
 #[cfg(feature = "hip")]
 pub mod hip;
 
-#[cfg(feature = "hip")]
+#[cfg(feature = "cuda")]
+pub mod cuda;
+
+// Backend-generic op-launch bodies (one `fn op<B: KernelBackend>(…)` per op).
+// Always compiled — HIP and CUDA share the same bodies; the `hip` / `cuda`
+// modules only add the per-backend `Registry` / `Ops` type aliases.
+pub mod launch;
+
+// Backend-generic kernel-module registry over the `core::KernelBackend` seam.
+// Always compiled so a CUDA `Ops` impl shares it; `hip::OpsRegistry` is the
+// `Registry<HipKernels>` alias.
+pub mod registry;
+pub use registry::{Registry, RegistryError, KERNEL_STEMS};
+
+// `sig` is the backend-portable op-signature surface (POD buffers / shapes /
+// knobs over `DevicePtr` + `core::ScalarSlot`). Always compiled so the `Ops`
+// trait and a future `CudaOps` impl share it. The one HIP-specific member —
+// `OpCtx` (holds `&HipStream`) — is gated within the module.
 pub mod sig;
 
 #[cfg(feature = "hip")]
 pub use hip::{OpsRegistry, OpsRegistryError};
 
-#[cfg(feature = "hip")]
 pub use sig::{
-    AttnBatchedBuffers, AttnBuffers, AttnDecodeBatchedShape, AttnDecodePagedShape,
-    AttnDecodeShape, AttnDecodeSlots, AttnKnobs, AttnPagedDecodeBuffers, AttnPagedPrefillBuffers,
-    AttnPrefillPagedShape, AttnPrefillShape, AttnPrefillSlots, AttnSplitkPartials,
-    AttnSplitkShape, MatmulShape, MmvqBatchShape, MmvqBuffers, MmvqGateUpBatchShape,
+    AttnBatchedBuffers, AttnBuffers, AttnDecodeBatchedShape, AttnDecodeBatchedSplitkShape,
+    AttnDecodePagedShape,
+    AttnDecodeQ8Slots, AttnDecodeQ8SplitkSlots,
+    AttnDecodeShape, AttnDecodeSlots, AttnDecodeVariant, AttnVecDposShape, AttnDposKnobs, AttnKnobs, AttnPagedDecodeBuffers,
+    AttnPagedPrefillBuffers,
+    AttnPrefillPagedShape, AttnPrefillShape, AttnPrefillSlots, AttnSplitkDposShape,
+    AttnSplitkPartials,
+    AttnSplitkShape, AttnSplitkSlots, KvAppendSlots,
+    MatmulShape, MmvqBatchShape, MmvqBuffers, MmvqGateUpBatchShape,
     MmvqGateUpBuffers, MmvqGateUpShape, MmvqShape, MoeMmvqBuffers, MoeMmvqGateUpBuffers,
-    MoeMmqTile8DownBuffers, MoeMmqTile8GateUpBuffers, MoeMmvqGateUpSortedBuffers, MoeMmvqShape,
+    MoeMmqTile8DownBuffers, MoeMmqTile8GateUpBuffers, MoeMmvqShape,
     KvAppendBatchedSlotsBuffers, KvAppendBatchedSlotsShape, KvAppendBuffers,
     KvAppendPagedPrefillBuffers, KvAppendPagedPrefillShape, KvAppendPagedSlotsBuffers,
     KvAppendPagedSlotsShape, KvAppendVUnitShape, MoeCombineBuffers,
     MoeCombineNoResidualBuffers, MoeCombineShape, MoeCombineTwoResidualsBuffers,
-    MoeMmvqSortedBuffers, MoeSortBuffers, MoeSortPaddedBuffers, MoeSortPaddedShape, MoeSortShape,
-    MmvqKvF16Buffers, NormBuffers, NormFusedAddBuffers, NormResidualBuffers, NormShape, OpCtx,
+    MoeSortBuffers, MoeSortPaddedBuffers, MoeSortPaddedShape, MoeSortShape,
+    MmvqKvF16Buffers, MoeShape, NormBuffers, NormFusedAddBuffers, NormResidualBuffers, NormShape,
     QmatmulBuffers, RopeBuffers, RopeFusedBuffers, RopePartialShape, RopeShape,
     GdnStepBuffers, GdnStepAlphaBetaBuffers, GdnStepAlphaBetaBatchedSlotsBuffers, GdnStepShape,
     GdnAlphaBetaBuffers, GdnAlphaBetaShape, GdnConvTrioBatchedSlotsBuffers, GdnConvTrioShape,
     GdnSplitQkvBuffers, GdnSplitQkvShape,
-    PenaltyBuffers, PenaltyKnobs,
-    MoeMmqQ4KGateUpTurboBuffers, MoeMmqQ4KDownTurboBuffers,
-    MoeMmqQ4KBuffers, MoeMmqQ4KShape,
+    ArgmaxBuffers, PenaltyBuffers, PenaltyKnobs,
     SplitQGateBuffers, SplitQGateShape,
     ConvCausal1dBuffers, ConvCausal1dShape,
     TopkBuffers, TopkShape,
@@ -61,21 +80,23 @@ pub use sig::{
 };
 
 #[cfg(feature = "hip")]
-pub use hip::{attention, conv, mlp, moe, norm, pe, qmatmul, softmax};
+pub use sig::OpCtx;
 
-// Backend-portable shape used by every `indexed_moe_mmq_*` method on
-// the `Ops` trait. Lifted out of `hip::moe` so CUDA can implement the
-// trait without depending on the HIP module path.
-#[cfg(feature = "hip")]
-pub use hip::moe::MoeShape;
+// The op-launch bodies are backend-generic; re-export them at the historical
+// crate-root paths so callers say `flambeau_ops::qmatmul::…` for either backend.
+pub use launch::{attention, conv, mlp, moe, norm, pe, qmatmul, sampling, softmax};
 
-// `Ops` references `MoeShape`, which today only exists under the `hip`
-// feature. Gate the trait the same way; CUDA will pull `MoeShape` to a
-// backend-neutral home at the point where it grows a second impl.
-#[cfg(feature = "hip")]
+// The portable op contract. Backend-neutral: every method takes `sig` POD +
+// `core` types only (the `Ops` impl — `OpsImpl<B>`, aliased per backend as
+// `HipOps` / `CudaOps` — holds the backend `(registry, stream)` pair
+// internally). Always compiled.
+mod ops_impl;
 mod ops_trait;
-#[cfg(feature = "hip")]
+pub use ops_impl::OpsImpl;
 pub use ops_trait::Ops;
 
 #[cfg(feature = "hip")]
 pub use hip::HipOps;
+
+#[cfg(feature = "cuda")]
+pub use cuda::{CudaOps, CudaOpsRegistry};

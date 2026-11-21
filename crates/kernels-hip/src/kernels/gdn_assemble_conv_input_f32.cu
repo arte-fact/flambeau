@@ -1,4 +1,4 @@
-// gdn_assemble_conv_input_f32 — 3.d.1 fused `conv_input = [history, current]`.
+// gdn_assemble_conv_input_f32 — fused `conv_input = [history, current]`.
 // Replaces two back-to-back device-to-device memcpys in `assemble_conv_input`
 // (forward_gdn_decode) with a single pointwise kernel. At decode each GDN
 // layer fires this pattern once per token — on 40-layer Qwen3.6-35B with

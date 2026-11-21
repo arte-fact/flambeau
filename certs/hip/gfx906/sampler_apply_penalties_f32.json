@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "impl_id": "sampler_apply_penalties_f32",
+  "backend": "hip",
+  "arch": "gfx906",
+  "op": "sampler_apply_penalties_f32",
+  "dtype_weight": "F32",
+  "dtype_activation": "F32",
+  "tolerance_formula": "|err| <= 1e-5 * max(|ref|, 1) vs F64 oracle (device FMA contraction)",
+  "results": [
+    {
+      "m": 1000,
+      "k": 50,
+      "n": 1,
+      "seed": 12631080,
+      "max_rel_err": 1.0985463e-7,
+      "tolerance": 0.00001,
+      "pass": true
+    },
+    {
+      "m": 50000,
+      "k": 200,
+      "n": 1,
+      "seed": 13369894,
+      "max_rel_err": 1.1920929e-7,
+      "tolerance": 0.00001,
+      "pass": true
+    },
+    {
+      "m": 151000,
+      "k": 500,
+      "n": 1,
+      "seed": 15189738,
+      "max_rel_err": 1.1920929e-7,
+      "tolerance": 0.00001,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-06-18T11:43:54Z",
+  "rig": "threadreaper-gfx906",
+  "pmc": {
+    "vgpr_count": 9,
+    "sgpr_count": null,
+    "waves_per_simd": 10,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

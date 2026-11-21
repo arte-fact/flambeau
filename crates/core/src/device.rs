@@ -91,11 +91,47 @@ pub trait Stream: Send + Sync {
     fn synchronize(&self) -> DeviceResult<()>;
 }
 
+/// A cross-stream ordering primitive. Recorded on one stream, waited on
+/// another, so a consumer stream does not start work before a producer
+/// stream's recorded point retires (PP / Hybrid stage hand-off). Backends
+/// wrap their native event handle (`HipEvent`, `cudaEvent_t`).
+pub trait Event<S: Stream>: Send + Sync {
+    /// Record this event on `stream`. The event transitions to the recorded
+    /// state once all work enqueued on `stream` before this call retires.
+    /// # Errors
+    /// Returns `DeviceError::Backend` if the backend record call fails.
+    fn record(&self, stream: &S) -> DeviceResult<()>;
+
+    /// Insert a driver-side wait on `stream`: work enqueued on `stream` after
+    /// this call does not start until the event is recorded. Non-blocking on
+    /// the host.
+    /// # Errors
+    /// Returns `DeviceError::Backend` if the backend wait call fails.
+    fn stream_wait(&self, stream: &S) -> DeviceResult<()>;
+
+    /// Block the calling thread until this event is recorded. Profiling /
+    /// teardown only; the hot path uses `stream_wait`.
+    /// # Errors
+    /// Returns `DeviceError::Backend` if the backend sync call fails.
+    fn synchronize(&self) -> DeviceResult<()>;
+
+    /// Milliseconds between `start`'s recorded point and this event's. Both
+    /// events must be timing-enabled (`Device::new_timing_event`) and already
+    /// recorded + synced.
+    /// # Errors
+    /// Returns `DeviceError::Backend` if the events are not timing-enabled or
+    /// the backend query fails.
+    fn elapsed_ms_since(&self, start: &Self) -> DeviceResult<f32>;
+}
+
 /// A compute device (one GPU). `Device` is the root of the trait hierarchy —
 /// everything else (allocators, streams, kernel impls) flows from a concrete
 /// device type.
 pub trait Device: Send + Sync + 'static {
     type Stream: Stream;
+
+    /// Cross-stream ordering event for this backend (see [`Event`]).
+    type Event: Event<Self::Stream>;
 
     /// Backend identifier (`"hip"`, `"cuda"`, `"cpu"`). Used in error messages
     /// and dispatch keys.
@@ -148,9 +184,90 @@ pub trait Device: Send + Sync + 'static {
         bytes: usize,
     ) -> DeviceResult<()>;
 
+    /// Graph-captureable variant of [`Self::memcpy_async`] that tags the copy
+    /// with a [`MemcpySlot`](crate::slot::MemcpySlot) so a backend graph
+    /// executor can retarget the source pointer per replay. The default ignores
+    /// the slot (plain memcpy) — correct for backends without a graph slot-map;
+    /// the real backends override it to record the tag under an active capture.
+    /// Mirrors [`LaunchArgs::push_slot`](crate::kernel_backend::LaunchArgs::push_slot).
+    /// # Safety
+    /// Same as [`Self::memcpy_async`].
+    unsafe fn memcpy_async_slot(
+        &self,
+        stream: &Self::Stream,
+        dir: CopyDirection,
+        dst: DevicePtr,
+        src: DevicePtr,
+        bytes: usize,
+        _slot: crate::slot::MemcpySlot,
+    ) -> DeviceResult<()> {
+        // SAFETY: forwarded verbatim under the caller's contract.
+        unsafe { self.memcpy_async(stream, dir, dst, src, bytes) }
+    }
+
     /// Block until **all** streams on this device have retired. Session
     /// boundaries only; hot paths must use `Stream::synchronize`.
     /// # Errors
     /// Returns `DeviceError::Backend` if the device-sync call fails.
     fn synchronize(&self) -> DeviceResult<()>;
+
+    /// Create a timing-disabled ordering event on this device (cheap; the
+    /// production hot-path choice for stage hand-off).
+    /// # Errors
+    /// Returns `DeviceError::Backend` if the backend event-create call fails.
+    fn new_event(&self) -> DeviceResult<Self::Event>;
+
+    /// Create a timing-enabled event (for `Event::elapsed_ms_since`). Use only
+    /// for profiling instrumentation.
+    /// # Errors
+    /// Returns `DeviceError::Backend` if the backend event-create call fails.
+    fn new_timing_event(&self) -> DeviceResult<Self::Event>;
+
+    /// Bind this device as the calling thread's active context before issuing
+    /// ops or peer copies. Multi-GPU paths re-bind whenever a prior call may
+    /// have left another rank's context current.
+    /// # Errors
+    /// Returns `DeviceError::Backend` if the backend context-bind call fails.
+    fn bind(&self) -> DeviceResult<()>;
+
+    /// Cross-device PUSH: copy `src` (on this device) into `dst` (on
+    /// `dst_device_id`), enqueued on `stream` (which must belong to this
+    /// source device). Peer access must already be authorised by cluster
+    /// bring-up. The PP / Hybrid stage hand-off producer side.
+    /// # Safety
+    /// `dst` valid for `bytes` writes on `dst_device_id`; `src` valid for
+    /// `bytes` reads on this device; no in-flight op on `stream` aliases
+    /// either pointer.
+    /// # Errors
+    /// Returns `DeviceError::Backend` if the peer-copy enqueue fails. Zero-byte
+    /// copies are infallible.
+    unsafe fn memcpy_peer_async(
+        &self,
+        stream: &Self::Stream,
+        dst: DevicePtr,
+        dst_device_id: i32,
+        src: DevicePtr,
+        bytes: usize,
+    ) -> DeviceResult<()>;
+
+    /// Cross-device PULL: copy `src` (on `src_device_id`) into `dst` (on this
+    /// device), enqueued on `stream` (which must belong to this destination
+    /// device). Used by the deterministic DtoD AllReduce, where the copy
+    /// engine sources peer bytes coherently (an in-kernel BAR1 load is stale
+    /// on some PCIe-P2P silicon).
+    /// # Safety
+    /// `dst` valid for `bytes` writes on this device; `src` valid for `bytes`
+    /// reads on `src_device_id`; no in-flight op on `stream` aliases either
+    /// pointer.
+    /// # Errors
+    /// Returns `DeviceError::Backend` if the peer-copy enqueue fails. Zero-byte
+    /// copies are infallible.
+    unsafe fn memcpy_peer_in_async(
+        &self,
+        stream: &Self::Stream,
+        dst: DevicePtr,
+        src: DevicePtr,
+        src_device_id: i32,
+        bytes: usize,
+    ) -> DeviceResult<()>;
 }

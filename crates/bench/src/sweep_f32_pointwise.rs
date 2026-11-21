@@ -1,9 +1,9 @@
-//! c1 correctness sweeps for the GDN F32 pointwise kernels:
-//! silu_f32, swiglu_f32, scale_f32, rmsnorm_f32, cast_f16_f32. Each writes
-//! its own cert under `certs/hip/gfx906/<impl_id>.json`.
-//! All references are host F64 scalar implementations; pass tolerance is
-//! `1e-6` in the relative sense. The kernels are trivial pointwise math;
-//! any larger error is a real bug.
+//! gfx906 correctness sweeps that check more than their cross-backend
+//! counterparts in `sweep_pointwise_cb`: silu_f32 and swiglu_f32 at a 1e-6
+//! relative bound, gdn_alpha_beta_f32 at 1e-5 on single-token rows,
+//! quantize_f16_q8_1 with bit-exact quants, dense_gemv_f32_f16 up to
+//! 256 x 2048. Each writes its cert under `certs/hip/gfx906/<impl_id>.json`
+//! against a host F64 reference.
 
 #![cfg(feature = "hip")]
 #![expect(
@@ -225,169 +225,7 @@ pub fn run_swiglu_sweep(repo_root: &Path) -> Result<Cert> {
 
 // --- scale_f32 -------------------------------------------------------------
 
-pub fn run_scale_sweep(repo_root: &Path) -> Result<Cert> {
-    let (dev, module, entry) = open_kernel("scale_f32", "flambeau_scale_f32")?;
-    let kernel = module.kernel_dynamic(&entry)?;
-    let shapes = [64usize, 1024, 2048, 4096];
-    let mut results = Vec::new();
-    for n in shapes {
-        let seed = 0xC0FFEE ^ ((n as u64) * 31 + 11);
-        let x = seeded_f32(seed, n);
-        let scale = 1.0f32 / (128.0f32).sqrt(); // head_k_dim=128
-        let reference: Vec<f32> = x.iter().map(|v| v * scale).collect();
-        let d_x = alloc_and_upload(&dev, &x);
-        let d_y = dev.alloc(n * 4)?;
-        {
-            let n_i = n as i32;
-            let x_ptr: u64 = d_x.as_usize() as u64;
-            let y_ptr: u64 = d_y.as_usize() as u64;
-            let mut args = KernelArgs::new();
-            args.push(&x_ptr);
-            args.push(&y_ptr);
-            args.push(&n_i);
-            args.push(&scale);
-            let cfg = LaunchCfg::one_d((n as u32).div_ceil(256), 256);
-            unsafe { kernel.launch(dev.default_stream(), cfg, args)? };
-            dev.default_stream().synchronize()?;
-        }
-        let mut got = vec![0.0f32; n];
-        unsafe {
-            dev.memcpy_async(
-                dev.default_stream(),
-                CopyDirection::DeviceToHost,
-                DevicePtr(got.as_mut_ptr() as usize),
-                d_y,
-                n * 4,
-            )?;
-        }
-        dev.default_stream().synchronize()?;
-        unsafe {
-            dev.dealloc(d_x, n * 4)?;
-            dev.dealloc(d_y, n * 4)?;
-        }
-        let err = max_rel_err(&got, &reference);
-        results.push(ShapeResult {
-            m: n,
-            k: 1,
-            n: 1,
-            seed,
-            max_rel_err: err,
-            tolerance: 0.0,
-            pass: err == 0.0,
-        });
-    }
-    let pass = results.iter().all(|r| r.pass);
-    let pmc = pmc(&kernel);
-    let cert = Cert {
-        schema_version: SCHEMA_VERSION,
-        impl_id: "scale_f32_gfx906".to_string(),
-        backend: "hip".to_string(),
-        arch: "gfx906".to_string(),
-        op: "scale_f32".to_string(),
-        dtype_weight: "F32".to_string(),
-        dtype_activation: "F32".to_string(),
-        tolerance_formula: "exact (pointwise multiply)".to_string(),
-        results,
-        pass,
-        emitted_at: now_utc_iso8601(),
-        rig: rig(),
-        pmc,
-    };
-    cert.write_to_disk(repo_root)?;
-    Ok(cert)
-}
-
 // --- rmsnorm_f32 -----------------------------------------------------------
-
-pub fn run_rmsnorm_f32_sweep(repo_root: &Path) -> Result<Cert> {
-    let (dev, module, entry) = open_kernel("rmsnorm_f32", "flambeau_rmsnorm_f32")?;
-    let kernel = module.kernel_dynamic(&entry)?;
-    // GDN ssm_norm shapes: per-head over num_v_heads × head_v_dim.
-    // Qwen3.6: (32, 128). Include 9B variant and a 1-row sanity check.
-    let shapes = [(32usize, 128usize), (16, 128), (1, 512)];
-    let eps = 1e-6f32;
-    let mut results = Vec::new();
-    for (m, k) in shapes {
-        let seed = 0xC0FFEE ^ ((m as u64) * 1049 + (k as u64) * 11);
-        let x = seeded_f32(seed, m * k);
-        let w = seeded_f32(seed ^ 0xEE, k);
-        // Reference: per-row RMS norm in F64 to keep the reference honest.
-        let mut reference = vec![0.0f32; m * k];
-        for r in 0..m {
-            let row = &x[r * k..(r + 1) * k];
-            let sum_sq: f64 = row.iter().map(|&v| (v as f64) * (v as f64)).sum();
-            let rsqrt = 1.0 / ((sum_sq / (k as f64)) + eps as f64).sqrt();
-            for i in 0..k {
-                reference[r * k + i] = (row[i] as f64 * w[i] as f64 * rsqrt) as f32;
-            }
-        }
-        let d_x = alloc_and_upload(&dev, &x);
-        let d_w = alloc_and_upload(&dev, &w);
-        let d_y = dev.alloc(m * k * 4)?;
-        {
-            let m_i = m as i32;
-            let k_i = k as i32;
-            let x_ptr: u64 = d_x.as_usize() as u64;
-            let w_ptr: u64 = d_w.as_usize() as u64;
-            let y_ptr: u64 = d_y.as_usize() as u64;
-            let mut args = KernelArgs::new();
-            args.push(&x_ptr);
-            args.push(&w_ptr);
-            args.push(&y_ptr);
-            args.push(&m_i);
-            args.push(&k_i);
-            args.push(&eps);
-            let cfg = LaunchCfg::one_d(m as u32, 256);
-            unsafe { kernel.launch(dev.default_stream(), cfg, args)? };
-            dev.default_stream().synchronize()?;
-        }
-        let mut got = vec![0.0f32; m * k];
-        unsafe {
-            dev.memcpy_async(
-                dev.default_stream(),
-                CopyDirection::DeviceToHost,
-                DevicePtr(got.as_mut_ptr() as usize),
-                d_y,
-                m * k * 4,
-            )?;
-        }
-        dev.default_stream().synchronize()?;
-        unsafe {
-            dev.dealloc(d_x, m * k * 4)?;
-            dev.dealloc(d_w, k * 4)?;
-            dev.dealloc(d_y, m * k * 4)?;
-        }
-        let err = max_rel_err(&got, &reference);
-        results.push(ShapeResult {
-            m,
-            k,
-            n: 1,
-            seed,
-            max_rel_err: err,
-            tolerance: 1e-5,
-            pass: err <= 1e-5,
-        });
-    }
-    let pass = results.iter().all(|r| r.pass);
-    let pmc = pmc(&kernel);
-    let cert = Cert {
-        schema_version: SCHEMA_VERSION,
-        impl_id: "rmsnorm_f32_gfx906".to_string(),
-        backend: "hip".to_string(),
-        arch: "gfx906".to_string(),
-        op: "rmsnorm_f32".to_string(),
-        dtype_weight: "F32".to_string(),
-        dtype_activation: "F32".to_string(),
-        tolerance_formula: "|err| <= 1e-5 * max(|ref|, 1)".to_string(),
-        results,
-        pass,
-        emitted_at: now_utc_iso8601(),
-        rig: rig(),
-        pmc,
-    };
-    cert.write_to_disk(repo_root)?;
-    Ok(cert)
-}
 
 // --- gdn_alpha_beta_f32 ----------------------------------------------------
 
@@ -444,7 +282,9 @@ pub fn run_gdn_alpha_beta_sweep(repo_root: &Path) -> Result<Cert> {
             args.push(&g_ptr);
             args.push(&bo_ptr);
             args.push(&n_i);
-            let cfg = LaunchCfg::one_d((n as u32).div_ceil(64), 64);
+            let n_tokens_i: i32 = 1;
+            args.push(&n_tokens_i);
+            let cfg = LaunchCfg::one_d(1, n as u32);
             unsafe { kernel.launch(dev.default_stream(), cfg, args)? };
             dev.default_stream().synchronize()?;
         }
@@ -643,96 +483,6 @@ pub fn run_quantize_f16_q8_1_sweep(repo_root: &Path) -> Result<Cert> {
 
 // --- add_f16 ---------------------------------------------------------------
 
-pub fn run_add_f16_sweep(repo_root: &Path) -> Result<Cert> {
-    let (dev, module, entry) = open_kernel("add_f16", "flambeau_add_f16")?;
-    let kernel = module.kernel_dynamic(&entry)?;
-    let shapes = [64usize, 256, 2048, 4096, 8192];
-    let mut results = Vec::new();
-    for n in shapes {
-        let seed = 0xC0FFEE ^ ((n as u64) * 83 + 23);
-        let a_f32 = seeded_f32(seed, n);
-        let b_f32 = seeded_f32(seed ^ 0xBE, n);
-        let a_f16: Vec<f16> = a_f32.iter().map(|v| f16::from_f32(*v)).collect();
-        let b_f16: Vec<f16> = b_f32.iter().map(|v| f16::from_f32(*v)).collect();
-        // Reference: cast to F32, add, cast back to F16 — matches the kernel.
-        let reference: Vec<f16> = a_f16
-            .iter()
-            .zip(&b_f16)
-            .map(|(a, b)| f16::from_f32(a.to_f32() + b.to_f32()))
-            .collect();
-
-        let d_a = alloc_and_upload(&dev, &a_f16);
-        let d_b = alloc_and_upload(&dev, &b_f16);
-        let d_y = dev.alloc(n * 2)?;
-        {
-            let n_i = n as i32;
-            let a_ptr: u64 = d_a.as_usize() as u64;
-            let b_ptr: u64 = d_b.as_usize() as u64;
-            let y_ptr: u64 = d_y.as_usize() as u64;
-            let mut args = KernelArgs::new();
-            args.push(&a_ptr);
-            args.push(&b_ptr);
-            args.push(&y_ptr);
-            args.push(&n_i);
-            let cfg = LaunchCfg::one_d((n as u32).div_ceil(256), 256);
-            unsafe { kernel.launch(dev.default_stream(), cfg, args)? };
-            dev.default_stream().synchronize()?;
-        }
-        let mut got = vec![f16::from_f32(0.0); n];
-        unsafe {
-            dev.memcpy_async(
-                dev.default_stream(),
-                CopyDirection::DeviceToHost,
-                DevicePtr(got.as_mut_ptr() as usize),
-                d_y,
-                n * 2,
-            )?;
-        }
-        dev.default_stream().synchronize()?;
-        unsafe {
-            dev.dealloc(d_a, n * 2)?;
-            dev.dealloc(d_b, n * 2)?;
-            dev.dealloc(d_y, n * 2)?;
-        }
-
-        // Bit-exact against the F32-add-then-F16-cast reference.
-        let mismatches = got
-            .iter()
-            .zip(&reference)
-            .filter(|(g, r)| g.to_bits() != r.to_bits())
-            .count();
-        let err = mismatches as f32;
-        results.push(ShapeResult {
-            m: n,
-            k: 1,
-            n: 1,
-            seed,
-            max_rel_err: err,
-            tolerance: 0.0,
-            pass: err == 0.0,
-        });
-    }
-    let pass = results.iter().all(|r| r.pass);
-    let pmc = pmc(&kernel);
-    let cert = Cert {
-        schema_version: SCHEMA_VERSION,
-        impl_id: "add_f16_gfx906".to_string(),
-        backend: "hip".to_string(),
-        arch: "gfx906".to_string(),
-        op: "add_f16".to_string(),
-        dtype_weight: "F16".to_string(),
-        dtype_activation: "F16".to_string(),
-        tolerance_formula: "exact bit match vs (f32) a + (f32) b → f16".to_string(),
-        results,
-        pass,
-        emitted_at: now_utc_iso8601(),
-        rig: rig(),
-        pmc,
-    };
-    cert.write_to_disk(repo_root)?;
-    Ok(cert)
-}
-
 // --- dense_gemv_f32_f16 ---------------------------------------------------
 
 pub fn run_dense_gemv_sweep(repo_root: &Path) -> Result<Cert> {
@@ -831,80 +581,3 @@ pub fn run_dense_gemv_sweep(repo_root: &Path) -> Result<Cert> {
 
 // --- cast_f16_f32 ----------------------------------------------------------
 
-pub fn run_cast_f16_f32_sweep(repo_root: &Path) -> Result<Cert> {
-    let (dev, module, entry) = open_kernel("cast_f16_f32", "flambeau_cast_f16_f32")?;
-    let kernel = module.kernel_dynamic(&entry)?;
-    let shapes = [64usize, 1024, 2048, 4096, 8192];
-    let mut results = Vec::new();
-    for n in shapes {
-        let seed = 0xC0FFEE ^ ((n as u64) * 37 + 13);
-        let x_f32 = seeded_f32(seed, n);
-        let x_f16: Vec<f16> = x_f32.iter().map(|v| f16::from_f32(*v)).collect();
-        let reference: Vec<f32> = x_f16.iter().map(|v| v.to_f32()).collect();
-        let d_x = alloc_and_upload(&dev, &x_f16);
-        let d_y = dev.alloc(n * 4)?;
-        {
-            let n_i = n as i32;
-            let x_ptr: u64 = d_x.as_usize() as u64;
-            let y_ptr: u64 = d_y.as_usize() as u64;
-            let mut args = KernelArgs::new();
-            args.push(&x_ptr);
-            args.push(&y_ptr);
-            args.push(&n_i);
-            let cfg = LaunchCfg::one_d((n as u32).div_ceil(256), 256);
-            unsafe { kernel.launch(dev.default_stream(), cfg, args)? };
-            dev.default_stream().synchronize()?;
-        }
-        let mut got = vec![0.0f32; n];
-        unsafe {
-            dev.memcpy_async(
-                dev.default_stream(),
-                CopyDirection::DeviceToHost,
-                DevicePtr(got.as_mut_ptr() as usize),
-                d_y,
-                n * 4,
-            )?;
-        }
-        dev.default_stream().synchronize()?;
-        unsafe {
-            dev.dealloc(d_x, n * 2)?;
-            dev.dealloc(d_y, n * 4)?;
-        }
-        // Exact bit match expected — widening is lossless.
-        let mut diff_bits = 0f32;
-        for (g, r) in got.iter().zip(&reference) {
-            if g.to_bits() != r.to_bits() {
-                diff_bits = 1.0;
-                break;
-            }
-        }
-        results.push(ShapeResult {
-            m: n,
-            k: 1,
-            n: 1,
-            seed,
-            max_rel_err: diff_bits,
-            tolerance: 0.0,
-            pass: diff_bits == 0.0,
-        });
-    }
-    let pass = results.iter().all(|r| r.pass);
-    let pmc = pmc(&kernel);
-    let cert = Cert {
-        schema_version: SCHEMA_VERSION,
-        impl_id: "cast_f16_f32_gfx906".to_string(),
-        backend: "hip".to_string(),
-        arch: "gfx906".to_string(),
-        op: "cast_f16_f32".to_string(),
-        dtype_weight: "F16".to_string(),
-        dtype_activation: "F32".to_string(),
-        tolerance_formula: "exact bit match vs half::f16::to_f32".to_string(),
-        results,
-        pass,
-        emitted_at: now_utc_iso8601(),
-        rig: rig(),
-        pmc,
-    };
-    cert.write_to_disk(repo_root)?;
-    Ok(cert)
-}

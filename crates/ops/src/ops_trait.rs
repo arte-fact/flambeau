@@ -17,7 +17,7 @@ use anyhow::Result;
 use flambeau_core::device::DevicePtr;
 use flambeau_core::op::QDtype;
 
-/// Portable op surface implemented per backend (HIP today, CUDA in V2).
+/// Portable op surface implemented per backend (HIP and CUDA).
 ///
 /// The trait is intentionally one fat surface: every method a model
 /// composition crate needs lands here, grouped by family in the
@@ -97,18 +97,6 @@ pub trait Ops {
         k: usize,
     ) -> Result<()>;
 
-    fn mmvq_q4_0_gate_up(
-        &self,
-        buffers: crate::MmvqGateUpBuffers,
-        shape: crate::MmvqGateUpShape,
-    ) -> Result<()>;
-
-    fn mmvq_q4_1_gate_up(
-        &self,
-        buffers: crate::MmvqGateUpBuffers,
-        shape: crate::MmvqGateUpShape,
-    ) -> Result<()>;
-
     fn mmvq_q8_0_gate_up(
         &self,
         buffers: crate::MmvqGateUpBuffers,
@@ -128,17 +116,33 @@ pub trait Ops {
         dtype_weight: QDtype,
     ) -> Result<()>;
 
+    /// Q4_K r4 MMVQ for the wide-vocab LM head at decode: each block
+    /// owns 4 output rows, halving the block count over r2. `n_rows` is
+    /// the vocab; `n_superblocks` is `k / 256`. The 4-row amortisation
+    /// only pays off at vocab ≥ 131072 with `k % 256 == 0` — the caller
+    /// gates on that and falls back to `qmatmul` otherwise.
+    fn mmvq_q4_k_r4(
+        &self,
+        buf: crate::MmvqBuffers,
+        n_rows: usize,
+        n_superblocks: usize,
+    ) -> Result<()>;
+
     /// Weight × Q8_1 MMVQ writing directly into an F16 destination
     /// (saturating at ±65504). Skips the F32 scratch + `cast_f32_to_f16`
     /// two-step path for consumers whose downstream kernel expects F16
-    /// (e.g. K projection feeding `rmsnorm_f16`). Supports Q4_0 / Q4_1
-    /// / Q8_0 today; other dtypes bail. #120.
+    /// (e.g. K projection feeding `rmsnorm_f16`). Runs the same kernel as
+    /// [`Self::mmvq`]; valid when [`Self::mmvq_f16_supported`] holds.
     fn mmvq_f16_direct(
         &self,
         buf: crate::MmvqBuffers,
         shape: crate::MmvqShape,
         dtype_weight: QDtype,
     ) -> Result<()>;
+
+    /// Whether the m = 1 MMVQ kernel `mmvq` dispatches for `dtype_weight`
+    /// has an F16-output entry in this backend's build.
+    fn mmvq_f16_supported(&self, dtype_weight: QDtype) -> bool;
 
     fn mmq(
         &self,
@@ -239,12 +243,36 @@ pub trait Ops {
         eps: f32,
     ) -> Result<()>;
 
+    /// Graph-capture variant of `kv_append_v_unit_norm_f16`. When `slots` is
+    /// `Some`, the `write_pos` cache-row scalar arg is tagged for per-replay
+    /// update so the captured graph advances the write cursor.
+    fn kv_append_v_unit_norm_f16_slots(
+        &self,
+        buf: crate::KvAppendBuffers,
+        shape: crate::KvAppendVUnitShape,
+        write_pos: usize,
+        eps: f32,
+        slots: Option<crate::KvAppendSlots>,
+    ) -> Result<()>;
+
     fn attention_decode_f16_splitk(
         &self,
         buffers: crate::AttnBuffers,
         partials: crate::AttnSplitkPartials,
         shape: crate::AttnSplitkShape,
         knobs: crate::AttnKnobs,
+    ) -> Result<()>;
+
+    /// Graph-capture variant of `attention_decode_f16_splitk`. When `slots`
+    /// is `Some`, the chunk kernel's `n_tokens_kv` + `chunk_base` scalar args
+    /// are tagged for per-replay update while `n_chunks` is fixed.
+    fn attention_decode_f16_splitk_slots(
+        &self,
+        buffers: crate::AttnBuffers,
+        partials: crate::AttnSplitkPartials,
+        shape: crate::AttnSplitkShape,
+        knobs: crate::AttnKnobs,
+        slots: Option<crate::AttnSplitkSlots>,
     ) -> Result<()>;
 
     fn attention_decode_f16_splitk_h2(
@@ -255,11 +283,72 @@ pub trait Ops {
         knobs: crate::AttnKnobs,
     ) -> Result<()>;
 
+    /// Device-position split-K decode attention. Reads `position` from `pos_ptr`
+    /// on-device and derives `n_tokens_kv` / `chunk_base` / the K-V cache pointer
+    /// from the baked [`crate::AttnDposKnobs`] regime, so a captured decode graph
+    /// needs no per-arg rebind. CUDA-only.
+    fn attention_decode_f16_splitk_dpos(
+        &self,
+        buffers: crate::AttnBuffers,
+        partials: crate::AttnSplitkPartials,
+        shape: crate::AttnSplitkDposShape,
+        knobs: crate::AttnDposKnobs,
+        pos_ptr: DevicePtr,
+    ) -> Result<()>;
+
+    /// Device-position fused V-unit-norm + KV append. The write row is read from
+    /// `pos_ptr[0]` on-device; `shape.ring_depth` + `eps` are baked. CUDA-only.
+    fn kv_append_v_unit_norm_f16_dpos(
+        &self,
+        buf: crate::KvAppendBuffers,
+        shape: crate::KvAppendVUnitShape,
+        eps: f32,
+        pos_ptr: DevicePtr,
+    ) -> Result<()>;
+
+    /// Device-position F16 KV append of one K and one V row of `kv_width`;
+    /// the write row is read from `pos_ptr[0]` on-device. CUDA-only.
+    fn kv_append_f16_dpos(
+        &self,
+        buf: crate::KvAppendBuffers,
+        kv_width: usize,
+        ring_depth: usize,
+        pos_ptr: DevicePtr,
+    ) -> Result<()>;
+
+    /// Device-position embedding-row gather. Reads `token_id` from `ctx_ptr[1]`
+    /// on-device and copies `embd[token_id * hidden + j]` → `dst[j]`. CUDA-only.
+    fn embed_gather_f16_dpos(
+        &self,
+        embd: DevicePtr,
+        dst: DevicePtr,
+        hidden: usize,
+        ctx_ptr: DevicePtr,
+    ) -> Result<()>;
+
+    fn attention_decode_f16_batched_splitk(
+        &self,
+        buffers: crate::AttnBatchedBuffers,
+        partials: crate::AttnSplitkPartials,
+        shape: crate::AttnDecodeBatchedSplitkShape,
+        knobs: crate::AttnKnobs,
+    ) -> Result<()>;
+
     fn attention_decode_q8_kv(
         &self,
         buffers: crate::AttnBuffers,
         shape: crate::AttnDecodeShape,
         knobs: crate::AttnKnobs,
+    ) -> Result<()>;
+
+    /// Graph-capture variant of `attention_decode_q8_kv`. When `slots` is
+    /// `Some`, the `n_tokens_kv` kernel arg is tagged for per-replay update.
+    fn attention_decode_q8_kv_slots(
+        &self,
+        buffers: crate::AttnBuffers,
+        shape: crate::AttnDecodeShape,
+        knobs: crate::AttnKnobs,
+        slots: Option<crate::AttnDecodeQ8Slots>,
     ) -> Result<()>;
 
     fn attention_decode_q8_kv_splitk(
@@ -268,6 +357,50 @@ pub trait Ops {
         partials: crate::AttnSplitkPartials,
         shape: crate::AttnSplitkShape,
         knobs: crate::AttnKnobs,
+    ) -> Result<()>;
+
+    /// Graph-capture variant of `attention_decode_q8_kv_splitk`. When `slots`
+    /// is `Some`, the chunk kernel's `n_tokens_kv` + `chunk_base` scalar args
+    /// are tagged for per-replay update while `n_chunks` is fixed.
+    fn attention_decode_q8_kv_splitk_slots(
+        &self,
+        buffers: crate::AttnBuffers,
+        partials: crate::AttnSplitkPartials,
+        shape: crate::AttnSplitkShape,
+        knobs: crate::AttnKnobs,
+        slots: Option<crate::AttnDecodeQ8SplitkSlots>,
+    ) -> Result<()>;
+
+    /// Device-position split-K decode attention, Q8_0 KV. Q8 sibling of
+    /// `attention_decode_f16_splitk_dpos`: reads `position` from `pos_ptr`
+    /// on-device and derives `n_tokens_kv` / `chunk_base` / the K-V cache pointer
+    /// from the baked [`crate::AttnDposKnobs`] regime. CUDA-only.
+    /// The decode-attention path the committed dispatch table picks for a
+    /// `kv_dtype` KV cache at `m` query rows.
+    /// # Errors
+    /// No `[[attention_decode]]` row matches, or the row names an impl this
+    /// build does not map to a path.
+    fn attention_decode_variant(&self, kv_dtype: QDtype, m: usize) -> Result<crate::AttnDecodeVariant>;
+
+    /// Device-position Q8_0-KV decode attention, 128-thread warp-per-token
+    /// blocks (`attention_decode_q8_kv_vec_dpos`, CUDA-only). Global layers;
+    /// `partials` are used only when `shape.n_par > 1`.
+    fn attention_decode_q8_kv_vec_dpos(
+        &self,
+        buffers: crate::AttnBuffers,
+        partials: crate::AttnSplitkPartials,
+        shape: crate::AttnVecDposShape,
+        scale: f32,
+        pos_ptr: DevicePtr,
+    ) -> Result<()>;
+
+    fn attention_decode_q8_kv_splitk_dpos(
+        &self,
+        buffers: crate::AttnBuffers,
+        partials: crate::AttnSplitkPartials,
+        shape: crate::AttnSplitkDposShape,
+        knobs: crate::AttnDposKnobs,
+        pos_ptr: DevicePtr,
     ) -> Result<()>;
 
     fn attention_prefill_q8_kv(
@@ -390,6 +523,32 @@ pub trait Ops {
 
     fn quantize_f16_q8_0(&self, x_f16: DevicePtr, y_q8_0: DevicePtr, n_elems: usize) -> Result<()>;
 
+    /// Graph-capture variant of `quantize_f16_q8_0`. When `dst_slot` is
+    /// `Some`, the `y_q8_0` destination-pointer kernel arg is tagged so a
+    /// captured graph can rebind the per-token cache-write destination per
+    /// replay; `None` is byte-identical to `quantize_f16_q8_0`.
+    fn quantize_f16_q8_0_slots(
+        &self,
+        x_f16: DevicePtr,
+        y_q8_0: DevicePtr,
+        n_elems: usize,
+        dst_slot: Option<flambeau_core::ScalarSlot>,
+    ) -> Result<()>;
+
+    /// Device-position variant of `quantize_f16_q8_0`. Quantizes one decode row
+    /// (`n_elems` F16) into Q8_0 blocks at physical cache row
+    /// `ring_depth > 0 ? position % ring_depth : position`, `position` read from
+    /// `pos_ptr[0]` on-device. `y_q8_0_base` is the UNSLID cache slab base.
+    /// CUDA-only.
+    fn quantize_f16_q8_0_dpos(
+        &self,
+        x_f16: DevicePtr,
+        y_q8_0_base: DevicePtr,
+        n_elems: usize,
+        ring_depth: i32,
+        pos_ptr: DevicePtr,
+    ) -> Result<()>;
+
     // -- mlp (pointwise + gated activations) --
 
     fn silu_f32(&self, x: DevicePtr, y: DevicePtr, n: usize) -> Result<()>;
@@ -405,6 +564,40 @@ pub trait Ops {
         y_q8_1: DevicePtr,
         n: usize,
     ) -> Result<()>;
+
+    /// Fused `y_q8_1 = quantize_row_q8_1(gelu(a) * b)` for F32 inputs —
+    /// Gemma-4 dense-FFN twin of [`Ops::swiglu_f32_to_q8_1`]. GELU is the
+    /// ggml tanh-approximation form.
+    fn gelu_mul_f32_to_q8_1(
+        &self,
+        a: DevicePtr,
+        b: DevicePtr,
+        y_q8_1: DevicePtr,
+        n: usize,
+    ) -> Result<()>;
+
+    /// MMQ-layout twin of [`Ops::gelu_mul_f32_to_q8_1`]: emits the DS4 144-B
+    /// `block_q8_1_mmq` the prefill down-projection MMQ reads. `ncols` is the
+    /// intermediate width (must be `% 128 == 0`); `total_b` the token count.
+    fn gelu_mul_f32_to_q8_1_mmq(
+        &self,
+        a: DevicePtr,
+        b: DevicePtr,
+        y_q8_1_mmq: DevicePtr,
+        ncols: usize,
+        total_b: usize,
+    ) -> Result<()>;
+
+    /// Whether the auto-dispatched [`Ops::qmatmul`] reads the 144-B DS4
+    /// `act_q8_1_mmq` activation (`true`) or the 36-B standard `act_q8_1`
+    /// (`false`) for `(dtype_weight, shape)`. Callers that pre-quantise both
+    /// layouts use this to skip whichever is dead. Backed by the same
+    /// dispatch used to launch, so it never disagrees with the real routing.
+    fn qmatmul_reads_mmq_activation(
+        &self,
+        shape: crate::MatmulShape,
+        dtype_weight: QDtype,
+    ) -> bool;
 
     /// Fused `y_f16[i] = (fp16)(gelu(a[i]) * b[i])` — Gemma 4 dense
     /// FFN. GELU = ggml tanh-approximation form.
@@ -466,6 +659,17 @@ pub trait Ops {
         n_pairs: usize,
         vocab: usize,
         knobs: crate::PenaltyKnobs,
+    ) -> Result<()>;
+
+    /// On-device host `argmax` of `logits` after, in place and in the host
+    /// order, the `n_adds` sparse additions then the optional penalties
+    /// (`(n_pairs, knobs)` over `bufs.penalty_counts`).
+    fn argmax_f32(
+        &self,
+        bufs: crate::ArgmaxBuffers,
+        vocab: usize,
+        n_adds: usize,
+        penalties: Option<(usize, crate::PenaltyKnobs)>,
     ) -> Result<()>;
 
     fn topk_softmax_f32(
@@ -734,12 +938,6 @@ pub trait Ops {
         shape: crate::MoeMmvqShape,
     ) -> Result<()>;
 
-    fn indexed_moe_mmvq_q4_k_r2_sorted(
-        &self,
-        buffers: crate::MoeMmvqSortedBuffers,
-        shape: crate::MoeMmvqShape,
-    ) -> Result<()>;
-
     fn indexed_moe_mmq_q4_k_gate_up_tile8(
         &self,
         buffers: crate::MoeMmqTile8GateUpBuffers,
@@ -910,18 +1108,6 @@ pub trait Ops {
         shape: MoeShape,
     ) -> Result<()>;
 
-    fn indexed_moe_mmq_q4_k_gate_up_turbo(
-        &self,
-        bufs: crate::MoeMmqQ4KGateUpTurboBuffers,
-        shape: MoeShape,
-    ) -> Result<()>;
-
-    fn indexed_moe_mmq_q4_k_down_turbo(
-        &self,
-        bufs: crate::MoeMmqQ4KDownTurboBuffers,
-        shape: MoeShape,
-    ) -> Result<()>;
-
     fn indexed_moe_mmq_q5_k_down_tile8(
         &self,
         buffers: crate::MoeMmqTile8DownBuffers,
@@ -934,22 +1120,10 @@ pub trait Ops {
         shape: MoeShape,
     ) -> Result<()>;
 
-    fn indexed_moe_mmvq_q4_k_gate_up_sorted(
-        &self,
-        buffers: crate::MoeMmvqGateUpSortedBuffers,
-        shape: crate::MoeMmvqShape,
-    ) -> Result<()>;
-
     fn indexed_moe_mmvq_q4_k_gate_up(
         &self,
         buffers: crate::MoeMmvqGateUpBuffers,
         shape: crate::MoeMmvqShape,
-    ) -> Result<()>;
-
-    fn indexed_moe_mmq_q4_k(
-        &self,
-        bufs: crate::MoeMmqQ4KBuffers,
-        shape: crate::MoeMmqQ4KShape,
     ) -> Result<()>;
 
     fn shared_expert_scale_f32(

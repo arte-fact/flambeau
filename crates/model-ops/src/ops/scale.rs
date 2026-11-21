@@ -2,7 +2,7 @@
 //! alias input).
 
 use anyhow::bail;
-use flambeau_ops::{HipOps, Ops};
+use flambeau_ops::Ops;
 
 use crate::dtype::F16;
 use crate::error::Result;
@@ -13,7 +13,7 @@ pub fn scale_f16(
     output: &mut Tensor<F16>,
     n: usize,
     scale: f32,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     if input.n_elems < n {
         bail!("scale_f16: input has {} elems, need >= {n}", input.n_elems);
@@ -35,6 +35,7 @@ fn cpu_scale_f16(input: &[half::f16], scale: f32) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flambeau_ops::HipOps;
     use crate::testing::{
         alloc, assert_close_f16, download, free, test_device, test_ops_registry, upload,
     };

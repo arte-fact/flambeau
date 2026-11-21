@@ -3,9 +3,7 @@
 //! `POST /v1/chat/completions` (non-streaming only in ; SSE is ).
 //! Chat template from GGUF `tokenizer.chat_template` via `minijinja`.
 //! Single-session model: one shared `ModelState` behind a Tokio mutex.
-//! Concurrent HTTP requests serialise through the mutex — continuous
-//! batching is V2. The V1 target is "works end-to-end with real OpenAI
-//! clients", not throughput at load.
+//! Concurrent HTTP requests serialise through the mutex.
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 
@@ -17,19 +15,19 @@ pub mod tool_call_parser;
 
 #[cfg(feature = "hip")]
 pub mod embedding;
-#[cfg(feature = "hip")]
+#[cfg(any(feature = "hip", feature = "cuda"))]
 pub mod gpu_sampler;
-#[cfg(feature = "hip")]
+#[cfg(any(feature = "hip", feature = "cuda"))]
 pub mod model_cfg;
-#[cfg(feature = "hip")]
+#[cfg(any(feature = "hip", feature = "cuda"))]
 pub mod model_handle;
-#[cfg(feature = "hip")]
+#[cfg(any(feature = "hip", feature = "cuda"))]
 pub mod routes;
-#[cfg(feature = "hip")]
+#[cfg(any(feature = "hip", feature = "cuda"))]
 pub mod serve;
-#[cfg(feature = "hip")]
+#[cfg(any(feature = "hip", feature = "cuda"))]
 pub mod serve_common;
-#[cfg(feature = "hip")]
+#[cfg(any(feature = "hip", feature = "cuda"))]
 pub mod v2_handle;
 
 pub use api::{
@@ -40,7 +38,7 @@ pub use api::{
 };
 pub use state::{ModelDefaults, SamplingParams};
 
-#[cfg(feature = "hip")]
+#[cfg(any(feature = "hip", feature = "cuda"))]
 pub use model_handle::{Model, Session};
-#[cfg(feature = "hip")]
-pub use serve::{serve, MeshMode, ServeConfig};
+#[cfg(any(feature = "hip", feature = "cuda"))]
+pub use serve::{serve, MeshMode, ServeBackend, ServeConfig};

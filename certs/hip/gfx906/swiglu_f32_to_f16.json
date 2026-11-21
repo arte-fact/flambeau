@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "impl_id": "swiglu_f32_to_f16",
+  "backend": "hip",
+  "arch": "gfx906",
+  "op": "swiglu_f32_to_f16",
+  "dtype_weight": "F32",
+  "dtype_activation": "F16",
+  "tolerance_formula": "|err| <= tol * max(|ref|, floor) vs F64 oracle",
+  "results": [
+    {
+      "m": 256,
+      "k": 1,
+      "n": 1,
+      "seed": 12599535,
+      "max_rel_err": 0.0,
+      "tolerance": 0.005,
+      "pass": true
+    },
+    {
+      "m": 1024,
+      "k": 1,
+      "n": 1,
+      "seed": 12714991,
+      "max_rel_err": 0.0,
+      "tolerance": 0.005,
+      "pass": true
+    },
+    {
+      "m": 4096,
+      "k": 1,
+      "n": 1,
+      "seed": 13307887,
+      "max_rel_err": 0.0,
+      "tolerance": 0.005,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-06-18T12:49:39Z",
+  "rig": "threadreaper-gfx906",
+  "pmc": {
+    "vgpr_count": 10,
+    "sgpr_count": null,
+    "waves_per_simd": 10,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

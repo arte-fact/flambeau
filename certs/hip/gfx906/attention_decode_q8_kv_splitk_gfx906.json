@@ -19,10 +19,37 @@
     },
     {
       "m": 32,
+      "k": 40,
+      "n": 128,
+      "seed": 13742742,
+      "max_rel_err": 0.00053947966,
+      "tolerance": 0.05,
+      "pass": true
+    },
+    {
+      "m": 32,
+      "k": 100,
+      "n": 128,
+      "seed": 13736490,
+      "max_rel_err": 0.00053947966,
+      "tolerance": 0.05,
+      "pass": true
+    },
+    {
+      "m": 32,
       "k": 128,
       "n": 128,
       "seed": 13733854,
       "max_rel_err": 0.00053947966,
+      "tolerance": 0.05,
+      "pass": true
+    },
+    {
+      "m": 32,
+      "k": 256,
+      "n": 128,
+      "seed": 13752414,
+      "max_rel_err": 0.00026973983,
       "tolerance": 0.05,
       "pass": true
     },
@@ -64,10 +91,37 @@
     },
     {
       "m": 16,
+      "k": 40,
+      "n": 256,
+      "seed": 12593686,
+      "max_rel_err": 0.00076293945,
+      "tolerance": 0.05,
+      "pass": true
+    },
+    {
+      "m": 16,
+      "k": 100,
+      "n": 256,
+      "seed": 12583594,
+      "max_rel_err": 0.00038146973,
+      "tolerance": 0.05,
+      "pass": true
+    },
+    {
+      "m": 16,
       "k": 128,
       "n": 256,
       "seed": 12588894,
       "max_rel_err": 0.00038146973,
+      "tolerance": 0.05,
+      "pass": true
+    },
+    {
+      "m": 16,
+      "k": 256,
+      "n": 256,
+      "seed": 12599518,
+      "max_rel_err": 0.00019073486,
       "tolerance": 0.05,
       "pass": true
     },
@@ -100,12 +154,12 @@
     }
   ],
   "pass": true,
-  "emitted_at": "2026-06-09T16:17:22Z",
+  "emitted_at": "2026-11-19T15:04:35Z",
   "rig": "threadreaper-gfx906",
   "pmc": {
-    "vgpr_count": 31,
+    "vgpr_count": 24,
     "sgpr_count": null,
-    "waves_per_simd": 8,
+    "waves_per_simd": 10,
     "mem_busy_pct": null,
     "valu_busy_pct": null
   }

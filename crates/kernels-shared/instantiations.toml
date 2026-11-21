@@ -1,0 +1,4960 @@
+# Backend-neutral kernel instantiation manifest.
+#
+# Each [[kernel]] cell generates one wrapper `.cu` for BOTH backends
+# (kernels-hip + kernels-cuda) at build time. The build scripts inject the
+# per-backend arch-primitives header ahead of `includes` (gfx906.cuh for HIP,
+# sm_80.cuh for CUDA), so a templated kernel is a cell here — not two
+# hand-written wrappers that drift. `stem` is the catalogue key (what
+# `hsaco(..)` / `cubin(..)` look up). A cell carries one or more
+# `[[kernel.entry]]` blocks sharing that `.cu`/module — each `name` is a
+# dispatch ABI symbol, identical on both backends (e.g. an F32 dst entry plus
+# an F16-dst entry).
+
+[[kernel]]
+stem = "mmvq_q8_0_dp4a"
+includes = ["quant_traits.cuh", "mmvq.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q8_0_dp4a_q8_1"
+params = """
+    const flambeau_block_q8_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_dp4a_row<Q8_0, 256>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q8_0_dp4a_q8_1_f16"
+params = """
+    const flambeau_block_q8_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_dp4a_row<Q8_0, 256, fb_fp16_t>(x, y, dst, n_rows, n_blocks_per_row);"
+
+# Q8_0 t128 config variant — same skeleton at 128 threads/block (2 wave64 → more
+# in-flight blocks/CU; on CUDA 4 warps). An autotune candidate vs the 256-thread
+# dp4a; the THREADS template param is the only difference.
+[[kernel]]
+stem = "mmvq_q8_0_t128"
+includes = ["quant_traits.cuh", "mmvq.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q8_0_t128_q8_1"
+params = """
+    const flambeau_block_q8_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_dp4a_row<Q8_0, 128>(x, y, dst, n_rows, n_blocks_per_row);"
+
+# Q8_0 VDR=2 config variants — 4 threads/block, 2 dp4a chained per slot then one
+# scale multiply (mmvq_dp4a_vdr_row). dp4a_vdr2 = 256t; t128_vdr2 = 128t.
+[[kernel]]
+stem = "mmvq_q8_0_dp4a_vdr2"
+includes = ["quant_traits.cuh", "mmvq.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q8_0_dp4a_vdr2_q8_1"
+params = """
+    const flambeau_block_q8_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_dp4a_vdr_row<Q8_0, 256, 2>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel]]
+stem = "mmvq_q8_0_t128_vdr2"
+includes = ["quant_traits.cuh", "mmvq.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q8_0_t128_vdr2_q8_1"
+params = """
+    const flambeau_block_q8_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_dp4a_vdr_row<Q8_0, 128, 2>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q8_0_t128_vdr2_q8_1_f16"
+params = """
+    const flambeau_block_q8_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_dp4a_vdr_row<Q8_0, 128, 2, fb_fp16_t>(x, y, dst, n_rows, n_blocks_per_row);"
+
+# Q8_0 multi-row config variants — one 64-thread block computes 2 (r2) / 4 (r4)
+# output rows, sharing the Q8_1 activation reads across rows and shrinking the
+# grid by ROWS (mmvq_dp4a_nrow_row). Per-row width-(64/ROWS) shfl_xor reduce, no
+# LDS. Autotune candidates vs the single-row 256/128-thread variants.
+[[kernel]]
+stem = "mmvq_q8_0_r2"
+includes = ["quant_traits.cuh", "mmvq.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q8_0_r2_q8_1"
+params = """
+    const flambeau_block_q8_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_dp4a_nrow_row<Q8_0, 64, 2>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel]]
+stem = "mmvq_q8_0_r4"
+includes = ["quant_traits.cuh", "mmvq.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q8_0_r4_q8_1"
+params = """
+    const flambeau_block_q8_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_dp4a_nrow_row<Q8_0, 64, 4>(x, y, dst, n_rows, n_blocks_per_row);"
+
+# Q8_0 fused gate+up MMVQ — the dense FFN decode kernel. Two weight matrices
+# share one Q8_1 activation read, two outputs. t128 + VDR=2 (mmvq_gate_up_dp4a_
+# vdr_row); same stem/entry as the retired hand kernel so the runtime alias and
+# the ops launcher are unchanged.
+[[kernel]]
+stem = "mmvq_q8_0_gate_up_t128_vdr2"
+includes = ["quant_traits.cuh", "mmvq_gate_up.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q8_0_gate_up_t128_vdr2_q8_1"
+params = """
+    const flambeau_block_q8_0* __restrict__ gate_w,
+    const flambeau_block_q8_0* __restrict__ up_w,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ gate_out,
+    float* __restrict__ up_out,
+    const int n_rows_gate,
+    const int n_rows_up,
+    const int n_blocks_per_row"""
+body = "mmvq_gate_up_dp4a_vdr_row<Q8_0, 128, 2>(gate_w, up_w, y, gate_out, up_out, n_rows_gate, n_rows_up, n_blocks_per_row);"
+
+# Q5_K fused gate+up MMVQ — super-block 5-bit dense FFN / shared-expert decode
+# kernel. 256 threads, 32 per super-block; scales+dmin + 5th-bit plane; own
+# neutral body (mmvq_q5_k_gate_up.cuh) sharing the two-output reduce. Same
+# stem/entry as the retired hand kernel.
+[[kernel]]
+stem = "mmvq_q5_k_gate_up_dp4a"
+includes = ["quant_traits.cuh", "mmvq_q5_k_gate_up.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q5_k_gate_up_dp4a_q8_1"
+params = """
+    const flambeau_block_q5_K* __restrict__ gate_w,
+    const flambeau_block_q5_K* __restrict__ up_w,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ gate_out,
+    float* __restrict__ up_out,
+    const int n_rows_gate,
+    const int n_rows_up,
+    const int n_superblocks_per_row"""
+body = "mmvq_q5_k_gate_up_dp4a_row<256>(gate_w, up_w, y, gate_out, up_out, n_rows_gate, n_rows_up, n_superblocks_per_row);"
+
+# Q8_0 batched MMVQ — one weight row × N Q8_1 activation columns (slot-major),
+# N=2/3/4 compile-time. The weight read is amortized across the N slots (the
+# mirror of gate+up). Same stem/entries as the retired hand kernel.
+[[kernel]]
+stem = "mmvq_q8_0_batched"
+includes = ["quant_traits.cuh", "mmvq.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q8_0_q8_1_batched_n2"
+params = """
+    const flambeau_block_q8_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_dp4a_batched_row<Q8_0, 256, 2>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q8_0_q8_1_batched_n3"
+params = """
+    const flambeau_block_q8_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_dp4a_batched_row<Q8_0, 256, 3>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q8_0_q8_1_batched_n4"
+params = """
+    const flambeau_block_q8_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_dp4a_batched_row<Q8_0, 256, 4>(x, y, dst, n_rows, n_blocks_per_row);"
+
+# Q4_0 / Q4_1 batched MMVQ — same generic skeleton; the per-block (q-8) / +m·s_y
+# bias rides in quant_traits<Q4_0/Q4_1>::partial. Same stems/entries as the
+# retired hand kernels.
+[[kernel]]
+stem = "mmvq_q4_0_batched"
+includes = ["quant_traits.cuh", "mmvq.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_0_q8_1_batched_n2"
+params = """
+    const flambeau_block_q4_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_dp4a_batched_row<Q4_0, 256, 2>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_0_q8_1_batched_n3"
+params = """
+    const flambeau_block_q4_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_dp4a_batched_row<Q4_0, 256, 3>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_0_q8_1_batched_n4"
+params = """
+    const flambeau_block_q4_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_dp4a_batched_row<Q4_0, 256, 4>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel]]
+stem = "mmvq_q4_1_batched"
+includes = ["quant_traits.cuh", "mmvq.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_1_q8_1_batched_n2"
+params = """
+    const flambeau_block_q4_1* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_dp4a_batched_row<Q4_1, 256, 2>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_1_q8_1_batched_n3"
+params = """
+    const flambeau_block_q4_1* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_dp4a_batched_row<Q4_1, 256, 3>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_1_q8_1_batched_n4"
+params = """
+    const flambeau_block_q4_1* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_dp4a_batched_row<Q4_1, 256, 4>(x, y, dst, n_rows, n_blocks_per_row);"
+
+# Row-tiled batched dp4a MMVQ for Q4_K / Q5_K / Q6_K / IQ4_XS / IQ3_S / IQ3_XXS / IQ2_S
+# (mmvq_dp4a_batched_k.cuh):
+# 8 weight rows per block share one LDS-staged activation strip; one weight
+# read feeds N activation columns, N = 2..8 (speculative-decode verify).
+[[kernel]]
+stem = "mmvq_q4_k_dp4a_batched"
+includes = ["mmvq_dp4a_batched_k.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_k_dp4a_q8_1_batched_n2"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_q4_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::Q4K, 2>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_k_dp4a_q8_1_batched_n3"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_q4_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::Q4K, 3>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_k_dp4a_q8_1_batched_n4"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_q4_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::Q4K, 4>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_k_dp4a_q8_1_batched_n5"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_q4_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::Q4K, 5>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_k_dp4a_q8_1_batched_n6"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_q4_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::Q4K, 6>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_k_dp4a_q8_1_batched_n7"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_q4_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::Q4K, 7>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_k_dp4a_q8_1_batched_n8"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_q4_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::Q4K, 8>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel]]
+stem = "mmvq_q5_k_dp4a_batched"
+includes = ["mmvq_dp4a_batched_k.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q5_k_dp4a_q8_1_batched_n2"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_q5_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::Q5K, 2>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q5_k_dp4a_q8_1_batched_n3"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_q5_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::Q5K, 3>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q5_k_dp4a_q8_1_batched_n4"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_q5_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::Q5K, 4>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q5_k_dp4a_q8_1_batched_n5"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_q5_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::Q5K, 5>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q5_k_dp4a_q8_1_batched_n6"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_q5_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::Q5K, 6>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q5_k_dp4a_q8_1_batched_n7"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_q5_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::Q5K, 7>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q5_k_dp4a_q8_1_batched_n8"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_q5_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::Q5K, 8>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel]]
+stem = "mmvq_iq4_xs_dp4a_batched"
+includes = ["mmvq_dp4a_batched_k.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq4_xs_dp4a_q8_1_batched_n2"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_iq4_xs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::IQ4XS, 2>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq4_xs_dp4a_q8_1_batched_n3"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_iq4_xs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::IQ4XS, 3>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq4_xs_dp4a_q8_1_batched_n4"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_iq4_xs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::IQ4XS, 4>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq4_xs_dp4a_q8_1_batched_n5"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_iq4_xs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::IQ4XS, 5>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq4_xs_dp4a_q8_1_batched_n6"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_iq4_xs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::IQ4XS, 6>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq4_xs_dp4a_q8_1_batched_n7"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_iq4_xs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::IQ4XS, 7>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq4_xs_dp4a_q8_1_batched_n8"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_iq4_xs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::IQ4XS, 8>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel]]
+stem = "mmvq_iq3_s_dp4a_batched"
+includes = ["mmvq_dp4a_batched_k.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq3_s_dp4a_q8_1_batched_n2"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_iq3_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::IQ3S, 2>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq3_s_dp4a_q8_1_batched_n3"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_iq3_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::IQ3S, 3>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq3_s_dp4a_q8_1_batched_n4"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_iq3_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::IQ3S, 4>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq3_s_dp4a_q8_1_batched_n5"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_iq3_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::IQ3S, 5>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq3_s_dp4a_q8_1_batched_n6"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_iq3_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::IQ3S, 6>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq3_s_dp4a_q8_1_batched_n7"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_iq3_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::IQ3S, 7>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq3_s_dp4a_q8_1_batched_n8"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_iq3_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::IQ3S, 8>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel]]
+stem = "mmvq_iq3_xxs_dp4a_batched"
+includes = ["mmvq_dp4a_batched_k.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq3_xxs_dp4a_q8_1_batched_n2"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_iq3_xxs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::IQ3XXS, 2>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq3_xxs_dp4a_q8_1_batched_n3"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_iq3_xxs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::IQ3XXS, 3>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq3_xxs_dp4a_q8_1_batched_n4"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_iq3_xxs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::IQ3XXS, 4>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq3_xxs_dp4a_q8_1_batched_n5"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_iq3_xxs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::IQ3XXS, 5>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq3_xxs_dp4a_q8_1_batched_n6"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_iq3_xxs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::IQ3XXS, 6>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq3_xxs_dp4a_q8_1_batched_n7"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_iq3_xxs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::IQ3XXS, 7>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq3_xxs_dp4a_q8_1_batched_n8"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_iq3_xxs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::IQ3XXS, 8>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel]]
+stem = "mmvq_iq2_s_dp4a_batched"
+includes = ["mmvq_dp4a_batched_k.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq2_s_dp4a_q8_1_batched_n2"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_iq2_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::IQ2S, 2>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq2_s_dp4a_q8_1_batched_n3"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_iq2_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::IQ2S, 3>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq2_s_dp4a_q8_1_batched_n4"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_iq2_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::IQ2S, 4>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq2_s_dp4a_q8_1_batched_n5"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_iq2_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::IQ2S, 5>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq2_s_dp4a_q8_1_batched_n6"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_iq2_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::IQ2S, 6>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq2_s_dp4a_q8_1_batched_n7"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_iq2_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::IQ2S, 7>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq2_s_dp4a_q8_1_batched_n8"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_iq2_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::IQ2S, 8>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel]]
+stem = "mmvq_q6_k_dp4a_batched"
+includes = ["mmvq_dp4a_batched_k.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q6_k_dp4a_q8_1_batched_n2"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_q6_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::Q6K, 2>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q6_k_dp4a_q8_1_batched_n3"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_q6_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::Q6K, 3>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q6_k_dp4a_q8_1_batched_n4"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_q6_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::Q6K, 4>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q6_k_dp4a_q8_1_batched_n5"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_q6_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::Q6K, 5>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q6_k_dp4a_q8_1_batched_n6"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_q6_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::Q6K, 6>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q6_k_dp4a_q8_1_batched_n7"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_q6_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::Q6K, 7>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q6_k_dp4a_q8_1_batched_n8"
+launch_bounds = "256, 2"
+params = """
+    const flambeau_block_q6_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_dp4a_rowtile_batched_row<mmvq_rt::Q6K, 8>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+# Q5_K batched MMVQ — r2 multi-row (64 threads = 2 rows/block), own neutral body
+# (mmvq_q5_k_r2_batched.cuh) sharing the r2 N-way reduce. Same stem/entries as
+# the retired hand kernel; grid = ceil(n_rows/2).
+[[kernel]]
+stem = "mmvq_q5_k_r2_batched"
+includes = ["quant_traits.cuh", "mmvq_q5_k_r2_batched.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q5_k_r2_q8_1_batched_n2"
+params = """
+    const flambeau_block_q5_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_q5_k_r2_batched_row<2>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q5_k_r2_q8_1_batched_n3"
+params = """
+    const flambeau_block_q5_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_q5_k_r2_batched_row<3>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q5_k_r2_q8_1_batched_n4"
+params = """
+    const flambeau_block_q5_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_q5_k_r2_batched_row<4>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+# Q8_0 row-tiled batched MMVQ — R=THREADS/WARP_SIZE rows/block share an LDS-
+# staged activation strip across N columns (warp-size-agnostic block coverage).
+# Own neutral body (mmvq_q8_0_row_tile.cuh). Same stem/entries as the retired
+# hand kernel; grid = ceil(n_rows / 4) (wave64 R; wave32 over-launches, guarded).
+[[kernel]]
+stem = "mmvq_q8_0_row_tile_batched"
+includes = ["quant_traits.cuh", "mmvq_q8_0_row_tile.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q8_0_row_tile_dp4a_q8_1_batched_n2"
+params = """
+    const flambeau_block_q8_0* __restrict__ w,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_q8_0_row_tile_batched_row<256, 2>(w, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q8_0_row_tile_dp4a_q8_1_batched_n3"
+params = """
+    const flambeau_block_q8_0* __restrict__ w,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_q8_0_row_tile_batched_row<256, 3>(w, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q8_0_row_tile_dp4a_q8_1_batched_n4"
+params = """
+    const flambeau_block_q8_0* __restrict__ w,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_q8_0_row_tile_batched_row<256, 4>(w, y, dst, n_rows, n_blocks_per_row);"
+
+# Q4_0 row-tiled batched MMVQ — nibble + (q-8) bias sibling of the Q8_0 row-tile
+# (OUTER_BLOCKS=16, 4 weight lanes/block). Own neutral body
+# (mmvq_q4_0_row_tile.cuh). Same stem/entries as the retired hand kernel.
+[[kernel]]
+stem = "mmvq_q4_0_row_tile_batched"
+includes = ["quant_traits.cuh", "mmvq_q4_0_row_tile.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_0_row_tile_dp4a_q8_1_batched_n2"
+params = """
+    const flambeau_block_q4_0* __restrict__ w,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_q4_0_row_tile_batched_row<256, 2>(w, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_0_row_tile_dp4a_q8_1_batched_n3"
+params = """
+    const flambeau_block_q4_0* __restrict__ w,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_q4_0_row_tile_batched_row<256, 3>(w, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_0_row_tile_dp4a_q8_1_batched_n4"
+params = """
+    const flambeau_block_q4_0* __restrict__ w,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_q4_0_row_tile_batched_row<256, 4>(w, y, dst, n_rows, n_blocks_per_row);"
+
+# Q4_0 fused gate+up row-tiled batched MMVQ — the triple fusion (2 outputs × R
+# rows × N cols). Own neutral body (mmvq_q4_0_gate_up_row_tile.cuh). Same
+# stem/entries as the retired hand kernel; grid = ceil(max(rows_gate,rows_up)/4).
+[[kernel]]
+stem = "mmvq_q4_0_gate_up_row_tile_batched"
+includes = ["quant_traits.cuh", "mmvq_q4_0_gate_up_row_tile.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_0_gate_up_row_tile_dp4a_q8_1_batched_n2"
+params = """
+    const flambeau_block_q4_0* __restrict__ gate_w,
+    const flambeau_block_q4_0* __restrict__ up_w,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ gate_out,
+    float* __restrict__ up_out,
+    const int n_rows_gate,
+    const int n_rows_up,
+    const int n_blocks_per_row"""
+body = "mmvq_q4_0_gate_up_row_tile_batched_row<256, 2>(gate_w, up_w, y, gate_out, up_out, n_rows_gate, n_rows_up, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_0_gate_up_row_tile_dp4a_q8_1_batched_n3"
+params = """
+    const flambeau_block_q4_0* __restrict__ gate_w,
+    const flambeau_block_q4_0* __restrict__ up_w,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ gate_out,
+    float* __restrict__ up_out,
+    const int n_rows_gate,
+    const int n_rows_up,
+    const int n_blocks_per_row"""
+body = "mmvq_q4_0_gate_up_row_tile_batched_row<256, 3>(gate_w, up_w, y, gate_out, up_out, n_rows_gate, n_rows_up, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_0_gate_up_row_tile_dp4a_q8_1_batched_n4"
+params = """
+    const flambeau_block_q4_0* __restrict__ gate_w,
+    const flambeau_block_q4_0* __restrict__ up_w,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ gate_out,
+    float* __restrict__ up_out,
+    const int n_rows_gate,
+    const int n_rows_up,
+    const int n_blocks_per_row"""
+body = "mmvq_q4_0_gate_up_row_tile_batched_row<256, 4>(gate_w, up_w, y, gate_out, up_out, n_rows_gate, n_rows_up, n_blocks_per_row);"
+
+# Q8_0 MMQ correctness oracle — one output element per {n_rows, n_batches} grid
+# block (batched dot). The cross-backend MMQ pilot (P2c); reuses the warp-size-
+# agnostic mmvq reduce. Same stem/entry as the retired hand kernel.
+[[kernel]]
+stem = "mmq_q8_0_oracle"
+includes = ["quant_traits.cuh", "mmq_q8_0_oracle.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmq_q8_0_oracle_q8_1"
+params = """
+    const flambeau_block_q8_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_batches,
+    const int n_blocks_per_row"""
+body = "mmq_q8_0_oracle_row<256>(x, y, dst, n_rows, n_batches, n_blocks_per_row);"
+
+# Single-pass tiled MMQ (prefill GEMM) for the simple 32-element-block quants —
+# one shared skeleton `mmq_wave64_row<Q, MMQ_Y=64, TILE_N=8>` (each thread one
+# weight row, decode-once via quant_traits<Q>::mmq_decode + per-col mmq_partial;
+# no LDS, warp-size agnostic). Same stem/entry as the retired hand kernels.
+[[kernel]]
+stem = "mmq_q8_0_wave64"
+includes = ["quant_traits.cuh", "mmq_wave64.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_q8_0_wave64_q8_1"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int nrows_y,
+    const int nrows_dst"""
+body = "mmq_wave64_row<Q8_0, 64, 8>(vx, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst);"
+
+# Q8_0 wave64 MMQ, TILE_N=16 — same skeleton, doubles activation cols/block to
+# halve weight HBM bandwidth on L2-overflowing prefill (HBM-bound at TILE_N=8).
+[[kernel]]
+stem = "mmq_q8_0_wave64_tile16"
+includes = ["quant_traits.cuh", "mmq_wave64.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_q8_0_wave64_tile16_q8_1"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int nrows_y,
+    const int nrows_dst"""
+body = "mmq_wave64_row<Q8_0, 64, 16>(vx, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst);"
+
+[[kernel]]
+stem = "mmq_q4_0_wave64"
+includes = ["quant_traits.cuh", "mmq_wave64.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_q4_0_wave64_q8_1"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int nrows_y,
+    const int nrows_dst"""
+body = "mmq_wave64_row<Q4_0, 64, 8>(vx, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst);"
+
+[[kernel]]
+stem = "mmq_q4_1_wave64"
+includes = ["quant_traits.cuh", "mmq_wave64.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_q4_1_wave64_q8_1"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int nrows_y,
+    const int nrows_dst"""
+body = "mmq_wave64_row<Q4_1, 64, 8>(vx, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst);"
+
+[[kernel]]
+stem = "mmq_q5_0_wave64"
+includes = ["quant_traits.cuh", "mmq_wave64.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_q5_0_wave64_q8_1"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int nrows_y,
+    const int nrows_dst"""
+body = "mmq_wave64_row<Q5_0, 64, 8>(vx, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst);"
+
+[[kernel]]
+stem = "mmq_q5_1_wave64"
+includes = ["quant_traits.cuh", "mmq_wave64.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_q5_1_wave64_q8_1"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int nrows_y,
+    const int nrows_dst"""
+body = "mmq_wave64_row<Q5_1, 64, 8>(vx, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst);"
+
+# Q6_K single-pass tiled MMQ (prefill GEMM) — super-block decode (own body,
+# K-quant). Same stem/entry as the retired hand kernel.
+[[kernel]]
+stem = "mmq_q6_K_wave64"
+includes = ["quant_traits.cuh", "mmq_q6_k_wave64.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_q6_K_wave64_q8_1"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int nrows_y,
+    const int nrows_dst"""
+body = "mmq_q6_k_wave64_row<64, 8>(vx, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst);"
+
+# Q4_K single-pass tiled MMQ (prefill GEMM) — super-block decode (own body,
+# K-quant; d·Σd − dmin·Σm). Same stem/entry as the retired hand kernel.
+[[kernel]]
+stem = "mmq_q4_K_wave64"
+includes = ["quant_traits.cuh", "mmq_q4_k_wave64.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_q4_K_wave64_q8_1"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int nrows_y,
+    const int nrows_dst"""
+body = "mmq_q4_k_wave64_row<64, 8>(vx, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst);"
+
+# Q5_K single-pass tiled MMQ (prefill GEMM) — Q4_K super-block decode plus the
+# 5th-bit plane from qh. Same stem/entry as the retired hand kernel.
+[[kernel]]
+stem = "mmq_q5_K_wave64"
+includes = ["quant_traits.cuh", "mmq_q5_k_wave64.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_q5_K_wave64_q8_1"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int nrows_y,
+    const int nrows_dst"""
+body = "mmq_q5_k_wave64_row<64, 8>(vx, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst);"
+
+# Q2_K single-pass tiled MMQ (prefill GEMM) — 16 packed 4-bit (scale, min)
+# pairs, 2-bit quants, two Q2_K sub-blocks per Q8_1 sub-block. Same stem/entry
+# as the retired hand kernel.
+[[kernel]]
+stem = "mmq_q2_K_wave64"
+includes = ["quant_traits.cuh", "mmq_q2_k_wave64.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_q2_K_wave64_q8_1"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int nrows_y,
+    const int nrows_dst"""
+body = "mmq_q2_k_wave64_row<64, 8>(vx, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst);"
+
+# Q3_K single-pass tiled MMQ (prefill GEMM) — 3-bit super-block (hmask high
+# plane + 2 low bits, 6-bit signed scales, (raw4-4)·y bias trick). Same
+# stem/entry as the retired hand kernel.
+[[kernel]]
+stem = "mmq_q3_K_wave64"
+includes = ["quant_traits.cuh", "mmq_q3_k_wave64.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_q3_K_wave64_q8_1"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int nrows_y,
+    const int nrows_dst"""
+body = "mmq_q3_k_wave64_row<64, 8>(vx, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst);"
+
+# Q8_K single-pass tiled MMQ (prefill GEMM) — simplest K-quant: f32 d, plain
+# i8 qs, no scale/min. Same stem/entry as the retired hand kernel.
+[[kernel]]
+stem = "mmq_q8_K_wave64"
+includes = ["quant_traits.cuh", "mmq_q8_k_wave64.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_q8_K_wave64_q8_1"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int nrows_y,
+    const int nrows_dst"""
+body = "mmq_q8_k_wave64_row<64, 8>(vx, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst);"
+
+# IQ4_NL single-pass tiled MMQ (prefill GEMM) — 32-elem codebook quant, no
+# sub-block scale. Same stem/entry as the retired hand kernel.
+[[kernel]]
+stem = "mmq_iq4_nl_wave64"
+includes = ["quant_traits.cuh", "iq_grid.cuh", "mmq_iq4_nl_wave64.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_iq4_nl_wave64_q8_1"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int nrows_y,
+    const int nrows_dst"""
+body = "mmq_iq4_nl_wave64_row<64, 8>(vx, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst);"
+
+# IQ4_XS single-pass tiled MMQ (prefill GEMM) — Q4_K-shaped super-block, symmetric
+# (no min), signed-i8 LUT decode + per-sub-block 6-bit scale. Same stem/entry as
+# the retired hand kernel.
+[[kernel]]
+stem = "mmq_iq4_xs_wave64"
+includes = ["quant_traits.cuh", "iq_grid.cuh", "mmq_iq4_xs_wave64.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_iq4_xs_wave64_q8_1"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int nrows_y,
+    const int nrows_dst"""
+body = "mmq_iq4_xs_wave64_row<64, 8>(vx, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst);"
+
+# IQ2_XXS single-pass tiled MMQ (prefill GEMM) — grid-codebook quant: 8-bit
+# index → 8 i8 magnitudes (IQ2XXS_GRID) signed via KSIGNS_IQ2XS, 4-bit scale.
+# Same stem/entry as the retired hand kernel.
+[[kernel]]
+stem = "mmq_iq2_xxs_wave64"
+includes = ["quant_traits.cuh", "iq_grid.cuh", "mmq_iq2_xxs_wave64.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_iq2_xxs_wave64_q8_1"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int nrows_y,
+    const int nrows_dst"""
+body = "mmq_iq2_xxs_wave64_row<64, 8>(vx, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst);"
+
+# IQ2_XS single-pass tiled MMQ (prefill GEMM) — grid-codebook quant: 9-bit grid
+# index (IQ2XS_GRID) + 7-bit sign index, per-sub-block scale nibble. Same
+# stem/entry as the retired hand kernel.
+[[kernel]]
+stem = "mmq_iq2_xs_wave64"
+includes = ["quant_traits.cuh", "iq_grid.cuh", "mmq_iq2_xs_wave64.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_iq2_xs_wave64_q8_1"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int nrows_y,
+    const int nrows_dst"""
+body = "mmq_iq2_xs_wave64_row<64, 8>(vx, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst);"
+
+# IQ2_S single-pass tiled MMQ (prefill GEMM) — grid-codebook quant: 10-bit grid
+# index (IQ2S_GRID) + explicit per-byte signs, per-sub-block scale nibble. Same
+# stem/entry as the retired hand kernel.
+[[kernel]]
+stem = "mmq_iq2_s_wave64"
+includes = ["quant_traits.cuh", "iq_grid.cuh", "mmq_iq2_s_wave64.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_iq2_s_wave64_q8_1"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int nrows_y,
+    const int nrows_dst"""
+body = "mmq_iq2_s_wave64_row<64, 8>(vx, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst);"
+
+# IQ3_XXS single-pass tiled MMQ (prefill GEMM) — grid-codebook quant: 8-bit grid
+# index (IQ3XXS_GRID, 4 i8/entry) + 7-bit sign index, 4-bit scale (·0.5). Same
+# stem/entry as the retired hand kernel.
+[[kernel]]
+stem = "mmq_iq3_xxs_wave64"
+includes = ["quant_traits.cuh", "iq_grid.cuh", "mmq_iq3_xxs_wave64.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_iq3_xxs_wave64_q8_1"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int nrows_y,
+    const int nrows_dst"""
+body = "mmq_iq3_xxs_wave64_row<64, 8>(vx, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst);"
+
+# IQ3_S single-pass tiled MMQ (prefill GEMM) — grid-codebook quant: 9-bit grid
+# index (IQ3S_GRID, qs+qh) + explicit per-byte signs, db = 1 + 2·nibble. Same
+# stem/entry as the retired hand kernel.
+[[kernel]]
+stem = "mmq_iq3_s_wave64"
+includes = ["quant_traits.cuh", "iq_grid.cuh", "mmq_iq3_s_wave64.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_iq3_s_wave64_q8_1"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int nrows_y,
+    const int nrows_dst"""
+body = "mmq_iq3_s_wave64_row<64, 8>(vx, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst);"
+
+# IQ1_S single-pass tiled MMQ (prefill GEMM) — signed grid (IQ1S_GRID) + ±delta
+# bias via the Q8_1 s field. Same stem/entry as the retired hand kernel.
+[[kernel]]
+stem = "mmq_iq1_s_wave64"
+includes = ["quant_traits.cuh", "iq_grid.cuh", "mmq_iq1_s_wave64.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_iq1_s_wave64_q8_1"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int nrows_y,
+    const int nrows_dst"""
+body = "mmq_iq1_s_wave64_row<64, 8>(vx, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst);"
+
+# IQ1_M single-pass tiled MMQ (prefill GEMM) — signed grid + ±delta, per-l
+# dl/delta, d reassembled from scale-word nibbles. Same stem/entry as the
+# retired hand kernel.
+[[kernel]]
+stem = "mmq_iq1_m_wave64"
+includes = ["quant_traits.cuh", "iq_grid.cuh", "mmq_iq1_m_wave64.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_iq1_m_wave64_q8_1"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int nrows_y,
+    const int nrows_dst"""
+body = "mmq_iq1_m_wave64_row<64, 8>(vx, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst);"
+
+# Q4_0 4-warp LDS-tiled MMQ (dense-prefill perf kernel), DS4 144-B activation —
+# MMQ_Y=128 × MMQ_X=64, logical 64-wide lanes, dynamic LDS. Same stem/entry as
+# the retired hand kernel.
+[[kernel]]
+stem = "mmq_q4_0_4warp_lds"
+includes = ["quant_traits.cuh", "mmq_q4_0_4warp_lds.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_q4_0_4warp_lds_q8_1"
+launch_bounds = "256, 2"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int stride_col_y,
+    const int stride_row_x,
+    const int nrows_dst"""
+body = "mmq_q4_0_4warp_lds_row<64, 128, 4>(vx, vy, dst, ncols_x, nrows_x, ncols_y, stride_col_y, stride_row_x, nrows_dst);"
+
+# Q4_1 4-warp LDS-tiled MMQ (dense-prefill perf kernel), DS4 144-B activation —
+# Q4_0 sibling with a per-block min (affine dot d_x·d_y·sumi + m_x·Σx). Same
+# stem/entry as the retired hand kernel.
+[[kernel]]
+stem = "mmq_q4_1_4warp_lds"
+includes = ["quant_traits.cuh", "mmq_q4_1_4warp_lds.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_q4_1_4warp_lds_q8_1"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int stride_col_y,
+    const int stride_row_x,
+    const int nrows_dst"""
+body = "mmq_q4_1_4warp_lds_row<64, 128, 4>(vx, vy, dst, ncols_x, nrows_x, ncols_y, stride_col_y, stride_row_x, nrows_dst);"
+
+# Q4_K turbo 4-warp LDS-tiled MMQ (turbo prefill kernel), DS4 144-B activation —
+# MMQ_Y=128 × MMQ_X=16, super-block affine dot, double-buffered Y. Same stem/entry
+# as the retired hand kernel.
+[[kernel]]
+stem = "mmq_q4_K_lds_tiled"
+includes = ["quant_traits.cuh", "mmq_q4_k_lds_tiled.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_q4_K_lds_tiled_q8_1"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int stride_col_y,
+    const int stride_row_x,
+    const int nrows_dst"""
+body = "mmq_q4_k_lds_tiled_row<16, 128, 4>(vx, vy, dst, ncols_x, nrows_x, ncols_y, stride_col_y, stride_row_x, nrows_dst);"
+
+# Generic 4-warp LDS-tiled MMQ (prefill GEMM), DS4 144-B activation —
+# MMQ_Y=64 × MMQ_X=64, weight super-block decoded to int8 lanes in LDS.
+# `stride_col_y` is unused; the 9-arg ABI matches the other LDS-tiled entries.
+[[kernel]]
+stem = "mmq_q5_K_lds_tiled"
+includes = ["quant_traits.cuh", "mmq_lds_tiled.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_q5_K_lds_tiled_q8_1"
+launch_bounds = "256, 2"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int stride_col_y,
+    const int stride_row_x,
+    const int nrows_dst"""
+body = "(void) stride_col_y; mmq_lds_tiled_row<mmq_lds::Q5K, 64, 64, 4>(vx, vy, dst, ncols_x, nrows_x, ncols_y, stride_row_x, nrows_dst);"
+
+[[kernel]]
+stem = "mmq_q6_K_lds_tiled"
+includes = ["quant_traits.cuh", "mmq_lds_tiled.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_q6_K_lds_tiled_q8_1"
+launch_bounds = "256, 2"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int stride_col_y,
+    const int stride_row_x,
+    const int nrows_dst"""
+body = "(void) stride_col_y; mmq_lds_tiled_row<mmq_lds::Q6K, 64, 64, 4>(vx, vy, dst, ncols_x, nrows_x, ncols_y, stride_row_x, nrows_dst);"
+
+[[kernel]]
+stem = "mmq_iq4_xs_lds_tiled"
+includes = ["quant_traits.cuh", "mmq_lds_tiled.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_iq4_xs_lds_tiled_q8_1"
+launch_bounds = "256, 2"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int stride_col_y,
+    const int stride_row_x,
+    const int nrows_dst"""
+body = "(void) stride_col_y; mmq_lds_tiled_row<mmq_lds::IQ4XS, 64, 64, 4>(vx, vy, dst, ncols_x, nrows_x, ncols_y, stride_row_x, nrows_dst);"
+
+[[kernel]]
+stem = "mmq_q4_K_lds_tiled_y64"
+includes = ["quant_traits.cuh", "mmq_lds_tiled.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_q4_K_lds_tiled_y64_q8_1"
+launch_bounds = "256, 2"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int stride_col_y,
+    const int stride_row_x,
+    const int nrows_dst"""
+body = "(void) stride_col_y; mmq_lds_tiled_row<mmq_lds::Q4K, 64, 64, 4>(vx, vy, dst, ncols_x, nrows_x, ncols_y, stride_row_x, nrows_dst);"
+
+[[kernel]]
+stem = "mmq_q3_K_lds_tiled"
+includes = ["quant_traits.cuh", "mmq_lds_tiled.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_q3_K_lds_tiled_q8_1"
+launch_bounds = "256, 2"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int stride_col_y,
+    const int stride_row_x,
+    const int nrows_dst"""
+body = "(void) stride_col_y; mmq_lds_tiled_row<mmq_lds::Q3K, 64, 64, 4>(vx, vy, dst, ncols_x, nrows_x, ncols_y, stride_row_x, nrows_dst);"
+
+[[kernel]]
+stem = "mmq_iq4_nl_lds_tiled"
+includes = ["quant_traits.cuh", "mmq_lds_tiled.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_iq4_nl_lds_tiled_q8_1"
+launch_bounds = "256, 2"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int stride_col_y,
+    const int stride_row_x,
+    const int nrows_dst"""
+body = "(void) stride_col_y; mmq_lds_tiled_row<mmq_lds::IQ4NL, 64, 64, 4>(vx, vy, dst, ncols_x, nrows_x, ncols_y, stride_row_x, nrows_dst);"
+
+[[kernel]]
+stem = "mmq_q8_0_lds_tiled"
+includes = ["quant_traits.cuh", "mmq_lds_tiled.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_q8_0_lds_tiled_q8_1"
+launch_bounds = "256, 2"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int stride_col_y,
+    const int stride_row_x,
+    const int nrows_dst"""
+body = "(void) stride_col_y; mmq_lds_tiled_row<mmq_lds::Q8_0, 64, 64, 4>(vx, vy, dst, ncols_x, nrows_x, ncols_y, stride_row_x, nrows_dst);"
+
+# Small-batch tile of the generic LDS-tiled MMQ: MMQ_Y=64 × MMQ_X=8. One pass
+# over the weights serves up to 8 activation rows (speculative-decode verify).
+[[kernel]]
+stem = "mmq_q5_K_lds_tiled_x8"
+includes = ["quant_traits.cuh", "mmq_lds_tiled.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_q5_K_lds_tiled_x8_q8_1"
+launch_bounds = "256, 2"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int stride_col_y,
+    const int stride_row_x,
+    const int nrows_dst"""
+body = "(void) stride_col_y; mmq_lds_tiled_row<mmq_lds::Q5K, 8, 64, 4>(vx, vy, dst, ncols_x, nrows_x, ncols_y, stride_row_x, nrows_dst);"
+
+[[kernel]]
+stem = "mmq_q6_K_lds_tiled_x8"
+includes = ["quant_traits.cuh", "mmq_lds_tiled.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_q6_K_lds_tiled_x8_q8_1"
+launch_bounds = "256, 2"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int stride_col_y,
+    const int stride_row_x,
+    const int nrows_dst"""
+body = "(void) stride_col_y; mmq_lds_tiled_row<mmq_lds::Q6K, 8, 64, 4>(vx, vy, dst, ncols_x, nrows_x, ncols_y, stride_row_x, nrows_dst);"
+
+[[kernel]]
+stem = "mmq_iq4_xs_lds_tiled_x8"
+includes = ["quant_traits.cuh", "mmq_lds_tiled.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_iq4_xs_lds_tiled_x8_q8_1"
+launch_bounds = "256, 2"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int stride_col_y,
+    const int stride_row_x,
+    const int nrows_dst"""
+body = "(void) stride_col_y; mmq_lds_tiled_row<mmq_lds::IQ4XS, 8, 64, 4>(vx, vy, dst, ncols_x, nrows_x, ncols_y, stride_row_x, nrows_dst);"
+
+[[kernel]]
+stem = "mmq_q4_K_lds_tiled_y64_x8"
+includes = ["quant_traits.cuh", "mmq_lds_tiled.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_q4_K_lds_tiled_y64_x8_q8_1"
+launch_bounds = "256, 2"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int stride_col_y,
+    const int stride_row_x,
+    const int nrows_dst"""
+body = "(void) stride_col_y; mmq_lds_tiled_row<mmq_lds::Q4K, 8, 64, 4>(vx, vy, dst, ncols_x, nrows_x, ncols_y, stride_row_x, nrows_dst);"
+
+[[kernel]]
+stem = "mmq_q3_K_lds_tiled_x8"
+includes = ["quant_traits.cuh", "mmq_lds_tiled.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_q3_K_lds_tiled_x8_q8_1"
+launch_bounds = "256, 2"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int stride_col_y,
+    const int stride_row_x,
+    const int nrows_dst"""
+body = "(void) stride_col_y; mmq_lds_tiled_row<mmq_lds::Q3K, 8, 64, 4>(vx, vy, dst, ncols_x, nrows_x, ncols_y, stride_row_x, nrows_dst);"
+
+[[kernel]]
+stem = "mmq_iq4_nl_lds_tiled_x8"
+includes = ["quant_traits.cuh", "mmq_lds_tiled.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_iq4_nl_lds_tiled_x8_q8_1"
+launch_bounds = "256, 2"
+params = """
+    const void* __restrict__ vx,
+    const void* __restrict__ vy,
+    float* __restrict__ dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int stride_col_y,
+    const int stride_row_x,
+    const int nrows_dst"""
+body = "(void) stride_col_y; mmq_lds_tiled_row<mmq_lds::IQ4NL, 8, 64, 4>(vx, vy, dst, ncols_x, nrows_x, ncols_y, stride_row_x, nrows_dst);"
+
+# F16 weight × Q8_1 activation — single-row MMVQ (F16 layers in UD-Q8_K_XL).
+[[kernel]]
+stem = "mmvq_f16_q8_1"
+includes = ["quant_traits.cuh", "mmvq_f16.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmvq_f16_q8_1"
+params = """
+    const fb_fp16_t* __restrict__ x_f16,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_f16_q8_1_row<256>(x_f16, y, dst, n_rows, n_blocks_per_row);"
+
+# F16 weight × Q8_1 activation — multi-row MMQ (grid.y = n_tokens, launch-overhead
+# amortisation; per-block math identical to mmvq_f16).
+[[kernel]]
+stem = "mmq_f16_q8_1"
+includes = ["quant_traits.cuh", "mmq_f16.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_f16_q8_1"
+params = """
+    const fb_fp16_t* __restrict__ x_f16,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int n_blocks_per_row"""
+body = "mmq_f16_q8_1_tile<256>(x_f16, y, dst, n_rows, n_tokens, n_blocks_per_row);"
+
+# F16 weight × Q8_1 activation — tile-M MMQ (MMQ_Y=64 × TILE_N=8, register-resident
+# weight reused across 8 token cols; weight HBM amortisation).
+[[kernel]]
+stem = "mmq_f16_tile"
+includes = ["quant_traits.cuh", "mmq_f16.cuh"]
+[[kernel.entry]]
+name = "flambeau_mmq_f16_tile_q8_1"
+params = """
+    const fb_fp16_t* __restrict__ x_f16,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int n_blocks_per_row"""
+body = "mmq_f16_tile_row<64, 8>(x_f16, y, dst, n_rows, n_tokens, n_blocks_per_row);"
+
+# Q4_0 single-row MMVQ — legacy 4-bit (nibble unpack + (q-8) bias correction).
+# One module carries both the F32 dst entry (scratch-then-cast path) and the
+# F16-dst entry (mmvq_q4_0_kv_decode_f16 / mmvq_f16_direct).
+[[kernel]]
+stem = "mmvq_q4_0"
+includes = ["quant_traits.cuh", "mmvq.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_0_q8_1"
+params = """
+    const flambeau_block_q4_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_dp4a_row<Q4_0, 256>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_0_q8_1_f16"
+params = """
+    const flambeau_block_q4_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_dp4a_row<Q4_0, 256, fb_fp16_t>(x, y, dst, n_rows, n_blocks_per_row);"
+
+# Q4_0 t128 config variant — same single-row DP4A skeleton at 128 threads/block
+# (4 warps on CUDA → more in-flight blocks/CU). Autotune candidate vs the
+# 256-thread base `mmvq_q4_0` for sm_86 m=1 decode; THREADS is the only
+# difference. Distinct stem from the gfx906-only hand kernel `mmvq_q4_0_t128`
+# (which carries the same entry symbol) so the shared manifest can compile it on
+# both backends without a stem/output collision.
+[[kernel]]
+stem = "mmvq_q4_0_t128_dp4a"
+includes = ["quant_traits.cuh", "mmvq.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_0_t128_dp4a_q8_1"
+params = """
+    const flambeau_block_q4_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_dp4a_row<Q4_0, 128>(x, y, dst, n_rows, n_blocks_per_row);"
+
+# Q4_0 t128 + VDR=2 config variant — 128 threads, each owning 2 consecutive
+# int32 lanes of the block (2 threads/quant-block), chaining 4 dp4a into one int
+# sum before the block-scale multiply for a tighter dp4a register chain (ILP).
+# Autotune candidate vs t128 and the 256-thread base.
+[[kernel]]
+stem = "mmvq_q4_0_t128_vdr2"
+includes = ["quant_traits.cuh", "mmvq.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_0_t128_vdr2_q8_1"
+params = """
+    const flambeau_block_q4_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_dp4a_vdr_row<Q4_0, 128, 2>(x, y, dst, n_rows, n_blocks_per_row);"
+
+# Q4_1 single-row MMVQ — legacy 4-bit with per-block min (y = d*q + m).
+[[kernel]]
+stem = "mmvq_q4_1"
+includes = ["quant_traits.cuh", "mmvq.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_1_q8_1"
+params = """
+    const flambeau_block_q4_1* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_dp4a_row<Q4_1, 256>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_1_q8_1_f16"
+params = """
+    const flambeau_block_q4_1* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_dp4a_row<Q4_1, 256, fb_fp16_t>(x, y, dst, n_rows, n_blocks_per_row);"
+
+# Q5_0 single-row MMVQ — 5-bit, zero-point -16 (5th bit in the qh plane).
+[[kernel]]
+stem = "mmvq_q5_0"
+includes = ["quant_traits.cuh", "mmvq.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q5_0_q8_1"
+params = """
+    const flambeau_block_q5_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_dp4a_row<Q5_0, 256>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q5_0_q8_1_f16"
+params = """
+    const flambeau_block_q5_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_dp4a_row<Q5_0, 256, fb_fp16_t>(x, y, dst, n_rows, n_blocks_per_row);"
+
+# Q5_1 single-row MMVQ — 5-bit with per-block min (y = d*q5 + m).
+[[kernel]]
+stem = "mmvq_q5_1"
+includes = ["quant_traits.cuh", "mmvq.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q5_1_q8_1"
+params = """
+    const flambeau_block_q5_1* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_dp4a_row<Q5_1, 256>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q5_1_q8_1_f16"
+params = """
+    const flambeau_block_q5_1* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_dp4a_row<Q5_1, 256, fb_fp16_t>(x, y, dst, n_rows, n_blocks_per_row);"
+
+# Q6_K single-row MMVQ — first K-quant (super-block, 64 threads/row). Its own
+# templated body (super-block iqs scheme) rather than the flat mmvq_dp4a_row.
+[[kernel]]
+stem = "mmvq_q6_k_dp4a"
+includes = ["mmvq_q6_k.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q6_k_dp4a_q8_1"
+params = """
+    const flambeau_block_q6_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_q6_k_dp4a_row<float>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q6_k_dp4a_q8_1_f16"
+params = """
+    const flambeau_block_q6_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_q6_k_dp4a_row<fb_fp16_t>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+# Q5_K single-row MMVQ — 256 threads, 8×32 sub-blocks, 6-bit packed (sc,m)
+# scales shared with Q4_K (flambeau_q4k_scale_min) + per-element 5th bit.
+[[kernel]]
+stem = "mmvq_q5_k_dp4a"
+includes = ["mmvq_q5_k.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q5_k_dp4a_q8_1"
+params = """
+    const flambeau_block_q5_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_q5_k_dp4a_row<float>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q5_k_dp4a_q8_1_f16"
+params = """
+    const flambeau_block_q5_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_q5_k_dp4a_row<fb_fp16_t>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+# Q3_K single-row MMVQ — 256 threads, 64/super-block, 2-bit qs + hmask high bit,
+# two dp4a per term (low-bits minus inverted high bit), inline 6-bit scales.
+[[kernel]]
+stem = "mmvq_q3_k_dp4a"
+includes = ["mmvq_q3_k.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q3_k_dp4a_q8_1"
+params = """
+    const flambeau_block_q3_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_q3_k_dp4a_row<float>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q3_k_dp4a_q8_1_f16"
+params = """
+    const flambeau_block_q3_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_q3_k_dp4a_row<fb_fp16_t>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel]]
+stem = "mmvq_q3_k_dp4a_t128_vdr2"
+includes = ["mmvq_q3_k.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q3_k_dp4a_t128_vdr2_q8_1"
+launch_bounds = "128"
+params = """
+    const flambeau_block_q3_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_q3_k_vdr2_row<float, 128>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q3_k_dp4a_t128_vdr2_q8_1_f16"
+launch_bounds = "128"
+params = """
+    const flambeau_block_q3_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_q3_k_vdr2_row<fb_fp16_t, 128>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+# Q2_K single-row MMVQ — 256 threads, 64/super-block, 2-bit qs + packed (sc,m)
+# scales, two dp4a per term (value + broadcast-min).
+[[kernel]]
+stem = "mmvq_q2_k_dp4a"
+includes = ["mmvq_q2_k.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q2_k_dp4a_q8_1"
+params = """
+    const flambeau_block_q2_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_q2_k_dp4a_row<float>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q2_k_dp4a_q8_1_f16"
+params = """
+    const flambeau_block_q2_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_q2_k_dp4a_row<fb_fp16_t>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+# Q4_K MMVQ — r2 (64 threads = 2 rows/block, 32-lane row groups). Shares
+# flambeau_q4k_scale_min with Q5_K; reduces via mmvq_reduce_store_2row.
+[[kernel]]
+stem = "mmvq_q4_k_r2_dp4a"
+includes = ["mmvq_q4_k.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_k_r2_dp4a_q8_1"
+params = """
+    const flambeau_block_q4_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_q4_k_r2_dp4a_row<float>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_k_r2_dp4a_q8_1_f16"
+params = """
+    const flambeau_block_q4_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_q4_k_r2_dp4a_row<fb_fp16_t>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+# Q4_K single-row MMVQ, 256 threads (8 super-blocks in flight per block).
+[[kernel]]
+stem = "mmvq_q4_k_dp4a"
+includes = ["mmvq_q4_k.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_k_dp4a_q8_1"
+params = """
+    const flambeau_block_q4_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_q4_k_dp4a_row<float>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_k_dp4a_q8_1_f16"
+params = """
+    const flambeau_block_q4_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_q4_k_dp4a_row<fb_fp16_t>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+# Single-row dp4a MMVQ in llama.cpp's GCN layout: 128 threads per row, VDR 2
+# (Q4_K / Q5_K, 16 threads per super-block) or VDR 4 (IQ4_XS, 8 threads).
+[[kernel]]
+stem = "mmvq_q4_k_dp4a_t128_vdr2"
+includes = ["mmvq_q4_k.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_k_dp4a_t128_vdr2_q8_1"
+launch_bounds = "128"
+params = """
+    const flambeau_block_q4_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_q4_k_vdr2_row<float, 128>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_k_dp4a_t128_vdr2_q8_1_f16"
+launch_bounds = "128"
+params = """
+    const flambeau_block_q4_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_q4_k_vdr2_row<fb_fp16_t, 128>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel]]
+stem = "mmvq_q5_k_dp4a_t128_vdr2"
+includes = ["mmvq_q5_k.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q5_k_dp4a_t128_vdr2_q8_1"
+launch_bounds = "128"
+params = """
+    const flambeau_block_q5_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_q5_k_vdr2_row<float, 128>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q5_k_dp4a_t128_vdr2_q8_1_f16"
+launch_bounds = "128"
+params = """
+    const flambeau_block_q5_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_q5_k_vdr2_row<fb_fp16_t, 128>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel]]
+stem = "mmvq_iq4_xs_dp4a_t128_vdr4"
+includes = ["mmvq_iq4_xs.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq4_xs_dp4a_t128_vdr4_q8_1"
+launch_bounds = "128"
+params = """
+    const flambeau_block_iq4_xs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_iq4_xs_vdr4_row<float, 128>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq4_xs_dp4a_t128_vdr4_q8_1_f16"
+launch_bounds = "128"
+params = """
+    const flambeau_block_iq4_xs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_iq4_xs_vdr4_row<fb_fp16_t, 128>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+# Q8_K single-row MMVQ — simplest K-quant (f32 d, no sub-block scales). 256
+# threads, dp4a per Q8_1 sub-block. Used by UD-Q8_K_XL GGUFs.
+[[kernel]]
+stem = "mmvq_q8_k"
+includes = ["mmvq_q8_k.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q8_K_q8_1"
+params = """
+    const flambeau_block_q8_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_super_blocks_per_row"""
+body = "mmvq_q8_k_row<float>(x, y, dst, n_rows, n_super_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q8_K_q8_1_f16"
+params = """
+    const flambeau_block_q8_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_super_blocks_per_row"""
+body = "mmvq_q8_k_row<fb_fp16_t>(x, y, dst, n_rows, n_super_blocks_per_row);"
+
+# IQ4_NL single-row MMVQ — 32-elem block, 16-entry non-linear codebook via the
+# neutral byte_perm LUT. First codebook (perm-based) kernel.
+[[kernel]]
+stem = "mmvq_iq4_nl_dp4a"
+includes = ["mmvq_iq4_nl.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq4_nl_dp4a_q8_1"
+params = """
+    const flambeau_block_iq4_nl* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_iq4_nl_dp4a_row<float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq4_nl_dp4a_q8_1_f16"
+params = """
+    const flambeau_block_iq4_nl* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_iq4_nl_dp4a_row<fb_fp16_t>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel]]
+stem = "mmvq_iq4_nl_dp4a_t128_vdr2"
+includes = ["mmvq_iq4_nl.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq4_nl_dp4a_t128_vdr2_q8_1"
+launch_bounds = "128"
+params = """
+    const flambeau_block_iq4_nl* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_iq4_nl_vdr2_row<float, 128>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq4_nl_dp4a_t128_vdr2_q8_1_f16"
+launch_bounds = "128"
+params = """
+    const flambeau_block_iq4_nl* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_iq4_nl_vdr2_row<fb_fp16_t, 128>(x, y, dst, n_rows, n_blocks_per_row);"
+
+# IQ4_XS single-row MMVQ — super-block (8×32) IQ4, same kvalues_iq4nl codebook
+# as IQ4_NL (reuses iq4_nl_table_4) + 6-bit sub-block scales.
+[[kernel]]
+stem = "mmvq_iq4_xs_dp4a"
+includes = ["mmvq_iq4_xs.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq4_xs_dp4a_q8_1"
+params = """
+    const flambeau_block_iq4_xs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_iq4_xs_dp4a_row<float>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq4_xs_dp4a_q8_1_f16"
+params = """
+    const flambeau_block_iq4_xs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_iq4_xs_dp4a_row<fb_fp16_t>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+# IQ2_XXS single-row MMVQ — first grid-codebook kernel (IQ2XXS_GRID via the
+# already-neutral iq_grid.cuh + per-element sign LUT). 256 threads, 32/sb.
+[[kernel]]
+stem = "mmvq_iq2_xxs_dp4a"
+includes = ["mmvq_iq2_xxs.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq2_xxs_dp4a_q8_1"
+params = """
+    const flambeau_block_iq2_xxs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_iq2_xxs_dp4a_row<float>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq2_xxs_dp4a_q8_1_f16"
+params = """
+    const flambeau_block_iq2_xxs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_iq2_xxs_dp4a_row<fb_fp16_t>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+# IQ3_XXS single-row MMVQ — u32 IQ3XXS_GRID + ksigns LUT (reuses IQ2_XXS signs).
+[[kernel]]
+stem = "mmvq_iq3_xxs_dp4a"
+includes = ["mmvq_iq3_xxs.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq3_xxs_dp4a_q8_1"
+params = """
+    const flambeau_block_iq3_xxs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_iq3_xxs_dp4a_row<float>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq3_xxs_dp4a_q8_1_f16"
+params = """
+    const flambeau_block_iq3_xxs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_iq3_xxs_dp4a_row<fb_fp16_t>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+# IQ3_S single-row MMVQ — 9-bit IQ3S_GRID index + explicit sign bytes/scales.
+[[kernel]]
+stem = "mmvq_iq3_s_dp4a"
+includes = ["mmvq_iq3_s.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq3_s_dp4a_q8_1"
+params = """
+    const flambeau_block_iq3_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_iq3_s_dp4a_row<float>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq3_s_dp4a_q8_1_f16"
+params = """
+    const flambeau_block_iq3_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_iq3_s_dp4a_row<fb_fp16_t>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel]]
+stem = "mmvq_iq3_s_dp4a_t128_vdr2"
+includes = ["mmvq_iq3_s.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq3_s_dp4a_t128_vdr2_q8_1"
+launch_bounds = "128"
+params = """
+    const flambeau_block_iq3_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_iq3_s_vdr2_row<float, 128>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq3_s_dp4a_t128_vdr2_q8_1_f16"
+launch_bounds = "128"
+params = """
+    const flambeau_block_iq3_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_iq3_s_vdr2_row<fb_fp16_t, 128>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+# IQ2_XS single-row MMVQ — u16 (9-bit grid idx | 7-bit ksigns) + IQ2XS_GRID.
+[[kernel]]
+stem = "mmvq_iq2_xs_dp4a"
+includes = ["mmvq_iq2_xs.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq2_xs_dp4a_q8_1"
+params = """
+    const flambeau_block_iq2_xs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_iq2_xs_dp4a_row<float>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq2_xs_dp4a_q8_1_f16"
+params = """
+    const flambeau_block_iq2_xs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_iq2_xs_dp4a_row<fb_fp16_t>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+# IQ2_S single-row MMVQ — 10-bit grid idx (qs|qh) + explicit sign bytes + IQ2S_GRID.
+[[kernel]]
+stem = "mmvq_iq2_s_dp4a"
+includes = ["mmvq_iq2_s.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq2_s_dp4a_q8_1"
+params = """
+    const flambeau_block_iq2_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_iq2_s_dp4a_row<float>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq2_s_dp4a_q8_1_f16"
+params = """
+    const flambeau_block_iq2_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_iq2_s_dp4a_row<fb_fp16_t>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+# IQ1_S single-row MMVQ — 11-bit IQ1S_GRID idx + 3-bit scale + delta bias.
+[[kernel]]
+stem = "mmvq_iq1_s_dp4a"
+includes = ["mmvq_iq1_s.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq1_s_dp4a_q8_1"
+params = """
+    const flambeau_block_iq1_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_iq1_s_dp4a_row<float>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq1_s_dp4a_q8_1_f16"
+params = """
+    const flambeau_block_iq1_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_iq1_s_dp4a_row<fb_fp16_t>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+# IQ1_M single-row MMVQ — IQ1_S codebook + reassembled super-block scale.
+[[kernel]]
+stem = "mmvq_iq1_m_dp4a"
+includes = ["mmvq_iq1_m.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq1_m_dp4a_q8_1"
+params = """
+    const flambeau_block_iq1_m* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_iq1_m_dp4a_row<float>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq1_m_dp4a_q8_1_f16"
+params = """
+    const flambeau_block_iq1_m* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_superblocks_per_row"""
+body = "mmvq_iq1_m_dp4a_row<fb_fp16_t>(x, y, dst, n_rows, n_superblocks_per_row);"
+
+# ===========================================================================
+# P2d — indexed-MoE MMVQ (per-token expert routing). Same inner product as the
+# dense mmvq family (quant_traits<Q>::partial), MoE addressing in
+# indexed_moe_mmvq.cuh. Stems/entries match the runtime ops launchers
+# (crates/ops/src/hip/moe.rs) so the dispatch layer is untouched.
+# ===========================================================================
+[[kernel]]
+stem = "indexed_moe_mmvq_q8_0"
+includes = ["quant_traits.cuh", "indexed_moe_mmvq.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmvq_q8_0_dp4a_q8_1"
+params = """
+    const flambeau_block_q8_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_blocks_per_row"""
+body = "indexed_moe_mmvq_vdr_row<Q8_0, 256, 2>(x, y, expert_ids, dst, n_rows, n_tokens, top_k, n_blocks_per_row);"
+
+[[kernel]]
+stem = "indexed_moe_mmvq_q4_0"
+includes = ["quant_traits.cuh", "indexed_moe_mmvq.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmvq_q4_0_q8_1"
+params = """
+    const flambeau_block_q4_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_blocks_per_row"""
+body = "indexed_moe_mmvq_row<Q4_0, 256>(x, y, expert_ids, dst, n_rows, n_tokens, top_k, n_blocks_per_row);"
+
+[[kernel]]
+stem = "indexed_moe_mmvq_q4_1"
+includes = ["quant_traits.cuh", "indexed_moe_mmvq.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmvq_q4_1_q8_1"
+params = """
+    const flambeau_block_q4_1* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_blocks_per_row"""
+body = "indexed_moe_mmvq_row<Q4_1, 256>(x, y, expert_ids, dst, n_rows, n_tokens, top_k, n_blocks_per_row);"
+
+# K-quant indexed-MoE MMVQ — r2 (2 rows/block) + r4 (4 rows/block). Own
+# super-block bodies (not quant_traits); shared per-sub-block dot helpers.
+[[kernel]]
+stem = "indexed_moe_mmvq_q4_k_r2_dp4a"
+includes = ["indexed_moe_mmvq_q4_k.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmvq_q4_k_r2_dp4a_q8_1"
+params = """
+    const flambeau_block_q4_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_sb_per_row"""
+body = "indexed_moe_mmvq_q4_k_r2_dp4a_row<float>(x, y, expert_ids, dst, n_rows, n_tokens, top_k, n_sb_per_row);"
+
+[[kernel]]
+stem = "indexed_moe_mmvq_q4_k_r4_dp4a"
+includes = ["indexed_moe_mmvq_q4_k.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmvq_q4_k_r4_dp4a_q8_1"
+params = """
+    const flambeau_block_q4_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_sb_per_row"""
+body = "indexed_moe_mmvq_q4_k_r4_dp4a_row<float>(x, y, expert_ids, dst, n_rows, n_tokens, top_k, n_sb_per_row);"
+
+[[kernel]]
+stem = "indexed_moe_mmvq_q5_k_r2_dp4a"
+includes = ["indexed_moe_mmvq_q5_k.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmvq_q5_k_r2_dp4a_q8_1"
+params = """
+    const flambeau_block_q5_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_sb_per_row"""
+body = "indexed_moe_mmvq_q5_k_r2_dp4a_row<float>(x, y, expert_ids, dst, n_rows, n_tokens, top_k, n_sb_per_row);"
+
+[[kernel]]
+stem = "indexed_moe_mmvq_q6_k_r2_dp4a"
+includes = ["indexed_moe_mmvq_q6_k.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmvq_q6_k_r2_dp4a_q8_1"
+params = """
+    const flambeau_block_q6_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_sb_per_row"""
+body = "indexed_moe_mmvq_q6_k_r2_dp4a_row<float>(x, y, expert_ids, dst, n_rows, n_tokens, top_k, n_sb_per_row);"
+
+[[kernel]]
+stem = "indexed_moe_mmvq_q3_k_r2_dp4a"
+includes = ["indexed_moe_mmvq_q3_k.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmvq_q3_k_r2_dp4a_q8_1"
+params = """
+    const flambeau_block_q3_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_sb_per_row"""
+body = "indexed_moe_mmvq_q3_k_r2_dp4a_row<float>(x, y, expert_ids, dst, n_rows, n_tokens, top_k, n_sb_per_row);"
+
+# IQ* indexed-MoE MMVQ r2_dp4a — codebook bodies reuse the dense mmvq_iq*.cuh
+# LUT/sign helpers; the ops layer calls only these r2_dp4a entries.
+[[kernel]]
+stem = "indexed_moe_mmvq_iq4_nl_r2_dp4a"
+includes = ["indexed_moe_mmvq_iq4_nl.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmvq_iq4_nl_r2_dp4a_q8_1"
+params = """
+    const flambeau_block_iq4_nl* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_blocks_per_row"""
+body = "indexed_moe_mmvq_iq4_nl_r2_dp4a_row<float>(x, y, expert_ids, dst, n_rows, n_tokens, top_k, n_blocks_per_row);"
+
+[[kernel]]
+stem = "indexed_moe_mmvq_iq4_xs_r2_dp4a"
+includes = ["indexed_moe_mmvq_iq4_xs.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmvq_iq4_xs_r2_dp4a_q8_1"
+params = """
+    const flambeau_block_iq4_xs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_sb_per_row"""
+body = "indexed_moe_mmvq_iq4_xs_r2_dp4a_row<float>(x, y, expert_ids, dst, n_rows, n_tokens, top_k, n_sb_per_row);"
+
+[[kernel]]
+stem = "indexed_moe_mmvq_iq2_xxs_r2_dp4a"
+includes = ["indexed_moe_mmvq_iq2_xxs.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmvq_iq2_xxs_r2_dp4a_q8_1"
+params = """
+    const flambeau_block_iq2_xxs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_sb_per_row"""
+body = "indexed_moe_mmvq_iq2_xxs_r2_dp4a_row<float>(x, y, expert_ids, dst, n_rows, n_tokens, top_k, n_sb_per_row);"
+
+[[kernel]]
+stem = "indexed_moe_mmvq_iq2_xs_r2_dp4a"
+includes = ["indexed_moe_mmvq_iq2_xs.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmvq_iq2_xs_r2_dp4a_q8_1"
+params = """
+    const flambeau_block_iq2_xs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_sb_per_row"""
+body = "indexed_moe_mmvq_iq2_xs_r2_dp4a_row<float>(x, y, expert_ids, dst, n_rows, n_tokens, top_k, n_sb_per_row);"
+
+[[kernel]]
+stem = "indexed_moe_mmvq_iq2_s_r2_dp4a"
+includes = ["indexed_moe_mmvq_iq2_s.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmvq_iq2_s_r2_dp4a_q8_1"
+params = """
+    const flambeau_block_iq2_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_sb_per_row"""
+body = "indexed_moe_mmvq_iq2_s_r2_dp4a_row<float>(x, y, expert_ids, dst, n_rows, n_tokens, top_k, n_sb_per_row);"
+
+[[kernel]]
+stem = "indexed_moe_mmvq_iq3_xxs_r2_dp4a"
+includes = ["indexed_moe_mmvq_iq3_xxs.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmvq_iq3_xxs_r2_dp4a_q8_1"
+params = """
+    const flambeau_block_iq3_xxs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_sb_per_row"""
+body = "indexed_moe_mmvq_iq3_xxs_r2_dp4a_row<float>(x, y, expert_ids, dst, n_rows, n_tokens, top_k, n_sb_per_row);"
+
+[[kernel]]
+stem = "indexed_moe_mmvq_iq3_s_r2_dp4a"
+includes = ["indexed_moe_mmvq_iq3_s.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmvq_iq3_s_r2_dp4a_q8_1"
+params = """
+    const flambeau_block_iq3_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_sb_per_row"""
+body = "indexed_moe_mmvq_iq3_s_r2_dp4a_row<float>(x, y, expert_ids, dst, n_rows, n_tokens, top_k, n_sb_per_row);"
+
+[[kernel]]
+stem = "indexed_moe_mmvq_iq1_s_r2_dp4a"
+includes = ["indexed_moe_mmvq_iq1_s.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmvq_iq1_s_r2_dp4a_q8_1"
+params = """
+    const flambeau_block_iq1_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_sb_per_row"""
+body = "indexed_moe_mmvq_iq1_s_r2_dp4a_row<float>(x, y, expert_ids, dst, n_rows, n_tokens, top_k, n_sb_per_row);"
+
+[[kernel]]
+stem = "indexed_moe_mmvq_iq1_m_r2_dp4a"
+includes = ["indexed_moe_mmvq_iq1_m.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmvq_iq1_m_r2_dp4a_q8_1"
+params = """
+    const flambeau_block_iq1_m* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_sb_per_row"""
+body = "indexed_moe_mmvq_iq1_m_r2_dp4a_row<float>(x, y, expert_ids, dst, n_rows, n_tokens, top_k, n_sb_per_row);"
+
+# Fused gate+up indexed-MoE MMVQ (10-arg ABI: gate_w, up_w, y, expert_ids,
+# gate_out, up_out, n_rows, n_tokens, top_k, n_blocks_per_row).
+[[kernel]]
+stem = "indexed_moe_mmvq_q8_0_gate_up_dp4a"
+includes = ["quant_traits.cuh", "indexed_moe_mmvq.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmvq_q8_0_gate_up_dp4a_q8_1"
+params = """
+    const flambeau_block_q8_0* __restrict__ gate_w,
+    const flambeau_block_q8_0* __restrict__ up_w,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    float* __restrict__ gate_out,
+    float* __restrict__ up_out,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_blocks_per_row"""
+body = "indexed_moe_mmvq_gate_up_vdr_row<Q8_0, 256, 2>(gate_w, up_w, y, expert_ids, gate_out, up_out, n_rows, n_tokens, top_k, n_blocks_per_row);"
+
+[[kernel]]
+stem = "indexed_moe_mmvq_q4_0_gate_up_dp4a"
+includes = ["indexed_moe_mmvq_q4_0_gate_up.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmvq_q4_0_gate_up_dp4a_q8_1"
+params = """
+    const flambeau_block_q4_0* __restrict__ gate_w,
+    const flambeau_block_q4_0* __restrict__ up_w,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    float* __restrict__ gate_out,
+    float* __restrict__ up_out,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_blocks_per_row"""
+body = "indexed_moe_mmvq_q4_0_gate_up_dp4a_row<256>(gate_w, up_w, y, expert_ids, gate_out, up_out, n_rows, n_tokens, top_k, n_blocks_per_row);"
+
+# Register-tiled prefill MoE MMQ (tile8): MMQ_Y=64 rows × TILE_N=8 sorted
+# slot-cols/block, no LDS/no warp ops. Simple block quants ride the generic
+# indexed_moe_mmq_{gate_up,down}_tile8_row<Q> skeleton (quant_traits mmq policy).
+# gate_up = 13-arg (2 weights/outputs); down = 11-arg (1 weight/output).
+[[kernel]]
+stem = "indexed_moe_mmq_q8_0_gate_up_tile8_dp4a"
+includes = ["indexed_moe_mmq_tile8.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmq_q8_0_gate_up_tile8_dp4a_q8_1"
+params = """
+    const flambeau_block_q8_0* __restrict__ gate_w,
+    const flambeau_block_q8_0* __restrict__ up_w,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    const int* __restrict__ sorted_pair_idx_padded,
+    const int* __restrict__ padded_offsets,
+    float* __restrict__ gate_out,
+    float* __restrict__ up_out,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_blocks_per_row,
+    const int n_experts"""
+body = "indexed_moe_mmq_gate_up_tile8_row<Q8_0>(gate_w, up_w, y, expert_ids, sorted_pair_idx_padded, padded_offsets, gate_out, up_out, n_rows, n_tokens, top_k, n_blocks_per_row, n_experts);"
+
+[[kernel]]
+stem = "indexed_moe_mmq_q8_0_down_tile8_dp4a"
+includes = ["indexed_moe_mmq_tile8.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmq_q8_0_down_tile8_dp4a_q8_1"
+params = """
+    const flambeau_block_q8_0* __restrict__ w,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    const int* __restrict__ sorted_pair_idx_padded,
+    const int* __restrict__ padded_offsets,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_blocks_per_row,
+    const int n_experts"""
+body = "indexed_moe_mmq_down_tile8_row<Q8_0>(w, y, expert_ids, sorted_pair_idx_padded, padded_offsets, dst, n_rows, n_tokens, top_k, n_blocks_per_row, n_experts);"
+
+[[kernel]]
+stem = "indexed_moe_mmq_q4_0_gate_up_tile8_dp4a"
+includes = ["indexed_moe_mmq_tile8.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmq_q4_0_gate_up_tile8_dp4a_q8_1"
+params = """
+    const flambeau_block_q4_0* __restrict__ gate_w,
+    const flambeau_block_q4_0* __restrict__ up_w,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    const int* __restrict__ sorted_pair_idx_padded,
+    const int* __restrict__ padded_offsets,
+    float* __restrict__ gate_out,
+    float* __restrict__ up_out,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_blocks_per_row,
+    const int n_experts"""
+body = "indexed_moe_mmq_gate_up_tile8_row<Q4_0>(gate_w, up_w, y, expert_ids, sorted_pair_idx_padded, padded_offsets, gate_out, up_out, n_rows, n_tokens, top_k, n_blocks_per_row, n_experts);"
+
+[[kernel]]
+stem = "indexed_moe_mmq_q4_0_down_tile8_dp4a"
+includes = ["indexed_moe_mmq_tile8.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmq_q4_0_down_tile8_dp4a_q8_1"
+params = """
+    const flambeau_block_q4_0* __restrict__ w,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    const int* __restrict__ sorted_pair_idx_padded,
+    const int* __restrict__ padded_offsets,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_blocks_per_row,
+    const int n_experts"""
+body = "indexed_moe_mmq_down_tile8_row<Q4_0>(w, y, expert_ids, sorted_pair_idx_padded, padded_offsets, dst, n_rows, n_tokens, top_k, n_blocks_per_row, n_experts);"
+
+[[kernel]]
+stem = "indexed_moe_mmq_q4_1_down_tile8_dp4a"
+includes = ["indexed_moe_mmq_tile8.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmq_q4_1_down_tile8_dp4a_q8_1"
+params = """
+    const flambeau_block_q4_1* __restrict__ w,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    const int* __restrict__ sorted_pair_idx_padded,
+    const int* __restrict__ padded_offsets,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_blocks_per_row,
+    const int n_experts"""
+body = "indexed_moe_mmq_down_tile8_row<Q4_1>(w, y, expert_ids, sorted_pair_idx_padded, padded_offsets, dst, n_rows, n_tokens, top_k, n_blocks_per_row, n_experts);"
+
+# K-quant tile8 — own super-block decode (not quant_traits mmq policy).
+[[kernel]]
+stem = "indexed_moe_mmq_q4_k_gate_up_tile8_dp4a"
+includes = ["indexed_moe_mmq_q4_k_tile8.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmq_q4_k_gate_up_tile8_dp4a_q8_1"
+params = """
+    const flambeau_block_q4_K* __restrict__ gate_w,
+    const flambeau_block_q4_K* __restrict__ up_w,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    const int* __restrict__ sorted_pair_idx_padded,
+    const int* __restrict__ padded_offsets,
+    float* __restrict__ gate_out,
+    float* __restrict__ up_out,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_sb_per_row,
+    const int n_experts"""
+body = "indexed_moe_mmq_q4_k_gate_up_tile8_row<float>(gate_w, up_w, y, expert_ids, sorted_pair_idx_padded, padded_offsets, gate_out, up_out, n_rows, n_tokens, top_k, n_sb_per_row, n_experts);"
+
+[[kernel]]
+stem = "indexed_moe_mmq_q4_k_down_tile8_dp4a"
+includes = ["indexed_moe_mmq_q4_k_tile8.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmq_q4_k_down_tile8_dp4a_q8_1"
+params = """
+    const flambeau_block_q4_K* __restrict__ down_w,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    const int* __restrict__ sorted_pair_idx_padded,
+    const int* __restrict__ padded_offsets,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_sb_per_row,
+    const int n_experts"""
+body = "indexed_moe_mmq_q4_k_down_tile8_row<float>(down_w, y, expert_ids, sorted_pair_idx_padded, padded_offsets, dst, n_rows, n_tokens, top_k, n_sb_per_row, n_experts);"
+
+[[kernel]]
+stem = "indexed_moe_mmq_q5_k_gate_up_tile8_dp4a"
+includes = ["indexed_moe_mmq_q5_k_tile8.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmq_q5_k_gate_up_tile8_dp4a_q8_1"
+params = """
+    const flambeau_block_q5_K* __restrict__ gate_w,
+    const flambeau_block_q5_K* __restrict__ up_w,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    const int* __restrict__ sorted_pair_idx_padded,
+    const int* __restrict__ padded_offsets,
+    float* __restrict__ gate_out,
+    float* __restrict__ up_out,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_sb_per_row,
+    const int n_experts"""
+body = "indexed_moe_mmq_q5_k_gate_up_tile8_row<float>(gate_w, up_w, y, expert_ids, sorted_pair_idx_padded, padded_offsets, gate_out, up_out, n_rows, n_tokens, top_k, n_sb_per_row, n_experts);"
+
+[[kernel]]
+stem = "indexed_moe_mmq_q5_k_down_tile8_dp4a"
+includes = ["indexed_moe_mmq_q5_k_tile8.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmq_q5_k_down_tile8_dp4a_q8_1"
+params = """
+    const flambeau_block_q5_K* __restrict__ down_w,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    const int* __restrict__ sorted_pair_idx_padded,
+    const int* __restrict__ padded_offsets,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_sb_per_row,
+    const int n_experts"""
+body = "indexed_moe_mmq_q5_k_down_tile8_row<float>(down_w, y, expert_ids, sorted_pair_idx_padded, padded_offsets, dst, n_rows, n_tokens, top_k, n_sb_per_row, n_experts);"
+
+[[kernel]]
+stem = "indexed_moe_mmq_q6_k_gate_up_tile8_dp4a"
+includes = ["indexed_moe_mmq_q6_k_tile8.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmq_q6_k_gate_up_tile8_dp4a_q8_1"
+params = """
+    const flambeau_block_q6_K* __restrict__ gate_w,
+    const flambeau_block_q6_K* __restrict__ up_w,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    const int* __restrict__ sorted_pair_idx_padded,
+    const int* __restrict__ padded_offsets,
+    float* __restrict__ gate_out,
+    float* __restrict__ up_out,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_sb_per_row,
+    const int n_experts"""
+body = "indexed_moe_mmq_q6_k_gate_up_tile8_row<float>(gate_w, up_w, y, expert_ids, sorted_pair_idx_padded, padded_offsets, gate_out, up_out, n_rows, n_tokens, top_k, n_sb_per_row, n_experts);"
+
+[[kernel]]
+stem = "indexed_moe_mmq_q6_k_down_tile8_dp4a"
+includes = ["indexed_moe_mmq_q6_k_tile8.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmq_q6_k_down_tile8_dp4a_q8_1"
+params = """
+    const flambeau_block_q6_K* __restrict__ down_w,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    const int* __restrict__ sorted_pair_idx_padded,
+    const int* __restrict__ padded_offsets,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_sb_per_row,
+    const int n_experts"""
+body = "indexed_moe_mmq_q6_k_down_tile8_row<float>(down_w, y, expert_ids, sorted_pair_idx_padded, padded_offsets, dst, n_rows, n_tokens, top_k, n_sb_per_row, n_experts);"
+
+[[kernel]]
+stem = "indexed_moe_mmq_q3_k_gate_up_tile8_dp4a"
+includes = ["indexed_moe_mmq_q3_k_tile8.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmq_q3_k_gate_up_tile8_dp4a_q8_1"
+params = """
+    const flambeau_block_q3_K* __restrict__ gate_w,
+    const flambeau_block_q3_K* __restrict__ up_w,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    const int* __restrict__ sorted_pair_idx_padded,
+    const int* __restrict__ padded_offsets,
+    float* __restrict__ gate_out,
+    float* __restrict__ up_out,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_sb_per_row,
+    const int n_experts"""
+body = "indexed_moe_mmq_q3_k_gate_up_tile8_row<float>(gate_w, up_w, y, expert_ids, sorted_pair_idx_padded, padded_offsets, gate_out, up_out, n_rows, n_tokens, top_k, n_sb_per_row, n_experts);"
+
+[[kernel]]
+stem = "indexed_moe_mmq_q3_k_down_tile8_dp4a"
+includes = ["indexed_moe_mmq_q3_k_tile8.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmq_q3_k_down_tile8_dp4a_q8_1"
+params = """
+    const flambeau_block_q3_K* __restrict__ down_w,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    const int* __restrict__ sorted_pair_idx_padded,
+    const int* __restrict__ padded_offsets,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_sb_per_row,
+    const int n_experts"""
+body = "indexed_moe_mmq_q3_k_down_tile8_row<float>(down_w, y, expert_ids, sorted_pair_idx_padded, padded_offsets, dst, n_rows, n_tokens, top_k, n_sb_per_row, n_experts);"
+
+[[kernel]]
+stem = "indexed_moe_mmq_iq4_nl_gate_up_tile8_dp4a"
+includes = ["indexed_moe_mmq_iq4_nl_tile8.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmq_iq4_nl_gate_up_tile8_dp4a_q8_1"
+params = """
+    const flambeau_block_iq4_nl* __restrict__ gate_w,
+    const flambeau_block_iq4_nl* __restrict__ up_w,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    const int* __restrict__ sorted_pair_idx_padded,
+    const int* __restrict__ padded_offsets,
+    float* __restrict__ gate_out,
+    float* __restrict__ up_out,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_blocks_per_row,
+    const int n_experts"""
+body = "indexed_moe_mmq_iq4_nl_gate_up_tile8_row<float>(gate_w, up_w, y, expert_ids, sorted_pair_idx_padded, padded_offsets, gate_out, up_out, n_rows, n_tokens, top_k, n_blocks_per_row, n_experts);"
+
+[[kernel]]
+stem = "indexed_moe_mmq_iq4_nl_down_tile8_dp4a"
+includes = ["indexed_moe_mmq_iq4_nl_tile8.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmq_iq4_nl_down_tile8_dp4a_q8_1"
+params = """
+    const flambeau_block_iq4_nl* __restrict__ down_w,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    const int* __restrict__ sorted_pair_idx_padded,
+    const int* __restrict__ padded_offsets,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_blocks_per_row,
+    const int n_experts"""
+body = "indexed_moe_mmq_iq4_nl_down_tile8_row<float>(down_w, y, expert_ids, sorted_pair_idx_padded, padded_offsets, dst, n_rows, n_tokens, top_k, n_blocks_per_row, n_experts);"
+
+[[kernel]]
+stem = "indexed_moe_mmq_iq4_xs_gate_up_tile8_dp4a"
+includes = ["indexed_moe_mmq_iq4_xs_tile8.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmq_iq4_xs_gate_up_tile8_dp4a_q8_1"
+params = """
+    const flambeau_block_iq4_xs* __restrict__ gate_w,
+    const flambeau_block_iq4_xs* __restrict__ up_w,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    const int* __restrict__ sorted_pair_idx_padded,
+    const int* __restrict__ padded_offsets,
+    float* __restrict__ gate_out,
+    float* __restrict__ up_out,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_sb_per_row,
+    const int n_experts"""
+body = "indexed_moe_mmq_iq4_xs_gate_up_tile8_row<float>(gate_w, up_w, y, expert_ids, sorted_pair_idx_padded, padded_offsets, gate_out, up_out, n_rows, n_tokens, top_k, n_sb_per_row, n_experts);"
+
+[[kernel]]
+stem = "indexed_moe_mmq_iq4_xs_down_tile8_dp4a"
+includes = ["indexed_moe_mmq_iq4_xs_tile8.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmq_iq4_xs_down_tile8_dp4a_q8_1"
+params = """
+    const flambeau_block_iq4_xs* __restrict__ down_w,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    const int* __restrict__ sorted_pair_idx_padded,
+    const int* __restrict__ padded_offsets,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_sb_per_row,
+    const int n_experts"""
+body = "indexed_moe_mmq_iq4_xs_down_tile8_row<float>(down_w, y, expert_ids, sorted_pair_idx_padded, padded_offsets, dst, n_rows, n_tokens, top_k, n_sb_per_row, n_experts);"
+
+[[kernel]]
+stem = "indexed_moe_mmq_iq2_xxs_gate_up_tile8_dp4a"
+includes = ["indexed_moe_mmq_iq2_xxs_tile8.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmq_iq2_xxs_gate_up_tile8_dp4a_q8_1"
+params = """
+    const flambeau_block_iq2_xxs* __restrict__ gate_w,
+    const flambeau_block_iq2_xxs* __restrict__ up_w,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    const int* __restrict__ sorted_pair_idx_padded,
+    const int* __restrict__ padded_offsets,
+    float* __restrict__ gate_out,
+    float* __restrict__ up_out,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_sb_per_row,
+    const int n_experts"""
+body = "indexed_moe_mmq_iq2_xxs_gate_up_tile8_row<float>(gate_w, up_w, y, expert_ids, sorted_pair_idx_padded, padded_offsets, gate_out, up_out, n_rows, n_tokens, top_k, n_sb_per_row, n_experts);"
+
+[[kernel]]
+stem = "indexed_moe_mmq_iq2_xxs_down_tile8_dp4a"
+includes = ["indexed_moe_mmq_iq2_xxs_tile8.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmq_iq2_xxs_down_tile8_dp4a_q8_1"
+params = """
+    const flambeau_block_iq2_xxs* __restrict__ down_w,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    const int* __restrict__ sorted_pair_idx_padded,
+    const int* __restrict__ padded_offsets,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_sb_per_row,
+    const int n_experts"""
+body = "indexed_moe_mmq_iq2_xxs_down_tile8_row<float>(down_w, y, expert_ids, sorted_pair_idx_padded, padded_offsets, dst, n_rows, n_tokens, top_k, n_sb_per_row, n_experts);"
+
+[[kernel]]
+stem = "indexed_moe_mmq_iq2_xs_gate_up_tile8_dp4a"
+includes = ["indexed_moe_mmq_iq2_xs_tile8.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmq_iq2_xs_gate_up_tile8_dp4a_q8_1"
+params = """
+    const flambeau_block_iq2_xs* __restrict__ gate_w,
+    const flambeau_block_iq2_xs* __restrict__ up_w,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    const int* __restrict__ sorted_pair_idx_padded,
+    const int* __restrict__ padded_offsets,
+    float* __restrict__ gate_out,
+    float* __restrict__ up_out,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_sb_per_row,
+    const int n_experts"""
+body = "indexed_moe_mmq_iq2_xs_gate_up_tile8_row<float>(gate_w, up_w, y, expert_ids, sorted_pair_idx_padded, padded_offsets, gate_out, up_out, n_rows, n_tokens, top_k, n_sb_per_row, n_experts);"
+
+[[kernel]]
+stem = "indexed_moe_mmq_iq2_xs_down_tile8_dp4a"
+includes = ["indexed_moe_mmq_iq2_xs_tile8.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmq_iq2_xs_down_tile8_dp4a_q8_1"
+params = """
+    const flambeau_block_iq2_xs* __restrict__ down_w,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    const int* __restrict__ sorted_pair_idx_padded,
+    const int* __restrict__ padded_offsets,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_sb_per_row,
+    const int n_experts"""
+body = "indexed_moe_mmq_iq2_xs_down_tile8_row<float>(down_w, y, expert_ids, sorted_pair_idx_padded, padded_offsets, dst, n_rows, n_tokens, top_k, n_sb_per_row, n_experts);"
+
+[[kernel]]
+stem = "indexed_moe_mmq_iq2_s_gate_up_tile8_dp4a"
+includes = ["indexed_moe_mmq_iq2_s_tile8.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmq_iq2_s_gate_up_tile8_dp4a_q8_1"
+params = """
+    const flambeau_block_iq2_s* __restrict__ gate_w,
+    const flambeau_block_iq2_s* __restrict__ up_w,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    const int* __restrict__ sorted_pair_idx_padded,
+    const int* __restrict__ padded_offsets,
+    float* __restrict__ gate_out,
+    float* __restrict__ up_out,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_sb_per_row,
+    const int n_experts"""
+body = "indexed_moe_mmq_iq2_s_gate_up_tile8_row<float>(gate_w, up_w, y, expert_ids, sorted_pair_idx_padded, padded_offsets, gate_out, up_out, n_rows, n_tokens, top_k, n_sb_per_row, n_experts);"
+
+[[kernel]]
+stem = "indexed_moe_mmq_iq2_s_down_tile8_dp4a"
+includes = ["indexed_moe_mmq_iq2_s_tile8.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmq_iq2_s_down_tile8_dp4a_q8_1"
+params = """
+    const flambeau_block_iq2_s* __restrict__ down_w,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    const int* __restrict__ sorted_pair_idx_padded,
+    const int* __restrict__ padded_offsets,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_sb_per_row,
+    const int n_experts"""
+body = "indexed_moe_mmq_iq2_s_down_tile8_row<float>(down_w, y, expert_ids, sorted_pair_idx_padded, padded_offsets, dst, n_rows, n_tokens, top_k, n_sb_per_row, n_experts);"
+
+[[kernel]]
+stem = "indexed_moe_mmq_iq3_xxs_gate_up_tile8_dp4a"
+includes = ["indexed_moe_mmq_iq3_xxs_tile8.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmq_iq3_xxs_gate_up_tile8_dp4a_q8_1"
+params = """
+    const flambeau_block_iq3_xxs* __restrict__ gate_w,
+    const flambeau_block_iq3_xxs* __restrict__ up_w,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    const int* __restrict__ sorted_pair_idx_padded,
+    const int* __restrict__ padded_offsets,
+    float* __restrict__ gate_out,
+    float* __restrict__ up_out,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_sb_per_row,
+    const int n_experts"""
+body = "indexed_moe_mmq_iq3_xxs_gate_up_tile8_row<float>(gate_w, up_w, y, expert_ids, sorted_pair_idx_padded, padded_offsets, gate_out, up_out, n_rows, n_tokens, top_k, n_sb_per_row, n_experts);"
+
+[[kernel]]
+stem = "indexed_moe_mmq_iq3_xxs_down_tile8_dp4a"
+includes = ["indexed_moe_mmq_iq3_xxs_tile8.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmq_iq3_xxs_down_tile8_dp4a_q8_1"
+params = """
+    const flambeau_block_iq3_xxs* __restrict__ down_w,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    const int* __restrict__ sorted_pair_idx_padded,
+    const int* __restrict__ padded_offsets,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_sb_per_row,
+    const int n_experts"""
+body = "indexed_moe_mmq_iq3_xxs_down_tile8_row<float>(down_w, y, expert_ids, sorted_pair_idx_padded, padded_offsets, dst, n_rows, n_tokens, top_k, n_sb_per_row, n_experts);"
+
+[[kernel]]
+stem = "indexed_moe_mmq_iq3_s_gate_up_tile8_dp4a"
+includes = ["indexed_moe_mmq_iq3_s_tile8.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmq_iq3_s_gate_up_tile8_dp4a_q8_1"
+params = """
+    const flambeau_block_iq3_s* __restrict__ gate_w,
+    const flambeau_block_iq3_s* __restrict__ up_w,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    const int* __restrict__ sorted_pair_idx_padded,
+    const int* __restrict__ padded_offsets,
+    float* __restrict__ gate_out,
+    float* __restrict__ up_out,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_sb_per_row,
+    const int n_experts"""
+body = "indexed_moe_mmq_iq3_s_gate_up_tile8_row<float>(gate_w, up_w, y, expert_ids, sorted_pair_idx_padded, padded_offsets, gate_out, up_out, n_rows, n_tokens, top_k, n_sb_per_row, n_experts);"
+
+[[kernel]]
+stem = "indexed_moe_mmq_iq3_s_down_tile8_dp4a"
+includes = ["indexed_moe_mmq_iq3_s_tile8.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmq_iq3_s_down_tile8_dp4a_q8_1"
+params = """
+    const flambeau_block_iq3_s* __restrict__ down_w,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    const int* __restrict__ sorted_pair_idx_padded,
+    const int* __restrict__ padded_offsets,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_sb_per_row,
+    const int n_experts"""
+body = "indexed_moe_mmq_iq3_s_down_tile8_row<float>(down_w, y, expert_ids, sorted_pair_idx_padded, padded_offsets, dst, n_rows, n_tokens, top_k, n_sb_per_row, n_experts);"
+
+[[kernel]]
+stem = "indexed_moe_mmq_iq1_s_gate_up_tile8_dp4a"
+includes = ["indexed_moe_mmq_iq1_s_tile8.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmq_iq1_s_gate_up_tile8_dp4a_q8_1"
+params = """
+    const flambeau_block_iq1_s* __restrict__ gate_w,
+    const flambeau_block_iq1_s* __restrict__ up_w,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    const int* __restrict__ sorted_pair_idx_padded,
+    const int* __restrict__ padded_offsets,
+    float* __restrict__ gate_out,
+    float* __restrict__ up_out,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_sb_per_row,
+    const int n_experts"""
+body = "indexed_moe_mmq_iq1_s_gate_up_tile8_row<float>(gate_w, up_w, y, expert_ids, sorted_pair_idx_padded, padded_offsets, gate_out, up_out, n_rows, n_tokens, top_k, n_sb_per_row, n_experts);"
+
+[[kernel]]
+stem = "indexed_moe_mmq_iq1_s_down_tile8_dp4a"
+includes = ["indexed_moe_mmq_iq1_s_tile8.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmq_iq1_s_down_tile8_dp4a_q8_1"
+params = """
+    const flambeau_block_iq1_s* __restrict__ down_w,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    const int* __restrict__ sorted_pair_idx_padded,
+    const int* __restrict__ padded_offsets,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_sb_per_row,
+    const int n_experts"""
+body = "indexed_moe_mmq_iq1_s_down_tile8_row<float>(down_w, y, expert_ids, sorted_pair_idx_padded, padded_offsets, dst, n_rows, n_tokens, top_k, n_sb_per_row, n_experts);"
+
+[[kernel]]
+stem = "indexed_moe_mmq_iq1_m_gate_up_tile8_dp4a"
+includes = ["indexed_moe_mmq_iq1_m_tile8.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmq_iq1_m_gate_up_tile8_dp4a_q8_1"
+params = """
+    const flambeau_block_iq1_m* __restrict__ gate_w,
+    const flambeau_block_iq1_m* __restrict__ up_w,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    const int* __restrict__ sorted_pair_idx_padded,
+    const int* __restrict__ padded_offsets,
+    float* __restrict__ gate_out,
+    float* __restrict__ up_out,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_sb_per_row,
+    const int n_experts"""
+body = "indexed_moe_mmq_iq1_m_gate_up_tile8_row<float>(gate_w, up_w, y, expert_ids, sorted_pair_idx_padded, padded_offsets, gate_out, up_out, n_rows, n_tokens, top_k, n_sb_per_row, n_experts);"
+
+[[kernel]]
+stem = "indexed_moe_mmq_iq1_m_down_tile8_dp4a"
+includes = ["indexed_moe_mmq_iq1_m_tile8.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_indexed_moe_mmq_iq1_m_down_tile8_dp4a_q8_1"
+params = """
+    const flambeau_block_iq1_m* __restrict__ down_w,
+    const flambeau_block_q8_1* __restrict__ y,
+    const int* __restrict__ expert_ids,
+    const int* __restrict__ sorted_pair_idx_padded,
+    const int* __restrict__ padded_offsets,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_tokens,
+    const int top_k,
+    const int n_sb_per_row,
+    const int n_experts"""
+body = "indexed_moe_mmq_iq1_m_down_tile8_row<float>(down_w, y, expert_ids, sorted_pair_idx_padded, padded_offsets, dst, n_rows, n_tokens, top_k, n_sb_per_row, n_experts);"
+
+# P3 Stream F — Tier-B block-reduce kernels neutralized to shared `.cuh`
+# (block_reduce_sum over the WARP_SIZE seam → correct on wave64 + wave32).
+[[kernel]]
+stem = "rmsnorm_f32"
+includes = ["block_reduce.cuh", "rmsnorm.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_rmsnorm_f32"
+params = """
+    const float* __restrict__ x,
+    const float* __restrict__ weight,
+    float* __restrict__ y,
+    const int n_rows,
+    const int k,
+    const float eps"""
+body = "rmsnorm_f32_row<256>(x, weight, y, n_rows, k, eps);"
+
+[[kernel]]
+stem = "l2_norm_f32"
+includes = ["block_reduce.cuh", "l2_norm.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_l2_norm_f32"
+params = """
+    const float* __restrict__ x,
+    float* __restrict__ y,
+    const int n_rows,
+    const int k,
+    const float eps"""
+body = "l2_norm_f32_row<256>(x, y, n_rows, k, eps);"
+
+[[kernel]]
+stem = "rmsnorm_f16"
+includes = ["block_quant.cuh", "block_reduce.cuh", "rmsnorm_f16.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_rmsnorm_f16"
+params = """
+    const fb_fp16_t* __restrict__ x,
+    const fb_fp16_t* __restrict__ weight,
+    fb_fp16_t* __restrict__ y,
+    const int n_rows,
+    const int k,
+    const float eps"""
+body = "rmsnorm_f16_row<256>(x, weight, y, n_rows, k, eps);"
+
+# Fused RMSNorm family — gemma4 cast/residual paths + the decode RMSNorm→Q8_1
+# edge, sharing block_reduce_sum (rmsnorm_fused.cuh).
+[[kernel]]
+stem = "rmsnorm_f32_to_f16"
+includes = ["block_quant.cuh", "block_reduce.cuh", "rmsnorm_fused.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_rmsnorm_f32_to_f16"
+params = """
+    const float* __restrict__ x,
+    const fb_fp16_t* __restrict__ weight,
+    fb_fp16_t* __restrict__ y,
+    const int n_rows,
+    const int k,
+    const float eps"""
+body = "rmsnorm_f32_to_f16_row<256>(x, weight, y, n_rows, k, eps);"
+
+[[kernel.entry]]
+name = "flambeau_rmsnorm_f32_to_f16_add_residual"
+params = """
+    const float* __restrict__ x,
+    const fb_fp16_t* __restrict__ weight,
+    const fb_fp16_t* __restrict__ resid_in,
+    fb_fp16_t* __restrict__ resid_out,
+    const int n_rows,
+    const int k,
+    const float eps"""
+body = "rmsnorm_f32_to_f16_add_residual_row<256>(x, weight, resid_in, resid_out, n_rows, k, eps);"
+
+[[kernel.entry]]
+name = "flambeau_rmsnorm_f16_to_f16_add_residual"
+params = """
+    const fb_fp16_t* __restrict__ x,
+    const fb_fp16_t* __restrict__ weight,
+    const fb_fp16_t* __restrict__ resid_in,
+    fb_fp16_t* __restrict__ resid_out,
+    const int n_rows,
+    const int k,
+    const float eps"""
+body = "rmsnorm_f16_to_f16_add_residual_row<256>(x, weight, resid_in, resid_out, n_rows, k, eps);"
+
+[[kernel]]
+stem = "rmsnorm_f16_add_residual"
+includes = ["block_quant.cuh", "block_reduce.cuh", "rmsnorm_fused.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_rmsnorm_f16_add_residual"
+params = """
+    const fb_fp16_t* __restrict__ x_in,
+    const fb_fp16_t* __restrict__ delta,
+    const fb_fp16_t* __restrict__ weight,
+    fb_fp16_t* __restrict__ mid,
+    fb_fp16_t* __restrict__ mid_norm,
+    const int n_rows,
+    const int k,
+    const float eps"""
+body = "rmsnorm_f16_add_residual_row<256>(x_in, delta, weight, mid, mid_norm, n_rows, k, eps);"
+
+[[kernel]]
+stem = "rmsnorm_q8_1_fused"
+includes = ["block_quant.cuh", "block_reduce.cuh", "rmsnorm_fused.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_rmsnorm_q8_1_fused"
+params = """
+    const fb_fp16_t* __restrict__ x,
+    const fb_fp16_t* __restrict__ weight,
+    flambeau_block_q8_1* __restrict__ y,
+    const int n_rows,
+    const int k,
+    const float eps"""
+body = "rmsnorm_q8_1_fused_row<1024>(x, weight, y, n_rows, k, eps);"
+
+# MoE-decode glue — shared-expert gate (block-reduce dot + sigmoid scale).
+[[kernel]]
+stem = "shared_expert_scale_f32"
+includes = ["block_reduce.cuh", "shared_expert_scale.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_shared_expert_scale_f32"
+params = """
+    float* __restrict__ shared_out,
+    const float* __restrict__ x,
+    const float* __restrict__ gate_w,
+    const int n_tokens,
+    const int hidden"""
+body = "shared_expert_scale_f32_row<256>(shared_out, x, gate_w, n_tokens, hidden);"
+
+# Router top-k — per-token argmax×k + softmax (WARP_SIZE-seamed argmax reduce).
+[[kernel]]
+stem = "topk_f32"
+includes = ["backend_compat.cuh", "topk.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_topk_softmax_f32"
+params = """
+    const float* __restrict__ logits,
+    int* __restrict__ out_indices,
+    float* __restrict__ out_weights,
+    const int n_tokens,
+    const int n_experts,
+    const int k"""
+body = "topk_softmax_f32_row(logits, out_indices, out_weights, n_tokens, n_experts, k);"
+
+# Online-softmax — shared block_reduce_softmax (max,sum) seam.
+[[kernel]]
+stem = "softmax_masked_f16"
+includes = ["backend_compat.cuh", "block_reduce_softmax.cuh", "softmax_masked.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_softmax_masked_f16"
+params = """
+    const fb_fp16_t* __restrict__ scores,
+    const fb_fp16_t* __restrict__ mask,
+    fb_fp16_t* __restrict__ out,
+    const int n_rows,
+    const int k,
+    const float scale"""
+body = "softmax_masked_f16_row<256>(scores, mask, out, n_rows, k, scale);"
+
+[[kernel]]
+stem = "sampler_topk_softmax_f32"
+includes = ["backend_compat.cuh", "block_reduce_softmax.cuh", "sampler_topk_softmax.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_sampler_topk_softmax_f32"
+params = """
+    const float* __restrict__ logits,
+    int* __restrict__ out_ids,
+    float* __restrict__ out_probs,
+    const int V,
+    const int K,
+    const float inv_temp"""
+body = "sampler_topk_softmax_f32_body(logits, out_ids, out_probs, V, K, inv_temp);"
+
+# GQA decode attention — online softmax; the Q·K dot is a block sum over the
+# WARP_SIZE seam (warp_reduce_sum + runtime cross-warp LDS).
+[[kernel]]
+stem = "attention_decode_f16"
+includes = ["block_quant.cuh", "attention_decode.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_attention_decode_f16"
+params = """
+    const fb_fp16_t* __restrict__ q,
+    const fb_fp16_t* __restrict__ k_cache,
+    const fb_fp16_t* __restrict__ v_cache,
+    fb_fp16_t* __restrict__ out,
+    const int n_heads_q,
+    const int n_heads_kv,
+    const int head_dim,
+    const int n_tokens,
+    const float scale,
+    const int window_size,
+    const int ring_depth"""
+body = "attention_decode_f16_body(q, k_cache, v_cache, out, n_heads_q, n_heads_kv, head_dim, n_tokens, scale, window_size, ring_depth);"
+
+# Flash-decoding split-K attention — chunk (tile-4 __shfl_xor reduce) + combine.
+[[kernel]]
+stem = "attention_decode_f16_splitk"
+includes = ["block_quant.cuh", "attention_decode_splitk.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_attention_decode_f16_splitk_chunk"
+params = """
+    const fb_fp16_t* __restrict__ q,
+    const fb_fp16_t* __restrict__ k_cache,
+    const fb_fp16_t* __restrict__ v_cache,
+    float* __restrict__ partials_m,
+    float* __restrict__ partials_s,
+    float* __restrict__ partials_o,
+    const int n_heads_q,
+    const int n_heads_kv,
+    const int head_dim,
+    const int n_tokens,
+    const int n_chunks,
+    const int chunk_size,
+    const float scale,
+    const int window_size,
+    const int ring_depth,
+    const int chunk_base"""
+body = "attention_decode_f16_splitk_chunk_body(q, k_cache, v_cache, partials_m, partials_s, partials_o, n_heads_q, n_heads_kv, head_dim, n_tokens, n_chunks, chunk_size, scale, window_size, ring_depth, chunk_base);"
+
+[[kernel.entry]]
+name = "flambeau_attention_decode_f16_splitk_combine"
+params = """
+    const float* __restrict__ partials_m,
+    const float* __restrict__ partials_s,
+    const float* __restrict__ partials_o,
+    fb_fp16_t* __restrict__ out,
+    const int n_heads_q,
+    const int n_chunks,
+    const int head_dim"""
+body = "attention_decode_f16_splitk_combine_body(partials_m, partials_s, partials_o, out, n_heads_q, n_chunks, head_dim);"
+
+# Dense GEMV (router / dense projections) — block_reduce_sum dot.
+[[kernel]]
+stem = "dense_gemv_f32_f16"
+includes = ["block_quant.cuh", "block_reduce.cuh", "dense_gemv.cuh"]
+[[kernel.entry]]
+name = "flambeau_dense_gemv_f32_f16"
+params = """
+    const float* __restrict__ w,
+    const fb_fp16_t* __restrict__ x,
+    float* __restrict__ y,
+    const int n_rows,
+    const int k"""
+body = "dense_gemv_row<float>(w, x, y, n_rows, k);"
+
+[[kernel]]
+stem = "dense_gemv_f16_f16"
+includes = ["block_quant.cuh", "block_reduce.cuh", "dense_gemv.cuh"]
+[[kernel.entry]]
+name = "flambeau_dense_gemv_f16_f16"
+params = """
+    const fb_fp16_t* __restrict__ w,
+    const fb_fp16_t* __restrict__ x,
+    float* __restrict__ y,
+    const int n_rows,
+    const int k"""
+body = "dense_gemv_row<fb_fp16_t>(w, x, y, n_rows, k);"
+
+[[kernel]]
+stem = "dense_gemv_f32_f16_batched"
+includes = ["block_quant.cuh", "block_reduce.cuh", "dense_gemv.cuh"]
+[[kernel.entry]]
+name = "flambeau_dense_gemv_f32_f16_batched"
+params = """
+    const float* __restrict__ w,
+    const fb_fp16_t* __restrict__ x,
+    float* __restrict__ y,
+    const int n_rows,
+    const int k,
+    const int n_tokens"""
+body = "dense_gemv_row_batched<float>(w, x, y, n_rows, k, n_tokens);"
+
+[[kernel]]
+stem = "dense_gemv_f16_f16_batched"
+includes = ["block_quant.cuh", "block_reduce.cuh", "dense_gemv.cuh"]
+[[kernel.entry]]
+name = "flambeau_dense_gemv_f16_f16_batched"
+params = """
+    const fb_fp16_t* __restrict__ w,
+    const fb_fp16_t* __restrict__ x,
+    float* __restrict__ y,
+    const int n_rows,
+    const int k,
+    const int n_tokens"""
+body = "dense_gemv_row_batched<fb_fp16_t>(w, x, y, n_rows, k, n_tokens);"
+
+# Per-head V RMSNorm (gemma4 attn_v_unit_norm) + fused KV append.
+[[kernel]]
+stem = "v_unit_norm_per_head_f16"
+includes = ["block_quant.cuh", "block_reduce.cuh", "v_unit_norm.cuh"]
+[[kernel.entry]]
+name = "flambeau_v_unit_norm_per_head_f16"
+params = """
+    fb_fp16_t* __restrict__ v,
+    const int n_kv_heads,
+    const int head_dim,
+    const float eps"""
+body = "v_unit_norm_per_head_f16_body(v, n_kv_heads, head_dim, eps);"
+
+[[kernel]]
+stem = "kv_append_v_unit_norm_f16"
+includes = ["block_quant.cuh", "block_reduce.cuh", "kv_append_v_unit_norm.cuh"]
+[[kernel.entry]]
+name = "flambeau_kv_append_v_unit_norm_f16_d64"
+launch_bounds = "64, 16"
+params = """
+    const fb_fp16_t* __restrict__ k_src,
+    const fb_fp16_t* __restrict__ v_src,
+    fb_fp16_t* __restrict__ k_cache,
+    fb_fp16_t* __restrict__ v_cache,
+    const int n_kv_heads,
+    const int write_pos,
+    const float eps,
+    const int ring_depth"""
+body = "kv_append_v_unit_norm_f16_body<64>(k_src, v_src, k_cache, v_cache, n_kv_heads, write_pos, eps, ring_depth);"
+[[kernel.entry]]
+name = "flambeau_kv_append_v_unit_norm_f16_d128"
+launch_bounds = "128, 8"
+params = """
+    const fb_fp16_t* __restrict__ k_src,
+    const fb_fp16_t* __restrict__ v_src,
+    fb_fp16_t* __restrict__ k_cache,
+    fb_fp16_t* __restrict__ v_cache,
+    const int n_kv_heads,
+    const int write_pos,
+    const float eps,
+    const int ring_depth"""
+body = "kv_append_v_unit_norm_f16_body<128>(k_src, v_src, k_cache, v_cache, n_kv_heads, write_pos, eps, ring_depth);"
+[[kernel.entry]]
+name = "flambeau_kv_append_v_unit_norm_f16_d256"
+launch_bounds = "256, 4"
+params = """
+    const fb_fp16_t* __restrict__ k_src,
+    const fb_fp16_t* __restrict__ v_src,
+    fb_fp16_t* __restrict__ k_cache,
+    fb_fp16_t* __restrict__ v_cache,
+    const int n_kv_heads,
+    const int write_pos,
+    const float eps,
+    const int ring_depth"""
+body = "kv_append_v_unit_norm_f16_body<256>(k_src, v_src, k_cache, v_cache, n_kv_heads, write_pos, eps, ring_depth);"
+[[kernel.entry]]
+name = "flambeau_kv_append_v_unit_norm_f16_d512"
+launch_bounds = "512, 2"
+params = """
+    const fb_fp16_t* __restrict__ k_src,
+    const fb_fp16_t* __restrict__ v_src,
+    fb_fp16_t* __restrict__ k_cache,
+    fb_fp16_t* __restrict__ v_cache,
+    const int n_kv_heads,
+    const int write_pos,
+    const float eps,
+    const int ring_depth"""
+body = "kv_append_v_unit_norm_f16_body<512>(k_src, v_src, k_cache, v_cache, n_kv_heads, write_pos, eps, ring_depth);"
+
+# Fused per-head RMSNorm + partial NeoX RoPE (gemma4 Q/K norm; HEAD_DIM entries).
+[[kernel]]
+stem = "rmsnorm_rope_neox_partial_f16"
+includes = ["block_quant.cuh", "block_reduce.cuh", "rmsnorm_rope.cuh"]
+[[kernel.entry]]
+name = "flambeau_rmsnorm_rope_neox_partial_f16_d64"
+launch_bounds = "64, 16"
+params = """
+    fb_fp16_t* __restrict__ x,
+    const fb_fp16_t* __restrict__ norm_w,
+    const int* __restrict__ positions,
+    const int n_heads,
+    const int rotated_dims,
+    const float theta_base,
+    const float eps"""
+body = "rmsnorm_rope_neox_partial_f16_body<64>(x, norm_w, positions, n_heads, rotated_dims, theta_base, eps);"
+[[kernel.entry]]
+name = "flambeau_rmsnorm_rope_neox_partial_f16_d128"
+launch_bounds = "128, 8"
+params = """
+    fb_fp16_t* __restrict__ x,
+    const fb_fp16_t* __restrict__ norm_w,
+    const int* __restrict__ positions,
+    const int n_heads,
+    const int rotated_dims,
+    const float theta_base,
+    const float eps"""
+body = "rmsnorm_rope_neox_partial_f16_body<128>(x, norm_w, positions, n_heads, rotated_dims, theta_base, eps);"
+[[kernel.entry]]
+name = "flambeau_rmsnorm_rope_neox_partial_f16_d256"
+launch_bounds = "256, 4"
+params = """
+    fb_fp16_t* __restrict__ x,
+    const fb_fp16_t* __restrict__ norm_w,
+    const int* __restrict__ positions,
+    const int n_heads,
+    const int rotated_dims,
+    const float theta_base,
+    const float eps"""
+body = "rmsnorm_rope_neox_partial_f16_body<256>(x, norm_w, positions, n_heads, rotated_dims, theta_base, eps);"
+[[kernel.entry]]
+name = "flambeau_rmsnorm_rope_neox_partial_f16_d512"
+launch_bounds = "512, 2"
+params = """
+    fb_fp16_t* __restrict__ x,
+    const fb_fp16_t* __restrict__ norm_w,
+    const int* __restrict__ positions,
+    const int n_heads,
+    const int rotated_dims,
+    const float theta_base,
+    const float eps"""
+body = "rmsnorm_rope_neox_partial_f16_body<512>(x, norm_w, positions, n_heads, rotated_dims, theta_base, eps);"
+
+# GDN recurrent state step (qwen3-coder-next). WARP_SIZE from arch seam → the
+# register-sharded column recurrence scales (2 rows/lane wave64, 4 wave32).
+[[kernel]]
+stem = "gdn_state_step_f32"
+includes = ["backend_compat.cuh", "gdn_state_step.cuh"]
+[[kernel.entry]]
+name = "flambeau_gdn_state_step_f32_s128"
+launch_bounds = "WARP_SIZE * GDN_WARPS_PER_BLOCK, 1"
+params = """
+    const float* __restrict__ q,
+    const float* __restrict__ k,
+    const float* __restrict__ v,
+    const float* __restrict__ gate,
+    const float* __restrict__ beta,
+    const float* __restrict__ state_in,
+    float* __restrict__ state_out,
+    float* __restrict__ attn_out,
+    int B, int H, int L, int n_rep, int rep_inner_layout"""
+body = "gdn_state_step_impl<128>(q, k, v, gate, beta, state_in, state_out, attn_out, B, H, L, n_rep, rep_inner_layout);"
+
+[[kernel]]
+stem = "gdn_state_step_alphabeta_f32"
+includes = ["backend_compat.cuh", "gdn_state_step.cuh", "gdn_state_step_alphabeta.cuh"]
+[[kernel.entry]]
+name = "flambeau_gdn_state_step_alphabeta_f32_s128"
+launch_bounds = "WARP_SIZE * GDN_WARPS_PER_BLOCK, 2"
+params = """
+    const float* __restrict__ q,
+    const float* __restrict__ k,
+    const float* __restrict__ v,
+    const float* __restrict__ alpha_in,
+    const float* __restrict__ beta_in,
+    const float* __restrict__ ssm_dt_bias,
+    const float* __restrict__ ssm_a,
+    const float* __restrict__ state_in,
+    float* __restrict__ state_out,
+    float* __restrict__ attn_out,
+    int B, int H, int L, int n_rep, int rep_inner_layout"""
+body = "gdn_state_step_alphabeta_impl<128>(q, k, v, alpha_in, beta_in, ssm_dt_bias, ssm_a, state_in, state_out, attn_out, B, H, L, n_rep, rep_inner_layout);"
+
+[[kernel]]
+stem = "gdn_state_step_alphabeta_f32_batched_slots"
+includes = ["backend_compat.cuh", "gdn_state_step.cuh", "gdn_state_step_alphabeta.cuh"]
+[[kernel.entry]]
+name = "flambeau_gdn_state_step_alphabeta_f32_s128_batched_slots"
+launch_bounds = "WARP_SIZE * GDN_WARPS_PER_BLOCK, 2"
+params = """
+    const float* __restrict__ q,
+    const float* __restrict__ k,
+    const float* __restrict__ v,
+    const float* __restrict__ alpha_in,
+    const float* __restrict__ beta_in,
+    const float* __restrict__ ssm_dt_bias,
+    const float* __restrict__ ssm_a,
+    const float* const* __restrict__ state_in_ptrs,
+    float* const* __restrict__ state_out_ptrs,
+    float* __restrict__ attn_out,
+    int B, int H, int L, int n_rep, int rep_inner_layout"""
+body = "gdn_state_step_ab_batched_slots_impl<128>(q, k, v, alpha_in, beta_in, ssm_dt_bias, ssm_a, state_in_ptrs, state_out_ptrs, attn_out, B, H, L, n_rep, rep_inner_layout);"
+
+# F16 attention variants (prefill / batched-slots / paged) — online softmax,
+# Q·K dot via __shfl_xor butterfly over WARP_SIZE (bit-identical to hand).
+[[kernel]]
+stem = "attention_prefill_f16"
+includes = ["block_quant.cuh", "attention_f16.cuh"]
+[[kernel.entry]]
+name = "flambeau_attention_prefill_f16"
+params = """
+    const fb_fp16_t* __restrict__ q,
+    const fb_fp16_t* __restrict__ k_cache,
+    const fb_fp16_t* __restrict__ v_cache,
+    fb_fp16_t* __restrict__ out,
+    const int n_q_tokens, const int n_heads_q, const int n_heads_kv, const int head_dim,
+    const int n_k_tokens, const int q_offset, const float scale, const int window_size, const int ring_depth"""
+body = "attention_prefill_f16_body(q, k_cache, v_cache, out, n_q_tokens, n_heads_q, n_heads_kv, head_dim, n_k_tokens, q_offset, scale, window_size, ring_depth);"
+
+[[kernel]]
+stem = "attention_decode_f16_batched"
+includes = ["block_quant.cuh", "attention_f16.cuh"]
+[[kernel.entry]]
+name = "flambeau_attention_decode_f16_batched"
+params = """
+    const fb_fp16_t* __restrict__ q_batched,
+    const uint64_t* __restrict__ k_cache_ptrs,
+    const uint64_t* __restrict__ v_cache_ptrs,
+    fb_fp16_t* __restrict__ out_batched,
+    const int* __restrict__ n_tokens_kv,
+    const int n_heads_q, const int n_heads_kv, const int head_dim, const int n_slots,
+    const float scale, const int window_size, const int ring_depth"""
+body = "attention_decode_f16_batched_body(q_batched, k_cache_ptrs, v_cache_ptrs, out_batched, n_tokens_kv, n_heads_q, n_heads_kv, head_dim, n_slots, scale, window_size, ring_depth);"
+
+[[kernel]]
+stem = "attention_decode_f16_paged"
+includes = ["block_quant.cuh", "attention_f16.cuh"]
+[[kernel.entry]]
+name = "flambeau_attention_decode_f16_paged"
+params = """
+    const fb_fp16_t* __restrict__ q_batched,
+    const fb_fp16_t* __restrict__ k_pool,
+    const fb_fp16_t* __restrict__ v_pool,
+    const unsigned int* __restrict__ block_tables,
+    fb_fp16_t* __restrict__ out_batched,
+    const int* __restrict__ n_tokens_kv,
+    const int n_heads_q, const int n_heads_kv, const int head_dim, const int n_slots,
+    const int page_size, const int max_pages_per_slot, const float scale"""
+body = "attention_decode_f16_paged_body(q_batched, k_pool, v_pool, block_tables, out_batched, n_tokens_kv, n_heads_q, n_heads_kv, head_dim, n_slots, page_size, max_pages_per_slot, scale);"
+
+[[kernel]]
+stem = "attention_prefill_f16_paged"
+includes = ["block_quant.cuh", "attention_f16.cuh"]
+[[kernel.entry]]
+name = "flambeau_attention_prefill_f16_paged"
+params = """
+    const fb_fp16_t* __restrict__ q,
+    const fb_fp16_t* __restrict__ k_pool,
+    const fb_fp16_t* __restrict__ v_pool,
+    const unsigned int* __restrict__ block_table,
+    fb_fp16_t* __restrict__ out,
+    const int n_q_tokens, const int n_heads_q, const int n_heads_kv, const int head_dim,
+    const int n_k_tokens, const int q_offset, const int page_size, const float scale, const int window_size"""
+body = "attention_prefill_f16_paged_body(q, k_pool, v_pool, block_table, out, n_q_tokens, n_heads_q, n_heads_kv, head_dim, n_k_tokens, q_offset, page_size, scale, window_size);"
+
+# Flash-attn-v2 prefill (LDS-tiled) — WARP_SIZE-parameterized; neutral
+# warp_reduce_sum / fast_exp / fast_rcp from the arch seam.
+[[kernel]]
+stem = "attention_prefill_flash_tile_f16"
+includes = ["block_quant.cuh", "attention_flash_tile.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_attention_prefill_flash_tile_d64_f16"
+launch_bounds = "256, 2"
+params = """
+    const fb_fp16_t* __restrict__ q,
+    const fb_fp16_t* __restrict__ k_cache,
+    const fb_fp16_t* __restrict__ v_cache,
+    fb_fp16_t* __restrict__ out,
+    const int n_q_tokens, const int n_heads_q, const int n_heads_kv,
+    const int n_k_tokens, const int q_offset, const float scale,
+    const int window_size, const int ring_depth"""
+body = "flash_attn_prefill_v2_impl<64, 4, 64>(q, k_cache, v_cache, out, n_q_tokens, n_heads_q, n_heads_kv, n_k_tokens, q_offset, scale, window_size, ring_depth);"
+
+[[kernel.entry]]
+name = "flambeau_attention_prefill_flash_tile_d128_f16"
+launch_bounds = "256, 2"
+params = """
+    const fb_fp16_t* __restrict__ q,
+    const fb_fp16_t* __restrict__ k_cache,
+    const fb_fp16_t* __restrict__ v_cache,
+    fb_fp16_t* __restrict__ out,
+    const int n_q_tokens, const int n_heads_q, const int n_heads_kv,
+    const int n_k_tokens, const int q_offset, const float scale,
+    const int window_size, const int ring_depth"""
+body = "flash_attn_prefill_v2_impl<128, 4, 32>(q, k_cache, v_cache, out, n_q_tokens, n_heads_q, n_heads_kv, n_k_tokens, q_offset, scale, window_size, ring_depth);"
+
+[[kernel.entry]]
+name = "flambeau_attention_prefill_flash_tile_d256_f16"
+launch_bounds = "256, 2"
+params = """
+    const fb_fp16_t* __restrict__ q,
+    const fb_fp16_t* __restrict__ k_cache,
+    const fb_fp16_t* __restrict__ v_cache,
+    fb_fp16_t* __restrict__ out,
+    const int n_q_tokens, const int n_heads_q, const int n_heads_kv,
+    const int n_k_tokens, const int q_offset, const float scale,
+    const int window_size, const int ring_depth"""
+body = "flash_attn_prefill_v2_impl<256, 4, 16>(q, k_cache, v_cache, out, n_q_tokens, n_heads_q, n_heads_kv, n_k_tokens, q_offset, scale, window_size, ring_depth);"
+
+[[kernel.entry]]
+name = "flambeau_attention_prefill_flash_tile_d256_br8_f16"
+launch_bounds = "512, 1"
+params = """
+    const fb_fp16_t* __restrict__ q,
+    const fb_fp16_t* __restrict__ k_cache,
+    const fb_fp16_t* __restrict__ v_cache,
+    fb_fp16_t* __restrict__ out,
+    const int n_q_tokens, const int n_heads_q, const int n_heads_kv,
+    const int n_k_tokens, const int q_offset, const float scale,
+    const int window_size, const int ring_depth"""
+body = "flash_attn_prefill_v2_impl<256, 8, 16>(q, k_cache, v_cache, out, n_q_tokens, n_heads_q, n_heads_kv, n_k_tokens, q_offset, scale, window_size, ring_depth);"
+
+[[kernel.entry]]
+name = "flambeau_attention_prefill_flash_tile_d512_f16"
+launch_bounds = "256, 2"
+params = """
+    const fb_fp16_t* __restrict__ q,
+    const fb_fp16_t* __restrict__ k_cache,
+    const fb_fp16_t* __restrict__ v_cache,
+    fb_fp16_t* __restrict__ out,
+    const int n_q_tokens, const int n_heads_q, const int n_heads_kv,
+    const int n_k_tokens, const int q_offset, const float scale,
+    const int window_size, const int ring_depth"""
+body = "flash_attn_prefill_v2_impl<512, 4, 8>(q, k_cache, v_cache, out, n_q_tokens, n_heads_q, n_heads_kv, n_k_tokens, q_offset, scale, window_size, ring_depth);"
+
+# Q8_0 KV-cache attention (decode + prefill) — dp4a score, block_tree_sum reduce
+# (wave-agnostic over the sub-warp head_dim/4 block).
+[[kernel]]
+stem = "attention_decode_q8_kv"
+includes = ["block_quant.cuh", "quant_traits.cuh", "block_reduce.cuh", "attention_q8_kv.cuh"]
+[[kernel.entry]]
+name = "flambeau_attention_decode_q8_kv"
+params = """
+    const fb_fp16_t* __restrict__ q,
+    const flambeau_block_q8_0* __restrict__ k_cache,
+    const flambeau_block_q8_0* __restrict__ v_cache,
+    fb_fp16_t* __restrict__ out,
+    const int n_heads_q, const int n_heads_kv, const int head_dim, const int n_tokens,
+    const float scale, const int window_size, const int ring_depth"""
+body = "attention_decode_q8_kv_body(q, k_cache, v_cache, out, n_heads_q, n_heads_kv, head_dim, n_tokens, scale, window_size, ring_depth);"
+
+[[kernel]]
+stem = "attention_prefill_q8_kv"
+includes = ["block_quant.cuh", "quant_traits.cuh", "block_reduce.cuh", "attention_q8_kv.cuh"]
+[[kernel.entry]]
+name = "flambeau_attention_prefill_q8_kv"
+params = """
+    const fb_fp16_t* __restrict__ q,
+    const flambeau_block_q8_0* __restrict__ k_cache,
+    const flambeau_block_q8_0* __restrict__ v_cache,
+    fb_fp16_t* __restrict__ out,
+    const int n_q_tokens, const int n_heads_q, const int n_heads_kv, const int head_dim,
+    const int n_k_tokens, const int q_offset, const float scale, const int window_size, const int ring_depth"""
+body = "attention_prefill_q8_kv_body(q, k_cache, v_cache, out, n_q_tokens, n_heads_q, n_heads_kv, head_dim, n_k_tokens, q_offset, scale, window_size, ring_depth);"
+
+[[kernel]]
+stem = "attention_decode_q8_kv_splitk"
+includes = ["block_quant.cuh", "quant_traits.cuh", "block_reduce.cuh", "attention_q8_kv.cuh", "attention_decode_splitk.cuh"]
+[[kernel.entry]]
+name = "flambeau_attention_decode_q8_kv_splitk_chunk"
+params = """
+    const fb_fp16_t* __restrict__ q,
+    const flambeau_block_q8_0* __restrict__ k_cache,
+    const flambeau_block_q8_0* __restrict__ v_cache,
+    float* __restrict__ partials_m,
+    float* __restrict__ partials_s,
+    float* __restrict__ partials_o,
+    const int n_heads_q, const int n_heads_kv, const int head_dim, const int n_tokens,
+    const int n_chunks, const int chunk_size, const float scale,
+    const int window_size, const int ring_depth, const int chunk_base"""
+body = "attention_decode_q8_kv_splitk_chunk_body(q, k_cache, v_cache, partials_m, partials_s, partials_o, n_heads_q, n_heads_kv, head_dim, n_tokens, n_chunks, chunk_size, scale, window_size, ring_depth, chunk_base);"
+[[kernel.entry]]
+name = "flambeau_attention_decode_q8_kv_splitk_combine"
+params = """
+    const float* __restrict__ partials_m,
+    const float* __restrict__ partials_s,
+    const float* __restrict__ partials_o,
+    fb_fp16_t* __restrict__ out,
+    const int n_heads_q, const int n_chunks, const int head_dim"""
+body = "attention_decode_f16_splitk_combine_body(partials_m, partials_s, partials_o, out, n_heads_q, n_chunks, head_dim);"
+
+# Flash-attn-v2 prefill with Q8_0 KV (LDS-tiled) — WARP_SIZE-parameterized.
+[[kernel]]
+stem = "attention_prefill_flash_tile_q8_kv"
+includes = ["block_quant.cuh", "attention_flash_tile_q8.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_attention_prefill_flash_tile_d64_q8_kv"
+launch_bounds = "256, 2"
+params = """
+    const fb_fp16_t* __restrict__ q,
+    const flambeau_block_q8_0* __restrict__ k_cache,
+    const flambeau_block_q8_0* __restrict__ v_cache,
+    fb_fp16_t* __restrict__ out,
+    const int n_q_tokens, const int n_heads_q, const int n_heads_kv,
+    const int n_k_tokens, const int q_offset, const float scale,
+    const int window_size, const int ring_depth"""
+body = "flash_attn_prefill_v2_q8_impl<64, 4, 64>(q, k_cache, v_cache, out, n_q_tokens, n_heads_q, n_heads_kv, n_k_tokens, q_offset, scale, window_size, ring_depth);"
+
+[[kernel.entry]]
+name = "flambeau_attention_prefill_flash_tile_d128_q8_kv"
+launch_bounds = "256, 2"
+params = """
+    const fb_fp16_t* __restrict__ q,
+    const flambeau_block_q8_0* __restrict__ k_cache,
+    const flambeau_block_q8_0* __restrict__ v_cache,
+    fb_fp16_t* __restrict__ out,
+    const int n_q_tokens, const int n_heads_q, const int n_heads_kv,
+    const int n_k_tokens, const int q_offset, const float scale,
+    const int window_size, const int ring_depth"""
+body = "flash_attn_prefill_v2_q8_impl<128, 4, 32>(q, k_cache, v_cache, out, n_q_tokens, n_heads_q, n_heads_kv, n_k_tokens, q_offset, scale, window_size, ring_depth);"
+
+[[kernel.entry]]
+name = "flambeau_attention_prefill_flash_tile_d256_q8_kv"
+launch_bounds = "256, 2"
+params = """
+    const fb_fp16_t* __restrict__ q,
+    const flambeau_block_q8_0* __restrict__ k_cache,
+    const flambeau_block_q8_0* __restrict__ v_cache,
+    fb_fp16_t* __restrict__ out,
+    const int n_q_tokens, const int n_heads_q, const int n_heads_kv,
+    const int n_k_tokens, const int q_offset, const float scale,
+    const int window_size, const int ring_depth"""
+body = "flash_attn_prefill_v2_q8_impl<256, 4, 16>(q, k_cache, v_cache, out, n_q_tokens, n_heads_q, n_heads_kv, n_k_tokens, q_offset, scale, window_size, ring_depth);"
+
+[[kernel.entry]]
+name = "flambeau_attention_prefill_flash_tile_d256_br8_q8_kv"
+launch_bounds = "512, 1"
+params = """
+    const fb_fp16_t* __restrict__ q,
+    const flambeau_block_q8_0* __restrict__ k_cache,
+    const flambeau_block_q8_0* __restrict__ v_cache,
+    fb_fp16_t* __restrict__ out,
+    const int n_q_tokens, const int n_heads_q, const int n_heads_kv,
+    const int n_k_tokens, const int q_offset, const float scale,
+    const int window_size, const int ring_depth"""
+body = "flash_attn_prefill_v2_q8_impl<256, 8, 16>(q, k_cache, v_cache, out, n_q_tokens, n_heads_q, n_heads_kv, n_k_tokens, q_offset, scale, window_size, ring_depth);"
+
+# Batched MMVQ (IQ4_XS), N = 1..8 activation columns per launch,
+# 32 threads x 2 rows per block (`mmvq_batched_shape`).
+[[kernel]]
+stem = "mmvq_iq4_xs_dp4a_t128_vdr4_batched"
+includes = ["mmvq_vdr_batched.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq4_xs_dp4a_t128_vdr4_batched_q8_1_n1"
+launch_bounds = "32"
+params = """
+    const flambeau_block_iq4_xs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Iq4Xs, 1, 32, 2, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq4_xs_dp4a_t128_vdr4_batched_q8_1_n2"
+launch_bounds = "32"
+params = """
+    const flambeau_block_iq4_xs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Iq4Xs, 2, 32, 2, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq4_xs_dp4a_t128_vdr4_batched_q8_1_n3"
+launch_bounds = "32"
+params = """
+    const flambeau_block_iq4_xs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Iq4Xs, 3, 32, 2, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq4_xs_dp4a_t128_vdr4_batched_q8_1_n4"
+launch_bounds = "32"
+params = """
+    const flambeau_block_iq4_xs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Iq4Xs, 4, 32, 2, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq4_xs_dp4a_t128_vdr4_batched_q8_1_n5"
+launch_bounds = "32"
+params = """
+    const flambeau_block_iq4_xs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Iq4Xs, 5, 32, 2, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq4_xs_dp4a_t128_vdr4_batched_q8_1_n6"
+launch_bounds = "32"
+params = """
+    const flambeau_block_iq4_xs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Iq4Xs, 6, 32, 2, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq4_xs_dp4a_t128_vdr4_batched_q8_1_n7"
+launch_bounds = "32"
+params = """
+    const flambeau_block_iq4_xs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Iq4Xs, 7, 32, 2, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq4_xs_dp4a_t128_vdr4_batched_q8_1_n8"
+launch_bounds = "32"
+params = """
+    const flambeau_block_iq4_xs* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Iq4Xs, 8, 32, 2, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+# Batched MMVQ (Q5_K), N = 1..8 activation columns per launch,
+# 32 threads x 2 rows per block (`mmvq_batched_shape`).
+[[kernel]]
+stem = "mmvq_q5_k_dp4a_t128_vdr2_batched"
+includes = ["mmvq_vdr_batched.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q5_k_dp4a_t128_vdr2_batched_q8_1_n1"
+launch_bounds = "32"
+params = """
+    const flambeau_block_q5_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::QkVdr2<true>, 1, 32, 2, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q5_k_dp4a_t128_vdr2_batched_q8_1_n2"
+launch_bounds = "32"
+params = """
+    const flambeau_block_q5_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::QkVdr2<true>, 2, 32, 2, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q5_k_dp4a_t128_vdr2_batched_q8_1_n3"
+launch_bounds = "32"
+params = """
+    const flambeau_block_q5_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::QkVdr2<true>, 3, 32, 2, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q5_k_dp4a_t128_vdr2_batched_q8_1_n4"
+launch_bounds = "32"
+params = """
+    const flambeau_block_q5_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::QkVdr2<true>, 4, 32, 2, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q5_k_dp4a_t128_vdr2_batched_q8_1_n5"
+launch_bounds = "32"
+params = """
+    const flambeau_block_q5_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::QkVdr2<true>, 5, 32, 2, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q5_k_dp4a_t128_vdr2_batched_q8_1_n6"
+launch_bounds = "32"
+params = """
+    const flambeau_block_q5_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::QkVdr2<true>, 6, 32, 2, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q5_k_dp4a_t128_vdr2_batched_q8_1_n7"
+launch_bounds = "32"
+params = """
+    const flambeau_block_q5_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::QkVdr2<true>, 7, 32, 2, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q5_k_dp4a_t128_vdr2_batched_q8_1_n8"
+launch_bounds = "32"
+params = """
+    const flambeau_block_q5_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::QkVdr2<true>, 8, 32, 2, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+# Batched MMVQ (Q4_K), N = 1..8 activation columns per launch,
+# 32 threads x 2 rows per block (`mmvq_batched_shape`).
+[[kernel]]
+stem = "mmvq_q4_k_dp4a_t128_vdr2_batched"
+includes = ["mmvq_vdr_batched.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_k_dp4a_t128_vdr2_batched_q8_1_n1"
+launch_bounds = "32"
+params = """
+    const flambeau_block_q4_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::QkVdr2<false>, 1, 32, 2, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_k_dp4a_t128_vdr2_batched_q8_1_n2"
+launch_bounds = "32"
+params = """
+    const flambeau_block_q4_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::QkVdr2<false>, 2, 32, 2, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_k_dp4a_t128_vdr2_batched_q8_1_n3"
+launch_bounds = "32"
+params = """
+    const flambeau_block_q4_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::QkVdr2<false>, 3, 32, 2, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_k_dp4a_t128_vdr2_batched_q8_1_n4"
+launch_bounds = "32"
+params = """
+    const flambeau_block_q4_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::QkVdr2<false>, 4, 32, 2, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_k_dp4a_t128_vdr2_batched_q8_1_n5"
+launch_bounds = "32"
+params = """
+    const flambeau_block_q4_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::QkVdr2<false>, 5, 32, 2, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_k_dp4a_t128_vdr2_batched_q8_1_n6"
+launch_bounds = "32"
+params = """
+    const flambeau_block_q4_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::QkVdr2<false>, 6, 32, 2, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_k_dp4a_t128_vdr2_batched_q8_1_n7"
+launch_bounds = "32"
+params = """
+    const flambeau_block_q4_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::QkVdr2<false>, 7, 32, 2, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q4_k_dp4a_t128_vdr2_batched_q8_1_n8"
+launch_bounds = "32"
+params = """
+    const flambeau_block_q4_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::QkVdr2<false>, 8, 32, 2, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+# Batched MMVQ (Q6_K), N = 1..8 activation columns per launch,
+# 32 threads x 2 rows per block (`mmvq_batched_shape`).
+[[kernel]]
+stem = "mmvq_q6_k_dp4a_vdr2_batched"
+includes = ["mmvq_vdr_batched.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q6_k_dp4a_vdr2_batched_q8_1_n1"
+launch_bounds = "32"
+params = """
+    const flambeau_block_q6_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Q6K, 1, 32, 2, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q6_k_dp4a_vdr2_batched_q8_1_n2"
+launch_bounds = "32"
+params = """
+    const flambeau_block_q6_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Q6K, 2, 32, 2, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q6_k_dp4a_vdr2_batched_q8_1_n3"
+launch_bounds = "32"
+params = """
+    const flambeau_block_q6_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Q6K, 3, 32, 2, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q6_k_dp4a_vdr2_batched_q8_1_n4"
+launch_bounds = "32"
+params = """
+    const flambeau_block_q6_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Q6K, 4, 32, 2, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q6_k_dp4a_vdr2_batched_q8_1_n5"
+launch_bounds = "32"
+params = """
+    const flambeau_block_q6_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Q6K, 5, 32, 2, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q6_k_dp4a_vdr2_batched_q8_1_n6"
+launch_bounds = "32"
+params = """
+    const flambeau_block_q6_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Q6K, 6, 32, 2, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q6_k_dp4a_vdr2_batched_q8_1_n7"
+launch_bounds = "32"
+params = """
+    const flambeau_block_q6_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Q6K, 7, 32, 2, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q6_k_dp4a_vdr2_batched_q8_1_n8"
+launch_bounds = "32"
+params = """
+    const flambeau_block_q6_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Q6K, 8, 32, 2, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+# Batched MMVQ (Q3_K), N = 1..8 activation columns per launch,
+# 32 threads x 4 rows per block (`mmvq_batched_shape`).
+[[kernel]]
+stem = "mmvq_q3_k_dp4a_t128_vdr2_batched"
+includes = ["mmvq_vdr_batched.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q3_k_dp4a_t128_vdr2_batched_q8_1_n1"
+launch_bounds = "32"
+params = """
+    const flambeau_block_q3_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Q3K, 1, 32, 4, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q3_k_dp4a_t128_vdr2_batched_q8_1_n2"
+launch_bounds = "32"
+params = """
+    const flambeau_block_q3_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Q3K, 2, 32, 4, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q3_k_dp4a_t128_vdr2_batched_q8_1_n3"
+launch_bounds = "32"
+params = """
+    const flambeau_block_q3_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Q3K, 3, 32, 4, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q3_k_dp4a_t128_vdr2_batched_q8_1_n4"
+launch_bounds = "32"
+params = """
+    const flambeau_block_q3_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Q3K, 4, 32, 4, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q3_k_dp4a_t128_vdr2_batched_q8_1_n5"
+launch_bounds = "32"
+params = """
+    const flambeau_block_q3_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Q3K, 5, 32, 4, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q3_k_dp4a_t128_vdr2_batched_q8_1_n6"
+launch_bounds = "32"
+params = """
+    const flambeau_block_q3_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Q3K, 6, 32, 4, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q3_k_dp4a_t128_vdr2_batched_q8_1_n7"
+launch_bounds = "32"
+params = """
+    const flambeau_block_q3_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Q3K, 7, 32, 4, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q3_k_dp4a_t128_vdr2_batched_q8_1_n8"
+launch_bounds = "32"
+params = """
+    const flambeau_block_q3_K* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Q3K, 8, 32, 4, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+# Batched MMVQ (IQ3_S), N = 1..8 activation columns per launch,
+# 32 threads x 4 rows per block (`mmvq_batched_shape`).
+[[kernel]]
+stem = "mmvq_iq3_s_dp4a_t128_vdr2_batched"
+includes = ["mmvq_vdr_batched_iq3_s.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq3_s_dp4a_t128_vdr2_batched_q8_1_n1"
+launch_bounds = "32"
+params = """
+    const flambeau_block_iq3_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Iq3S, 1, 32, 4, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq3_s_dp4a_t128_vdr2_batched_q8_1_n2"
+launch_bounds = "32"
+params = """
+    const flambeau_block_iq3_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Iq3S, 2, 32, 4, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq3_s_dp4a_t128_vdr2_batched_q8_1_n3"
+launch_bounds = "32"
+params = """
+    const flambeau_block_iq3_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Iq3S, 3, 32, 4, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq3_s_dp4a_t128_vdr2_batched_q8_1_n4"
+launch_bounds = "32"
+params = """
+    const flambeau_block_iq3_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Iq3S, 4, 32, 4, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq3_s_dp4a_t128_vdr2_batched_q8_1_n5"
+launch_bounds = "32"
+params = """
+    const flambeau_block_iq3_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Iq3S, 5, 32, 4, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq3_s_dp4a_t128_vdr2_batched_q8_1_n6"
+launch_bounds = "32"
+params = """
+    const flambeau_block_iq3_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Iq3S, 6, 32, 4, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq3_s_dp4a_t128_vdr2_batched_q8_1_n7"
+launch_bounds = "32"
+params = """
+    const flambeau_block_iq3_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Iq3S, 7, 32, 4, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq3_s_dp4a_t128_vdr2_batched_q8_1_n8"
+launch_bounds = "32"
+params = """
+    const flambeau_block_iq3_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Iq3S, 8, 32, 4, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+# Batched MMVQ (IQ4_NL), N = 1..8 activation columns per launch,
+# 32 threads x 4 rows per block (`mmvq_batched_shape`).
+[[kernel]]
+stem = "mmvq_iq4_nl_dp4a_t128_vdr2_batched"
+includes = ["mmvq_vdr_batched.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq4_nl_dp4a_t128_vdr2_batched_q8_1_n1"
+launch_bounds = "32"
+params = """
+    const flambeau_block_iq4_nl* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Iq4Nl, 1, 32, 4, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq4_nl_dp4a_t128_vdr2_batched_q8_1_n2"
+launch_bounds = "32"
+params = """
+    const flambeau_block_iq4_nl* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Iq4Nl, 2, 32, 4, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq4_nl_dp4a_t128_vdr2_batched_q8_1_n3"
+launch_bounds = "32"
+params = """
+    const flambeau_block_iq4_nl* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Iq4Nl, 3, 32, 4, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq4_nl_dp4a_t128_vdr2_batched_q8_1_n4"
+launch_bounds = "32"
+params = """
+    const flambeau_block_iq4_nl* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Iq4Nl, 4, 32, 4, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq4_nl_dp4a_t128_vdr2_batched_q8_1_n5"
+launch_bounds = "32"
+params = """
+    const flambeau_block_iq4_nl* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Iq4Nl, 5, 32, 4, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq4_nl_dp4a_t128_vdr2_batched_q8_1_n6"
+launch_bounds = "32"
+params = """
+    const flambeau_block_iq4_nl* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Iq4Nl, 6, 32, 4, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq4_nl_dp4a_t128_vdr2_batched_q8_1_n7"
+launch_bounds = "32"
+params = """
+    const flambeau_block_iq4_nl* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Iq4Nl, 7, 32, 4, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq4_nl_dp4a_t128_vdr2_batched_q8_1_n8"
+launch_bounds = "32"
+params = """
+    const flambeau_block_iq4_nl* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Iq4Nl, 8, 32, 4, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+# Batched MMVQ (Q8_0), N = 1..8 activation columns per launch,
+# 32 threads x 4 rows per block (`mmvq_batched_shape`).
+[[kernel]]
+stem = "mmvq_q8_0_dp4a_vdr2_batched"
+includes = ["mmvq_vdr_batched.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q8_0_dp4a_vdr2_batched_q8_1_n1"
+launch_bounds = "32"
+params = """
+    const flambeau_block_q8_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Q8_0, 1, 32, 4, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q8_0_dp4a_vdr2_batched_q8_1_n2"
+launch_bounds = "32"
+params = """
+    const flambeau_block_q8_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Q8_0, 2, 32, 4, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q8_0_dp4a_vdr2_batched_q8_1_n3"
+launch_bounds = "32"
+params = """
+    const flambeau_block_q8_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Q8_0, 3, 32, 4, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q8_0_dp4a_vdr2_batched_q8_1_n4"
+launch_bounds = "32"
+params = """
+    const flambeau_block_q8_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Q8_0, 4, 32, 4, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q8_0_dp4a_vdr2_batched_q8_1_n5"
+launch_bounds = "32"
+params = """
+    const flambeau_block_q8_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Q8_0, 5, 32, 4, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q8_0_dp4a_vdr2_batched_q8_1_n6"
+launch_bounds = "32"
+params = """
+    const flambeau_block_q8_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Q8_0, 6, 32, 4, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q8_0_dp4a_vdr2_batched_q8_1_n7"
+launch_bounds = "32"
+params = """
+    const flambeau_block_q8_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Q8_0, 7, 32, 4, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_q8_0_dp4a_vdr2_batched_q8_1_n8"
+launch_bounds = "32"
+params = """
+    const flambeau_block_q8_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Q8_0, 8, 32, 4, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+# Greedy draw on device (MTP draft): sparse additive adjustments in list order,
+# then a two-pass argmax with the host's tie / NaN / -inf rules.
+[[kernel]]
+stem = "sampler_argmax_f32"
+includes = ["sampler_argmax.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_sampler_sparse_add_f32"
+params = """
+    float* __restrict__ logits,
+    const int* __restrict__ ids,
+    const float* __restrict__ vals,
+    const int n"""
+body = "sampler_sparse_add_f32_body(logits, ids, vals, n);"
+
+[[kernel.entry]]
+name = "flambeau_sampler_argmax_partial_f32"
+launch_bounds = "256"
+params = """
+    const float* __restrict__ logits,
+    const int vocab,
+    float* __restrict__ part_v,
+    int* __restrict__ part_i"""
+body = "sampler_argmax_partial_f32_body(logits, vocab, part_v, part_i);"
+
+[[kernel.entry]]
+name = "flambeau_sampler_argmax_final_f32"
+launch_bounds = "256"
+params = """
+    const float* __restrict__ part_v,
+    const int* __restrict__ part_i,
+    const int n_parts,
+    int* __restrict__ out"""
+body = "sampler_argmax_final_f32_body(part_v, part_i, n_parts, out);"

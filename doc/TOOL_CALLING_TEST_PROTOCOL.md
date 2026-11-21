@@ -1,6 +1,6 @@
 # Tool-Calling Live Test Protocol
 
-Companion to `TOOL_CALLING_FIX_PLAN.md`. Defines the end-to-end live
+Companion to `archive/TOOL_CALLING_FIX_PLAN.md`. Defines the end-to-end live
 test that:
 1. Captures the broken state (T1, baseline).
 2. Gates each fix slice (T2–T4) as it lands.
@@ -325,7 +325,7 @@ python scripts/tool_test/run.py --all --assert
 
 ## What "broken" looks like in fixtures (today, on `main`)
 
-Predicted shape based on upstream issues (see `TOOL_CALLING_FIX_PLAN.md`):
+Predicted shape based on upstream issues (see `archive/TOOL_CALLING_FIX_PLAN.md`):
 
 - **gemma4 S1**: `tool_calls` is None; `content` contains literal
   `<|tool_call>call:get_current_weather{...}<tool_call|>` plus
@@ -461,7 +461,7 @@ The non-streaming and SSE paths share the parser but assemble
 
 ### What "broken" looks like in fixtures (today, on `main`)
 
-Predicted shape based on upstream issues (see `TOOL_CALLING_FIX_PLAN.md`):
+Predicted shape based on upstream issues (see `archive/TOOL_CALLING_FIX_PLAN.md`):
 
 - **gemma4 S1**: `tool_calls` is None; `content` contains literal
   `<|tool_call>call:get_current_weather{...}<tool_call|>` plus
@@ -471,7 +471,7 @@ Predicted shape based on upstream issues (see `TOOL_CALLING_FIX_PLAN.md`):
 - **qwen3.6 S1**: `tool_calls == []` (empty list); `content` claims
   "I'll call get_current_weather" but no call gets parsed.
 
-(T1 capture updated these to reality — see `TOOL_CALLING_FIX_PLAN.md`
+(T1 capture updated these to reality — see `archive/TOOL_CALLING_FIX_PLAN.md`
 §T1: qwen3.6 actually passes S1–S4/S6; gemma4-31B emits the degraded
 `<|call:>` + `tool_code` shapes; the channel leak is gemma4-26B.)
 

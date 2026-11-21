@@ -14,6 +14,7 @@ fn main() {
     println!("cargo:rerun-if-changed=src/kernels");
     println!("cargo:rerun-if-changed=src/arch_primitives");
     println!("cargo:rerun-if-changed=../kernels-shared/include");
+    println!("cargo:rerun-if-changed=../kernels-shared/instantiations.toml");
     println!("cargo:rerun-if-env-changed=ROCM_PATH");
     println!("cargo:rerun-if-env-changed=HIP_OFFLOAD_ARCH");
     println!("cargo:rerun-if-env-changed=HIP_SKIP_BUILD");
@@ -27,11 +28,35 @@ fn main() {
     let cu_files = enumerate_cu_files(src_dir);
 
     let mut entries: BTreeMap<String, PathBuf> = BTreeMap::new();
+    let mut param_counts: BTreeMap<String, usize> = BTreeMap::new();
     if !skip_build && !cu_files.is_empty() {
         let rocm_path = env::var("ROCM_PATH").unwrap_or_else(|_| "/opt/rocm".into());
         let hipcc = find_hipcc(&rocm_path)
             .expect("hipcc not found — set ROCM_PATH or HIP_SKIP_BUILD=1 to build without kernels");
         let arch = env::var("HIP_OFFLOAD_ARCH").unwrap_or_else(|_| "gfx906".into());
+
+        // Generate the templated `extern "C"` wrappers declared in the shared
+        // manifest, injecting this arch's primitives header (gfx906.cuh, …).
+        let generated = flambeau_kernels_shared::codegen::generate_instantiations(
+            Path::new("../kernels-shared/instantiations.toml"),
+            &out_dir.join("generated"),
+            &format!("{arch}.cuh"),
+        );
+        // Static `.cu` that hard-code `#include "gfx906.cuh"` are the wave64 DPP
+        // hand-kernels — gfx906-only. For any other arch the catalogue is carried
+        // by the manifest-generated kernels (which inject this arch's header, so
+        // they're wave-width portable) plus the arch-neutral static `.cu`.
+        let static_cu: Vec<PathBuf> = cu_files
+            .iter()
+            .filter(|cu| arch == "gfx906" || !file_includes(cu, "gfx906.cuh"))
+            .cloned()
+            .collect();
+        let all_cu: Vec<PathBuf> = static_cu.into_iter().chain(generated).collect();
+        param_counts = flambeau_kernels_shared::signatures::param_counts(&all_cu);
+
+        // Fold included-header contents into the per-kernel cache key so a
+        // change to a shared / arch_primitives header recompiles the kernels.
+        let headers_hash = hash_headers(&[arch_inc, shared_inc]);
 
         let cache_dir = out_dir.join("cache");
         let _ = fs::create_dir_all(&cache_dir);
@@ -41,14 +66,14 @@ fn main() {
         // Compile in parallel. hipcc is single-threaded per file; 160 .cu files
         // compiled serially is the dominant build cost. rayon parallelises across
         // all available cores, cutting wall-clock time ~N×.
-        let results: Vec<(String, PathBuf)> = cu_files
+        let results: Vec<(String, PathBuf)> = all_cu
             .par_iter()
             .map(|cu| {
                 let stem = cu.file_stem().unwrap().to_string_lossy().into_owned();
                 let hsaco = out_dir.join(format!("{stem}.hsaco"));
                 let cache_hash_file = cache_dir.join(format!("{stem}.sha256"));
 
-                let needs_rebuild = needs_rebuild(cu, &hsaco, &cache_hash_file, &arch);
+                let needs_rebuild = needs_rebuild(cu, &hsaco, &cache_hash_file, &arch, &headers_hash);
 
                 if needs_rebuild {
                     compile_cu(
@@ -59,7 +84,7 @@ fn main() {
                         IncludeRoots { arch: arch_inc, shared: shared_inc, kernel: src_dir },
                         &device_lib,
                     );
-                    let hash = hash_cu_source(cu, &arch);
+                    let hash = hash_cu_source(cu, &arch, &headers_hash);
                     fs::write(&cache_hash_file, &hash).ok();
                 }
 
@@ -89,6 +114,7 @@ fn main() {
             .expect("write to String is infallible");
     }
     hsaco_rs.push_str("];\n");
+    hsaco_rs.push_str(&flambeau_kernels_shared::signatures::render_table(&param_counts));
     fs::write(out_dir.join("hsaco.rs"), hsaco_rs).expect("write hsaco.rs");
 }
 
@@ -101,6 +127,12 @@ fn enumerate_cu_files(dir: &Path) -> Vec<PathBuf> {
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().is_some_and(|x| x == "cu"))
         .collect()
+}
+
+/// Whether `path`'s source `#include`s `needle` (an arch header). Used to keep
+/// arch-specific static `.cu` out of other arches' builds.
+fn file_includes(path: &Path, needle: &str) -> bool {
+    fs::read_to_string(path).map(|s| s.contains(needle)).unwrap_or(false)
 }
 
 fn find_hipcc(rocm_path: &str) -> Option<PathBuf> {
@@ -139,21 +171,49 @@ fn find_device_lib_path(rocm_path: &str) -> String {
         .unwrap_or_else(|| format!("{rocm_path}/lib"))
 }
 
-fn hash_cu_source(cu: &Path, arch: &str) -> String {
+/// SHA-256 over every `.cuh`/`.h` header in the include dirs (sorted by path),
+/// so any header edit changes the cache key.
+fn hash_headers(dirs: &[&Path]) -> String {
+    let mut files: Vec<PathBuf> = Vec::new();
+    for d in dirs {
+        if let Ok(rd) = fs::read_dir(d) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.extension().is_some_and(|x| x == "cuh" || x == "h") {
+                    files.push(p);
+                }
+            }
+        }
+    }
+    files.sort();
+    let mut hasher = Sha256::new();
+    for p in &files {
+        if let Ok(mut f) = fs::File::open(p) {
+            let mut buf = Vec::new();
+            let _ = f.read_to_end(&mut buf);
+            hasher.update(p.to_string_lossy().as_bytes());
+            hasher.update(&buf);
+        }
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+fn hash_cu_source(cu: &Path, arch: &str, headers_hash: &str) -> String {
     let mut hasher = Sha256::new();
     let mut f = fs::File::open(cu).expect("open cu file");
     let mut buf = Vec::new();
     f.read_to_end(&mut buf).expect("read cu file");
     hasher.update(&buf);
     hasher.update(arch.as_bytes());
+    hasher.update(headers_hash.as_bytes());
     format!("{:x}", hasher.finalize())
 }
 
-fn needs_rebuild(cu: &Path, hsaco: &Path, cache_hash: &Path, arch: &str) -> bool {
+fn needs_rebuild(cu: &Path, hsaco: &Path, cache_hash: &Path, arch: &str, headers_hash: &str) -> bool {
     if !hsaco.exists() {
         return true;
     }
-    let current_hash = hash_cu_source(cu, arch);
+    let current_hash = hash_cu_source(cu, arch, headers_hash);
     if !cache_hash.exists() {
         return true;
     }
@@ -179,6 +239,9 @@ fn compile_cu(
 ) {
     let IncludeRoots { arch: arch_inc, shared: shared_inc, kernel: kernel_inc } = includes;
     let rocm_path = env::var("ROCM_PATH").unwrap_or_else(|_| "/opt/rocm".into());
+    // RDNA (gfx10xx/gfx11xx) is wave32; CDNA/GCN (gfx9xx) is wave64. The arch
+    // header's `WARP_SIZE` must agree with the hardware wavefront width.
+    let warp_size = if arch.starts_with("gfx10") || arch.starts_with("gfx11") { 32 } else { 64 };
     let output = Command::new(hipcc)
         .args([
             "--cuda-device-only",
@@ -190,7 +253,7 @@ fn compile_cu(
             "-std=c++17",
             "-O3",
             "-D__HIP_PLATFORM_AMD__",
-            "-DWARP_SIZE=64",
+            &format!("-DWARP_SIZE={warp_size}"),
             "-I",
             kernel_inc.to_str().unwrap(),
             "-I",

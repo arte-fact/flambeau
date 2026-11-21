@@ -6,7 +6,6 @@
 //! `ShardMode`.
 
 use anyhow::{bail, Context, Result};
-use flambeau_backend_hip::HipDevice;
 use flambeau_core::{Device, DevicePtr};
 use flambeau_forward::ctx::{
     Activation, AttnWeights, EmbeddingWeights, FfnWeights, LmHeadWeights, ModelLayout, MoeWeights,
@@ -98,12 +97,12 @@ pub struct Gemma4V2Model {
 }
 
 impl Gemma4V2Model {
-    pub fn dispose(&mut self, device: &HipDevice) -> Result<()> {
-        if device.default_stream().device_id() != self.device_id {
+    pub fn dispose(&mut self, device: &impl Device) -> Result<()> {
+        if device.id() != self.device_id {
             bail!(
                 "Gemma4V2Model::dispose: device mismatch (model on {}, called on {})",
                 self.device_id,
-                device.default_stream().device_id()
+                device.id()
             );
         }
         for (ptr, bytes) in self.allocs.drain(..) {
@@ -117,7 +116,7 @@ impl Gemma4V2Model {
 
 fn load_with_shard(
     file: &GgufFile,
-    device: &HipDevice,
+    device: &impl Device,
     shard: ShardMode,
     layer_range: Option<(usize, usize)>,
     ctx_cap: Option<usize>,
@@ -678,7 +677,7 @@ fn load_with_shard(
         hidden: config.hidden,
         kv_max_seq_len: config.context_length,
     };
-    let device_id = device.default_stream().device_id();
+    let device_id = device.id();
     Ok(Gemma4V2Model {
         config,
         layout,
@@ -697,7 +696,7 @@ fn load_with_shard(
 
 pub fn load_from_gguf(
     file: &GgufFile,
-    device: &HipDevice,
+    device: &impl Device,
     layer_range: Option<(usize, usize)>,
     ctx_cap: Option<usize>,
 ) -> Result<Gemma4V2Model> {
@@ -706,7 +705,7 @@ pub fn load_from_gguf(
 
 pub fn load_tp_shard_from_gguf(
     file: &GgufFile,
-    device: &HipDevice,
+    device: &impl Device,
     rank: usize,
     n_ranks: usize,
     layer_range: Option<(usize, usize)>,

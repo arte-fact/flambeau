@@ -2,8 +2,7 @@
 //! replicated across ranks.
 
 use anyhow::Result;
-use flambeau_backend_hip::HipDevice;
-use flambeau_core::DevicePtr;
+use flambeau_core::{Device, DevicePtr};
 use flambeau_quant::GgufFile;
 
 use crate::ctx::{EmbeddingWeights, LmHeadWeights};
@@ -21,7 +20,7 @@ pub struct EmbeddingSpec<'a> {
 
 pub fn load_embedding(
     file: &GgufFile,
-    device: &HipDevice,
+    device: &impl Device,
     spec: &EmbeddingSpec,
     allocs: &mut Vec<(DevicePtr, usize)>,
 ) -> Result<EmbeddingWeights> {
@@ -53,7 +52,7 @@ pub struct LmHeadSpec<'a> {
 
 pub fn load_lm_head(
     file: &GgufFile,
-    device: &HipDevice,
+    device: &impl Device,
     spec: &LmHeadSpec,
     allocs: &mut Vec<(DevicePtr, usize)>,
 ) -> Result<LmHeadWeights> {

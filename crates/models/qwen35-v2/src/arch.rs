@@ -6,7 +6,7 @@
 //! `FullShard`.
 
 use anyhow::Result;
-use flambeau_backend_hip::HipDevice;
+use flambeau_core::Device;
 use flambeau_forward::ctx::{ForwardCtx, GdnDims};
 use flambeau_forward::loader::{per_rank_gdn_dims, ShardMode};
 use flambeau_forward::runtime::Arch;
@@ -27,7 +27,7 @@ impl Arch for Qwen35V2 {
 
     fn load(
         file: &GgufFile,
-        device: &HipDevice,
+        device: &impl Device,
         shard: ShardMode,
         layer_range: Option<(usize, usize)>,
         ctx_cap: Option<usize>,
@@ -68,6 +68,7 @@ impl Arch for Qwen35V2 {
         max_slots: usize,
         paged_kv_pages: Option<usize>,
         kv_layout: KvLayout,
+        mtp_max_draft: usize,
     ) -> ScratchConfig {
         scratch_config_for(
             &model.config,
@@ -76,11 +77,40 @@ impl Arch for Qwen35V2 {
             max_slots,
             paged_kv_pages,
             kv_layout,
+            mtp_max_draft,
         )
     }
 
-    fn dispose(model: &mut Self::Model, device: &HipDevice) -> Result<()> {
+    fn dispose(model: &mut Self::Model, device: &impl Device) -> Result<()> {
         model.dispose(device)
+    }
+
+    fn has_mtp(model: &Self::Model) -> bool {
+        model.mtp.is_some()
+    }
+
+    fn mtp_cycle<C: ForwardCtx>(
+        model: &Self::Model,
+        ctx: &mut C,
+        anchor_token: u32,
+        anchor_pos: usize,
+        slot_id: usize,
+        n_draft: usize,
+        sample: &mut flambeau_runtime::MtpSampler,
+        seed: u64,
+        out_logits: &mut Vec<f32>,
+    ) -> Result<Vec<u32>> {
+        crate::model::mtp_cycle(
+            model,
+            ctx,
+            anchor_token,
+            anchor_pos,
+            slot_id,
+            n_draft,
+            sample,
+            seed,
+            out_logits,
+        )
     }
 }
 
@@ -108,5 +138,11 @@ impl ScratchShape for Qwen35V2Config {
     }
     fn attn_q_gated(&self) -> bool {
         true
+    }
+    fn mtp_kv_width(&self, n_ranks: usize) -> Option<usize> {
+        // The nextn draft block is a full-attention layer with the same KV
+        // geometry as the main full-attn layers (TP-sharded like them).
+        (self.nextn_layers > 0)
+            .then(|| (self.n_kv_heads / n_ranks.max(1)) * self.head_dim)
     }
 }

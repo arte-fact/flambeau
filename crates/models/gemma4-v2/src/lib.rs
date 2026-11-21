@@ -5,7 +5,7 @@
 //! MoE (26B-A4B) and per-layer-embd (E2B/E4B) variants are out of
 //! scope for the first cut.
 
-#![cfg(feature = "hip")]
+#![cfg(any(feature = "hip", feature = "cuda"))]
 
 pub mod arch;
 pub mod config;

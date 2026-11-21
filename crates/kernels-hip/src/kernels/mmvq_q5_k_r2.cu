@@ -4,7 +4,7 @@
 // is shared across the 8 sub-block iterations; the bit mask walks the byte
 // from LSB (sub-block 0) to MSB (sub-block 7) one step per sub-block.
 
-// Two output dtypes via templated __device__ body (#120):
+// Two output dtypes via templated __device__ body:
 //   flambeau_mmvq_q5_k_r2_q8_1      → F32 dst
 //   flambeau_mmvq_q5_k_r2_q8_1_f16  → F16 dst (saturating)
 

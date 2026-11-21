@@ -6,7 +6,7 @@
 //! rank (loader is SD-only; TP expert sharding is a follow-up).
 
 use anyhow::Result;
-use flambeau_backend_hip::HipDevice;
+use flambeau_core::Device;
 use flambeau_forward::ctx::{ForwardCtx, GdnDims};
 use flambeau_forward::loader::{per_rank_gdn_dims, ShardMode};
 use flambeau_forward::runtime::Arch;
@@ -27,7 +27,7 @@ impl Arch for Qwen35MoeV2 {
 
     fn load(
         file: &GgufFile,
-        device: &HipDevice,
+        device: &impl Device,
         shard: ShardMode,
         layer_range: Option<(usize, usize)>,
         ctx_cap: Option<usize>,
@@ -73,6 +73,7 @@ impl Arch for Qwen35MoeV2 {
         max_slots: usize,
         paged_kv_pages: Option<usize>,
         kv_layout: KvLayout,
+        mtp_max_draft: usize,
     ) -> ScratchConfig {
         scratch_config_for(
             &model.config,
@@ -81,10 +82,11 @@ impl Arch for Qwen35MoeV2 {
             max_slots,
             paged_kv_pages,
             kv_layout,
+            mtp_max_draft,
         )
     }
 
-    fn dispose(model: &mut Self::Model, device: &HipDevice) -> Result<()> {
+    fn dispose(model: &mut Self::Model, device: &impl Device) -> Result<()> {
         model.dispose(device)
     }
 }

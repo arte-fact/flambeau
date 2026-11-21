@@ -13,7 +13,7 @@
 //   qs byte    = qs[chunk_idx*32 + qi]
 // Reconstruct: y = d*(scales[is]&0xF)*q - dmin*(scales[is]>>4).
 
-// Two output dtypes via templated __device__ body (#120):
+// Two output dtypes via templated __device__ body:
 //   flambeau_mmvq_q2_K_r2_q8_1      → F32 dst (legacy scratch-then-cast)
 //   flambeau_mmvq_q2_K_r2_q8_1_f16  → F16 dst (saturating; direct store)
 

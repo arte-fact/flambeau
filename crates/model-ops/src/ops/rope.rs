@@ -7,7 +7,7 @@
 //!   separately for Q and K.
 
 use anyhow::bail;
-use flambeau_ops::{HipOps, Ops};
+use flambeau_ops::Ops;
 
 use crate::dtype::{F16, I32};
 use crate::error::Result;
@@ -21,7 +21,7 @@ pub fn rope_f16(
     n_tokens: usize,
     n_heads: usize,
     head_dim: usize,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     if head_dim % 2 != 0 {
         bail!("rope_f16: head_dim ({head_dim}) must be even");
@@ -57,7 +57,7 @@ pub fn rope_neox_partial_f16(
     positions: &Tensor<I32>,
     theta_base: f32,
     shape: flambeau_ops::RopePartialShape,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     let flambeau_ops::RopePartialShape { n_tokens, n_heads, head_dim, rotated_dims } = shape;
     if rotated_dims % 2 != 0 {
@@ -150,6 +150,7 @@ fn cpu_rope_neox_partial(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flambeau_ops::HipOps;
     use crate::testing::{
         assert_close_f16, download, free, test_device, test_ops_registry, upload,
     };

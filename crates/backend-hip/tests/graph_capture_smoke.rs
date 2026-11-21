@@ -1,14 +1,14 @@
-//! 6.a — HipGraphExec smoke test.
+//! HipGraphExec smoke test.
 //! Captures a 2-step `memcpy_async` subgraph into an exec, replays it
 //! N times, and verifies the final device buffer equals the last input.
 //! Goal is to prove the FFI + wrapper cycle (begin/end capture,
 //! instantiate, launch, destroy) is correct on gfx906; perf measurement
 //! lives in the forward-path integration commit.
-//! 6.a-i2 adds the kernel-node param-update POC: capture a real
+//! The kernel-node param-update POC captures a real
 //! `flambeau_scale_f32` launch with scale=2.0, replay (y = x·2.0), then
 //! call `hipGraphExecKernelNodeSetParams` to swap scale → 5.0, replay
 //! again, verify y = x·5.0. Proves the per-node param update path on
-//! gfx906 — the enabling mechanism for 6.a-i3 through -i7.
+//! gfx906.
 
 use flambeau_backend_hip::module::{HipModule, KernelArgs, LaunchCfg};
 use flambeau_backend_hip::sys::{hipDim3, hipKernelNodeParams};
@@ -122,12 +122,12 @@ fn capture_empty_graph_is_noop() {
     s.synchronize().unwrap();
 }
 
-/// 6.a-i2 POC: capture `flambeau_scale_f32` with scale=2.0, instantiate
+/// Capture `flambeau_scale_f32` with scale=2.0, instantiate
 /// the exec, replay and verify y = x·2.0, then use
 /// `hipGraphExecKernelNodeSetParams` to swap scale → 5.0, replay, and
 /// verify y = x·5.0.
 /// Proves we can update scalar kernel params on an instantiated graph
-/// exec — the foundation 6.a-i3+ needs to make `forward_layer_prefill`
+/// exec — the foundation needed to make `forward_layer_prefill`
 /// captureable across different pos values.
 #[test]
 fn kernel_param_update_scale_f32() {
@@ -291,7 +291,7 @@ fn kernel_param_update_scale_f32() {
     let _ = hipDim3::default();
 }
 
-/// 6.a-i3 end-to-end: capture TWO `flambeau_scale_f32` launches in
+/// Capture TWO `flambeau_scale_f32` launches in
 /// sequence, each tagging its `scale` arg with a distinct ScalarSlot.
 /// The resulting exec's SlotMap should bind the first slot to kernel
 /// node 0 and the second to kernel node 1. Update both slots via
@@ -299,7 +299,7 @@ fn kernel_param_update_scale_f32() {
 /// scales.
 /// This proves the thread-local launch-recorder lines up with
 /// hipGraphGetNodes's dispatch-order node enumeration on gfx906 — the
-/// 6.a-i4 pos-rewiring depends on this 1:1 mapping.
+/// pos-rewiring depends on this 1:1 mapping.
 #[test]
 fn slot_map_two_launches_round_trip() {
     if !maybe_skip() {
@@ -446,13 +446,13 @@ fn slot_map_two_launches_round_trip() {
     let _ = (init_scale_0, init_scale_1, new_scale_0, new_scale_1);
 }
 
-/// 6.a-i5b POC: capture a D→D memcpy tagged with a `MemcpySlot`,
+/// Capture a D→D memcpy tagged with a `MemcpySlot`,
 /// replay to verify the dst landed, then use `set_memcpy_slot` to
 /// retarget dst to a different device buffer, replay, verify the new
 /// dst got the same data (and the old dst is unchanged since the
 /// second replay).
 /// Proves the memcpy-node update path (`hipGraphExecMemcpyNodeSetParams1D`)
-/// on gfx906 — the foundation 6.a-i5b's KvCache::append wiring needs.
+/// on gfx906 — the foundation the KvCache::append wiring needs.
 #[test]
 fn memcpy_slot_update_round_trip() {
     if !maybe_skip() {

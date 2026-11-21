@@ -1,7 +1,7 @@
 //! `KernelImpl` registrations for `QMatMul` on `HipDevice`.
 //! Each row corresponds to a `[[qmatmul]]` / `[[qmatmul_mmq]]` entry in
 //! `dispatch/hip/gfx906.toml` and a cert under `certs/hip/gfx906/`. This
-//! module is the Rust-typed mirror of the TOML — the dispatcher calls
+//! module is the Rust-typed counterpart of the TOML — the dispatcher calls
 //! [`dispatch_qmatmul`] with a runtime `QMatMulCfg` and gets back the
 //! matching `KernelDescriptor` (or `None` if no impl applies).
 
@@ -119,20 +119,6 @@ pub const TOPK_GFX906: &[KernelDescriptor] = &[KernelDescriptor {
     cert_rel_path: "certs/hip/gfx906/topk_f32_gfx906.json",
 }];
 
-pub const SPLIT_Q_GATE_GFX906: &[KernelDescriptor] = &[
-    // split (Q | gate) output of Qwen3.5/3.6 gated attention.
-    KernelDescriptor {
-        op_name: "SplitQGate",
-        impl_id: "split_q_gate_f16_gfx906",
-        backend: "hip",
-        arch: "gfx906",
-        dtype_weight: QDtype::F16,
-        dtype_activation: QDtype::F16,
-        m_range: (1, usize::MAX),
-        cert_rel_path: "certs/hip/gfx906/split_q_gate_f16_gfx906.json",
-    },
-];
-
 pub const SHARED_EXPERT_SCALE_GFX906: &[KernelDescriptor] = &[
     // fused per-token sigmoid-gate scaling for shared expert.
     KernelDescriptor {
@@ -161,34 +147,6 @@ pub const CAUSAL_CONV1D_GFX906: &[KernelDescriptor] = &[
     },
 ];
 
-pub const ADD_F16_GFX906: &[KernelDescriptor] = &[
-    // e1 — pointwise F16 + F16 → F16. Residual fan-in primitive.
-    KernelDescriptor {
-        op_name: "AddF16",
-        impl_id: "add_f16_gfx906",
-        backend: "hip",
-        arch: "gfx906",
-        dtype_weight: QDtype::F16,
-        dtype_activation: QDtype::F16,
-        m_range: (1, usize::MAX),
-        cert_rel_path: "certs/hip/gfx906/add_f16_gfx906.json",
-    },
-];
-
-pub const CAST_F16_F32_GFX906: &[KernelDescriptor] = &[
-    // c1 glue — F16 → F32 for the GDN path's internal recurrence.
-    KernelDescriptor {
-        op_name: "CastF16F32",
-        impl_id: "cast_f16_f32_gfx906",
-        backend: "hip",
-        arch: "gfx906",
-        dtype_weight: QDtype::F16,
-        dtype_activation: QDtype::F32,
-        m_range: (1, usize::MAX),
-        cert_rel_path: "certs/hip/gfx906/cast_f16_f32_gfx906.json",
-    },
-];
-
 pub const SILU_F32_GFX906: &[KernelDescriptor] = &[
     // c1 — standalone F32 SiLU for GDN's silu(conv_out).
     KernelDescriptor {
@@ -214,48 +172,6 @@ pub const SWIGLU_F32_GFX906: &[KernelDescriptor] = &[
         dtype_activation: QDtype::F32,
         m_range: (1, usize::MAX),
         cert_rel_path: "certs/hip/gfx906/swiglu_f32_gfx906.json",
-    },
-];
-
-pub const SCALE_F32_GFX906: &[KernelDescriptor] = &[
-    // c1 — pointwise scalar multiply. GDN scales Q by 1/sqrt(head_k_dim).
-    KernelDescriptor {
-        op_name: "ScaleF32",
-        impl_id: "scale_f32_gfx906",
-        backend: "hip",
-        arch: "gfx906",
-        dtype_weight: QDtype::F32,
-        dtype_activation: QDtype::F32,
-        m_range: (1, usize::MAX),
-        cert_rel_path: "certs/hip/gfx906/scale_f32_gfx906.json",
-    },
-];
-
-pub const RMSNORM_F32_GFX906: &[KernelDescriptor] = &[
-    // c1 — F32 RMSNorm for GDN's ssm_norm (per-head on F32 state out).
-    KernelDescriptor {
-        op_name: "RmsnormF32",
-        impl_id: "rmsnorm_f32_gfx906",
-        backend: "hip",
-        arch: "gfx906",
-        dtype_weight: QDtype::F32,
-        dtype_activation: QDtype::F32,
-        m_range: (1, usize::MAX),
-        cert_rel_path: "certs/hip/gfx906/rmsnorm_f32_gfx906.json",
-    },
-];
-
-pub const CAST_F32_F16_GFX906: &[KernelDescriptor] = &[
-    // b glue — F32 MMVQ output → F16 for attention / rmsnorm inputs.
-    KernelDescriptor {
-        op_name: "CastF32F16",
-        impl_id: "cast_f32_f16_gfx906",
-        backend: "hip",
-        arch: "gfx906",
-        dtype_weight: QDtype::F32,
-        dtype_activation: QDtype::F16,
-        m_range: (1, usize::MAX),
-        cert_rel_path: "certs/hip/gfx906/cast_f32_f16_gfx906.json",
     },
 ];
 
@@ -321,20 +237,6 @@ pub const GDN_STATE_STEP_GFX906: &[KernelDescriptor] = &[
     },
 ];
 
-pub const L2_NORM_GFX906: &[KernelDescriptor] = &[
-    // per-row L2 norm. Used inside GDN.
-    KernelDescriptor {
-        op_name: "L2Norm",
-        impl_id: "l2_norm_f32_gfx906",
-        backend: "hip",
-        arch: "gfx906",
-        dtype_weight: QDtype::F32,
-        dtype_activation: QDtype::F32,
-        m_range: (1, usize::MAX),
-        cert_rel_path: "certs/hip/gfx906/l2_norm_f32_gfx906.json",
-    },
-];
-
 pub const ROPE_NEOX_PARTIAL_GFX906: &[KernelDescriptor] = &[
     // NeoX-split partial RoPE for Qwen3.5/3.6 full-attention layers.
     KernelDescriptor {
@@ -349,18 +251,27 @@ pub const ROPE_NEOX_PARTIAL_GFX906: &[KernelDescriptor] = &[
     },
 ];
 
+/// Q4_K indexed-MoE MMVQ; `m` is the token count of the launch.
 pub const INDEXED_MOE_MMVQ_GFX906: &[KernelDescriptor] = &[
-    // Active: P29 multi-row r2 (landed ). Halves launches vs single-row,
-    // keeps VGPR 24 / waves/SIMD 10.
     KernelDescriptor {
         op_name: "IndexedMoEMMVQ",
-        impl_id: "indexed_moe_mmvq_q4_k_r2_gfx906",
+        impl_id: "indexed_moe_mmvq_q4_k_r2",
         backend: "hip",
         arch: "gfx906",
         dtype_weight: QDtype::Q4_K,
         dtype_activation: QDtype::Q8_1,
-        m_range: (1, usize::MAX),
-        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q4_k_r2_gfx906.json",
+        m_range: (1, 31),
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q4_k_r2.json",
+    },
+    KernelDescriptor {
+        op_name: "IndexedMoEMMVQ",
+        impl_id: "indexed_moe_mmvq_q4_k_r4",
+        backend: "hip",
+        arch: "gfx906",
+        dtype_weight: QDtype::Q4_K,
+        dtype_activation: QDtype::Q8_1,
+        m_range: (32, usize::MAX),
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q4_k_r4.json",
     },
 ];
 
@@ -377,43 +288,28 @@ pub const MOE_COMBINE_GFX906: &[KernelDescriptor] = &[KernelDescriptor {
 
 pub const INDEXED_MOE_MMVQ_GATE_UP_GFX906: &[KernelDescriptor] = &[KernelDescriptor {
     op_name: "IndexedMoEMMVQGateUp",
-    impl_id: "indexed_moe_mmvq_q4_k_gate_up_gfx906",
+    impl_id: "indexed_moe_mmvq_q4_k_gate_up_r4",
     backend: "hip",
     arch: "gfx906",
     dtype_weight: QDtype::Q4_K,
     dtype_activation: QDtype::Q8_1,
     m_range: (1, usize::MAX),
-    cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q4_k_gate_up_gfx906.json",
+    cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q4_k_gate_up_r4.json",
 }];
-
-pub const INDEXED_MOE_MMQ_GFX906: &[KernelDescriptor] = &[
-    // 4-warp LDS-tiled MoE MMQ. Caller sorts (token, slot) pairs into
-    // per-expert buckets so the weight tile amortises across MMQ_X=8 slots.
-    KernelDescriptor {
-        op_name: "IndexedMoEMMQ",
-        impl_id: "indexed_moe_mmq_q4_k_gfx906",
-        backend: "hip",
-        arch: "gfx906",
-        dtype_weight: QDtype::Q4_K,
-        dtype_activation: QDtype::Q8_1,
-        m_range: (1, usize::MAX),
-        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q4_k_gfx906.json",
-    },
-];
 
 /// Pick the `KernelDescriptor` that matches `cfg`. Predicates are
 /// non-overlapping by construction (see architectural rule: "two rows
 /// matching the same concrete shape = build-time error"), so first-match
 /// wins. Panics in debug if the invariant is violated.
 pub fn dispatch_qmatmul(cfg: &QMatMulCfg) -> Option<&'static KernelDescriptor> {
-    first_match(
+    flambeau_core::first_match(
         QMATMUL_GFX906,
         cfg.dtype_weight,
         cfg.dtype_activation,
         cfg.m,
     )
 }
-// 1.b was an attempt at shape-aware (n < 1024 → tile8) for Q8_0 MMQ,
+// An attempt at shape-aware (n < 1024 → tile8) for Q8_0 MMQ,
 // based on microbench PMC showing tile16 MemBusy crashes 75 % → 35 % at
 // small-N. End-to-end was a regression: the shexp shapes (k=2048 n=512)
 // are already-fast (~0.15 ms/call), and routing them through tile8's
@@ -428,36 +324,30 @@ pub fn dispatch_rmsnorm(
     dtype_out: flambeau_core::QDtype,
     m: usize,
 ) -> Option<&'static KernelDescriptor> {
-    first_match(RMSNORM_GFX906, dtype_in, dtype_out, m)
+    flambeau_core::first_match(RMSNORM_GFX906, dtype_in, dtype_out, m)
+}
+
+/// Pick the decode-attention row for a `kv_dtype` KV cache (Q / output F16).
+pub fn dispatch_attention_decode(
+    kv_dtype: flambeau_core::QDtype,
+    m: usize,
+) -> Option<&'static KernelDescriptor> {
+    flambeau_core::first_match(ATTENTION_DECODE_GFX906, kv_dtype, QDtype::F16, m)
+}
+
+/// Pick the prefill-attention row for a `kv_dtype` KV cache (Q / output F16).
+pub fn dispatch_attention_prefill(
+    kv_dtype: flambeau_core::QDtype,
+    m: usize,
+) -> Option<&'static KernelDescriptor> {
+    flambeau_core::first_match(ATTENTION_PREFILL_GFX906, kv_dtype, QDtype::F16, m)
 }
 
 pub fn dispatch_swiglu(
     dtype: flambeau_core::QDtype,
     m: usize,
 ) -> Option<&'static KernelDescriptor> {
-    first_match(SWIGLU_GFX906, dtype, dtype, m)
-}
-
-fn first_match(
-    table: &'static [KernelDescriptor],
-    dtype_w: flambeau_core::QDtype,
-    dtype_a: flambeau_core::QDtype,
-    m: usize,
-) -> Option<&'static KernelDescriptor> {
-    let mut hit: Option<&'static KernelDescriptor> = None;
-    for d in table {
-        if d.matches(dtype_w, dtype_a, m) {
-            if let Some(prev) = hit {
-                debug_assert!(
-                    false,
-                    "overlapping dispatch predicates in table for m={m}: {} and {}",
-                    prev.impl_id, d.impl_id
-                );
-            }
-            hit = Some(d);
-        }
-    }
-    hit
+    flambeau_core::first_match(SWIGLU_GFX906, dtype, dtype, m)
 }
 
 #[cfg(test)]
@@ -483,7 +373,7 @@ mod tests {
     #[test]
     fn mmvq_decode_selects_dp4a_for_q4_k() {
         let d = dispatch_qmatmul(&cfg(QDtype::Q4_K, QDtype::Q8_1, 1)).unwrap();
-        assert_eq!(d.impl_id, "qmatmul_q4_K_mmvq_dp4a_gfx906");
+        assert_eq!(d.impl_id, "qmatmul_q4_k_mmvq_dp4a_t128_vdr2");
     }
 
     #[test]
@@ -491,7 +381,7 @@ mod tests {
         // Q6_K MMVQ decode dispatch is the DP4A kernel directly
         // (runtime intercept removed after the borrow-chain bug was fixed).
         let d = dispatch_qmatmul(&cfg(QDtype::Q6_K, QDtype::Q8_1, 1)).unwrap();
-        assert_eq!(d.impl_id, "qmatmul_q6_K_mmvq_dp4a_gfx906");
+        assert_eq!(d.impl_id, "qmatmul_q6_k_mmvq_dp4a");
     }
 
     #[test]
@@ -501,16 +391,31 @@ mod tests {
     }
 
     #[test]
-    fn mmq_tile16_at_m_128() {
-        let d = dispatch_qmatmul(&cfg(QDtype::Q8_0, QDtype::Q8_1, 128)).unwrap();
-        // default large-N Q8_0 MMQ is tile16.
-        assert_eq!(d.impl_id, "qmatmul_q8_0_mmq_wave64_tile16_gfx906");
+    fn mmq_lds_tiled_at_m_32() {
+        let d = dispatch_qmatmul(&cfg(QDtype::Q8_0, QDtype::Q8_1, 32)).unwrap();
+        assert_eq!(d.impl_id, "qmatmul_q8_0_mmq_lds_tiled_gfx906");
     }
 
     #[test]
-    fn mmq_tile16_at_m_2048() {
+    fn small_batch_tile_owns_m_3_to_32() {
+        for m in [3, 8, 32] {
+            let d = dispatch_qmatmul(&cfg(QDtype::Q5_K, QDtype::Q8_1, m)).unwrap();
+            assert_eq!(d.impl_id, "qmatmul_q5_K_mmq_lds_tiled_x8_gfx906");
+        }
+        let d = dispatch_qmatmul(&cfg(QDtype::Q5_K, QDtype::Q8_1, 33)).unwrap();
+        assert_eq!(d.impl_id, "qmatmul_q5_K_mmq_lds_tiled_gfx906");
+    }
+
+    #[test]
+    fn mmq_lds_tiled_at_m_128() {
+        let d = dispatch_qmatmul(&cfg(QDtype::Q8_0, QDtype::Q8_1, 128)).unwrap();
+        assert_eq!(d.impl_id, "qmatmul_q8_0_mmq_lds_tiled_gfx906");
+    }
+
+    #[test]
+    fn mmq_lds_tiled_at_m_2048() {
         let d = dispatch_qmatmul(&cfg(QDtype::Q8_0, QDtype::Q8_1, 2048)).unwrap();
-        assert_eq!(d.impl_id, "qmatmul_q8_0_mmq_wave64_tile16_gfx906");
+        assert_eq!(d.impl_id, "qmatmul_q8_0_mmq_lds_tiled_gfx906");
     }
 
     #[test]
@@ -539,22 +444,14 @@ mod tests {
             INDEXED_MOE_MMVQ_GFX906,
             MOE_COMBINE_GFX906,
             INDEXED_MOE_MMVQ_GATE_UP_GFX906,
-            INDEXED_MOE_MMQ_GFX906,
             ROPE_NEOX_PARTIAL_GFX906,
-            L2_NORM_GFX906,
-            ADD_F16_GFX906,
-            CAST_F16_F32_GFX906,
-            CAST_F32_F16_GFX906,
             CAUSAL_CONV1D_GFX906,
             DENSE_GEMV_F32_F16_GFX906,
             GDN_ALPHA_BETA_GFX906,
             GDN_STATE_STEP_GFX906,
             QUANTIZE_F16_Q8_1_GFX906,
-            RMSNORM_F32_GFX906,
-            SCALE_F32_GFX906,
             SHARED_EXPERT_SCALE_GFX906,
             SILU_F32_GFX906,
-            SPLIT_Q_GATE_GFX906,
             SWIGLU_F32_GFX906,
         ] {
             for d in table {
@@ -646,22 +543,14 @@ mod tests {
             INDEXED_MOE_MMVQ_GFX906,
             MOE_COMBINE_GFX906,
             INDEXED_MOE_MMVQ_GATE_UP_GFX906,
-            INDEXED_MOE_MMQ_GFX906,
             ROPE_NEOX_PARTIAL_GFX906,
-            L2_NORM_GFX906,
-            ADD_F16_GFX906,
-            CAST_F16_F32_GFX906,
-            CAST_F32_F16_GFX906,
             CAUSAL_CONV1D_GFX906,
             DENSE_GEMV_F32_F16_GFX906,
             GDN_ALPHA_BETA_GFX906,
             GDN_STATE_STEP_GFX906,
             QUANTIZE_F16_Q8_1_GFX906,
-            RMSNORM_F32_GFX906,
-            SCALE_F32_GFX906,
             SHARED_EXPERT_SCALE_GFX906,
             SILU_F32_GFX906,
-            SPLIT_Q_GATE_GFX906,
             SWIGLU_F32_GFX906,
         ] {
             for d in table {
@@ -721,22 +610,14 @@ mod tests {
             INDEXED_MOE_MMVQ_GFX906,
             MOE_COMBINE_GFX906,
             INDEXED_MOE_MMVQ_GATE_UP_GFX906,
-            INDEXED_MOE_MMQ_GFX906,
             ROPE_NEOX_PARTIAL_GFX906,
-            L2_NORM_GFX906,
-            ADD_F16_GFX906,
-            CAST_F16_F32_GFX906,
-            CAST_F32_F16_GFX906,
             CAUSAL_CONV1D_GFX906,
             DENSE_GEMV_F32_F16_GFX906,
             GDN_ALPHA_BETA_GFX906,
             GDN_STATE_STEP_GFX906,
             QUANTIZE_F16_Q8_1_GFX906,
-            RMSNORM_F32_GFX906,
-            SCALE_F32_GFX906,
             SHARED_EXPERT_SCALE_GFX906,
             SILU_F32_GFX906,
-            SPLIT_Q_GATE_GFX906,
             SWIGLU_F32_GFX906,
         ] {
             for d in table {

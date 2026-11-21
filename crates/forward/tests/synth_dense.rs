@@ -109,6 +109,7 @@ fn synth_dense_one_token_forward() {
     }
 
     let cfg = ScratchConfig {
+        mtp: None,
         hidden: HIDDEN,
         intermediate: INTERMEDIATE,
         q_width,

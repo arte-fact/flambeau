@@ -417,6 +417,7 @@ fn run_shape(
         let q_off_i = q_offset as i32;
         let scale_f = scale;
         let window_i = window_size;
+        let ring_depth_i: i32 = 0;
         let d_q_ptr: u64 = d_q.as_usize() as u64;
         let d_k_ptr: u64 = d_k.as_usize() as u64;
         let d_v_ptr: u64 = d_v.as_usize() as u64;
@@ -439,6 +440,7 @@ fn run_shape(
         args.push(&q_off_i);
         args.push(&scale_f);
         args.push(&window_i);
+        args.push(&ring_depth_i);
 
         let cfg = if case.impl_kind.is_flash_tile() {
             let br = case.impl_kind.br();

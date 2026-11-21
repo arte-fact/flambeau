@@ -187,8 +187,10 @@ async fn messages_anthropic_inner(
             .await
             .map_err(ApiError::internal)?;
 
-    let (text_out, tool_calls) = if has_tools {
-        use crate::tool_call_parser::{dispatcher_with_prompt, split_events, ParserEvent};
+    // The streamed path runs every reply through the parser (tools declared
+    // or not); the same parse here keeps the two block for block.
+    let (text_out, parsed_reasoning, tool_calls) = {
+        use crate::tool_call_parser::{dispatcher_with_prompt, split_events_with_reasoning};
         let mut parser =
             dispatcher_with_prompt(None, state.tool_call_format_default, &prompt, false)
                 .map_err(|e| ApiError::bad_request(e.to_string()))?;
@@ -198,10 +200,9 @@ async fn messages_anthropic_inner(
         }
         events.extend(parser.push(&text));
         events.extend(parser.finish());
-        split_events(ParserEvent::coalesce(events))
-    } else {
-        (text, Vec::<ToolCall>::new())
+        split_events_with_reasoning(events)
     };
+    let reasoning = reasoning.or_else(|| (!parsed_reasoning.is_empty()).then_some(parsed_reasoning));
 
     let stop_reason: &str = if !tool_calls.is_empty() {
         "tool_use"
@@ -628,8 +629,9 @@ fn stream_messages_anthropic_sse(
             true
         };
 
+        let mut reasoning_trim = crate::tool_call_parser::ReasoningTrim::default();
         let mut emit_delta = |text: &str| -> bool {
-            let events = parser.push(text);
+            let events = reasoning_trim.apply(parser.push(text));
             drain_events(
                 events,
                 &mut next_block_index,
@@ -657,7 +659,7 @@ fn stream_messages_anthropic_sse(
             &mut emit_delta,
         );
 
-        let tail = parser.finish();
+        let tail = reasoning_trim.apply(parser.finish());
         let _ = drain_events(
             tail,
             &mut next_block_index,

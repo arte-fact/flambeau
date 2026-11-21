@@ -1,6 +1,6 @@
 //! Shared helpers for the synth_*.rs integration tests.
 
-#![cfg(feature = "hip")]
+#![cfg(any(feature = "hip", feature = "cuda"))]
 
 use bytemuck::Pod;
 use flambeau_backend_hip::HipDevice;
@@ -8,16 +8,20 @@ use flambeau_core::op::QDtype;
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_forward::ctx::QuantWeight;
 use flambeau_model_ops::{Tensor, F16};
-use flambeau_quant::quantize_k::quantize_row_q8_0;
+use flambeau_quant::quantize_k::{quantize_row_q4_k, quantize_row_q8_0};
 use half::f16;
 
-pub struct DeviceAllocs {
-    pub device: HipDevice,
+// Default `D = HipDevice` keeps the existing HIP synth tests' bare `DeviceAllocs`
+// references compiling unchanged; the CUDA parity test infers `D = CudaDevice`
+// from `DeviceAllocs::new(CudaDevice::…)`. (`forward` always carries the `hip`
+// feature — `engine.rs` names `HipBackend` — so `HipDevice` is always in scope.)
+pub struct DeviceAllocs<D: Device = HipDevice> {
+    pub device: D,
     pub allocs: Vec<(DevicePtr, usize)>,
 }
 
-impl DeviceAllocs {
-    pub fn new(device: HipDevice) -> Self {
+impl<D: Device> DeviceAllocs<D> {
+    pub fn new(device: D) -> Self {
         Self {
             device,
             allocs: Vec::new(),
@@ -64,9 +68,24 @@ impl DeviceAllocs {
             n_elems: rows * cols,
         }
     }
+
+    pub fn upload_q4_k(&mut self, host_f32: &[f32], rows: usize, cols: usize) -> QuantWeight {
+        assert_eq!(host_f32.len(), rows * cols);
+        assert!(cols % 256 == 0, "Q4_K needs cols % 256 == 0 (one super-block)");
+        let mut bytes: Vec<u8> = Vec::new();
+        for r in 0..rows {
+            quantize_row_q4_k(&host_f32[r * cols..(r + 1) * cols], &mut bytes);
+        }
+        let (ptr, _) = self.upload(&bytes);
+        QuantWeight {
+            ptr,
+            dtype: QDtype::Q4_K,
+            n_elems: rows * cols,
+        }
+    }
 }
 
-impl Drop for DeviceAllocs {
+impl<D: Device> Drop for DeviceAllocs<D> {
     fn drop(&mut self) {
         for (ptr, bytes) in self.allocs.drain(..) {
             unsafe {

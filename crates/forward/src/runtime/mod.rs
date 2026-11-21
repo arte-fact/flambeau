@@ -5,10 +5,11 @@
 pub mod ar;
 pub mod driver;
 pub mod orchestrate;
+pub mod solo;
 pub mod workers;
 
 use anyhow::{anyhow, Result};
-use flambeau_backend_hip::HipDevice;
+use flambeau_core::Device;
 use flambeau_quant::GgufFile;
 
 use crate::core::{KvLayout, ScratchConfig};
@@ -74,7 +75,7 @@ pub trait Arch: Send + Sync + 'static {
     /// slabs don't allocate for the full 128–256k context.
     fn load(
         file: &GgufFile,
-        device: &HipDevice,
+        device: &impl Device,
         shard: ShardMode,
         layer_range: Option<(usize, usize)>,
         ctx_cap: Option<usize>,
@@ -93,7 +94,7 @@ pub trait Arch: Send + Sync + 'static {
         slot_ids: &[usize],
     ) -> Result<()>;
 
-    /// Sarathi-Serve mixed-batch forward (Phase K4). Rows
+    /// Sarathi-Serve mixed-batch forward. Rows
     /// `[0..prefill_rows)` are a prefill chunk for `slot_ids[0]`;
     /// rows `[prefill_rows..n)` are batched decodes across N distinct
     /// slots. One forward call covering both phases; logit emission
@@ -122,7 +123,36 @@ pub trait Arch: Send + Sync + 'static {
         max_slots: usize,
         paged_kv_pages: Option<usize>,
         kv_layout: KvLayout,
+        mtp_max_draft: usize,
     ) -> ScratchConfig;
+
+    /// Whether the loaded model carries an MTP/nextn draft head.
+    fn has_mtp(_model: &Self::Model) -> bool {
+        false
+    }
+
+    /// One MTP cycle with rejection sampling (llama.cpp `draft-mtp`
+    /// style): forward the anchor token at `anchor_pos` (capturing its
+    /// hidden as the next anchor), draft up to `n_draft` tokens with the
+    /// nextn head, verify them in one batched forward, accept/reject via
+    /// `sample` (greedy = one-hot dists), and return the tokens to emit
+    /// (accepted drafts + bonus token). `seed` drives the accept / residual
+    /// draws, so every TP rank reaches the same verdicts. `out_logits`
+    /// receives the target logits row the bonus token was drawn from.
+    /// Default impl bails (arch has no MTP).
+    fn mtp_cycle<C: ForwardCtx>(
+        _model: &Self::Model,
+        _ctx: &mut C,
+        _anchor_token: u32,
+        _anchor_pos: usize,
+        _slot_id: usize,
+        _n_draft: usize,
+        _sample: &mut flambeau_runtime::MtpSampler,
+        _seed: u64,
+        _out_logits: &mut Vec<f32>,
+    ) -> Result<Vec<u32>> {
+        anyhow::bail!("mtp_cycle: arch has no MTP support")
+    }
 
     /// Per-layer attention kind (FullAttn / Gdn) if the arch is
     /// hybrid; `None` if every layer is uniform (qwen3 dense, gemma4
@@ -132,7 +162,7 @@ pub trait Arch: Send + Sync + 'static {
     }
 
     /// Release device memory. Called from the worker thread.
-    fn dispose(model: &mut Self::Model, device: &HipDevice) -> Result<()>;
+    fn dispose(model: &mut Self::Model, device: &impl Device) -> Result<()>;
 }
 
 /// Topology-abstracted forward session. Holds persistent worker threads
@@ -157,6 +187,8 @@ impl<A: Arch> Session<A> {
             max_slots,
             paged_kv_pages: _,
             kv_layout: _,
+            mtp_max_draft: _,
+            decode_graph: _,
         } = params;
         if prefill_ubatch == 0 {
             anyhow::bail!("Session::new: prefill_ubatch must be > 0");
@@ -216,7 +248,80 @@ impl<A: Arch> Session<A> {
         self.forward(&[token], &[position], &[0])
     }
 
-    /// Sarathi-Serve mixed-batch dispatch (Phase K4). Rows
+    /// One greedy MTP cycle on a single-device or TP topology. All ranks
+    /// run the cycle in lockstep (TP shards the draft layer like any other
+    /// layer); rank 0's reply carries the (replicated) result. Returns
+    /// `Ok(None)` for PP/hybrid or when the arch has no MTP head.
+    pub fn mtp_step(
+        &mut self,
+        token: u32,
+        position: usize,
+        slot_id: usize,
+        n_draft: usize,
+        sample_factory: workers::SampleFactory,
+        seed: u64,
+    ) -> Result<Option<(Vec<u32>, Vec<f32>)>> {
+        if !matches!(
+            self.topology,
+            Topology::SingleDevice { .. } | Topology::Tp { .. }
+        ) {
+            return Ok(None);
+        }
+        // Dispatch to every rank before collecting any reply: TP ranks block on
+        // each other's AllReduce, so a send-then-wait per rank deadlocks.
+        let mut replies = Vec::with_capacity(self.handles.len());
+        for handle in &self.handles {
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            handle
+                .cmd_tx
+                .send(workers::Command::MtpStep {
+                    token,
+                    position,
+                    slot_id,
+                    n_draft,
+                    sample_factory: std::sync::Arc::clone(&sample_factory),
+                    seed,
+                    reply: tx,
+                })
+                .map_err(|e| anyhow::anyhow!("mtp_step send: {e}"))?;
+            replies.push(rx);
+        }
+        let mut first: Option<(Vec<u32>, Vec<f32>)> = None;
+        let mut ranks_agree = true;
+        let mut unsupported = false;
+        let mut failure: Option<anyhow::Error> = None;
+        for (i, rx) in replies.into_iter().enumerate() {
+            match rx.recv().map_err(|e| anyhow::anyhow!("mtp_step recv: {e}"))? {
+                Ok(v) => match &first {
+                    None if i == 0 => first = Some(v),
+                    Some((tokens, _)) => ranks_agree &= *tokens == v.0,
+                    None => {}
+                },
+                Err(e) => {
+                    let msg = format!("{e:#}");
+                    if msg.contains("no MTP") || msg.contains("not supported") {
+                        unsupported = true;
+                    } else if failure.is_none() {
+                        failure = Some(e);
+                    }
+                }
+            }
+        }
+        if let Some(e) = failure {
+            return Err(e);
+        }
+        if unsupported {
+            return Ok(None);
+        }
+        if !ranks_agree {
+            anyhow::bail!(
+                "mtp_step: ranks emitted different tokens; their recurrent state and KV have diverged"
+            );
+        }
+        Ok(first)
+    }
+
+    /// Sarathi-Serve mixed-batch dispatch. Rows
     /// `[0..prefill_rows)` are a prefill chunk for `slot_ids[0]`;
     /// rows `[prefill_rows..n)` are batched decodes across N distinct
     /// slots. Logits emitted are `(N + 1)` rows: the last prefill

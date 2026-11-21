@@ -190,9 +190,9 @@ extern "C" __global__ void flambeau_moe_sort_scan_padded_offsets(
 }
 
 // ---------------------------------------------------------------------------
-// Kernel 4b (1.b): pad-to-16 variant of the scan. Same structure,
+// Pad-to-16 variant of the scan. Same structure,
 // different mask: `(counts[e] + 15) & ~15`. Lets 16-slot-per-block MMQ
-// kernels (tile16, 1.b) share the same block-expert invariant. The
+// kernels (tile16) share the same block-expert invariant. The
 // pad_copy kernel below is pad-agnostic (reads padded_count from
 // padded_offsets[e+1] - padded_offsets[e]) so no tile16 clone needed.
 // ---------------------------------------------------------------------------

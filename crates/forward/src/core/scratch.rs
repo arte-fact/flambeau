@@ -1,7 +1,6 @@
 //! Pre-allocated device scratch + per-layer KV cache.
 
 use anyhow::{Context, Result};
-use flambeau_backend_hip::HipDevice;
 use flambeau_core::{CopyDirection, Device, DevicePtr};
 
 use crate::ctx::GdnDims;
@@ -76,7 +75,7 @@ pub struct ScratchConfig {
     /// [`PagedKvCacheConfig::from_vram_budget`].
     pub paged_kv: Option<PagedKvCacheConfig>,
     /// KV cache element layout. Defaults to [`KvLayout::F16Contig`];
-    /// `--kv q8` selects [`KvLayout::Q8Contig`] (requires S7b/S7c).
+    /// `--kv q8` selects [`KvLayout::Q8Contig`].
     pub kv_layout: KvLayout,
     /// Per-layer override of [`Self::kv_layout`]. `None` ⇒ every layer
     /// uses `kv_layout`. `Some(v)` (length == num_layers) ⇒ layer `li`
@@ -89,6 +88,21 @@ pub struct ScratchConfig {
     /// and addressed modulo `v[li]` (ring-buffered SWA). Built from
     /// [`KvLayerShape::kv_depth_at`] via [`per_layer_kv_depths`].
     pub per_layer_kv_depths: Option<Vec<usize>>,
+    /// MTP/nextn draft-head configuration. `Some` when the GGUF embeds a
+    /// nextn block AND the operator enabled MTP: the pool allocates one
+    /// extra KV slab (index `num_layers`) for the draft layer, an F16
+    /// anchor-hidden buffer, and sizes the logits buffer for
+    /// `max_draft` verify rows.
+    pub mtp: Option<MtpScratch>,
+}
+
+/// MTP draft-head scratch sizing.
+#[derive(Clone, Copy, Debug)]
+pub struct MtpScratch {
+    /// KV width of the draft layer (full-attn `n_kv_heads * head_dim`).
+    pub kv_width: usize,
+    /// Max drafted tokens per verify batch; also the logits row count.
+    pub max_draft: usize,
 }
 
 impl Default for ScratchConfig {
@@ -114,6 +128,7 @@ impl Default for ScratchConfig {
             kv_layout: KvLayout::F16Contig,
             per_layer_kv_layouts: None,
             per_layer_kv_depths: None,
+            mtp: None,
         }
     }
 }
@@ -122,6 +137,14 @@ impl Default for ScratchConfig {
 /// `splitk_chunk_size` stays ≤ 32 for any `n_tokens_kv` ≤ 16 384;
 /// callers must keep ctx within that bound.
 pub const MAX_SPLITK_CHUNKS: usize = 32;
+
+/// Most sparse additions the on-device greedy draw takes; a longer list keeps
+/// the host draw.
+pub const ARGMAX_MAX_ADDS: usize = 256;
+/// Most logits rows one on-device greedy pass draws (MTP verification).
+pub const ARGMAX_MAX_ROWS: usize = 16;
+const ARGMAX_FIXED_BYTES: usize =
+    2 * ARGMAX_MAX_ADDS * 4 + 2 * flambeau_ops::sampling::ARGMAX_PARTS * 4 + ARGMAX_MAX_ROWS * 4;
 
 /// Per-layer KV-cache geometry. Arches implement this on their
 /// `Config` so `per_layer_kv_widths` can size the ScratchPool's
@@ -222,6 +245,12 @@ pub trait ScratchShape: KvLayerShape {
     fn per_layer_embd(&self) -> usize {
         0
     }
+    /// KV width of the embedded MTP/nextn draft layer when the arch has
+    /// one (`Some`), else `None`. The draft layer gets its own KV slab at
+    /// index `num_layers`. Takes `n_ranks` for TP sharding.
+    fn mtp_kv_width(&self, _n_ranks: usize) -> Option<usize> {
+        None
+    }
 }
 
 /// Build a `ScratchConfig` from a shape spec. Each arch's
@@ -238,11 +267,29 @@ pub fn scratch_config_for<S: ScratchShape + ?Sized>(
     max_slots: usize,
     paged_kv_pages: Option<usize>,
     kv_layout: KvLayout,
+    mtp_max_draft: usize,
 ) -> ScratchConfig {
     let n_ranks = shard.n_ranks();
-    let per_layer_kv = per_layer_kv_widths(shape, n_ranks);
+    let mut per_layer_kv = per_layer_kv_widths(shape, n_ranks);
+    let mut per_layer_depths = per_layer_kv_depths(shape, shape.max_seq_len(), prefill_ubatch);
+    let mut num_layers = shape.num_layers();
+    // MTP: the embedded nextn draft layer gets its own KV slab appended at
+    // index `num_layers`; `num_layers` is bumped so the per-layer width /
+    // depth vectors stay in lockstep with `kv_caches`.
+    let mtp = if mtp_max_draft > 0 {
+        shape.mtp_kv_width(n_ranks).map(|w| {
+            per_layer_kv.push(w);
+            per_layer_depths.push(shape.max_seq_len());
+            num_layers += 1;
+            MtpScratch {
+                kv_width: w,
+                max_draft: mtp_max_draft,
+            }
+        })
+    } else {
+        None
+    };
     let kv_width = per_layer_kv.iter().copied().max().unwrap_or(0);
-    let per_layer_depths = per_layer_kv_depths(shape, shape.max_seq_len(), prefill_ubatch);
     // Per-layer KV layout. `kv_layout` is the uniform request from --kv.
     // Q8 attention now covers head_dim ∈ {64, 128, 256, 512}; the d=512
     // path uses a 2-wave block with cross-wave LDS reduction. Layers
@@ -316,7 +363,7 @@ pub fn scratch_config_for<S: ScratchShape + ?Sized>(
         kv_width,
         vocab: shape.vocab(),
         max_seq_len: shape.max_seq_len(),
-        num_layers: shape.num_layers(),
+        num_layers,
         max_experts: moe.map_or(0, |m| m.num_experts),
         max_experts_per_tok: moe.map_or(0, |m| m.experts_per_tok),
         gdn: shape.gdn_per_rank(n_ranks),
@@ -330,6 +377,7 @@ pub fn scratch_config_for<S: ScratchShape + ?Sized>(
         kv_layout,
         per_layer_kv_layouts,
         per_layer_kv_depths: Some(per_layer_depths),
+        mtp,
     }
 }
 
@@ -341,7 +389,7 @@ pub fn scratch_config_for<S: ScratchShape + ?Sized>(
 /// (`KvCache<F16Contig>` vs `KvCache<Q8Contig>`). The v2 stack uses an
 /// enum because turning `KvCache` generic would ripple a type parameter
 /// through `ScratchPool`, `CoreState`, `ForwardCtx`, every composite, and
-/// every model crate — multi-session refactor. The enum encodes the same
+/// every model crate. The enum encodes the same
 /// decision at runtime; misdispatches surface as panics at composite
 /// dispatch rather than compile errors. Tracked in
 /// `doc/GEMMA4_PERF_PLAN.md` as the typestate-ification follow-up.
@@ -355,7 +403,7 @@ pub enum KvLayout {
     /// Q8_0 contiguous slabs. `bytes_per_row = (kv_width / 32) *
     /// Q8_0_BLOCK_BYTES`. ~47 % HBM saving on KV reads at decode
     /// for GQA-heavy archs (gemma4 32/16, mistral 32/8, …). Requires
-    /// the Q8 kv_append + attention kernels (S7b).
+    /// the Q8 kv_append + attention kernels.
     Q8Contig,
 }
 
@@ -365,6 +413,14 @@ pub enum KvLayout {
 pub const Q8_0_BLOCK_BYTES: usize = 34;
 
 impl KvLayout {
+    /// Whether one forward can decode several slots at once with this
+    /// layout. The multi-slot decode branch of `standard_attn` (batched KV
+    /// append + batched decode attention) exists for F16 slabs only; a Q8
+    /// cache must be decoded one slot per forward.
+    pub fn supports_multi_slot_decode(self) -> bool {
+        matches!(self, KvLayout::F16Contig)
+    }
+
     /// Slab byte stride for one (token × n_kv_heads × head_dim) row.
     /// `kv_width = n_kv_heads * head_dim` (elements, per rank).
     pub fn bytes_per_row(self, kv_width: usize) -> usize {
@@ -396,8 +452,7 @@ pub struct KvCache {
     pub bytes_per_row: usize,
     /// Identifies which family of kernels the composite must dispatch
     /// to. F16Contig ⇒ the existing kv_append_f16 / attention_decode_f16
-    /// family. Q8Contig ⇒ the Q8 family (kernels ported in S7b; dispatch
-    /// wired in S7c).
+    /// family. Q8Contig ⇒ the Q8 family.
     pub layout: KvLayout,
     /// Slab depth in tokens (rows). Slot stride = `depth * bytes_per_row`.
     /// Equals `max_seq_len` for full-context layers; `window_size +
@@ -469,7 +524,7 @@ impl PagedKvCacheConfig {
     /// * 2` (K and V pools, F16). The result is clamped to at least
     /// `max_slots * max_pages_per_slot` so every slot can fill its
     ///   table even when the budget is just enough; a larger budget
-    ///   leaves spare pages for cross-slot sharing (E4 prefix cache).
+    ///   leaves spare pages for cross-slot sharing (prefix cache).
     pub fn from_vram_budget(
         per_layer_budget_bytes: usize,
         page_size: usize,
@@ -506,14 +561,6 @@ impl PagedKvCache {
         self.n_pages * self.page_size * self.kv_width * std::mem::size_of::<u16>()
     }
 
-    /// Total per-layer allocation including K + V pools + block table
-    /// + block-table-lens. Used to size the page pool from a VRAM budget.
-    pub fn per_layer_bytes(&self) -> usize {
-        2 * self.pool_bytes()
-            + self.max_slots * self.max_pages_per_slot * std::mem::size_of::<u32>()
-            + self.max_slots * std::mem::size_of::<u32>()
-    }
-
     /// Allocate K + V page pools + block table + block-table-lens for a
     /// single layer on `device`. The block table is zero-initialised on
     /// the host buffer so unbacked entries decode as page 0 (a tombstone);
@@ -521,7 +568,7 @@ impl PagedKvCache {
     /// assigned". Caller is responsible for tracking the returned
     /// allocations and freeing them on dispose.
     pub fn alloc(
-        device: &HipDevice,
+        device: &impl Device,
         cfg: PagedKvCacheConfig,
         kv_width: usize,
         max_slots: usize,
@@ -858,8 +905,28 @@ pub struct ScratchPool {
     pub gated_q8_1_mmq: DevicePtr,
     pub down_f32: DevicePtr,
 
+    /// Rows `logits_f32_dev` holds: `max_slots`, or the MTP verify batch
+    /// (`max_draft + 1`) when larger.
+    pub logits_rows: usize,
     pub logits_f32_dev: DevicePtr,
     pub position_i32: DevicePtr,
+    /// Decode-graph device context: `[position, token_id]` (2 × i32). The
+    /// `_dpos` kernels read `position` from `[0]` (attention + kv_append) and
+    /// `token_id` from `[1]` (embed gather) directly on-device, so a captured
+    /// decode graph needs no per-arg rebind — the driver writes
+    /// both scalars via one 8-byte uncaptured HtoD from [`Self::decode_ctx_host`]
+    /// before each replay. Distinct from `position_i32` (which RoPE reads as a
+    /// positions tensor; that mechanism is left untouched).
+    pub decode_ctx_i32: DevicePtr,
+
+    /// Device scratch of the on-device greedy draw (`Ops::argmax_f32`, see
+    /// [`Self::argmax_buffers`]): `ARGMAX_MAX_ADDS` ids and values, the
+    /// first-pass winners, `ARGMAX_MAX_ROWS` result indices, then up to
+    /// [`Self::argmax_max_pairs`] penalty `(token, count)` pairs.
+    pub argmax_scratch: DevicePtr,
+    /// Penalty pairs the argmax scratch holds (`config.max_seq_len`: the
+    /// generated history never exceeds the context).
+    pub argmax_max_pairs: usize,
 
     /// `[max_experts]` F32. NULL when `config.max_experts == 0`.
     pub router_logits_f32: DevicePtr,
@@ -908,6 +975,43 @@ pub struct ScratchPool {
 
     pub kv_caches: Vec<KvCache>,
 
+    /// MTP anchor hidden (target post-`output_norm` hidden of the anchor
+    /// row) and the draft chain's current hidden. F16 `[hidden]`.
+    /// NULL when `config.mtp` is `None`.
+    pub mtp_anchor_f16: DevicePtr,
+    pub mtp_hidden_f16: DevicePtr,
+    /// MTP composite work buffers (F16 `[rows, hidden]` norms + post-eh_proj
+    /// input; F32 `[rows, hidden]` eh_proj partials), `rows` =
+    /// `max(max_prefill_tokens, max_draft + 1)`. NULL when no MTP.
+    pub mtp_e_f16: DevicePtr,
+    pub mtp_h_f16: DevicePtr,
+    pub mtp_in_f16: DevicePtr,
+    pub mtp_proj_a_f32: DevicePtr,
+    pub mtp_proj_b_f32: DevicePtr,
+    /// Device-side GDN snapshot for MTP rollback (one slot's worth of
+    /// per-layer state+history). NULL when MTP off or arch non-GDN.
+    pub mtp_gdn_snap: DevicePtr,
+    /// Bytes per slot in `mtp_gdn_snap`.
+    pub mtp_gdn_snap_slot_bytes: usize,
+    /// Set when `mtp_gdn_snap` holds a valid snapshot.
+    pub mtp_snap_valid: bool,
+    /// Per-GDN-layer state-step inputs of the last verify batch
+    /// (`max_draft + 1` rows), see [`GdnSpecRows`]. NULL when MTP off or
+    /// arch non-GDN.
+    pub mtp_gdn_rows: DevicePtr,
+    pub mtp_gdn_rows_layer_bytes: usize,
+    /// Target hiddens (post-`output_norm`, F16 `[rows, hidden]`) staged for
+    /// the draft layer's KV catch-up, and an all-zero `[hidden]` row used
+    /// as the hidden before position 0.
+    pub mtp_rows_f16: DevicePtr,
+    pub mtp_zero_f16: DevicePtr,
+    /// While set, the GDN prefill path keeps its state-step inputs in
+    /// `mtp_gdn_rows` so a rejected draft suffix can be rolled back by
+    /// replaying the state step alone.
+    pub mtp_spec_rows: bool,
+    /// `(slot, position)` whose target hidden `mtp_anchor_f16` holds.
+    pub mtp_pending: Option<(usize, usize)>,
+
     /// Per-layer paged KV cache, when `config.paged_kv` is `Some`.
     /// Coexists with `kv_caches` until E3c rewires `standard_attn`
     /// to dispatch on the paged path; today's runtime still reads
@@ -922,6 +1026,9 @@ pub struct ScratchPool {
     /// Per-owned-layer recurrent state + conv history. Empty when
     /// `config.gdn` is None.
     pub gdn_state: Vec<GdnLayerState>,
+    /// One slot's worth of zeros (`max(state, conv_history)` bytes), the
+    /// device-side source for GDN resets. NULL when `config.gdn` is None.
+    pub gdn_zero_slot: DevicePtr,
     /// Shared GDN per-decode scratch wrapping blocks's owned scratch.
     /// `None` when `config.gdn` is None.
     pub gdn_decode_scratch: Option<flambeau_model_ops::OwnedDeltaNetLayerDecodeScratch>,
@@ -961,7 +1068,57 @@ pub struct ScratchPool {
     /// `residual_add_local`.
     pub fused_residual_already_done: bool,
 
+    /// Stable host staging buffer for the per-forward positions HtoD upload
+    /// (`standard_attn`). Sized `max_prefill_tokens`; only ever index-assigned,
+    /// never reallocated, so `as_ptr()` is a stable host address for the pool's
+    /// lifetime. A decode-graph capture bakes that address into the captured
+    /// HtoD memcpy node; the driver rewrites `position_stage_host[0] = position`
+    /// before each replay (a host write — NOT a graph slot). The non-capture
+    /// path writes the same bytes it used to build a throwaway `Vec`, so the
+    /// device sees identical uploads.
+    pub position_stage_host: Vec<i32>,
+
+    /// Stable 2-element host staging for [`Self::decode_ctx_i32`]:
+    /// `[position, token_id]`. Only index-assigned, never reallocated, so
+    /// `as_ptr()` is a stable host address; the decode-graph driver rewrites
+    /// both entries then issues one uncaptured 8-byte HtoD before each replay.
+    pub decode_ctx_host: Vec<i32>,
+
     allocs: Vec<(DevicePtr, usize)>,
+}
+
+/// One GDN layer's state-step inputs for a verify batch, carved out of
+/// `ScratchPool::mtp_gdn_rows`. `conv_input` holds the `K - 1` history
+/// rows followed by the batch rows.
+#[derive(Clone, Copy)]
+pub struct GdnSpecRows {
+    pub alpha: DevicePtr,
+    pub beta: DevicePtr,
+    pub q: DevicePtr,
+    pub k: DevicePtr,
+    pub v: DevicePtr,
+    pub conv_input: DevicePtr,
+}
+
+impl GdnSpecRows {
+    pub fn layer_bytes(g: &GdnDims, rows: usize) -> usize {
+        let qk = g.num_k_heads * g.head_k_dim;
+        let v = g.num_v_heads * g.head_v_dim;
+        4 * (rows * (2 * g.num_v_heads + 2 * qk + v) + (g.conv_kernel - 1 + rows) * g.conv_channels)
+    }
+
+    pub fn carve(base: DevicePtr, g: &GdnDims, rows: usize) -> Self {
+        let qk = g.num_k_heads * g.head_k_dim * 4;
+        let v = g.num_v_heads * g.head_v_dim * 4;
+        let ab = g.num_v_heads * 4;
+        let alpha = base;
+        let beta = alpha.offset_bytes(rows * ab);
+        let q = beta.offset_bytes(rows * ab);
+        let k = q.offset_bytes(rows * qk);
+        let vp = k.offset_bytes(rows * qk);
+        let conv_input = vp.offset_bytes(rows * v);
+        Self { alpha, beta, q, k, v: vp, conv_input }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -973,7 +1130,26 @@ pub struct GdnLayerState {
 }
 
 impl ScratchPool {
-    pub fn new(device: &HipDevice, config: ScratchConfig) -> Result<Self> {
+    /// Rows the MTP verify batch may hold (`max_draft + 1`), 0 when MTP is off.
+    pub fn mtp_verify_rows(&self) -> usize {
+        self.config.mtp.map(|m| m.max_draft + 1).unwrap_or(0)
+    }
+
+    /// Layer `local_idx`'s slice of `mtp_gdn_rows`.
+    pub fn gdn_spec_rows(&self, local_idx: usize, g: &GdnDims) -> Option<GdnSpecRows> {
+        let rows = self.mtp_verify_rows();
+        if self.mtp_gdn_rows == DevicePtr::NULL
+            || GdnSpecRows::layer_bytes(g, rows) > self.mtp_gdn_rows_layer_bytes
+        {
+            return None;
+        }
+        let base = self
+            .mtp_gdn_rows
+            .offset_bytes(local_idx * self.mtp_gdn_rows_layer_bytes);
+        Some(GdnSpecRows::carve(base, g, rows))
+    }
+
+    pub fn new(device: &impl Device, config: ScratchConfig) -> Result<Self> {
         let mut allocs: Vec<(DevicePtr, usize)> = Vec::new();
         let mut alloc_bytes = |bytes: usize| -> Result<DevicePtr> {
             let p = device.alloc(bytes).context("alloc")?;
@@ -1023,14 +1199,17 @@ impl ScratchPool {
         let q_or_fused = if config.attn_q_gated { 2 * qw } else { qw };
         let attn_proj_f32 = alloc_bytes(n * q_or_fused.max(kvw).max(h) * f32)?;
 
-        // Split-K decode-attn partials. Over-allocate `partials_m/s`
-        // at q_width elems (= n_heads_q * head_dim) rather than the
-        // exact n_heads_q — saves storing head_dim in ScratchConfig
-        // and the waste is sub-MB.
+        // Split-K decode-attn partials. `m`/`s` over-allocate at q_width elems
+        // (= n_heads_q * head_dim) rather than the exact n_heads_q — this also
+        // covers the batched layout (n_heads_q * n_slots * n_chunks), since
+        // head_dim >= max_slots. `o` is the batched (n_heads_q * n_slots *
+        // n_chunks * head_dim) buffer = q_width * max_slots * MAX_SPLITK_CHUNKS;
+        // single-stream uses its n_slots=1 prefix.
+        let splitk_slots = config.max_slots.max(1);
         let (splitk_partials_m, splitk_partials_s, splitk_partials_o) = if qw > 0 {
             let m = alloc_bytes(qw * MAX_SPLITK_CHUNKS * f32)?;
             let s = alloc_bytes(qw * MAX_SPLITK_CHUNKS * f32)?;
-            let o = alloc_bytes(qw * MAX_SPLITK_CHUNKS * f32)?;
+            let o = alloc_bytes(qw * splitk_slots * MAX_SPLITK_CHUNKS * f32)?;
             (m, s, o)
         } else {
             (DevicePtr::NULL, DevicePtr::NULL, DevicePtr::NULL)
@@ -1054,8 +1233,15 @@ impl ScratchPool {
         };
         let down_f32 = alloc_bytes(n * h * f32)?;
 
-        let logits_f32_dev = alloc_bytes(config.max_slots.max(1) * config.vocab * f32)?;
+        let logits_rows = config
+            .max_slots
+            .max(1)
+            .max(config.mtp.map_or(0, |m| m.max_draft + 1));
+        let logits_f32_dev = alloc_bytes(logits_rows * config.vocab * f32)?;
         let position_i32 = alloc_bytes(n * i32_b)?;
+        let decode_ctx_i32 = alloc_bytes(2 * i32_b)?;
+        let argmax_max_pairs = config.max_seq_len;
+        let argmax_scratch = alloc_bytes(ARGMAX_FIXED_BYTES + argmax_max_pairs * 8)?;
 
         let (router_logits_f32, moe_accum_f16) = if config.max_experts > 0 {
             let r = alloc_bytes(n * config.max_experts * f32)?;
@@ -1239,6 +1425,95 @@ impl ScratchPool {
             });
         }
 
+        // MTP anchor / chain hidden buffers (F16 `[hidden]`). The draft
+        // layer's own KV slab is allocated by the loop above at index
+        // `num_layers - 1` (scratch_config_for appends its width/depth and
+        // bumps `num_layers` when `config.mtp` is `Some`).
+        let (
+            mtp_anchor_f16,
+            mtp_hidden_f16,
+            mtp_e_f16,
+            mtp_h_f16,
+            mtp_in_f16,
+            mtp_proj_a_f32,
+            mtp_proj_b_f32,
+            mtp_gdn_snap,
+            mtp_gdn_snap_slot_bytes,
+            mtp_gdn_rows,
+            mtp_gdn_rows_layer_bytes,
+        ) = match config.mtp {
+            Some(m) => {
+                let h = h * config.max_prefill_tokens.max(m.max_draft + 1);
+                let rows_layer_bytes = config
+                    .gdn
+                    .map(|g| GdnSpecRows::layer_bytes(&g, m.max_draft + 1))
+                    .unwrap_or(0);
+                let snap_bytes = match config.gdn {
+                    Some(g) => {
+                        let f32b = 4usize;
+                        let per_layer = g.num_v_heads * g.head_k_dim * g.head_v_dim * f32b
+                            + (g.conv_kernel - 1) * g.conv_channels * f32b;
+                        config.num_layers * per_layer
+                    }
+                    None => 0,
+                };
+                (
+                    alloc_bytes(h * f16)?,
+                    alloc_bytes(h * f16)?,
+                    alloc_bytes(h * f16)?,
+                    alloc_bytes(h * f16)?,
+                    alloc_bytes(h * f16)?,
+                    alloc_bytes(h * f32)?,
+                    alloc_bytes(h * f32)?,
+                    if snap_bytes > 0 { alloc_bytes(snap_bytes)? } else { DevicePtr::NULL },
+                    snap_bytes,
+                    if rows_layer_bytes > 0 {
+                        alloc_bytes(config.num_layers * rows_layer_bytes)?
+                    } else {
+                        DevicePtr::NULL
+                    },
+                    rows_layer_bytes,
+                )
+            }
+            None => (
+                DevicePtr::NULL,
+                DevicePtr::NULL,
+                DevicePtr::NULL,
+                DevicePtr::NULL,
+                DevicePtr::NULL,
+                DevicePtr::NULL,
+                DevicePtr::NULL,
+                DevicePtr::NULL,
+                0,
+                DevicePtr::NULL,
+                0,
+            ),
+        };
+        let (mtp_rows_f16, mtp_zero_f16) = match config.mtp {
+            Some(m) => {
+                let rows = config.max_prefill_tokens.max(m.max_draft + 1);
+                let rows_ptr = alloc_bytes(rows * h * f16)?;
+                let zero_ptr = alloc_bytes(h * f16)?;
+                let zeros = vec![0u8; h * f16];
+                let stream = device.default_stream();
+                // SAFETY: zero_ptr owns h * f16 bytes; zeros outlives the sync.
+                unsafe {
+                    device
+                        .memcpy_async(
+                            stream,
+                            CopyDirection::HostToDevice,
+                            zero_ptr,
+                            DevicePtr(zeros.as_ptr() as usize),
+                            h * f16,
+                        )
+                        .context("zero mtp lead hidden")?;
+                }
+                flambeau_core::Stream::synchronize(stream).context("sync mtp zero")?;
+                (rows_ptr, zero_ptr)
+            }
+            None => (DevicePtr::NULL, DevicePtr::NULL),
+        };
+
         // Paged-KV allocation runs alongside the contiguous cache when
         // `config.paged_kv` is `Some`. Today's `standard_attn` still
         // reads + writes via `kv_caches`; the paged structures sit
@@ -1274,7 +1549,7 @@ impl ScratchPool {
             (None, Vec::new())
         };
 
-        let (gdn_state, gdn_decode_scratch, gdn_decode_batched_scratch, gdn_prefill_scratch) = if let Some(g) = config.gdn {
+        let (gdn_state, gdn_zero_slot, gdn_decode_scratch, gdn_decode_batched_scratch, gdn_prefill_scratch) = if let Some(g) = config.gdn {
             let mut state_vec = Vec::with_capacity(config.num_layers);
             let state_bytes = n_slots * g.num_v_heads * g.head_k_dim * g.head_v_dim * f32;
             let hist_bytes = n_slots * (g.conv_kernel - 1) * g.conv_channels * f32;
@@ -1312,6 +1587,20 @@ impl ScratchPool {
                     state,
                     conv_history,
                 });
+            }
+            let zero_slot_bytes = state_bytes.max(hist_bytes) / n_slots;
+            let gdn_zero_slot = alloc_bytes(zero_slot_bytes)?;
+            // SAFETY: gdn_zero_slot owns zero_slot_bytes <= zero_buf.len().
+            unsafe {
+                device
+                    .memcpy_async(
+                        stream,
+                        CopyDirection::HostToDevice,
+                        gdn_zero_slot,
+                        DevicePtr(zero_buf.as_ptr() as usize),
+                        zero_slot_bytes,
+                    )
+                    .context("zero gdn reset source")?;
             }
             flambeau_core::Stream::synchronize(stream).context("sync gdn zero")?;
             // Drain the blocks-owned RawAllocTracker into our list
@@ -1359,9 +1648,9 @@ impl ScratchPool {
             } else {
                 None
             };
-            (state_vec, Some(owned), batched_owned, prefill_owned)
+            (state_vec, gdn_zero_slot, Some(owned), batched_owned, prefill_owned)
         } else {
-            (Vec::new(), None, None, None)
+            (Vec::new(), DevicePtr::NULL, None, None, None)
         };
 
         // MoE prefill scratch — must happen AFTER the `alloc_bytes`
@@ -1420,7 +1709,11 @@ impl ScratchPool {
             gated_q8_1_mmq,
             down_f32,
             logits_f32_dev,
+            logits_rows,
             position_i32,
+            decode_ctx_i32,
+            argmax_scratch,
+            argmax_max_pairs,
             router_logits_f32,
             moe_accum_f16,
             shared_x_norm_f32,
@@ -1444,9 +1737,26 @@ impl ScratchPool {
             ple_proj_out_f16,
             ple_normed_f16,
             kv_caches,
+            mtp_anchor_f16,
+            mtp_hidden_f16,
+            mtp_e_f16,
+            mtp_h_f16,
+            mtp_in_f16,
+            mtp_proj_a_f32,
+            mtp_proj_b_f32,
+            mtp_gdn_snap,
+            mtp_gdn_snap_slot_bytes,
+            mtp_snap_valid: false,
+            mtp_gdn_rows,
+            mtp_gdn_rows_layer_bytes,
+            mtp_rows_f16,
+            mtp_zero_f16,
+            mtp_spec_rows: false,
+            mtp_pending: None,
             paged_kv_caches,
             page_pools,
             gdn_state,
+            gdn_zero_slot,
             gdn_decode_scratch,
             gdn_decode_batched_scratch,
             gdn_slot_state_ptrs,
@@ -1455,18 +1765,37 @@ impl ScratchPool {
             current_residual_is_a: true,
             input_pre_normed: false,
             fused_residual_already_done: false,
+            position_stage_host: vec![0i32; n],
+            decode_ctx_host: vec![0i32; 2],
             allocs,
         })
     }
 
     /// Idempotent.
-    pub fn dispose(&mut self, device: &HipDevice) -> Result<()> {
+    pub fn dispose(&mut self, device: &impl Device) -> Result<()> {
         for (ptr, bytes) in self.allocs.drain(..) {
             // SAFETY: `ptr` came from `device.alloc(bytes)`; caller
             // contract: no further forward calls past dispose.
             unsafe { device.dealloc(ptr, bytes) }.context("dealloc")?;
         }
         Ok(())
+    }
+
+    /// `Ops::argmax_f32` buffers over `logits_f32_dev` row 0 and
+    /// [`Self::argmax_scratch`] (result slot 0); later rows offset `logits`
+    /// and `out` by the row.
+    pub fn argmax_buffers(&self) -> flambeau_ops::ArgmaxBuffers {
+        let base = self.argmax_scratch;
+        let parts = flambeau_ops::sampling::ARGMAX_PARTS;
+        flambeau_ops::ArgmaxBuffers {
+            logits: self.logits_f32_dev,
+            add_ids: base,
+            add_vals: base.offset_bytes(ARGMAX_MAX_ADDS * 4),
+            part_v: base.offset_bytes(2 * ARGMAX_MAX_ADDS * 4),
+            part_i: base.offset_bytes(2 * ARGMAX_MAX_ADDS * 4 + parts * 4),
+            out: base.offset_bytes(2 * ARGMAX_MAX_ADDS * 4 + 2 * parts * 4),
+            penalty_counts: base.offset_bytes(ARGMAX_FIXED_BYTES),
+        }
     }
 
     /// Flip residual ping-pong and return the live slot. Called by
@@ -1484,90 +1813,64 @@ impl ScratchPool {
     /// next request starts fresh. No-op when the arch is non-GDN.
     /// KV-cache positions are caller-supplied (no counter on the
     /// pool), so this is the only stateful slot that needs reset.
-    pub fn reset_gdn_state(&self, device: &HipDevice) -> Result<()> {
-        let Some(g) = self.config.gdn else {
-            return Ok(());
-        };
-        if self.gdn_state.is_empty() {
-            return Ok(());
+    pub fn reset_gdn_state(&self, device: &impl Device) -> Result<()> {
+        for slot_id in 0..self.config.max_slots.max(1) {
+            self.queue_gdn_slot_reset(slot_id, device)?;
         }
-        let f32 = 4;
-        let n_slots = self.config.max_slots.max(1);
-        let state_bytes = n_slots * g.num_v_heads * g.head_k_dim * g.head_v_dim * f32;
-        let hist_bytes = n_slots * (g.conv_kernel - 1) * g.conv_channels * f32;
-        let zero_buf = vec![0u8; state_bytes.max(hist_bytes)];
-        let stream = device.default_stream();
-        for ls in &self.gdn_state {
-            unsafe {
-                device
-                    .memcpy_async(
-                        stream,
-                        CopyDirection::HostToDevice,
-                        ls.state,
-                        DevicePtr(zero_buf.as_ptr() as usize),
-                        state_bytes,
-                    )
-                    .context("reset gdn state")?;
-                device
-                    .memcpy_async(
-                        stream,
-                        CopyDirection::HostToDevice,
-                        ls.conv_history,
-                        DevicePtr(zero_buf.as_ptr() as usize),
-                        hist_bytes,
-                    )
-                    .context("reset gdn conv_history")?;
-            }
-        }
-        flambeau_core::Stream::synchronize(stream).context("sync gdn reset")?;
-        Ok(())
+        flambeau_core::Stream::synchronize(device.default_stream()).context("sync gdn reset")
     }
 
     /// Zero one slot's GDN state + conv-history across every layer.
     /// Used by the server's shared-Session pool to reset a single
     /// conversation slot without touching others. No-op for non-GDN
-    /// archs or when the slot index is out of range.
-    pub fn reset_gdn_state_slot(&self, slot_id: usize, device: &HipDevice) -> Result<()> {
+    /// archs.
+    pub fn reset_gdn_state_slot(&self, slot_id: usize, device: &impl Device) -> Result<()> {
+        let n_slots = self.config.max_slots.max(1);
+        if slot_id >= n_slots {
+            anyhow::bail!("reset_gdn_state_slot: slot_id {slot_id} >= max_slots {n_slots}");
+        }
+        self.queue_gdn_slot_reset(slot_id, device)?;
+        flambeau_core::Stream::synchronize(device.default_stream()).context("sync gdn reset slot")
+    }
+
+    /// Queue device-to-device copies of `gdn_zero_slot` over one slot's GDN
+    /// state. The source stays on the device: a pageable host buffer here
+    /// gets pinned by the HIP runtime for the transfer, and a transient one
+    /// has faulted the GPU (page fault inside the host heap).
+    fn queue_gdn_slot_reset(&self, slot_id: usize, device: &impl Device) -> Result<()> {
         let Some(g) = self.config.gdn else {
             return Ok(());
         };
         if self.gdn_state.is_empty() {
             return Ok(());
         }
-        let n_slots = self.config.max_slots.max(1);
-        if slot_id >= n_slots {
-            anyhow::bail!("reset_gdn_state_slot: slot_id {slot_id} >= max_slots {n_slots}");
-        }
-        let f32 = 4;
-        let state_bytes_per_slot = g.num_v_heads * g.head_k_dim * g.head_v_dim * f32;
-        let hist_bytes_per_slot = (g.conv_kernel - 1) * g.conv_channels * f32;
-        let zero_buf = vec![0u8; state_bytes_per_slot.max(hist_bytes_per_slot)];
+        let state_bytes = g.num_v_heads * g.head_k_dim * g.head_v_dim * 4;
+        let hist_bytes = (g.conv_kernel - 1) * g.conv_channels * 4;
         let stream = device.default_stream();
         for ls in &self.gdn_state {
-            let state_off = ls.state.offset_bytes(slot_id * state_bytes_per_slot);
-            let hist_off = ls.conv_history.offset_bytes(slot_id * hist_bytes_per_slot);
+            // SAFETY: each slab holds max_slots slots of these sizes and
+            // gdn_zero_slot holds max(state_bytes, hist_bytes).
             unsafe {
                 device
                     .memcpy_async(
                         stream,
-                        CopyDirection::HostToDevice,
-                        state_off,
-                        DevicePtr(zero_buf.as_ptr() as usize),
-                        state_bytes_per_slot,
+                        CopyDirection::DeviceToDevice,
+                        ls.state.offset_bytes(slot_id * state_bytes),
+                        self.gdn_zero_slot,
+                        state_bytes,
                     )
                     .context("reset gdn state slot")?;
                 device
                     .memcpy_async(
                         stream,
-                        CopyDirection::HostToDevice,
-                        hist_off,
-                        DevicePtr(zero_buf.as_ptr() as usize),
-                        hist_bytes_per_slot,
+                        CopyDirection::DeviceToDevice,
+                        ls.conv_history.offset_bytes(slot_id * hist_bytes),
+                        self.gdn_zero_slot,
+                        hist_bytes,
                     )
                     .context("reset gdn conv_history slot")?;
             }
         }
-        flambeau_core::Stream::synchronize(stream).context("sync gdn reset slot")?;
         Ok(())
     }
 
@@ -1607,7 +1910,7 @@ impl ScratchPool {
         &self,
         slot_id: usize,
         n_tokens: usize,
-        device: &HipDevice,
+        device: &impl Device,
     ) -> Result<Vec<u8>> {
         const MAGIC: u32 = 0x4B56_5331; // "KVS1"
         let n_slots = self.config.max_slots.max(1);
@@ -1671,7 +1974,7 @@ impl ScratchPool {
         slot_id: usize,
         n_tokens: usize,
         bytes: &[u8],
-        device: &HipDevice,
+        device: &impl Device,
     ) -> Result<()> {
         const MAGIC: u32 = 0x4B56_5331;
         let n_slots = self.config.max_slots.max(1);
@@ -1751,6 +2054,16 @@ impl ScratchPool {
 #[cfg(test)]
 mod kv_layout_tests {
     use super::*;
+
+    /// The multi-slot decode branch of `standard_attn` writes and reads F16
+    /// rows; a layout without that branch must keep the server from putting
+    /// several slots in one forward (a Q8 cache decoded through it faulted
+    /// the GPU with an illegal memory access).
+    #[test]
+    fn only_f16_slabs_decode_several_slots_per_forward() {
+        assert!(KvLayout::F16Contig.supports_multi_slot_decode());
+        assert!(!KvLayout::Q8Contig.supports_multi_slot_decode());
+    }
 
     #[test]
     fn f16_contig_row_bytes_match_two_times_kv_width() {

@@ -1,7 +1,7 @@
 //! Final-logit softcap: `y[i] = tanh(x[i] / cap) * cap`. In-place safe.
 
 use anyhow::bail;
-use flambeau_ops::{HipOps, Ops};
+use flambeau_ops::Ops;
 
 use crate::dtype::F32;
 use crate::error::Result;
@@ -12,7 +12,7 @@ pub fn apply_softcap_f32(
     output: &mut Tensor<F32>,
     n: usize,
     cap: f32,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     if input.n_elems < n {
         bail!(
@@ -32,6 +32,7 @@ pub fn apply_softcap_f32(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flambeau_ops::HipOps;
     use crate::testing::{
         alloc, assert_close_f32, download, free, test_device, test_ops_registry, upload,
     };

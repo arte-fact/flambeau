@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "impl_id": "indexed_moe_mmvq_q4_k_gate_up_r4",
+  "backend": "hip",
+  "arch": "gfx906",
+  "op": "indexed_moe_mmvq_gate_up",
+  "dtype_weight": "Q4_K",
+  "dtype_activation": "Q8_1",
+  "tolerance_formula": "|err| <= 3e-2 * max(|ref|, sqrt(k))  (fused gate+up MoE MMVQ)",
+  "results": [
+    {
+      "m": 1,
+      "k": 2048,
+      "n": 768,
+      "seed": 14603931,
+      "max_rel_err": 0.00660222,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 8,
+      "k": 2048,
+      "n": 768,
+      "seed": 14604302,
+      "max_rel_err": 0.0086469315,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 31,
+      "k": 2048,
+      "n": 768,
+      "seed": 14605521,
+      "max_rel_err": 0.01062834,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 32,
+      "k": 2048,
+      "n": 768,
+      "seed": 14605574,
+      "max_rel_err": 0.010080009,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 64,
+      "k": 2048,
+      "n": 768,
+      "seed": 14607270,
+      "max_rel_err": 0.012374062,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 128,
+      "k": 2048,
+      "n": 768,
+      "seed": 14610662,
+      "max_rel_err": 0.010190518,
+      "tolerance": 0.03,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-11-20T18:32:19Z",
+  "rig": "threadreaper-gfx906",
+  "pmc": {
+    "vgpr_count": 44,
+    "sgpr_count": null,
+    "waves_per_simd": 5,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

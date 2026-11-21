@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "impl_id": "attention_decode_f16_splitk",
+  "backend": "cuda",
+  "arch": "sm_86",
+  "op": "attention_decode_f16_splitk",
+  "dtype_weight": "F16",
+  "dtype_activation": "F16",
+  "tolerance_formula": "|err| <= 5e-3 * max(|ref|, 1) vs F64 attention oracle",
+  "results": [
+    {
+      "m": 16,
+      "k": 256,
+      "n": 512,
+      "seed": 12612478,
+      "max_rel_err": 0.000014670193,
+      "tolerance": 0.005,
+      "pass": true
+    },
+    {
+      "m": 8,
+      "k": 128,
+      "n": 1024,
+      "seed": 12621990,
+      "max_rel_err": 0.000015124679,
+      "tolerance": 0.005,
+      "pass": true
+    },
+    {
+      "m": 4,
+      "k": 64,
+      "n": 300,
+      "seed": 12637542,
+      "max_rel_err": 0.000014796853,
+      "tolerance": 0.005,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-06-18T12:37:59Z",
+  "rig": "threadreaper-sm_86",
+  "pmc": {
+    "vgpr_count": 46,
+    "sgpr_count": null,
+    "waves_per_simd": null,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}
