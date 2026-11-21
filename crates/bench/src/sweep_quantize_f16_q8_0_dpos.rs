@@ -38,6 +38,9 @@ const CASES: &[Case] = &[
     Case { kv_width: 256, position: 300, ring_depth: 0 },
     Case { kv_width: 512, position: 511, ring_depth: 0 },
     Case { kv_width: 2048, position: 1641, ring_depth: 0 },
+    Case { kv_width: 1024, position: 33, ring_depth: 0 },
+    Case { kv_width: 1024, position: 300, ring_depth: 0 },
+    Case { kv_width: 1024, position: 1641, ring_depth: 0 },
     // Ring-wrapped: write lands at position % ring_depth.
     Case { kv_width: 512, position: 4000, ring_depth: 1152 },
     Case { kv_width: 512, position: 1200, ring_depth: 1152 },

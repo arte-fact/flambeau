@@ -34,6 +34,7 @@ const CASES: &[Case] = &[
     Case { hidden: 3840, vocab: 4096, token_id: 4095 },
     Case { hidden: 2048, vocab: 1000, token_id: 511 },
     Case { hidden: 5376, vocab: 512, token_id: 137 },
+    Case { hidden: 5120, vocab: 4096, token_id: 3001 },
 ];
 
 /// Backend-generic entry point.

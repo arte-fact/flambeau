@@ -53,6 +53,11 @@ pub fn mtp_stage_hidden_local<B: flambeau_backend::Backend>(
     if rows == DevicePtr::NULL {
         bail!("mtp_stage_hidden: pool has no MTP scratch (mtp disabled)");
     }
+    // The lead row is chosen from host-side pending state at record time; a
+    // replay would keep that choice for every later token.
+    if let Some(cap) = state.capture.as_deref_mut() {
+        cap.mark_uncapturable("mtp: staged hiddens depend on host pending state");
+    }
     let lead_src = match lead {
         MtpLead::Anchor => Some(state.pool.mtp_anchor_f16),
         MtpLead::Zero => Some(state.pool.mtp_zero_f16),

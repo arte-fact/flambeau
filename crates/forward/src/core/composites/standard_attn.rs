@@ -605,25 +605,26 @@ pub fn standard_attn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
                         None,
                     )?;
                 }
-            } else if weights.attn_v_unit_norm_w.is_some() && is_q8 {
-                // gemma4 Q8 path: V-unit-norm in place on the F16 scratch (no
-                // position arg → capturable as a standalone launch), then
-                // F16→Q8 quantize-and-write. The fused F16 kernel can't target
-                // a Q8 slab (different byte stride per row), so this slice
-                // splits the two ops. Under decode-graph capture the append
-                // reads the write row on-device from `decode_ctx_i32[0]`, so the
-                // captured graph advances the Q8 write cursor with no rebind.
-                let mut v_for_norm = unsafe {
-                    Tensor::<F16>::from_raw(state.pool.v_f16, n * kv_width)
-                };
-                flambeau_model_ops::v_unit_norm_per_head_f16(
-                    &mut v_for_norm,
-                    n,
-                    weights.n_kv_heads,
-                    weights.head_dim,
-                    weights.rms_eps,
-                    &ops,
-                )?;
+            } else if is_q8 {
+                // Q8 path. gemma4 normalises V in place on the F16 scratch first
+                // (no position arg, capturable as a standalone launch); the F16
+                // kernel above can't target a Q8 slab (different byte stride per
+                // row). Under decode-graph capture the append reads the write row
+                // on-device from `decode_ctx_i32[0]`, so the captured graph
+                // advances the Q8 write cursor with no rebind.
+                if weights.attn_v_unit_norm_w.is_some() {
+                    let mut v_for_norm = unsafe {
+                        Tensor::<F16>::from_raw(state.pool.v_f16, n * kv_width)
+                    };
+                    flambeau_model_ops::v_unit_norm_per_head_f16(
+                        &mut v_for_norm,
+                        n,
+                        weights.n_kv_heads,
+                        weights.head_dim,
+                        weights.rms_eps,
+                        &ops,
+                    )?;
+                }
                 let mut k_cache_q8 = unsafe {
                     Tensor::<flambeau_model_ops::Q8_0>::from_raw(
                         k_slot_ptr,
@@ -663,36 +664,6 @@ pub fn standard_attn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
                         &ops,
                     )?;
                 }
-            } else if is_q8 {
-                if let Some(cap) = state.capture.as_deref_mut() {
-                    cap.mark_uncapturable("kv_append: Q8 append not captured");
-                }
-                let mut k_cache_q8 = unsafe {
-                    Tensor::<flambeau_model_ops::Q8_0>::from_raw(
-                        k_slot_ptr,
-                        slab_depth * kv_width,
-                    )
-                };
-                let mut v_cache_q8 = unsafe {
-                    Tensor::<flambeau_model_ops::Q8_0>::from_raw(
-                        v_slot_ptr,
-                        slab_depth * kv_width,
-                    )
-                };
-                flambeau_model_ops::kv_append_f16_to_q8(
-                    &k_f16_rope,
-                    &v_f16_view,
-                    &mut k_cache_q8,
-                    &mut v_cache_q8,
-                    flambeau_model_ops::KvAppendSpec {
-                        n_tokens: n,
-                        kv_width,
-                        write_pos: start_position,
-                        max_seq_len: slab_depth,
-                        ring_depth: if is_ring_layer { slab_depth } else { 0 },
-                    },
-                    &ops,
-                )?;
             } else {
                 if let Some(cap) = state.capture.as_deref_mut() {
                     cap.mark_uncapturable("kv_append: plain F16 append (no _slots) not captured");

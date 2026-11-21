@@ -18,11 +18,10 @@ use crate::loader::ShardMode;
 use crate::runtime::orchestrate::LaunchParams;
 use crate::runtime::Arch;
 
-/// KV-tail threshold below which single-token decode uses the single-pass
-/// attention kernel (no `_slots` variant → not graph-capturable). The driver
-/// runs the plain forward for these early tokens; the graph engages once
-/// `position + 1` crosses into the split-K regime.
-const DECODE_GRAPH_MIN_KV: usize = 257;
+/// KV-tail length from which single-token decode attention takes the split-K
+/// path; below it the single-pass kernel (no `_dpos` variant) is not
+/// graph-capturable, so the driver runs the plain forward for those tokens.
+const DECODE_GRAPH_MIN_KV: usize = flambeau_ops::attention::SPLITK_MIN_TOKENS_KV + 1;
 
 /// Cached captured decode graph + its rebind program, keyed by the inflight
 /// slot it was captured against. `DecodeRebindPlan::reusable_at` decides whether
@@ -201,7 +200,10 @@ impl<B: Backend, A: Arch> SoloSession<B, A> {
         }
 
         // Recapture. The forward runs once in record-only capture mode, building
-        // the rebind plan + grid witnesses.
+        // the rebind plan + grid witnesses. The record pass still runs the
+        // model's host-side bookkeeping, so the MTP pending marker is restored
+        // if the capture is refused and the plain forward runs instead.
+        let mtp_pending_before = self.pool.mtp_pending;
         let mut capture = DecodeCapture::new();
         let exec_res = {
             let device = &self.device;
@@ -224,6 +226,7 @@ impl<B: Backend, A: Arch> SoloSession<B, A> {
                 _ => usize::MAX,
             };
             self.graph_block = Some(DecodeGraphBlock { slot_id, marked_at: position, retry_at });
+            self.pool.mtp_pending = mtp_pending_before;
             // The captured forward did not execute; run the real one for the
             // correct logits and drop the unusable graph.
             drop(exec);

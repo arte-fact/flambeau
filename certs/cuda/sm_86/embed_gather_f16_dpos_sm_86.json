@@ -52,10 +52,19 @@
       "max_rel_err": 0.0,
       "tolerance": 0.0,
       "pass": true
+    },
+    {
+      "m": 1,
+      "k": 3001,
+      "n": 5120,
+      "seed": 40779206,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
     }
   ],
   "pass": true,
-  "emitted_at": "2026-07-08T08:05:15Z",
+  "emitted_at": "2026-11-21T06:19:49Z",
   "rig": "threadreaper-sm_86",
   "pmc": {
     "vgpr_count": 12,

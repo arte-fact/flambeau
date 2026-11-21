@@ -69,6 +69,11 @@ const CASES: &[Case] = &[
     // Global mid-bucket: grid baked for the top of the bucket, run at a lower
     // eff so the last chunks run the empty sentinel.
     Case { head_dim: 256, n_heads_q: 16, n_heads_kv: 2, position: 900, window: 0, slab_depth: 0, regime: Regime::Global, bake_n_chunks: Some(MAX_SPLITK_CHUNKS) },
+    // Global GQA 24/4 (qwen35 27B full attention): first split-K position,
+    // mid and long context.
+    Case { head_dim: 256, n_heads_q: 24, n_heads_kv: 4, position: 32, window: 0, slab_depth: 0, regime: Regime::Global, bake_n_chunks: None },
+    Case { head_dim: 256, n_heads_q: 24, n_heads_kv: 4, position: 300, window: 0, slab_depth: 0, regime: Regime::Global, bake_n_chunks: None },
+    Case { head_dim: 256, n_heads_q: 24, n_heads_kv: 4, position: 1641, window: 0, slab_depth: 0, regime: Regime::Global, bake_n_chunks: None },
     // SWA ring (window 1024, slab 1152 = window + 128 ubatch), several eff.
     Case { head_dim: 256, n_heads_q: 16, n_heads_kv: 2, position: 1300, window: 1024, slab_depth: 1152, regime: Regime::Ring, bake_n_chunks: None },
     Case { head_dim: 256, n_heads_q: 16, n_heads_kv: 2, position: 4000, window: 1024, slab_depth: 1152, regime: Regime::Ring, bake_n_chunks: None },

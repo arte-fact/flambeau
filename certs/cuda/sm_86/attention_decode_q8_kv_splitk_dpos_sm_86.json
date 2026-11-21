@@ -36,6 +36,33 @@
       "pass": true
     },
     {
+      "m": 24,
+      "k": 33,
+      "n": 256,
+      "seed": 1274865,
+      "max_rel_err": 0.00076293945,
+      "tolerance": 0.05,
+      "pass": true
+    },
+    {
+      "m": 24,
+      "k": 301,
+      "n": 256,
+      "seed": 1247501,
+      "max_rel_err": 0.00019073486,
+      "tolerance": 0.05,
+      "pass": true
+    },
+    {
+      "m": 24,
+      "k": 1642,
+      "n": 256,
+      "seed": 1177660,
+      "max_rel_err": 0.00009536743,
+      "tolerance": 0.05,
+      "pass": true
+    },
+    {
       "m": 16,
       "k": 1301,
       "n": 256,
@@ -73,7 +100,7 @@
     }
   ],
   "pass": true,
-  "emitted_at": "2026-07-08T16:13:08Z",
+  "emitted_at": "2026-11-21T06:19:49Z",
   "rig": "threadreaper-sm_86",
   "pmc": {
     "vgpr_count": 36,
