@@ -195,36 +195,14 @@ pub fn mtp_draft_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
     if state.pool.mtp_anchor_f16 == DevicePtr::NULL {
         bail!("mtp_draft: pool has no MTP scratch (mtp disabled)");
     }
-    // Greedy draws run on device: upload the adjustments once, then each step
+    // Greedy draws run on device: the adjustments go up once, then each step
     // reads back the 4-byte token instead of the vocab-wide logits.
-    let plan = sample.argmax.clone().filter(|p| {
-        p.adds.len() <= crate::core::scratch::ARGMAX_MAX_ADDS
-            && p.penalty_counts.len() <= state.pool.argmax_max_pairs
-    });
+    let plan = sample.argmax.clone().filter(|p| argmax_plan_fits(state, p, 1));
     let argmax_bufs = state.pool.argmax_buffers();
-    let add_ids: Vec<i32> = plan.iter().flat_map(|p| p.adds.iter().map(|&(id, _)| id as i32)).collect();
-    let add_vals: Vec<f32> = plan.iter().flat_map(|p| p.adds.iter().map(|&(_, v)| v)).collect();
-    let counts: Vec<u32> = plan.iter().flat_map(|p| p.penalty_counts.iter().flat_map(|&(t, c)| [t, c])).collect();
-    let penalties = plan.as_ref().map(|p| {
-        (
-            p.penalty_counts.len(),
-            flambeau_ops::PenaltyKnobs { repetition: p.repetition, presence: p.presence, frequency: p.frequency },
-        )
-    });
-    for (dst, src, bytes) in [
-        (argmax_bufs.add_ids, add_ids.as_ptr() as usize, add_ids.len() * 4),
-        (argmax_bufs.add_vals, add_vals.as_ptr() as usize, add_vals.len() * 4),
-        (argmax_bufs.penalty_counts, counts.as_ptr() as usize, counts.len() * 4),
-    ] {
-        if bytes > 0 {
-            // SAFETY: each source fits its argmax_scratch region (the plan is
-            // filtered on both capacities); the host vectors outlive the copy,
-            // which completes before the first draw's sync.
-            unsafe {
-                state.device.memcpy_async(state.stream, CopyDirection::HostToDevice, dst, DevicePtr(src), bytes)?;
-            }
-        }
-    }
+    let device = match plan.as_deref() {
+        Some(p) => Some(upload_argmax_plan(state, p)?),
+        None => None,
+    };
     let mut h_cur = anchor_h.ptr;
     let mut tok = anchor_token;
     for step in 0..n_draft {
@@ -258,8 +236,8 @@ pub fn mtp_draft_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
         .context("mtp lm_head")?;
         // The persistent logits buffer is the copy target: a per-step Vec
         // would hand the runtime a fresh pageable range to pin every draft.
-        if plan.is_some() {
-            ops.argmax_f32(argmax_bufs, vocab, add_ids.len(), penalties).context("mtp draft argmax")?;
+        if let Some(up) = device.as_ref() {
+            ops.argmax_f32(argmax_bufs, vocab, up.n_adds, up.penalties).context("mtp draft argmax")?;
             let mut d: i32 = 0;
             // SAFETY: `out` is one i32 of argmax_scratch; synced below.
             unsafe {
@@ -303,4 +281,92 @@ pub fn mtp_draft_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
         h_cur = state.pool.mtp_hidden_f16;
     }
     Ok(())
+}
+
+/// Whether `plan` fits the on-device draw scratch for `n_rows` logits rows.
+pub fn argmax_plan_fits<B: flambeau_backend::Backend>(
+    state: &CoreState<'_, B>,
+    plan: &flambeau_runtime::MtpArgmax,
+    n_rows: usize,
+) -> bool {
+    plan.adds.len() <= crate::core::scratch::ARGMAX_MAX_ADDS
+        && plan.penalty_counts.len() <= state.pool.argmax_max_pairs
+        && n_rows <= crate::core::scratch::ARGMAX_MAX_ROWS
+        && n_rows <= state.pool.logits_rows
+}
+
+/// `plan` uploaded to the argmax scratch: the `Ops::argmax_f32` arguments,
+/// and the host sources, kept alive until the stream's next sync.
+struct ArgmaxUpload {
+    n_adds: usize,
+    penalties: Option<(usize, flambeau_ops::PenaltyKnobs)>,
+    _sources: (Vec<i32>, Vec<f32>, Vec<u32>),
+}
+
+/// Upload `plan`'s additions and penalty pairs to the argmax scratch. The
+/// caller has checked [`argmax_plan_fits`] and keeps the result until a sync.
+fn upload_argmax_plan<B: flambeau_backend::Backend>(
+    state: &mut CoreState<'_, B>,
+    plan: &flambeau_runtime::MtpArgmax,
+) -> Result<ArgmaxUpload> {
+    let bufs = state.pool.argmax_buffers();
+    let add_ids: Vec<i32> = plan.adds.iter().map(|&(id, _)| id as i32).collect();
+    let add_vals: Vec<f32> = plan.adds.iter().map(|&(_, v)| v).collect();
+    let counts: Vec<u32> = plan.penalty_counts.iter().flat_map(|&(t, c)| [t, c]).collect();
+    for (dst, src, bytes) in [
+        (bufs.add_ids, add_ids.as_ptr() as usize, add_ids.len() * 4),
+        (bufs.add_vals, add_vals.as_ptr() as usize, add_vals.len() * 4),
+        (bufs.penalty_counts, counts.as_ptr() as usize, counts.len() * 4),
+    ] {
+        if bytes > 0 {
+            // SAFETY: each source fits its argmax_scratch region
+            // (argmax_plan_fits) and lives in the returned ArgmaxUpload until
+            // the caller's next sync.
+            unsafe {
+                state.device.memcpy_async(state.stream, CopyDirection::HostToDevice, dst, DevicePtr(src), bytes)?;
+            }
+        }
+    }
+    let penalties = Some((
+        plan.penalty_counts.len(),
+        flambeau_ops::PenaltyKnobs { repetition: plan.repetition, presence: plan.presence, frequency: plan.frequency },
+    ));
+    Ok(ArgmaxUpload { n_adds: add_ids.len(), penalties, _sources: (add_ids, add_vals, counts) })
+}
+
+/// The greedy draw of `plan` on each of the first `n_rows` rows of the LM
+/// head's device logits; reads back the `n_rows` tokens. The caller has
+/// checked [`argmax_plan_fits`].
+pub fn argmax_rows_local<B: flambeau_backend::Backend>(
+    state: &mut CoreState<'_, B>,
+    plan: &flambeau_runtime::MtpArgmax,
+    n_rows: usize,
+    vocab: usize,
+) -> Result<Vec<u32>> {
+    let upload = upload_argmax_plan(state, plan)?;
+    let base = state.pool.argmax_buffers();
+    let ops = state.ops();
+    for row in 0..n_rows {
+        let bufs = flambeau_ops::ArgmaxBuffers {
+            logits: base.logits.offset_bytes(row * vocab * 4),
+            out: base.out.offset_bytes(row * 4),
+            ..base
+        };
+        ops.argmax_f32(bufs, vocab, upload.n_adds, upload.penalties).context("mtp verify argmax")?;
+    }
+    let mut tokens = vec![0i32; n_rows];
+    // SAFETY: `tokens` holds n_rows i32, the result slots written above
+    // (n_rows <= ARGMAX_MAX_ROWS); synced below.
+    unsafe {
+        state.device.memcpy_async(
+            state.stream,
+            CopyDirection::DeviceToHost,
+            DevicePtr(tokens.as_mut_ptr() as usize),
+            base.out,
+            n_rows * 4,
+        )?;
+    }
+    flambeau_core::Stream::synchronize(state.stream)?;
+    drop(upload);
+    Ok(tokens.into_iter().map(|t| t as u32).collect())
 }

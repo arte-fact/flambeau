@@ -214,34 +214,57 @@ pub fn mtp_cycle<C: ForwardCtx>(
     let resid = verified?;
 
     // One LM-head pass over all k + 1 rows: the head is weight-bound, so a
-    // batched pass reads its weights once instead of once per row.
-    ctx.output_head_all(&resid, &model.lm_head, &slots, k + 1)?;
-    let all_logits = ctx.logits();
-    anyhow::ensure!(all_logits.len() >= (k + 1) * vocab, "verify logits short");
-    let verify_logits = all_logits[..(k + 1) * vocab].to_vec();
-    let row_at = |i: usize| &verify_logits[i * vocab..(i + 1) * vocab];
+    // batched pass reads its weights once instead of once per row. Under a
+    // greedy plan each row's draw runs on device and only the tokens (then
+    // the bonus row's logits) come back; otherwise all rows come back.
+    let device_tokens = match sample.argmax.clone() {
+        Some(plan) => ctx.output_head_argmax_rows(&resid, &model.lm_head, &slots, k + 1, &plan)?,
+        None => {
+            ctx.output_head_all(&resid, &model.lm_head, &slots, k + 1)?;
+            None
+        }
+    };
 
     let mut emitted: Vec<u32> = Vec::with_capacity(k + 1);
     let mut accepted = 0usize;
-    let mut bonus: Option<u32> = None;
-    let mut row = row_at(0);
-    for d in &drafts {
-        let (_pt, p_dist) = (sample.draw)(row);
-        let p_d = p_dist.iter().find(|(t, _)| *t == d.token).map(|(_, p)| *p).unwrap_or(0.0);
-        // accept with prob min(1, p(d)/q(d)); greedy dists are one-hot, so
-        // this reduces to argmax-match.
-        if !(d.q > 0.0 && verdict_rng.next_f32() < (p_d / d.q).min(1.0)) {
-            bonus = Some(sample_residual(&p_dist, &d.dist, &mut verdict_rng));
-            break;
+    if let Some(tokens) = device_tokens {
+        // Greedy draft and target distributions are one-hot: draft i is
+        // accepted iff it is row i's draw, and the bonus is the draw of the
+        // row after the last accepted draft (the residual of two one-hot
+        // distributions is the target one).
+        while accepted < k && tokens[accepted] == drafts[accepted].token {
+            emitted.push(drafts[accepted].token);
+            accepted += 1;
         }
-        emitted.push(d.token);
-        accepted += 1;
-        row = row_at(accepted);
+        emitted.push(tokens[accepted]);
+        ctx.logits_row_to_host(accepted, vocab, out_logits)?;
+    } else {
+        let all_logits = ctx.logits();
+        anyhow::ensure!(all_logits.len() >= (k + 1) * vocab, "verify logits short");
+        let verify_logits = all_logits[..(k + 1) * vocab].to_vec();
+        let row_at = |i: usize| &verify_logits[i * vocab..(i + 1) * vocab];
+
+        let mut bonus: Option<u32> = None;
+        let mut row = row_at(0);
+        for d in &drafts {
+            let (_pt, p_dist) = (sample.draw)(row);
+            let p_d = p_dist.iter().find(|(t, _)| *t == d.token).map(|(_, p)| *p).unwrap_or(0.0);
+            // accept with prob min(1, p(d)/q(d)); greedy dists are one-hot, so
+            // this reduces to argmax-match.
+            if !(d.q > 0.0 && verdict_rng.next_f32() < (p_d / d.q).min(1.0)) {
+                bonus = Some(sample_residual(&p_dist, &d.dist, &mut verdict_rng));
+                break;
+            }
+            emitted.push(d.token);
+            accepted += 1;
+            row = row_at(accepted);
+        }
+        emitted.push(match bonus {
+            Some(t) => t,
+            None => (sample.draw)(row).0,
+        });
+        *out_logits = row.to_vec();
     }
-    emitted.push(match bonus {
-        Some(t) => t,
-        None => (sample.draw)(row).0,
-    });
 
     if accepted < k {
         let layers: Vec<usize> = ctx.layer_range(&model.layout).collect();
@@ -263,7 +286,6 @@ pub fn mtp_cycle<C: ForwardCtx>(
     )?;
     tracing::debug!(target: "mtp.cycle", drafted = k, accepted, "mtp cycle");
 
-    *out_logits = row.to_vec();
     Ok(emitted)
 }
 

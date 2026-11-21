@@ -1078,7 +1078,7 @@ impl<B: Backend, H: TopologyHooks<B>, S: StageHooks<B>> ForwardCtx for ForwardEn
         slot_ids: &[usize],
     ) -> Result<()> {
         if self.stage.is_last() {
-            composites::output_head_local(&mut self.core, &mut self.hooks, input, lm_head, slot_ids, false)
+            composites::output_head_local(&mut self.core, &mut self.hooks, input, lm_head, slot_ids, false, true)
         } else {
             self.stage.peer_send(&mut self.core, input, slot_ids.len())
         }
@@ -1149,7 +1149,43 @@ impl<B: Backend, H: TopologyHooks<B>, S: StageHooks<B>> ForwardCtx for ForwardEn
         if !self.stage.is_last() {
             anyhow::bail!("output_head_all: only on the last stage");
         }
-        composites::output_head_local(&mut self.core, &mut self.hooks, input, lm_head, slot_ids, true)
+        composites::output_head_local(&mut self.core, &mut self.hooks, input, lm_head, slot_ids, true, true)
+    }
+
+    fn output_head_argmax_rows(
+        &mut self,
+        input: &Tensor<F16>,
+        lm_head: &crate::ctx::LmHeadWeights,
+        slot_ids: &[usize],
+        n_rows: usize,
+        plan: &flambeau_runtime::MtpArgmax,
+    ) -> Result<Option<Vec<u32>>> {
+        if !self.stage.is_last() {
+            anyhow::bail!("output_head_argmax_rows: only on the last stage");
+        }
+        let fits = composites::argmax_plan_fits(&self.core, plan, n_rows);
+        composites::output_head_local(&mut self.core, &mut self.hooks, input, lm_head, slot_ids, true, !fits)?;
+        if !fits {
+            return Ok(None);
+        }
+        composites::argmax_rows_local(&mut self.core, plan, n_rows, lm_head.vocab_size).map(Some)
+    }
+
+    fn logits_row_to_host(&mut self, row: usize, vocab: usize, out: &mut Vec<f32>) -> Result<()> {
+        out.resize(vocab, 0.0);
+        // SAFETY: `out` holds `vocab` f32; the source is row `row` of
+        // logits_f32_dev (>= logits_rows * vocab f32); synced below.
+        unsafe {
+            self.core.device.memcpy_async(
+                self.core.stream,
+                flambeau_core::CopyDirection::DeviceToHost,
+                flambeau_core::DevicePtr(out.as_mut_ptr() as usize),
+                self.core.pool.logits_f32_dev.offset_bytes(row * vocab * 4),
+                vocab * 4,
+            )?;
+        }
+        flambeau_core::Stream::synchronize(self.core.stream)?;
+        Ok(())
     }
 
     fn gdn_snapshot(&mut self, slot_id: usize) -> Result<Vec<u8>> {

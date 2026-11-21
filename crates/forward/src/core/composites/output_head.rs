@@ -17,6 +17,7 @@ pub fn output_head_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
     lm_head: &LmHeadWeights,
     slot_ids: &[usize],
     force_emit_all: bool,
+    download: bool,
 ) -> Result<()> {
     let hidden = state.hidden();
     if hidden != lm_head.hidden {
@@ -124,7 +125,7 @@ pub fn output_head_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
     // `pool.logits_f32_dev` (captured); the trailing D2H + stream sync are the
     // graph's split point and run UNCAPTURED in the session driver after
     // `cuGraphLaunch`. Skip them here so they don't land inside the graph.
-    if state.capture.is_some() {
+    if state.capture.is_some() || !download {
         return Ok(());
     }
 

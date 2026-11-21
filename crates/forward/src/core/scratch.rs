@@ -141,7 +141,10 @@ pub const MAX_SPLITK_CHUNKS: usize = 32;
 /// Most sparse additions the on-device greedy draw takes; a longer list keeps
 /// the host draw.
 pub const ARGMAX_MAX_ADDS: usize = 256;
-const ARGMAX_FIXED_BYTES: usize = 2 * ARGMAX_MAX_ADDS * 4 + 2 * flambeau_ops::sampling::ARGMAX_PARTS * 4 + 8;
+/// Most logits rows one on-device greedy pass draws (MTP verification).
+pub const ARGMAX_MAX_ROWS: usize = 16;
+const ARGMAX_FIXED_BYTES: usize =
+    2 * ARGMAX_MAX_ADDS * 4 + 2 * flambeau_ops::sampling::ARGMAX_PARTS * 4 + ARGMAX_MAX_ROWS * 4;
 
 /// Per-layer KV-cache geometry. Arches implement this on their
 /// `Config` so `per_layer_kv_widths` can size the ScratchPool's
@@ -918,7 +921,7 @@ pub struct ScratchPool {
 
     /// Device scratch of the on-device greedy draw (`Ops::argmax_f32`, see
     /// [`Self::argmax_buffers`]): `ARGMAX_MAX_ADDS` ids and values, the
-    /// first-pass winners, the result index, then up to
+    /// first-pass winners, `ARGMAX_MAX_ROWS` result indices, then up to
     /// [`Self::argmax_max_pairs`] penalty `(token, count)` pairs.
     pub argmax_scratch: DevicePtr,
     /// Penalty pairs the argmax scratch holds (`config.max_seq_len`: the
@@ -1778,8 +1781,9 @@ impl ScratchPool {
         Ok(())
     }
 
-    /// `Ops::argmax_f32` buffers over `logits_f32_dev` (row 0) and
-    /// [`Self::argmax_scratch`].
+    /// `Ops::argmax_f32` buffers over `logits_f32_dev` row 0 and
+    /// [`Self::argmax_scratch`] (result slot 0); later rows offset `logits`
+    /// and `out` by the row.
     pub fn argmax_buffers(&self) -> flambeau_ops::ArgmaxBuffers {
         let base = self.argmax_scratch;
         let parts = flambeau_ops::sampling::ARGMAX_PARTS;
