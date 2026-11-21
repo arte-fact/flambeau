@@ -247,6 +247,7 @@ pub const KERNEL_STEMS: &[&str] = &[
     "kv_append_v_unit_norm_f16_dpos",
     "kv_append_f16_dpos",
     "embed_gather_f16_dpos",
+    "embed_gather_q4_k_f16",
     "softmax_masked_f16",
     // Attention.
     "attention_decode_f16",

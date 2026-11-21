@@ -4958,3 +4958,20 @@ params = """
     const int n_parts,
     int* __restrict__ out"""
 body = "sampler_argmax_final_f32_body(part_v, part_i, n_parts, out);"
+
+# Q4_K embedding-row gather, F16 out, token ids on device: one launch for a
+# prefill batch, and `ids = decode_ctx + 1` under decode-graph capture.
+# Bit-identical to the host Q4_K dequant + f16 cast (no FMA contraction).
+[[kernel]]
+stem = "embed_gather_q4_k_f16"
+includes = ["fp_rn.cuh", "embed_gather_q4_k.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_embed_gather_q4_k_f16"
+launch_bounds = "256"
+params = """
+    const flambeau_block_q4_K* __restrict__ embd,
+    fb_fp16_t* __restrict__ dst,
+    const int* __restrict__ ids,
+    const int hidden"""
+body = "embed_gather_q4_k_f16_body(embd, dst, ids, hidden);"

@@ -1906,3 +1906,43 @@ pub fn embed_gather_f16_dpos<B: flambeau_core::KernelBackend>(
     B::launch(&kernel, stream, cfg, args)?;
     Ok(())
 }
+
+/// Q4_K embedding gather, F16 out (`embed_gather_q4_k_f16`): `dst[r]` =
+/// dequant(row `ids[r]` of `embd`), bit-identical to the host Q4_K dequant +
+/// f16 cast. `hidden` must be a multiple of the 256-element super-block.
+pub fn embed_gather_q4_k_f16<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
+    embd: flambeau_core::DevicePtr,
+    dst: flambeau_core::DevicePtr,
+    ids: flambeau_core::DevicePtr,
+    n_rows: usize,
+    hidden: usize,
+) -> Result<()> {
+    const QK_K: usize = 256;
+    if hidden == 0 || hidden % QK_K != 0 {
+        anyhow::bail!("embed_gather_q4_k_f16: hidden {hidden} not a multiple of {QK_K}");
+    }
+    if n_rows == 0 {
+        return Ok(());
+    }
+    let module = reg.expect_module("embed_gather_q4_k_f16")?;
+    let kernel = B::kernel(module, "flambeau_embed_gather_q4_k_f16")?;
+
+    let embd_p: u64 = embd.as_usize() as u64;
+    let dst_p: u64 = dst.as_usize() as u64;
+    let ids_p: u64 = ids.as_usize() as u64;
+    let hidden_i = hidden as i32;
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&embd_p);
+    args.push_arg(&dst_p);
+    args.push_arg(&ids_p);
+    args.push_arg(&hidden_i);
+    let cfg = LaunchCfg {
+        grid: (n_rows as u32, (hidden / QK_K) as u32, 1),
+        block: (QK_K as u32, 1, 1),
+        shared_bytes: 0,
+    };
+    B::launch(&kernel, stream, cfg, args)?;
+    Ok(())
+}
