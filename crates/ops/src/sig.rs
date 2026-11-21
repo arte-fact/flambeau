@@ -287,6 +287,14 @@ pub struct AttnPrefillPagedShape {
     pub page_size: usize,
 }
 
+/// Decode-attention path chosen by the backend's `[[attention_decode]]` row.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum AttnDecodeVariant {
+    /// Single-pass kernel up to `SPLITK_MIN_TOKENS_KV` KV rows, split-K
+    /// (flash-decoding chunk + combine) above.
+    SplitK,
+}
+
 #[derive(Copy, Clone, Debug)]
 pub struct AttnKnobs {
     pub scale: f32,

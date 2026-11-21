@@ -1,5 +1,6 @@
-# Dispatch table — cuda / sm_86. Autotuned by `flambeau autotune`
-# (median of timed mmvq launches per shape). Regenerate; do not hand-edit.
+# Dispatch table — cuda / sm_86. The [[qmatmul]] rows are autotuned by
+# `flambeau autotune` (median of timed mmvq launches per shape): regenerate,
+# do not hand-edit them. The other sections are maintained by hand.
 
 [[qmatmul]]
 dtype   = "IQ1_M"
@@ -209,3 +210,21 @@ shape   = { m = "any", k = "any", n = "any" }
 impl    = "qmatmul_q8_k_mmvq_single_row"
 cert    = "certs/cuda/sm_86/qmatmul_q8_k_mmvq_single_row.json"
 notes   = "autotuned"
+
+# ----- Attention decode (m = 1..4, keyed on the KV dtype) -------------------
+
+[[attention_decode]]
+dtype   = "F16"           # KV dtype
+dtype_q = "F16"           # Q / output dtype
+shape   = { m = "1..4", k = "any", n = "any" }
+impl    = "attention_decode_f16"
+cert    = "certs/cuda/sm_86/attention_decode_f16.json"
+notes   = "Single-pass up to 32 KV rows, flash-decoding split-K above (attention_decode_f16_splitk, _dpos under graph capture)."
+
+[[attention_decode]]
+dtype   = "Q8_0"          # KV dtype
+dtype_q = "F16"           # Q / output dtype
+shape   = { m = "1..4", k = "any", n = "any" }
+impl    = "attention_decode_q8_kv"
+cert    = "certs/cuda/sm_86/attention_decode_q8_kv.json"
+notes   = "Single-pass up to 32 KV rows, flash-decoding split-K above (attention_decode_q8_kv_splitk, _dpos under graph capture)."

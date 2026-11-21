@@ -327,6 +327,14 @@ pub fn dispatch_rmsnorm(
     flambeau_core::first_match(RMSNORM_GFX906, dtype_in, dtype_out, m)
 }
 
+/// Pick the decode-attention row for a `kv_dtype` KV cache (Q / output F16).
+pub fn dispatch_attention_decode(
+    kv_dtype: flambeau_core::QDtype,
+    m: usize,
+) -> Option<&'static KernelDescriptor> {
+    flambeau_core::first_match(ATTENTION_DECODE_GFX906, kv_dtype, QDtype::F16, m)
+}
+
 pub fn dispatch_swiglu(
     dtype: flambeau_core::QDtype,
     m: usize,

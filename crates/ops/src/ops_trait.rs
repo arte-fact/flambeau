@@ -375,6 +375,13 @@ pub trait Ops {
     /// `attention_decode_f16_splitk_dpos`: reads `position` from `pos_ptr`
     /// on-device and derives `n_tokens_kv` / `chunk_base` / the K-V cache pointer
     /// from the baked [`crate::AttnDposKnobs`] regime. CUDA-only.
+    /// The decode-attention path the committed dispatch table picks for a
+    /// `kv_dtype` KV cache at `m` query rows.
+    /// # Errors
+    /// No `[[attention_decode]]` row matches, or the row names an impl this
+    /// build does not map to a path.
+    fn attention_decode_variant(&self, kv_dtype: QDtype, m: usize) -> Result<crate::AttnDecodeVariant>;
+
     fn attention_decode_q8_kv_splitk_dpos(
         &self,
         buffers: crate::AttnBuffers,

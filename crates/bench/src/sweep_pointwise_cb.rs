@@ -1476,7 +1476,10 @@ pub fn run_attention_q8_kv_sweep<B: BenchBackend>(repo_root: &Path, arch: &str, 
         let err = max_rel_err_with_floor(&got, &reference, 1.0);
         results.push(ShapeResult { m: n_a, k: head_dim, n: n_k, seed, max_rel_err: err, tolerance: 3e-2, pass: err <= 3e-2 });
     }
-    finish_cert(&dev, repo_root, arch, stem, stem, "F16", "Q8_0",
+    // The decode cert backs an `[[attention_decode]]` row, keyed KV dtype then
+    // Q / output dtype.
+    let (dtype_weight, dtype_activation) = if prefill { ("F16", "Q8_0") } else { ("Q8_0", "F16") };
+    finish_cert(&dev, repo_root, arch, stem, stem, dtype_weight, dtype_activation,
         "|err| <= 3e-2 * max(|ref|, 1) vs F64 dequant oracle (Q8 envelope)", results, pmc)
 }
 

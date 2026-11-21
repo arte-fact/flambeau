@@ -106,10 +106,6 @@ pub const BENCH_REFERENCE_KERNELS_SM86: &[DirectCallKernel] = &[
         cert_rel_path: "certs/cuda/sm_86/apply_softcap_f32.json",
     },
     DirectCallKernel {
-        impl_id: "attention_decode_f16",
-        cert_rel_path: "certs/cuda/sm_86/attention_decode_f16.json",
-    },
-    DirectCallKernel {
         impl_id: "attention_decode_f16_batched",
         cert_rel_path: "certs/cuda/sm_86/attention_decode_f16_batched.json",
     },
@@ -120,10 +116,6 @@ pub const BENCH_REFERENCE_KERNELS_SM86: &[DirectCallKernel] = &[
     DirectCallKernel {
         impl_id: "attention_decode_f16_splitk",
         cert_rel_path: "certs/cuda/sm_86/attention_decode_f16_splitk.json",
-    },
-    DirectCallKernel {
-        impl_id: "attention_decode_q8_kv",
-        cert_rel_path: "certs/cuda/sm_86/attention_decode_q8_kv.json",
     },
     DirectCallKernel {
         impl_id: "attention_decode_q8_kv_splitk",

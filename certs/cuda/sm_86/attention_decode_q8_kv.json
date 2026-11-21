@@ -4,8 +4,8 @@
   "backend": "cuda",
   "arch": "sm_86",
   "op": "attention_decode_q8_kv",
-  "dtype_weight": "F16",
-  "dtype_activation": "Q8_0",
+  "dtype_weight": "Q8_0",
+  "dtype_activation": "F16",
   "tolerance_formula": "|err| <= 3e-2 * max(|ref|, 1) vs F64 dequant oracle (Q8 envelope)",
   "results": [
     {
@@ -28,7 +28,7 @@
     }
   ],
   "pass": true,
-  "emitted_at": "2026-06-18T14:00:31Z",
+  "emitted_at": "2026-11-21T09:41:38Z",
   "rig": "threadreaper-sm_86",
   "pmc": {
     "vgpr_count": 36,

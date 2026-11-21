@@ -530,6 +530,17 @@ impl<B: KernelBackend> Ops for OpsImpl<'_, B> {
         )
     }
 
+    fn attention_decode_variant(&self, kv_dtype: QDtype, m: usize) -> Result<crate::AttnDecodeVariant> {
+        let row = B::dispatch_attention_decode(kv_dtype, m).ok_or_else(|| {
+            anyhow::anyhow!("attention_decode: no dispatch row for KV {kv_dtype:?} at m={m}")
+        })?;
+        match row.impl_id {
+            "attention_decode_f16" | "attention_decode_q8_kv" | "attention_decode_f16_gfx906"
+            | "attention_decode_q8_kv_gfx906" => Ok(crate::AttnDecodeVariant::SplitK),
+            other => anyhow::bail!("attention_decode: dispatch row impl {other} has no decode path"),
+        }
+    }
+
     fn attention_decode_q8_kv_splitk_dpos(
         &self,
         buffers: crate::AttnBuffers,

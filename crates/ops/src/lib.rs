@@ -52,7 +52,7 @@ pub use sig::{
     AttnBatchedBuffers, AttnBuffers, AttnDecodeBatchedShape, AttnDecodeBatchedSplitkShape,
     AttnDecodePagedShape,
     AttnDecodeQ8Slots, AttnDecodeQ8SplitkSlots,
-    AttnDecodeShape, AttnDecodeSlots, AttnDposKnobs, AttnKnobs, AttnPagedDecodeBuffers,
+    AttnDecodeShape, AttnDecodeSlots, AttnDecodeVariant, AttnDposKnobs, AttnKnobs, AttnPagedDecodeBuffers,
     AttnPagedPrefillBuffers,
     AttnPrefillPagedShape, AttnPrefillShape, AttnPrefillSlots, AttnSplitkDposShape,
     AttnSplitkPartials,

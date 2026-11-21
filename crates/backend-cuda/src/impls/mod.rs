@@ -2,7 +2,7 @@
 //! `dispatch/cuda/<arch>.toml` — and the catalogs of certified kernels outside
 //! them. `dispatch_qmatmul` returns the matching row.
 
-use flambeau_core::{first_match, KernelDescriptor, QMatMulCfg};
+use flambeau_core::{first_match, KernelDescriptor, QDtype, QMatMulCfg};
 
 mod direct_call;
 mod qmatmul;
@@ -12,6 +12,38 @@ pub use qmatmul::QMATMUL_SM86;
 /// Pick the `QMatMul` `KernelDescriptor` for `cfg` from the sm_86 table.
 pub fn dispatch_qmatmul(cfg: &QMatMulCfg) -> Option<&'static KernelDescriptor> {
     first_match(QMATMUL_SM86, cfg.dtype_weight, cfg.dtype_activation, cfg.m)
+}
+
+/// `[[attention_decode]]` rows of `dispatch/cuda/sm_86.toml`, keyed on the KV
+/// dtype (`dtype_weight`) with F16 Q / output. Each row names the decode path
+/// the composite runs for that KV layout: single-pass up to the split-K
+/// threshold, split-K above it (the split-K kernels are direct calls).
+pub const ATTENTION_DECODE_SM86: &[KernelDescriptor] = &[
+    KernelDescriptor {
+        op_name: "AttentionDecode",
+        impl_id: "attention_decode_f16",
+        backend: "cuda",
+        arch: "sm_86",
+        dtype_weight: QDtype::F16,
+        dtype_activation: QDtype::F16,
+        m_range: (1, 4),
+        cert_rel_path: "certs/cuda/sm_86/attention_decode_f16.json",
+    },
+    KernelDescriptor {
+        op_name: "AttentionDecode",
+        impl_id: "attention_decode_q8_kv",
+        backend: "cuda",
+        arch: "sm_86",
+        dtype_weight: QDtype::Q8_0,
+        dtype_activation: QDtype::F16,
+        m_range: (1, 4),
+        cert_rel_path: "certs/cuda/sm_86/attention_decode_q8_kv.json",
+    },
+];
+
+/// Pick the decode-attention row for a `kv_dtype` KV cache from the sm_86 table.
+pub fn dispatch_attention_decode(kv_dtype: QDtype, m: usize) -> Option<&'static KernelDescriptor> {
+    first_match(ATTENTION_DECODE_SM86, kv_dtype, QDtype::F16, m)
 }
 
 #[cfg(test)]
@@ -26,6 +58,7 @@ mod tests {
     fn registered() -> impl Iterator<Item = (&'static str, &'static str)> {
         QMATMUL_SM86
             .iter()
+            .chain(ATTENTION_DECODE_SM86)
             .map(|d| (d.impl_id, d.cert_rel_path))
             .chain(DIRECT_CALL_KERNELS_SM86.iter().map(|d| (d.impl_id, d.cert_rel_path)))
             .chain(BENCH_REFERENCE_KERNELS_SM86.iter().map(|d| (d.impl_id, d.cert_rel_path)))

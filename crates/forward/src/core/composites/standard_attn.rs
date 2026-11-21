@@ -699,6 +699,8 @@ pub fn standard_attn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
         }
         let mut attn_out = unsafe { Tensor::<F16>::from_raw(state.pool.attn_out_f16, n * q_width) };
         if n == 1 {
+            let kv_dtype = if is_q8 { flambeau_core::QDtype::Q8_0 } else { flambeau_core::QDtype::F16 };
+            let flambeau_ops::AttnDecodeVariant::SplitK = ops.attention_decode_variant(kv_dtype, n)?;
             let n_tokens_kv = start_position + 1;
             // Ring addressing kicks in only once the window-sized slab has
             // wrapped; below the wrap the slab is contiguous and the slide

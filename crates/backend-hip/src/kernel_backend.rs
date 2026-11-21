@@ -37,6 +37,10 @@ impl KernelBackend for HipKernels {
         crate::impls::dispatch_qmatmul(cfg)
     }
 
+    fn dispatch_attention_decode(kv_dtype: flambeau_core::QDtype, m: usize) -> Option<&'static KernelDescriptor> {
+        crate::impls::dispatch_attention_decode(kv_dtype, m)
+    }
+
     fn image(stem: &str) -> Option<&'static [u8]> {
         flambeau_kernels_hip::hsaco(stem)
     }

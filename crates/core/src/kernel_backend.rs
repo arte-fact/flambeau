@@ -4,7 +4,7 @@
 //! no concrete `HipModule` / `CudaModule`. One impl per backend (`HipKernels`,
 //! `CudaKernels`) wraps the existing concrete types.
 
-use crate::{Device, DeviceResult, KernelDescriptor, LaunchCfg, QMatMulCfg, ScalarSlot};
+use crate::{Device, DeviceResult, KernelDescriptor, LaunchCfg, QDtype, QMatMulCfg, ScalarSlot};
 
 /// Push kernel arguments by reference without naming a backend's concrete args
 /// type. Implemented for each backend's `KernelArgs` — a local trait on a
@@ -49,6 +49,11 @@ pub trait KernelBackend: 'static {
     /// `QMATMUL_SM86`). The arch-specific variant choice lives here, not in the
     /// op body — so the generic `qmatmul` op names no per-arch table.
     fn dispatch_qmatmul(cfg: &QMatMulCfg) -> Option<&'static KernelDescriptor>;
+
+    /// Pick the decode-attention row for a `kv_dtype` KV cache at `m` query
+    /// rows from this backend's committed `[[attention_decode]]` table
+    /// (`ATTENTION_DECODE_GFX906` / `ATTENTION_DECODE_SM86`).
+    fn dispatch_attention_decode(kv_dtype: QDtype, m: usize) -> Option<&'static KernelDescriptor>;
 
     /// Compiled kernel image (`.hsaco` / `.cubin`) for catalogue `stem`, if the
     /// kernel was compiled into this build.
