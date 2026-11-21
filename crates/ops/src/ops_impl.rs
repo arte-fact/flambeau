@@ -541,6 +541,8 @@ impl<B: KernelBackend> Ops for OpsImpl<'_, B> {
         }
     }
 
+    // why: microbench null on sm_86 (x0.83 vs split-K at a 181-token tail, x1.28 at 8k with 8 parts).
+    #[cfg(unverified)]
     fn attention_decode_q8_kv_vec_dpos(
         &self,
         buffers: crate::AttnBuffers,

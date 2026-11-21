@@ -97,6 +97,12 @@ pub const DIRECT_CALL_KERNELS_SM86: &[DirectCallKernel] = &[
 /// Kernels no runtime path launches on sm_86, kept as A/B and cross-backend
 /// references: a bench sweep (or autotune) is the only caller.
 pub const BENCH_REFERENCE_KERNELS_SM86: &[DirectCallKernel] = &[
+    // Null-result decode attention: its Ops surface is cfg(unverified); the
+    // sweep keeps the cert and the microbench against the split-K path.
+    DirectCallKernel {
+        impl_id: "attention_decode_q8_kv_vec_dpos_sm_86",
+        cert_rel_path: "certs/cuda/sm_86/attention_decode_q8_kv_vec_dpos_sm_86.json",
+    },
     DirectCallKernel {
         impl_id: "apply_per_expert_scale_f32",
         cert_rel_path: "certs/cuda/sm_86/apply_per_expert_scale_f32.json",
