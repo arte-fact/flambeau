@@ -138,10 +138,37 @@ pub fn standard_attn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
             weights.rms_eps,
             &ops,
         )?;
-        flambeau_model_ops::quantize_f16_to_q8_1(&norm_f16, &mut norm_q8_1, n * hidden, &ops)?;
+        // Quantise only the activation layouts the q / k / v projections read
+        // at this shape.
+        let q_cols = if weights.attn_q_gated { 2 * q_width } else { q_width };
+        let reads: Vec<bool> = [(&weights.attn_q, q_cols), (&weights.attn_k, kv_width)]
+            .into_iter()
+            .chain(weights.attn_v.as_ref().map(|v| (v, kv_width)))
+            .map(|(w, cols)| {
+                w.reads_mmq_activation(
+                    flambeau_ops::MatmulShape {
+                        m: n,
+                        k: hidden,
+                        n: cols,
+                    },
+                    &ops,
+                )
+            })
+            .collect();
+        if reads.iter().any(|&mmq| !mmq) {
+            flambeau_model_ops::quantize_f16_to_q8_1(&norm_f16, &mut norm_q8_1, n * hidden, &ops)?;
+        }
         let mut norm_mmq =
             unsafe { Tensor::<Q8_1>::from_raw(state.pool.norm_q8_1_mmq, n * hidden) };
-        flambeau_model_ops::quantize_f16_to_q8_1_mmq(&norm_f16, &mut norm_mmq, hidden, n, &ops)?;
+        if reads.iter().any(|&mmq| mmq) {
+            flambeau_model_ops::quantize_f16_to_q8_1_mmq(
+                &norm_f16,
+                &mut norm_mmq,
+                hidden,
+                n,
+                &ops,
+            )?;
+        }
         norm_mmq_t = norm_mmq;
         &norm_mmq_t
     } else {
@@ -1510,18 +1537,33 @@ pub fn standard_attn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
 
     let mut attn_out_q8_1 =
         unsafe { Tensor::<Q8_1>::from_raw(state.pool.attn_out_q8_1, n * q_width) };
-    flambeau_model_ops::quantize_f16_to_q8_1(&post_attn, &mut attn_out_q8_1, n * q_width, &ops)?;
+    // At n > 1 the output projection is a plain qmatmul: quantise only the
+    // layout it reads. At n == 1 the decode paths read the standard one.
+    let out_reads_mmq = n > 1
+        && weights.attn_output.reads_mmq_activation(
+            flambeau_ops::MatmulShape {
+                m: n,
+                k: q_width,
+                n: hidden,
+            },
+            &ops,
+        );
+    if !out_reads_mmq {
+        flambeau_model_ops::quantize_f16_to_q8_1(&post_attn, &mut attn_out_q8_1, n * q_width, &ops)?;
+    }
     let attn_out_mmq_t;
     let act_attn_out_mmq: &Tensor<Q8_1> = if n > 1 {
         let mut attn_out_mmq =
             unsafe { Tensor::<Q8_1>::from_raw(state.pool.attn_out_q8_1_mmq, n * q_width) };
-        flambeau_model_ops::quantize_f16_to_q8_1_mmq(
-            &post_attn,
-            &mut attn_out_mmq,
-            q_width,
-            n,
-            &ops,
-        )?;
+        if out_reads_mmq {
+            flambeau_model_ops::quantize_f16_to_q8_1_mmq(
+                &post_attn,
+                &mut attn_out_mmq,
+                q_width,
+                n,
+                &ops,
+            )?;
+        }
         attn_out_mmq_t = attn_out_mmq;
         &attn_out_mmq_t
     } else {

@@ -1421,8 +1421,8 @@ impl DeltaNetLayer {
         let qk_size = num_k_heads * head_k_dim;
         let v_size = num_v_heads * head_v_dim;
 
-        // 1. rmsnorm(x_in) → F16 scratch, then quantise to BOTH Q8_1
-        // layouts (std + DS4) so qmatmul can dispatch MMQ at L≥128.
+        // 1. rmsnorm(x_in) → F16 scratch, then quantise to the Q8_1 layouts
+        // (std, DS4) the four hidden-input projections read at M = L.
         ops.rmsnorm_f16(
             flambeau_ops::NormBuffers {
                 input: x_in,
@@ -1436,10 +1436,30 @@ impl DeltaNetLayer {
             self.rms_norm_eps,
         )
         .context("gdn prefill attn_norm")?;
-        ops.quantize_f16_q8_1(scratch.x_norm_f16, scratch.x_q8_1, n_tokens * hidden)
-            .context("gdn prefill x_norm → Q8_1 (std)")?;
-        ops.quantize_f16_q8_1_mmq(scratch.x_norm_f16, scratch.x_q8_1_mmq, hidden, n_tokens)
-            .context("gdn prefill x_norm → Q8_1 (MMQ DS4)")?;
+        let x_reads_mmq: [bool; 4] = [
+            (self.attn_qkv.dtype, conv_channels),
+            (self.attn_gate.dtype, d_inner),
+            (self.ssm_alpha.dtype, num_v_heads),
+            (self.ssm_beta.dtype, num_v_heads),
+        ]
+        .map(|(dtype, cols)| {
+            ops.qmatmul_reads_mmq_activation(
+                flambeau_ops::MatmulShape {
+                    m: n_tokens,
+                    k: hidden,
+                    n: cols,
+                },
+                dtype,
+            )
+        });
+        if x_reads_mmq.iter().any(|&mmq| !mmq) {
+            ops.quantize_f16_q8_1(scratch.x_norm_f16, scratch.x_q8_1, n_tokens * hidden)
+                .context("gdn prefill x_norm → Q8_1 (std)")?;
+        }
+        if x_reads_mmq.iter().any(|&mmq| mmq) {
+            ops.quantize_f16_q8_1_mmq(scratch.x_norm_f16, scratch.x_q8_1_mmq, hidden, n_tokens)
+                .context("gdn prefill x_norm → Q8_1 (MMQ DS4)")?;
+        }
 
         // 2..5. Hidden-input projections at M = L. qmatmul auto-
         // dispatches MMVQ vs MMQ based on M and weight dtype.
@@ -1665,8 +1685,8 @@ impl DeltaNetLayer {
         )
         .context("gdn prefill ssm_norm (rmsnorm_f32)")?;
 
-        // 13+14. swiglu(z, out_normed) → F32, then dual-quantise to
-        // both Q8_1 layouts so the ssm_out matmul auto-dispatches.
+        // 13+14. swiglu(z, out_normed) → F32, then quantise to the Q8_1
+        // layout the ssm_out matmul reads at M = L.
         if v_size != d_inner {
             bail!("GDN layout: num_v_heads * head_v_dim ({v_size}) != d_inner ({d_inner})");
         }
@@ -1677,10 +1697,18 @@ impl DeltaNetLayer {
             n_tokens * d_inner,
         )
         .context("gdn prefill swiglu_f32(z, out_normed)")?;
-        ops.quantize_q8_1(scratch.gated_f32, scratch.gated_q8_1, n_tokens * d_inner)
-            .context("gdn prefill quantise gated → Q8_1 (std)")?;
-        ops.quantize_q8_1_mmq(scratch.gated_f32, scratch.gated_q8_1_mmq, d_inner, n_tokens)
-            .context("gdn prefill quantise gated → Q8_1 (MMQ DS4)")?;
+        let out_shape = flambeau_ops::MatmulShape {
+            m: n_tokens,
+            k: d_inner,
+            n: hidden,
+        };
+        if ops.qmatmul_reads_mmq_activation(out_shape, self.ssm_out.dtype) {
+            ops.quantize_q8_1_mmq(scratch.gated_f32, scratch.gated_q8_1_mmq, d_inner, n_tokens)
+                .context("gdn prefill quantise gated → Q8_1 (MMQ DS4)")?;
+        } else {
+            ops.quantize_q8_1(scratch.gated_f32, scratch.gated_q8_1, n_tokens * d_inner)
+                .context("gdn prefill quantise gated → Q8_1 (std)")?;
+        }
 
         // 15. ssm_out projection at M = L.
         ops.qmatmul(
