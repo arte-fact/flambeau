@@ -15,7 +15,7 @@ pub mod standard_attn;
 pub mod standard_attn_mixed;
 
 pub use dense_ffn::dense_ffn_local;
-pub use embed::embed_local;
+pub use embed::{embed_ids, embed_local, TokenIds};
 pub use gdn::gdn_layer_local;
 pub use gdn_mixed::gdn_layer_mixed_local;
 pub use moe_ffn::moe_ffn_local;

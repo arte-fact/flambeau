@@ -16,7 +16,7 @@ use flambeau_ops::Ops;
 use crate::core::{CoreState, TokenBatch, TopologyHooks};
 use crate::ctx::{EmbeddingWeights, LmHeadWeights, MtpDraft, MtpWeights};
 
-use super::{dense_ffn_local, embed_local, residual_add_local, standard_attn_local};
+use super::{dense_ffn_local, embed_ids, residual_add_local, standard_attn_local, TokenIds};
 
 fn slot_f16(ptr: DevicePtr, n: usize) -> Tensor<F16> {
     unsafe { Tensor::<F16>::from_raw(ptr, n) }
@@ -100,16 +100,19 @@ fn mtp_attn_rows<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
     hooks: &mut H,
     w: &MtpWeights,
     embedding: &EmbeddingWeights,
-    tokens: &[u32],
+    tokens: TokenIds<'_>,
     h_in: DevicePtr,
     positions: &[usize],
     slot_id: usize,
     mtp_layer_idx: usize,
 ) -> Result<Tensor<F16>> {
     let hidden = state.hidden();
-    let n = tokens.len();
+    let n = positions.len();
     let ops = state.ops();
-    let e = embed_local(state, hooks, embedding, tokens)?;
+    if tokens.len() != n {
+        bail!("mtp_attn_rows: {} token ids for {n} positions", tokens.len());
+    }
+    let e = embed_ids(state, embedding, tokens)?;
     let mut e_n = slot_f16(state.pool.mtp_e_f16, n * hidden);
     flambeau_model_ops::rmsnorm_f16(&e, &w.enorm, &mut e_n, n, hidden, w.rms_eps, &ops)
         .context("mtp enorm")?;
@@ -167,7 +170,7 @@ pub fn mtp_catchup_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
         return Ok(());
     }
     let h_in = state.pool.mtp_rows_f16;
-    mtp_attn_rows(state, hooks, w, embedding, tokens, h_in, positions, slot_id, mtp_layer_idx)?;
+    mtp_attn_rows(state, hooks, w, embedding, TokenIds::Host(tokens), h_in, positions, slot_id, mtp_layer_idx)?;
     Ok(())
 }
 
@@ -200,9 +203,16 @@ pub fn mtp_draft_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
     if state.pool.mtp_anchor_f16 == DevicePtr::NULL {
         bail!("mtp_draft: pool has no MTP scratch (mtp disabled)");
     }
-    // Greedy draws run on device: the adjustments go up once, then each step
-    // reads back the 4-byte token instead of the vocab-wide logits.
+    // Greedy draws run on device: the adjustments go up once. When the
+    // embedding can gather device ids, each step's argmax lands in its own
+    // result slot and the next step embeds that slot directly, so the chain
+    // runs without a host round trip and the drafted tokens come back with
+    // one copy and one sync at the end; otherwise each step reads back its
+    // 4-byte token.
     let plan = sample.argmax.clone().filter(|p| argmax_plan_fits(state, p, 1));
+    let chained = plan.is_some()
+        && embedding.gathers_device_ids()
+        && n_draft <= crate::core::scratch::ARGMAX_MAX_ROWS;
     let argmax_bufs = state.pool.argmax_buffers();
     let device = match plan.as_deref() {
         Some(p) => Some(upload_argmax_plan(state, p)?),
@@ -210,10 +220,14 @@ pub fn mtp_draft_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
     };
     let mut h_cur = anchor_h.ptr;
     let mut tok = anchor_token;
+    let mut prev_draw: Option<DevicePtr> = None;
     for step in 0..n_draft {
         let pos = start_pos + step;
-        let mut resid =
-            mtp_attn_rows(state, hooks, w, embedding, &[tok], h_cur, &[pos], slot_id, mtp_layer_idx)?;
+        let ids = match prev_draw {
+            Some(ptr) => TokenIds::Device { ptr, n: 1 },
+            None => TokenIds::Host(std::slice::from_ref(&tok)),
+        };
+        let mut resid = mtp_attn_rows(state, hooks, w, embedding, ids, h_cur, &[pos], slot_id, mtp_layer_idx)?;
         let delta = dense_ffn_local(state, hooks, &resid, &w.ffn, 1, None)?;
         if let Some(d) = delta {
             resid = residual_add_local(state, hooks, resid, d, 1)?;
@@ -239,10 +253,15 @@ pub fn mtp_draft_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
             &ops,
         )
         .context("mtp lm_head")?;
-        // The persistent logits buffer is the copy target: a per-step Vec
-        // would hand the runtime a fresh pageable range to pin every draft.
+        h_cur = state.pool.mtp_hidden_f16;
         if let Some(up) = device.as_ref() {
-            ops.argmax_f32(argmax_bufs, vocab, up.n_adds, up.penalties).context("mtp draft argmax")?;
+            let out = argmax_bufs.out.offset_bytes(if chained { step * 4 } else { 0 });
+            ops.argmax_f32(flambeau_ops::ArgmaxBuffers { out, ..argmax_bufs }, vocab, up.n_adds, up.penalties)
+                .context("mtp draft argmax")?;
+            if chained {
+                prev_draw = Some(out);
+                continue;
+            }
             let mut d: i32 = 0;
             // SAFETY: `out` is one i32 of argmax_scratch; synced below.
             unsafe {
@@ -252,7 +271,7 @@ pub fn mtp_draft_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
                         state.stream,
                         CopyDirection::DeviceToHost,
                         DevicePtr(&mut d as *mut i32 as usize),
-                        argmax_bufs.out,
+                        out,
                         4,
                     )
                     .context("mtp draft token DtoH")?;
@@ -260,9 +279,10 @@ pub fn mtp_draft_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
             flambeau_core::Stream::synchronize(state.stream)?;
             drafts.push(MtpDraft { token: d as u32, q: 1.0, dist: vec![(d as u32, 1.0)] });
             tok = d as u32;
-            h_cur = state.pool.mtp_hidden_f16;
             continue;
         }
+        // The persistent logits buffer is the copy target: a per-step Vec
+        // would hand the runtime a fresh pageable range to pin every draft.
         if state.logits_host.len() < vocab {
             state.logits_host = vec![0.0_f32; vocab];
         }
@@ -283,8 +303,28 @@ pub fn mtp_draft_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
         let q = dist.iter().find(|(t, _)| *t == d).map(|(_, p)| *p).unwrap_or(0.0);
         drafts.push(MtpDraft { token: d, q, dist });
         tok = d;
-        h_cur = state.pool.mtp_hidden_f16;
     }
+    if chained {
+        let mut drawn = vec![0i32; n_draft];
+        // SAFETY: `drawn` holds n_draft i32, the result slots written above
+        // (n_draft <= ARGMAX_MAX_ROWS); synced below, which also releases the
+        // plan's host sources.
+        unsafe {
+            state
+                .device
+                .memcpy_async(
+                    state.stream,
+                    CopyDirection::DeviceToHost,
+                    DevicePtr(drawn.as_mut_ptr() as usize),
+                    argmax_bufs.out,
+                    n_draft * 4,
+                )
+                .context("mtp draft tokens DtoH")?;
+        }
+        flambeau_core::Stream::synchronize(state.stream)?;
+        drafts.extend(drawn.into_iter().map(|d| MtpDraft { token: d as u32, q: 1.0, dist: vec![(d as u32, 1.0)] }));
+    }
+    drop(device);
     Ok(())
 }
 
