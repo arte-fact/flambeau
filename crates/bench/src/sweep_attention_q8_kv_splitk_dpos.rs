@@ -9,6 +9,10 @@
 //!   * global / pre-window  — window == 0, base pointers, eff = position+1
 //!   * SWA ring             — window > 0, ring_depth > 0, rows mod ring_depth
 //!   * SWA in-band slid      — window > 0, slide_row_stride > 0, base slid on-device
+//! A baked grid floors chunk_size at 32 like the captured decode
+//! (`decode_graph_chunk_size`); for a tail of at most 32 tokens it is one
+//! chunk, which must match the single-pass `attention_decode_q8_kv` kernel
+//! (what the non-graph path runs there) bit for bit.
 //! K/V are Q8_0-quantized; the reference dequantizes exactly what the kernel
 //! reads and runs the F32 softmax over the live rows, so any delta is kernel
 //! arithmetic, not quant noise.
@@ -35,7 +39,7 @@ const TOL_FORMULA: &str =
     "|err| <= 5e-2 * max(|ref|, sqrt(head_dim))  (correctness; delta-ppl quality cert)";
 const Q8_0_BLOCK_BYTES: usize = 34;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Regime {
     /// window == 0, ring_depth == 0, slide == 0. eff = position+1 from row 0.
     Global,
@@ -74,6 +78,12 @@ const CASES: &[Case] = &[
     Case { head_dim: 256, n_heads_q: 24, n_heads_kv: 4, position: 32, window: 0, slab_depth: 0, regime: Regime::Global, bake_n_chunks: None },
     Case { head_dim: 256, n_heads_q: 24, n_heads_kv: 4, position: 300, window: 0, slab_depth: 0, regime: Regime::Global, bake_n_chunks: None },
     Case { head_dim: 256, n_heads_q: 24, n_heads_kv: 4, position: 1641, window: 0, slab_depth: 0, regime: Regime::Global, bake_n_chunks: None },
+    // Captured qwen35 decode: grid baked at the cap from the first decode
+    // token (one 32-token chunk, bit-exact to single-pass) to a 1024 tail.
+    Case { head_dim: 256, n_heads_q: 24, n_heads_kv: 4, position: 0, window: 0, slab_depth: 0, regime: Regime::Global, bake_n_chunks: Some(MAX_SPLITK_CHUNKS) },
+    Case { head_dim: 256, n_heads_q: 24, n_heads_kv: 4, position: 7, window: 0, slab_depth: 0, regime: Regime::Global, bake_n_chunks: Some(MAX_SPLITK_CHUNKS) },
+    Case { head_dim: 256, n_heads_q: 24, n_heads_kv: 4, position: 31, window: 0, slab_depth: 0, regime: Regime::Global, bake_n_chunks: Some(MAX_SPLITK_CHUNKS) },
+    Case { head_dim: 256, n_heads_q: 24, n_heads_kv: 4, position: 1023, window: 0, slab_depth: 0, regime: Regime::Global, bake_n_chunks: Some(MAX_SPLITK_CHUNKS) },
     // SWA ring (window 1024, slab 1152 = window + 128 ubatch), several eff.
     Case { head_dim: 256, n_heads_q: 16, n_heads_kv: 2, position: 1300, window: 1024, slab_depth: 1152, regime: Regime::Ring, bake_n_chunks: None },
     Case { head_dim: 256, n_heads_q: 16, n_heads_kv: 2, position: 4000, window: 1024, slab_depth: 1152, regime: Regime::Ring, bake_n_chunks: None },
@@ -132,14 +142,19 @@ pub fn run_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) -> Result<Cert> 
         .ok_or_else(|| anyhow!("attention_decode_q8_kv_splitk not compiled"))?;
     let combine_module = B::load(&dev, combine_bytes)?;
     let k_combine = B::kernel(&combine_module, "flambeau_attention_decode_q8_kv_splitk_combine")?;
+    let single_bytes = B::image("attention_decode_q8_kv")
+        .ok_or_else(|| anyhow!("attention_decode_q8_kv not compiled"))?;
+    let single_module = B::load(&dev, single_bytes)?;
+    let k_single = B::kernel(&single_module, "flambeau_attention_decode_q8_kv")?;
     let pmc = B::attributes(&k_chunk)?;
 
     let mut results = Vec::new();
     for case in CASES {
         let seed = 0xD9051 ^ (case.head_dim as u64 * 7919) ^ (case.position as u64 * 101)
             ^ (case.window as u64 * 13);
-        let (got, reference) = run_case::<B>(&dev, &k_chunk, &k_combine, case, seed)?;
+        let (got, reference, single_pass) = run_case::<B>(&dev, &k_chunk, &k_combine, &k_single, case, seed)?;
         let max_rel = max_rel_err_with_floor(&got, &reference, (case.head_dim as f32).sqrt() * 0.01);
+        let bit_exact = single_pass.is_none_or(|sp| sp.iter().zip(&got).all(|(a, b)| a.to_bits() == b.to_bits()));
         results.push(ShapeResult {
             m: case.n_heads_q,
             k: case.position + 1,
@@ -147,7 +162,7 @@ pub fn run_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) -> Result<Cert> 
             seed,
             max_rel_err: max_rel,
             tolerance: TOL,
-            pass: max_rel <= TOL,
+            pass: max_rel <= TOL && bit_exact,
         });
     }
 
@@ -176,9 +191,10 @@ fn run_case<B: BenchBackend>(
     dev: &B::Device,
     k_chunk: &B::Kernel<'_>,
     k_combine: &B::Kernel<'_>,
+    k_single: &B::Kernel<'_>,
     case: &Case,
     seed: u64,
-) -> Result<(Vec<f32>, Vec<f32>)> {
+) -> Result<(Vec<f32>, Vec<f32>, Option<Vec<f32>>)> {
     let Case { head_dim, n_heads_q, n_heads_kv, position, window, slab_depth, regime, bake_n_chunks } =
         *case;
     let group = n_heads_q / n_heads_kv;
@@ -217,7 +233,7 @@ fn run_case<B: BenchBackend>(
     };
 
     let chunk_len = eff - chunk_base;
-    let chunk_size = splitk_chunk_size(chunk_len);
+    let chunk_size = if bake_n_chunks.is_some() { splitk_chunk_size(chunk_len).max(32) } else { splitk_chunk_size(chunk_len) };
     let n_chunks = bake_n_chunks.unwrap_or_else(|| chunk_len.div_ceil(chunk_size).max(1));
 
     // Inputs.
@@ -311,6 +327,49 @@ fn run_case<B: BenchBackend>(
         stream.synchronize()?;
     }
 
+    // A one-chunk tail also runs the single-pass kernel for the bit-exact check.
+    let single_pass = if regime == Regime::Global && eff <= 32 {
+        let d_single = dev.alloc(out_len * 2)?;
+        let stream = dev.default_stream();
+        let n_heads_q_i = n_heads_q as i32;
+        let n_heads_kv_i = n_heads_kv as i32;
+        let head_dim_i = head_dim as i32;
+        let n_tokens_i = eff as i32;
+        let zero_i = 0i32;
+        let q_ptr = d_q.as_usize() as u64;
+        let k_ptr = d_k.as_usize() as u64;
+        let v_ptr = d_v.as_usize() as u64;
+        let out_ptr = d_single.as_usize() as u64;
+        let mut a = <B::Args<'_>>::default();
+        a.push_arg(&q_ptr);
+        a.push_arg(&k_ptr);
+        a.push_arg(&v_ptr);
+        a.push_arg(&out_ptr);
+        a.push_arg(&n_heads_q_i);
+        a.push_arg(&n_heads_kv_i);
+        a.push_arg(&head_dim_i);
+        a.push_arg(&n_tokens_i);
+        a.push_arg(&scale);
+        a.push_arg(&zero_i);
+        a.push_arg(&zero_i);
+        let cfg = LaunchCfg {
+            grid: (n_heads_q as u32, 1, 1),
+            block: ((head_dim / 4) as u32, 1, 1),
+            shared_bytes: 0,
+        };
+        B::launch(k_single, stream, cfg, a)?;
+        stream.synchronize()?;
+        let mut host: Vec<f16> = vec![f16::from_f32(0.0); out_len];
+        unsafe {
+            dev.memcpy_async(stream, CopyDirection::DeviceToHost, DevicePtr(host.as_mut_ptr() as usize), d_single, out_len * 2)?;
+        }
+        stream.synchronize()?;
+        unsafe { dev.dealloc(d_single, out_len * 2)? };
+        Some(host.iter().map(|v| v.to_f32()).collect())
+    } else {
+        None
+    };
+
     let mut out_f16: Vec<f16> = vec![f16::from_f32(0.0); out_len];
     unsafe {
         dev.memcpy_async(
@@ -378,5 +437,5 @@ fn run_case<B: BenchBackend>(
             reference[out_off + d] = f16::from_f32(acc as f32).to_f32();
         }
     }
-    Ok((got, reference))
+    Ok((got, reference, single_pass))
 }

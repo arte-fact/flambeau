@@ -9,7 +9,7 @@ pub mod scratch;
 pub mod state;
 
 pub use capture::{
-    AttnGridWitness, DecodeCapture, DecodeRebindPlan, RebindEntry, RebindValue, ScalarRule,
+    decode_graph_chunk_size, AttnGridWitness, DecodeCapture, DecodeRebindPlan, RebindEntry, RebindValue, ScalarRule,
 };
 
 pub use hooks::{

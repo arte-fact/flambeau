@@ -10,18 +10,12 @@ use flambeau_backend::{Backend, DecodeGraphExec};
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_quant::GgufFile;
 
-use crate::core::scratch::MAX_SPLITK_CHUNKS;
 use crate::core::{DecodeCapture, DecodeRebindPlan, RebindValue, ScratchPool};
 use crate::ctx::ForwardCtx;
 use crate::engine::ForwardEngine;
 use crate::loader::ShardMode;
 use crate::runtime::orchestrate::LaunchParams;
 use crate::runtime::Arch;
-
-/// KV-tail length from which single-token decode attention takes the split-K
-/// path; below it the single-pass kernel (no `_dpos` variant) is not
-/// graph-capturable, so the driver runs the plain forward for those tokens.
-const DECODE_GRAPH_MIN_KV: usize = flambeau_ops::attention::SPLITK_MIN_TOKENS_KV + 1;
 
 /// Cached captured decode graph + its rebind program, keyed by the inflight
 /// slot it was captured against. `DecodeRebindPlan::reusable_at` decides whether
@@ -152,7 +146,7 @@ impl<B: Backend, A: Arch> SoloSession<B, A> {
     /// The inline single-pass forward (one `ForwardEngine::<B>::new_solo`).
     /// Logits for the last token (or N rows under distinct slot_ids) land in
     /// `self.last_logits`. This is the untouched pre-graph path; the driver
-    /// falls back to it for uncapturable / early-token decode.
+    /// falls back to it for uncapturable decode.
     fn forward_general(
         &mut self,
         tokens: &[u32],
@@ -171,9 +165,8 @@ impl<B: Backend, A: Arch> SoloSession<B, A> {
     /// cached graph when its split-K grid + SWA regime + slot still match this
     /// `position`; otherwise recaptures (the forward runs ONCE inside capture,
     /// which records but does not execute — the subsequent `launch` computes
-    /// this token). Early tokens (`position + 1 < DECODE_GRAPH_MIN_KV`) and any
-    /// pass a composite flagged uncapturable (SWA SlideBand, Q8, single-pass)
-    /// fall back to the plain forward.
+    /// this token). A pass a composite flagged uncapturable (SWA SlideBand,
+    /// F16 single-pass) falls back to the plain forward.
     /// With `download` off, a replayed or captured token leaves its logits on
     /// device (`pool.logits_f32_dev`) and `last_logits` stale.
     fn forward_decode_graph(&mut self, token: u32, position: usize, slot_id: usize, download: bool) -> Result<()> {
@@ -181,17 +174,10 @@ impl<B: Backend, A: Arch> SoloSession<B, A> {
         let reusable = self.graph.as_ref().is_some_and(|g| {
             g.slot_id == slot_id
                 && g.plan
-                    .reusable_at(position, |cl| flambeau_model_ops::splitk_chunk_size(cl, MAX_SPLITK_CHUNKS))
+                    .reusable_at(position, crate::core::decode_graph_chunk_size)
         });
         if reusable {
             return self.graph_set_and_launch(token, position, vocab, download);
-        }
-        // Below the split-K threshold the attention takes the single-pass
-        // (uncapturable) path — run the plain forward and keep any stale graph
-        // (it will be revalidated / recaptured once we re-enter the split-K
-        // regime).
-        if position + 1 < DECODE_GRAPH_MIN_KV {
-            return self.forward_general(&[token], &[position], &[slot_id]);
         }
         // A prior capture attempt at this slot failed as uncapturable and its
         // condition still holds — don't pay capture+instantiate+discard again.

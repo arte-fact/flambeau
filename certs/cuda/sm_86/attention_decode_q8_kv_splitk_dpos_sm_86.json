@@ -63,6 +63,42 @@
       "pass": true
     },
     {
+      "m": 24,
+      "k": 1,
+      "n": 256,
+      "seed": 1277777,
+      "max_rel_err": 0.0,
+      "tolerance": 0.05,
+      "pass": true
+    },
+    {
+      "m": 24,
+      "k": 8,
+      "n": 256,
+      "seed": 1277330,
+      "max_rel_err": 0.00096618355,
+      "tolerance": 0.05,
+      "pass": true
+    },
+    {
+      "m": 24,
+      "k": 32,
+      "n": 256,
+      "seed": 1274730,
+      "max_rel_err": 0.00076293945,
+      "tolerance": 0.05,
+      "pass": true
+    },
+    {
+      "m": 24,
+      "k": 1024,
+      "n": 256,
+      "seed": 1240266,
+      "max_rel_err": 0.00009536743,
+      "tolerance": 0.05,
+      "pass": true
+    },
+    {
       "m": 16,
       "k": 1301,
       "n": 256,
@@ -100,7 +136,7 @@
     }
   ],
   "pass": true,
-  "emitted_at": "2026-11-21T06:19:49Z",
+  "emitted_at": "2026-11-21T09:27:07Z",
   "rig": "threadreaper-sm_86",
   "pmc": {
     "vgpr_count": 36,

@@ -95,7 +95,9 @@ pub struct AttnGridWitness {
     pub window_size: usize,
     /// `ring_active` at capture (ring layer whose slab has wrapped).
     pub ring_active: bool,
-    /// `n_chunks` (the split-K grid.y) baked at capture.
+    /// The split-K grid.y baked at capture. The `_dpos` kernels run any
+    /// chunk past the KV tail as an empty partial the combine weights 0, so
+    /// the graph replays for every position needing at most this many chunks.
     pub n_chunks: usize,
     /// `chunk_size` (a baked kernel arg, not a slot) at capture.
     pub chunk_size: usize,
@@ -104,6 +106,18 @@ pub struct AttnGridWitness {
     /// (`eff_n_tokens_kv = window`, `chunk_base = 0`), so the graph replays
     /// for any in-band position and needs recapture only at ring entry.
     pub slid: bool,
+    /// Smallest KV tail the captured split-K replays bit-identically to the
+    /// non-graph path (which takes the single-pass kernel below
+    /// `SPLITK_MIN_TOKENS_KV + 1`).
+    pub min_tokens_kv: usize,
+}
+
+/// The split-K chunk size a captured decode bakes for a `chunk_len`-token KV
+/// tail: the non-graph heuristic, floored at `SPLITK_MIN_TOKENS_KV` so a tail
+/// the non-graph path runs single-pass is one chunk of a reusable size.
+pub fn decode_graph_chunk_size(chunk_len: usize) -> usize {
+    flambeau_model_ops::splitk_chunk_size(chunk_len, crate::core::scratch::MAX_SPLITK_CHUNKS)
+        .max(flambeau_ops::attention::SPLITK_MIN_TOKENS_KV)
 }
 
 /// When a capture marked uncapturable becomes worth re-attempting. Without
@@ -254,9 +268,10 @@ pub struct DecodeRebindPlan {
 
 impl DecodeRebindPlan {
     /// Whether the captured graph is still valid to replay at `position` — i.e.
-    /// every recorded split-K attention grid recomputes to the SAME
-    /// `(ring_active, n_chunks)` it had at capture, using the composite's
-    /// `chunk_size` arithmetic (`chunk_len_chunk_size`). Any mismatch, or a
+    /// every recorded split-K attention grid recomputes, with the composite's
+    /// `chunk_size` arithmetic (`chunk_len_chunk_size`), to the SAME
+    /// `(ring_active, chunk_size)` it had at capture and at most its baked
+    /// `n_chunks`, at a KV tail of at least `min_tokens_kv`. Any mismatch, or a
     /// token that lands in the uncapturable SWA SlideBand, means the driver must
     /// recapture (grid dims / regime constants are baked, not slots).
     pub fn reusable_at(
@@ -280,7 +295,7 @@ impl DecodeRebindPlan {
                 }
                 let chunk_size = chunk_len_chunk_size(w.window_size).max(1);
                 let n_chunks = w.window_size.div_ceil(chunk_size);
-                return n_chunks == w.n_chunks && chunk_size == w.chunk_size;
+                return n_chunks <= w.n_chunks && chunk_size == w.chunk_size;
             }
             // SWA SlideBand at the new position — the composite would take the
             // pointer-slide branch this (non-slid) capture did not tag.
@@ -294,7 +309,10 @@ impl DecodeRebindPlan {
             };
             let chunk_size = chunk_len_chunk_size(chunk_len).max(1);
             let n_chunks = chunk_len.div_ceil(chunk_size);
-            ring_active == w.ring_active && n_chunks == w.n_chunks && chunk_size == w.chunk_size
+            ring_active == w.ring_active
+                && n_tokens_kv >= w.min_tokens_kv
+                && n_chunks <= w.n_chunks
+                && chunk_size == w.chunk_size
         })
     }
     /// Resolve every entry for a token at `position` with id `token_id`.
@@ -417,6 +435,7 @@ mod tests {
             n_chunks: 3,
             chunk_size: 128,
             slid: false,
+            min_tokens_kv: 0,
         });
         let plan = cap.into_plan();
         // Same bucket [257, 384]: n_chunks stays 3 → replayable.
@@ -425,6 +444,46 @@ mod tests {
         // Crosses into n_chunks = 4 at KV tail 385 → recapture.
         assert!(!plan.reusable_at(384, cs)); // 385/128 -> 4
         assert!(!plan.reusable_at(512, cs)); // 513/128 -> 5
+    }
+
+    #[test]
+    fn baked_grid_replays_every_tail_with_its_chunk_size() {
+        let mut cap = DecodeCapture::new();
+        cap.record_attn_grid(AttnGridWitness {
+            is_ring_layer: false,
+            slab_depth: 8192,
+            window_size: 0,
+            ring_active: false,
+            n_chunks: 32,
+            chunk_size: decode_graph_chunk_size(1),
+            slid: false,
+            min_tokens_kv: 1,
+        });
+        let plan = cap.into_plan();
+        // chunk_size 32 from the first decode token up to a 1024-token tail.
+        for pos in [0_usize, 5, 31, 32, 33, 500, 1023] {
+            assert!(plan.reusable_at(pos, decode_graph_chunk_size), "pos {pos}");
+        }
+        // Past 1024 the heuristic's chunk_size grows: recapture.
+        assert!(!plan.reusable_at(1024, decode_graph_chunk_size));
+    }
+
+    #[test]
+    fn min_tokens_kv_keeps_short_tails_off_the_graph() {
+        let mut cap = DecodeCapture::new();
+        cap.record_attn_grid(AttnGridWitness {
+            is_ring_layer: false,
+            slab_depth: 8192,
+            window_size: 0,
+            ring_active: false,
+            n_chunks: 32,
+            chunk_size: 32,
+            slid: false,
+            min_tokens_kv: 33,
+        });
+        let plan = cap.into_plan();
+        assert!(!plan.reusable_at(31, decode_graph_chunk_size));
+        assert!(plan.reusable_at(32, decode_graph_chunk_size));
     }
 
     #[test]
@@ -439,6 +498,7 @@ mod tests {
             n_chunks: 6, // pre-window capture (KV tail ~700)
             chunk_size: 128,
             slid: false,
+            min_tokens_kv: 0,
         });
         let plan = cap.into_plan();
         // Pre-window replay in the same n_chunks bucket is fine.
@@ -480,6 +540,7 @@ mod tests {
             n_chunks: 8, // 1024/128, constant in-band
             chunk_size: 128,
             slid: true,
+            min_tokens_kv: 0,
         });
         let plan = cap.into_plan();
         // In-band: window < KV tail <= slab_depth → positions [1024, 1279].

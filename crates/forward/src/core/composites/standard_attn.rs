@@ -745,15 +745,25 @@ pub fn standard_attn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
                     0
                 };
                 let chunk_len = eff_n_tokens_kv - chunk_base;
-                let chunk_size = flambeau_model_ops::splitk_chunk_size(
-                    chunk_len,
-                    crate::core::scratch::MAX_SPLITK_CHUNKS,
-                );
+                // Under capture a tail the non-graph path runs single-pass is
+                // one split-K chunk: the chunk body walks the same tokens in
+                // the same order and the one-chunk combine (weight exp(0) = 1)
+                // reproduces its normalisation, so the graph covers every
+                // decode position.
+                let capturing = state.capture.is_some();
+                let chunk_size = if capturing {
+                    crate::core::decode_graph_chunk_size(chunk_len)
+                } else {
+                    flambeau_model_ops::splitk_chunk_size(chunk_len, crate::core::scratch::MAX_SPLITK_CHUNKS)
+                };
                 let n_chunks = chunk_len.div_ceil(chunk_size);
-                let use_splitk = n_chunks > 1
+                let use_splitk = (n_chunks > 1 || capturing)
                     && n_chunks <= crate::core::scratch::MAX_SPLITK_CHUNKS
                     && state.pool.splitk_partials_m.as_usize() != 0;
                 if use_splitk {
+                    // A captured grid is baked at the cap so it replays for
+                    // every tail of the same chunk_size.
+                    let n_chunks = if capturing { crate::core::scratch::MAX_SPLITK_CHUNKS } else { n_chunks };
                     let partials_m_n = weights.n_heads * n_chunks;
                     let partials_o_n = partials_m_n * weights.head_dim;
                     let mut partials_m = unsafe {
@@ -780,6 +790,7 @@ pub fn standard_attn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
                                 n_chunks,
                                 chunk_size,
                                 slid: in_band,
+                                min_tokens_kv: 1,
                             });
                         }
                         let slide_row_stride = if in_band { kv.bytes_per_row as i32 } else { 0 };
@@ -919,6 +930,8 @@ pub fn standard_attn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
                 && n_chunks <= crate::core::scratch::MAX_SPLITK_CHUNKS
                 && state.pool.splitk_partials_m.as_usize() != 0;
             if use_splitk {
+                // A captured grid is baked at the cap (see the Q8 branch).
+                let n_chunks = if state.capture.is_some() { crate::core::scratch::MAX_SPLITK_CHUNKS } else { n_chunks };
                 let partials_m_n = weights.n_heads * n_chunks;
                 let partials_o_n = partials_m_n * weights.head_dim;
                 let mut partials_m =
@@ -944,6 +957,9 @@ pub fn standard_attn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
                             n_chunks,
                             chunk_size,
                             slid: in_band,
+                            // The F16 chunk body tiles tokens unlike the
+                            // single-pass kernel: no single-chunk replay.
+                            min_tokens_kv: flambeau_ops::attention::SPLITK_MIN_TOKENS_KV + 1,
                         });
                     }
                     let slide_row_stride = if in_band { kv.bytes_per_row as i32 } else { 0 };
@@ -1006,6 +1022,11 @@ pub fn standard_attn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
                         cap.mark_uncapturable_until(
                             "attn decode: SWA SlideBand single-pass not captured",
                             crate::core::capture::RetryAt::Position(slab_depth),
+                        );
+                    } else if chunk_len <= flambeau_ops::attention::SPLITK_MIN_TOKENS_KV {
+                        cap.mark_uncapturable_until(
+                            "attn decode: F16 single-pass below the split-K threshold not captured",
+                            crate::core::capture::RetryAt::Position(flambeau_ops::attention::SPLITK_MIN_TOKENS_KV),
                         );
                     } else {
                         cap.mark_uncapturable(
