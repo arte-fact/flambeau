@@ -15,6 +15,7 @@ pub const KERNEL_STEMS: &[&str] = &[
     // Qmatmul — MMVQ + MMQ, all dtypes.
     "mmvq_q8_0",
     "mmvq_q8_0_dp4a",
+    "mmvq_q8_0_dp4a_vdr2_batched",
     "mmvq_q8_0_dp4a_vdr2",
     "mmvq_q8_0_t128",
     "mmvq_q8_0_t128_vdr2",

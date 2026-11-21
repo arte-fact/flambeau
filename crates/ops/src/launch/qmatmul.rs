@@ -1232,6 +1232,7 @@ macro_rules! batched_entries {
 /// Per batched-MMVQ stem, its entry for 1..=`MMVQ_BATCH_MAX` columns. Each
 /// name is `<recipe.entry>_n<cols>` (checked by `recipe_table_tests`).
 const MMVQ_BATCHED_ENTRIES: &[(&str, [&str; MMVQ_BATCH_MAX])] = &[
+    ("mmvq_q8_0_dp4a_vdr2_batched", batched_entries!("flambeau_mmvq_q8_0_dp4a_vdr2_batched_q8_1")),
     ("mmvq_iq4_nl_dp4a_t128_vdr2_batched", batched_entries!("flambeau_mmvq_iq4_nl_dp4a_t128_vdr2_batched_q8_1")),
     ("mmvq_q3_k_dp4a_t128_vdr2_batched", batched_entries!("flambeau_mmvq_q3_k_dp4a_t128_vdr2_batched_q8_1")),
     ("mmvq_q6_k_dp4a_vdr2_batched", batched_entries!("flambeau_mmvq_q6_k_dp4a_vdr2_batched_q8_1")),
@@ -1673,6 +1674,18 @@ const QMATMUL_RECIPES: &[RecipeRow] = &[
             entry_f16: Some("flambeau_mmvq_q8_0_dp4a_q8_1_f16"),
             threads: 256,
             rows_per_block: 1,
+            mmq_tile: (0, 0),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_q8_0_mmvq_dp4a_vdr2_batched"],
+        recipe: Recipe {
+            kind: RecipeKind::MmvqBatched,
+            stem: "mmvq_q8_0_dp4a_vdr2_batched",
+            entry: "flambeau_mmvq_q8_0_dp4a_vdr2_batched_q8_1",
+            entry_f16: None,
+            threads: 32,
+            rows_per_block: 4,
             mmq_tile: (0, 0),
         },
     },

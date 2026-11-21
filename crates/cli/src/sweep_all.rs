@@ -124,6 +124,7 @@ const DISPATCH_SWEEPS: &[(&str, &str, &str, &str)] = &[
     ("sm_86", "qmatmul_q6_k_mmvq_dp4a", "qmatmul", "Q6_K"),
     ("sm_86", "qmatmul_q6_k_mmvq_dp4a_vdr2_batched", "qmatmul", "Q6_K_vdr_batched"),
     ("sm_86", "qmatmul_q8_0_mmvq_dp4a", "qmatmul", "Q8_0_dp4a"),
+    ("sm_86", "qmatmul_q8_0_mmvq_dp4a_vdr2_batched", "qmatmul", "Q8_0_vdr_batched"),
     ("sm_86", "qmatmul_q8_k_mmvq_single_row", "qmatmul", "Q8_K"),
 ];
 

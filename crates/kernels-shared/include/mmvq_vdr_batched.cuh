@@ -320,6 +320,39 @@ struct Iq4Nl {
     }
 };
 
+// Q8_0, VDR 2 (`vec_dot_q8_0_q8_1`): 4 threads per 32-element block.
+struct Q8_0 {
+    typedef flambeau_block_q8_0 block_t;
+    static constexpr int TPB = 4;
+    static constexpr int YPB = 1;
+    template<int N, int R>
+    static __device__ __forceinline__ void step(
+        const block_t* const (&bk)[R], const flambeau_block_q8_1* y, size_t ys, int lane,
+        float (&acc)[R][N])
+    {
+        const int iqs = 2 * lane;
+        int v[R][2];
+        float d[R];
+        #pragma unroll
+        for (int r = 0; r < R; ++r) {
+            v[r][0] = load_int_b2(bk[r]->qs, iqs);
+            v[r][1] = load_int_b2(bk[r]->qs, iqs + 1);
+            d[r] = (float) bk[r]->d;
+        }
+        #pragma unroll
+        for (int c = 0; c < N; ++c) {
+            const flambeau_block_q8_1* ya = y + c * ys;
+            const int u0 = load_int_b4(ya->qs, iqs);
+            const int u1 = load_int_b4(ya->qs, iqs + 1);
+            const float dy = (float) ya->d;
+            #pragma unroll
+            for (int r = 0; r < R; ++r) {
+                acc[r][c] += d[r] * dy * (float) dp4a(v[r][1], u1, dp4a(v[r][0], u0, 0));
+            }
+        }
+    }
+};
+
 }  // namespace mmvq_vdr
 
 // One block of G threads (G <= the hardware warp) owns R output rows: each
