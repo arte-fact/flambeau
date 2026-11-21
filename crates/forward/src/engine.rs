@@ -1116,7 +1116,7 @@ impl<B: Backend, H: TopologyHooks<B>, S: StageHooks<B>> ForwardCtx for ForwardEn
         slot_id: usize,
         mtp_layer_idx: usize,
         n_draft: usize,
-        sample: &mut dyn FnMut(&[f32]) -> (u32, Vec<(u32, f32)>),
+        sample: &mut flambeau_runtime::MtpSampler,
         drafts: &mut Vec<crate::ctx::MtpDraft>,
     ) -> Result<()> {
         if !self.stage.is_first() || !self.stage.is_last() {

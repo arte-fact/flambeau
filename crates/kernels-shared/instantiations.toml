@@ -4829,3 +4829,38 @@ params = """
     const int n_rows,
     const int n_blocks_per_row"""
 body = "mmvq_vdr_batched_row<mmvq_vdr::Q8_0, 8, 32, 4, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+# Greedy draw on device (MTP draft): sparse additive adjustments in list order,
+# then a two-pass argmax with the host's tie / NaN / -inf rules.
+[[kernel]]
+stem = "sampler_argmax_f32"
+includes = ["sampler_argmax.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_sampler_sparse_add_f32"
+params = """
+    float* __restrict__ logits,
+    const int* __restrict__ ids,
+    const float* __restrict__ vals,
+    const int n"""
+body = "sampler_sparse_add_f32_body(logits, ids, vals, n);"
+
+[[kernel.entry]]
+name = "flambeau_sampler_argmax_partial_f32"
+launch_bounds = "256"
+params = """
+    const float* __restrict__ logits,
+    const int vocab,
+    float* __restrict__ part_v,
+    int* __restrict__ part_i"""
+body = "sampler_argmax_partial_f32_body(logits, vocab, part_v, part_i);"
+
+[[kernel.entry]]
+name = "flambeau_sampler_argmax_final_f32"
+launch_bounds = "256"
+params = """
+    const float* __restrict__ part_v,
+    const int* __restrict__ part_i,
+    const int n_parts,
+    int* __restrict__ out"""
+body = "sampler_argmax_final_f32_body(part_v, part_i, n_parts, out);"

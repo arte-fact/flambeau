@@ -96,7 +96,7 @@ impl Arch for Qwen35V2 {
         anchor_pos: usize,
         slot_id: usize,
         n_draft: usize,
-        sample: &mut dyn FnMut(&[f32]) -> (u32, Vec<(u32, f32)>),
+        sample: &mut flambeau_runtime::MtpSampler,
         seed: u64,
         out_logits: &mut Vec<f32>,
     ) -> Result<Vec<u32>> {

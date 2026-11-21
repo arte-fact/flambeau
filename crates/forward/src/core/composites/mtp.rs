@@ -183,7 +183,7 @@ pub fn mtp_draft_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
     slot_id: usize,
     mtp_layer_idx: usize,
     n_draft: usize,
-    sample: &mut dyn FnMut(&[f32]) -> (u32, Vec<(u32, f32)>),
+    sample: &mut flambeau_runtime::MtpSampler,
     drafts: &mut Vec<MtpDraft>,
 ) -> Result<()> {
     let hidden = state.hidden();
@@ -194,6 +194,36 @@ pub fn mtp_draft_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
     }
     if state.pool.mtp_anchor_f16 == DevicePtr::NULL {
         bail!("mtp_draft: pool has no MTP scratch (mtp disabled)");
+    }
+    // Greedy draws run on device: upload the adjustments once, then each step
+    // reads back the 4-byte token instead of the vocab-wide logits.
+    let plan = sample.argmax.clone().filter(|p| {
+        p.adds.len() <= crate::core::scratch::ARGMAX_MAX_ADDS
+            && p.penalty_counts.len() <= state.pool.argmax_max_pairs
+    });
+    let argmax_bufs = state.pool.argmax_buffers();
+    let add_ids: Vec<i32> = plan.iter().flat_map(|p| p.adds.iter().map(|&(id, _)| id as i32)).collect();
+    let add_vals: Vec<f32> = plan.iter().flat_map(|p| p.adds.iter().map(|&(_, v)| v)).collect();
+    let counts: Vec<u32> = plan.iter().flat_map(|p| p.penalty_counts.iter().flat_map(|&(t, c)| [t, c])).collect();
+    let penalties = plan.as_ref().map(|p| {
+        (
+            p.penalty_counts.len(),
+            flambeau_ops::PenaltyKnobs { repetition: p.repetition, presence: p.presence, frequency: p.frequency },
+        )
+    });
+    for (dst, src, bytes) in [
+        (argmax_bufs.add_ids, add_ids.as_ptr() as usize, add_ids.len() * 4),
+        (argmax_bufs.add_vals, add_vals.as_ptr() as usize, add_vals.len() * 4),
+        (argmax_bufs.penalty_counts, counts.as_ptr() as usize, counts.len() * 4),
+    ] {
+        if bytes > 0 {
+            // SAFETY: each source fits its argmax_scratch region (the plan is
+            // filtered on both capacities); the host vectors outlive the copy,
+            // which completes before the first draw's sync.
+            unsafe {
+                state.device.memcpy_async(state.stream, CopyDirection::HostToDevice, dst, DevicePtr(src), bytes)?;
+            }
+        }
     }
     let mut h_cur = anchor_h.ptr;
     let mut tok = anchor_token;
@@ -228,6 +258,28 @@ pub fn mtp_draft_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
         .context("mtp lm_head")?;
         // The persistent logits buffer is the copy target: a per-step Vec
         // would hand the runtime a fresh pageable range to pin every draft.
+        if plan.is_some() {
+            ops.argmax_f32(argmax_bufs, vocab, add_ids.len(), penalties).context("mtp draft argmax")?;
+            let mut d: i32 = 0;
+            // SAFETY: `out` is one i32 of argmax_scratch; synced below.
+            unsafe {
+                state
+                    .device
+                    .memcpy_async(
+                        state.stream,
+                        CopyDirection::DeviceToHost,
+                        DevicePtr(&mut d as *mut i32 as usize),
+                        argmax_bufs.out,
+                        4,
+                    )
+                    .context("mtp draft token DtoH")?;
+            }
+            flambeau_core::Stream::synchronize(state.stream)?;
+            drafts.push(MtpDraft { token: d as u32, q: 1.0, dist: vec![(d as u32, 1.0)] });
+            tok = d as u32;
+            h_cur = state.pool.mtp_hidden_f16;
+            continue;
+        }
         if state.logits_host.len() < vocab {
             state.logits_host = vec![0.0_f32; vocab];
         }
@@ -244,7 +296,7 @@ pub fn mtp_draft_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
                 .context("mtp logits DtoH")?;
         }
         flambeau_core::Stream::synchronize(state.stream)?;
-        let (d, dist) = sample(&state.logits_host[..vocab]);
+        let (d, dist) = (sample.draw)(&state.logits_host[..vocab]);
         let q = dist.iter().find(|(t, _)| *t == d).map(|(_, p)| *p).unwrap_or(0.0);
         drafts.push(MtpDraft { token: d, q, dist });
         tok = d;

@@ -182,7 +182,7 @@ pub trait Model: Send + Sync + 'static {
 }
 
 /// Sampler closure + factory shared by the MTP path across crates.
-pub type MtpSampleFn = Box<dyn FnMut(&[f32]) -> (u32, Vec<(u32, f32)>) + Send>;
+pub type MtpSampleFn = flambeau_runtime::MtpSampler;
 pub type SampleFactory =
     std::sync::Arc<dyn Fn(u64) -> MtpSampleFn + Send + Sync>;
 

@@ -150,7 +150,7 @@ pub fn mtp_cycle<C: ForwardCtx>(
     pos: usize,
     slot_id: usize,
     n_draft: usize,
-    sample: &mut dyn FnMut(&[f32]) -> (u32, Vec<(u32, f32)>),
+    sample: &mut flambeau_runtime::MtpSampler,
     seed: u64,
     out_logits: &mut Vec<f32>,
 ) -> Result<Vec<u32>> {
@@ -168,7 +168,7 @@ pub fn mtp_cycle<C: ForwardCtx>(
         anyhow::ensure!(row.len() >= vocab, "decode logits short");
         out_logits.clear();
         out_logits.extend_from_slice(&row[..vocab]);
-        return Ok(vec![sample(out_logits).0]);
+        return Ok(vec![(sample.draw)(out_logits).0]);
     }
 
     let mut drafts: Vec<flambeau_forward::ctx::MtpDraft> = Vec::with_capacity(n_draft);
@@ -204,7 +204,7 @@ pub fn mtp_cycle<C: ForwardCtx>(
         let row = ctx.logits();
         out_logits.clear();
         out_logits.extend_from_slice(&row[..vocab]);
-        return Ok(vec![sample(out_logits).0]);
+        return Ok(vec![(sample.draw)(out_logits).0]);
     }
     ctx.mtp_set_pending(None);
     ctx.gdn_snapshot(slot_id)?;
@@ -226,7 +226,7 @@ pub fn mtp_cycle<C: ForwardCtx>(
     let mut bonus: Option<u32> = None;
     let mut row = row_at(0);
     for d in &drafts {
-        let (_pt, p_dist) = sample(row);
+        let (_pt, p_dist) = (sample.draw)(row);
         let p_d = p_dist.iter().find(|(t, _)| *t == d.token).map(|(_, p)| *p).unwrap_or(0.0);
         // accept with prob min(1, p(d)/q(d)); greedy dists are one-hot, so
         // this reduces to argmax-match.
@@ -240,7 +240,7 @@ pub fn mtp_cycle<C: ForwardCtx>(
     }
     emitted.push(match bonus {
         Some(t) => t,
-        None => sample(row).0,
+        None => (sample.draw)(row).0,
     });
 
     if accepted < k {

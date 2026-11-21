@@ -632,6 +632,17 @@ pub trait Ops {
         knobs: crate::PenaltyKnobs,
     ) -> Result<()>;
 
+    /// On-device host `argmax` of `logits` after, in place and in the host
+    /// order, the `n_adds` sparse additions then the optional penalties
+    /// (`(n_pairs, knobs)` over `bufs.penalty_counts`).
+    fn argmax_f32(
+        &self,
+        bufs: crate::ArgmaxBuffers,
+        vocab: usize,
+        n_adds: usize,
+        penalties: Option<(usize, crate::PenaltyKnobs)>,
+    ) -> Result<()>;
+
     fn topk_softmax_f32(
         &self,
         logits: DevicePtr,

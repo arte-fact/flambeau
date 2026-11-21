@@ -155,6 +155,10 @@ pub const DIRECT_CALL_KERNELS_GFX906: &[DirectCallKernel] = &[
         cert_rel_path: "certs/hip/gfx906/rmsnorm_f32.json",
     },
     DirectCallKernel {
+        impl_id: "sampler_argmax_f32",
+        cert_rel_path: "certs/hip/gfx906/sampler_argmax_f32.json",
+    },
+    DirectCallKernel {
         impl_id: "scale_f32",
         cert_rel_path: "certs/hip/gfx906/scale_f32.json",
     },

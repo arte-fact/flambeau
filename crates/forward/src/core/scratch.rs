@@ -138,6 +138,11 @@ impl Default for ScratchConfig {
 /// callers must keep ctx within that bound.
 pub const MAX_SPLITK_CHUNKS: usize = 32;
 
+/// Most sparse additions the on-device greedy draw takes; a longer list keeps
+/// the host draw.
+pub const ARGMAX_MAX_ADDS: usize = 256;
+const ARGMAX_FIXED_BYTES: usize = 2 * ARGMAX_MAX_ADDS * 4 + 2 * flambeau_ops::sampling::ARGMAX_PARTS * 4 + 8;
+
 /// Per-layer KV-cache geometry. Arches implement this on their
 /// `Config` so `per_layer_kv_widths` can size the ScratchPool's
 /// per-layer K/V slabs uniformly. Layers with no KV cache
@@ -911,6 +916,15 @@ pub struct ScratchPool {
     /// positions tensor; that mechanism is left untouched).
     pub decode_ctx_i32: DevicePtr,
 
+    /// Device scratch of the on-device greedy draw (`Ops::argmax_f32`, see
+    /// [`Self::argmax_buffers`]): `ARGMAX_MAX_ADDS` ids and values, the
+    /// first-pass winners, the result index, then up to
+    /// [`Self::argmax_max_pairs`] penalty `(token, count)` pairs.
+    pub argmax_scratch: DevicePtr,
+    /// Penalty pairs the argmax scratch holds (`config.max_seq_len`: the
+    /// generated history never exceeds the context).
+    pub argmax_max_pairs: usize,
+
     /// `[max_experts]` F32. NULL when `config.max_experts == 0`.
     pub router_logits_f32: DevicePtr,
     /// `[hidden]` F16 MoE per-expert accumulator. NULL when `max_experts == 0`.
@@ -1223,6 +1237,8 @@ impl ScratchPool {
         let logits_f32_dev = alloc_bytes(logits_rows * config.vocab * f32)?;
         let position_i32 = alloc_bytes(n * i32_b)?;
         let decode_ctx_i32 = alloc_bytes(2 * i32_b)?;
+        let argmax_max_pairs = config.max_seq_len;
+        let argmax_scratch = alloc_bytes(ARGMAX_FIXED_BYTES + argmax_max_pairs * 8)?;
 
         let (router_logits_f32, moe_accum_f16) = if config.max_experts > 0 {
             let r = alloc_bytes(n * config.max_experts * f32)?;
@@ -1693,6 +1709,8 @@ impl ScratchPool {
             logits_rows,
             position_i32,
             decode_ctx_i32,
+            argmax_scratch,
+            argmax_max_pairs,
             router_logits_f32,
             moe_accum_f16,
             shared_x_norm_f32,
@@ -1758,6 +1776,22 @@ impl ScratchPool {
             unsafe { device.dealloc(ptr, bytes) }.context("dealloc")?;
         }
         Ok(())
+    }
+
+    /// `Ops::argmax_f32` buffers over `logits_f32_dev` (row 0) and
+    /// [`Self::argmax_scratch`].
+    pub fn argmax_buffers(&self) -> flambeau_ops::ArgmaxBuffers {
+        let base = self.argmax_scratch;
+        let parts = flambeau_ops::sampling::ARGMAX_PARTS;
+        flambeau_ops::ArgmaxBuffers {
+            logits: self.logits_f32_dev,
+            add_ids: base,
+            add_vals: base.offset_bytes(ARGMAX_MAX_ADDS * 4),
+            part_v: base.offset_bytes(2 * ARGMAX_MAX_ADDS * 4),
+            part_i: base.offset_bytes(2 * ARGMAX_MAX_ADDS * 4 + parts * 4),
+            out: base.offset_bytes(2 * ARGMAX_MAX_ADDS * 4 + 2 * parts * 4),
+            penalty_counts: base.offset_bytes(ARGMAX_FIXED_BYTES),
+        }
     }
 
     /// Flip residual ping-pong and return the live slot. Called by

@@ -878,6 +878,16 @@ impl<B: KernelBackend> Ops for OpsImpl<'_, B> {
         crate::launch::sampling::apply_penalties_f32(self.reg, self.stream, bufs, n_pairs, vocab, knobs)
     }
 
+    fn argmax_f32(
+        &self,
+        bufs: crate::ArgmaxBuffers,
+        vocab: usize,
+        n_adds: usize,
+        penalties: Option<(usize, crate::PenaltyKnobs)>,
+    ) -> Result<()> {
+        crate::launch::sampling::argmax_f32(self.reg, self.stream, bufs, vocab, n_adds, penalties)
+    }
+
     fn topk_softmax_f32(
         &self,
         logits: DevicePtr,

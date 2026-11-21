@@ -70,6 +70,7 @@ pub fn run_pointwise_sweep<B: BenchBackend>(
         "sampler_apply_penalties_f32" => run_sampler_apply_penalties_sweep::<B>(repo_root, arch),
         "softmax_masked_f16" => run_softmax_masked_f16_sweep::<B>(repo_root, arch),
         "sampler_topk_softmax_f32" => run_sampler_topk_softmax_sweep::<B>(repo_root, arch),
+        "sampler_argmax_f32" => run_sampler_argmax_sweep::<B>(repo_root, arch),
         "kv_append_f16_batched_slots" => run_kv_append_f16_batched_slots_sweep::<B>(repo_root, arch),
         "attention_decode_f16" => run_attention_decode_f16_sweep::<B>(repo_root, arch),
         "attention_decode_f16_splitk" => run_attention_decode_splitk_sweep::<B>(repo_root, arch),
@@ -4717,4 +4718,188 @@ pub fn run_split_q_gate_f16_sweep<B: BenchBackend>(repo_root: &Path, arch: &str)
     };
     cert.write_to_disk(repo_root)?;
     Ok(cert)
+}
+
+/// Host reference of the on-device greedy draw: the `(id, delta)` additions in
+/// order, then flambeau-runtime's penalties over `(token, count)` pairs
+/// (`pen` = repetition, presence, frequency), then its `argmax` (first strict
+/// maximum above -inf, 0 when none).
+fn argmax_reference(logits: &[f32], adds: &[(i32, f32)], counts: &[(u32, u32)], pen: (f32, f32, f32)) -> u32 {
+    let mut adjusted = logits.to_vec();
+    for &(id, delta) in adds {
+        adjusted[id as usize] += delta;
+    }
+    let (rep, presence, frequency) = pen;
+    for &(tok, c) in counts {
+        let Some(l) = adjusted.get_mut(tok as usize) else { continue };
+        if rep != 1.0 && rep > 0.0 {
+            if *l > 0.0 {
+                *l /= rep;
+            } else {
+                *l *= rep;
+            }
+        }
+        if presence != 0.0 {
+            *l -= presence;
+        }
+        if frequency != 0.0 {
+            *l -= frequency * c as f32;
+        }
+    }
+    let mut best = 0u32;
+    let mut best_v = f32::NEG_INFINITY;
+    for (i, &v) in adjusted.iter().enumerate() {
+        if v > best_v {
+            best = i as u32;
+            best_v = v;
+        }
+    }
+    best
+}
+
+/// `sampler_argmax_f32` — sparse add (one thread, list order), the
+/// `sampler_apply_penalties_f32` step, then the two-pass argmax. Exact: the
+/// returned index must equal the host reference on every case, including
+/// ties, NaN, -inf entries, duplicate / -inf additions and penalties.
+pub fn run_sampler_argmax_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) -> Result<Cert> {
+    const PARTS: usize = 128;
+    let dev = B::new_device(0)?;
+    let image = B::image("sampler_argmax_f32").ok_or_else(|| anyhow!("sampler_argmax_f32 not compiled"))?;
+    let module = B::load(&dev, image)?;
+    let add_k = B::kernel(&module, "flambeau_sampler_sparse_add_f32")?;
+    let part_k = B::kernel(&module, "flambeau_sampler_argmax_partial_f32")?;
+    let final_k = B::kernel(&module, "flambeau_sampler_argmax_final_f32")?;
+    let pmc = B::attributes(&part_k)?;
+    let pen_image = B::image("sampler_apply_penalties_f32")
+        .ok_or_else(|| anyhow!("sampler_apply_penalties_f32 not compiled"))?;
+    let pen_module = B::load(&dev, pen_image)?;
+    let pen_k = B::kernel(&pen_module, "flambeau_sampler_apply_penalties_f32")?;
+
+    // (vocab, case): 0 random, 1 tied maxima, 2 NaN / -inf mixed in, 3 all -inf,
+    // 4 NaN at 0 and -inf elsewhere, 5 additions decide the winner, 6 additions
+    // + repetition penalty 1.05 on the leaders, 7 all three penalties.
+    let shapes = [
+        (248320usize, 0usize), (248320, 1), (248320, 2), (248320, 5), (248320, 6), (248320, 7),
+        (151936, 0), (151936, 1), (151936, 6), (4096, 2), (33, 3), (33, 4), (1, 0),
+    ];
+    let mut results = Vec::new();
+    for (vocab, case) in shapes {
+        let seed = 0xA7A7 ^ ((vocab as u64) * 31 + case as u64);
+        let mut logits = seeded_f32_range(seed, vocab, -20.0, 20.0);
+        let mut adds: Vec<(i32, f32)> = Vec::new();
+        let mut counts: Vec<(u32, u32)> = Vec::new();
+        let mut pen = (1.0f32, 0.0f32, 0.0f32);
+        match case {
+            1 => {
+                for j in [vocab / 7, vocab / 3, vocab / 2, vocab - 1] {
+                    logits[j] = 25.0;
+                }
+            }
+            2 => {
+                for j in (0..vocab).step_by(97) {
+                    logits[j] = if j % 2 == 0 { f32::NAN } else { f32::NEG_INFINITY };
+                }
+            }
+            3 => logits.iter_mut().for_each(|v| *v = f32::NEG_INFINITY),
+            4 => {
+                logits.iter_mut().for_each(|v| *v = f32::NEG_INFINITY);
+                logits[0] = f32::NAN;
+            }
+            5 => {
+                let top = argmax_reference(&logits, &[], &[], pen) as i32;
+                adds = vec![(top, f32::NEG_INFINITY), (11, 30.0), (11, -0.5), (vocab as i32 - 2, -3.0)];
+            }
+            6 | 7 => {
+                // The ten largest logits are penalised (some pushed below the
+                // runner-up), plus 190 spread tokens and an out-of-range id.
+                let mut order: Vec<usize> = (0..vocab).collect();
+                order.sort_by(|&a, &b| logits[b].total_cmp(&logits[a]));
+                for (rank, &j) in order.iter().take(10).enumerate() {
+                    counts.push((j as u32, 1 + rank as u32));
+                }
+                for j in (0..vocab).step_by(vocab / 190) {
+                    if !counts.iter().any(|&(t, _)| t as usize == j) {
+                        counts.push((j as u32, 2));
+                    }
+                }
+                counts.push((vocab as u32 + 5, 1));
+                adds = vec![(order[3] as i32, 0.25), (17, -1.0)];
+                pen = if case == 6 { (1.05, 0.0, 0.0) } else { (1.3, 0.4, 0.15) };
+            }
+            _ => {}
+        }
+        let want = argmax_reference(&logits, &adds, &counts, pen);
+
+        let d_logits = alloc_and_upload(&dev, logits.as_slice());
+        let ids: Vec<i32> = adds.iter().map(|a| a.0).collect();
+        let vals: Vec<f32> = adds.iter().map(|a| a.1).collect();
+        let d_ids = alloc_and_upload(&dev, if ids.is_empty() { &[0i32][..] } else { &ids[..] });
+        let d_vals = alloc_and_upload(&dev, if vals.is_empty() { &[0f32][..] } else { &vals[..] });
+        let flat: Vec<u32> = counts.iter().flat_map(|&(t, c)| [t, c]).collect();
+        let d_counts = alloc_and_upload(&dev, if flat.is_empty() { &[0u32][..] } else { &flat[..] });
+        let d_pv = dev.alloc(PARTS * 4)?;
+        let d_pi = dev.alloc(PARTS * 4)?;
+        let d_out = dev.alloc(4)?;
+        {
+            let stream = dev.default_stream();
+            let (l, i, v) = (d_logits.as_usize() as u64, d_ids.as_usize() as u64, d_vals.as_usize() as u64);
+            let (pv, pi, o) = (d_pv.as_usize() as u64, d_pi.as_usize() as u64, d_out.as_usize() as u64);
+            if !adds.is_empty() {
+                let n = adds.len() as i32;
+                let mut a = <B::Args<'_>>::default();
+                a.push_arg(&l);
+                a.push_arg(&i);
+                a.push_arg(&v);
+                a.push_arg(&n);
+                B::launch(&add_k, stream, LaunchCfg::one_d(1, 1), a)?;
+            }
+            let vocab_i = vocab as i32;
+            if !counts.is_empty() {
+                let c = d_counts.as_usize() as u64;
+                let n_pairs = counts.len() as i32;
+                let mut a = <B::Args<'_>>::default();
+                a.push_arg(&l);
+                a.push_arg(&c);
+                a.push_arg(&n_pairs);
+                a.push_arg(&vocab_i);
+                a.push_arg(&pen.0);
+                a.push_arg(&pen.1);
+                a.push_arg(&pen.2);
+                B::launch(&pen_k, stream, LaunchCfg::one_d((counts.len() as u32).div_ceil(256), 256), a)?;
+            }
+            let mut a = <B::Args<'_>>::default();
+            a.push_arg(&l);
+            a.push_arg(&vocab_i);
+            a.push_arg(&pv);
+            a.push_arg(&pi);
+            B::launch(&part_k, stream, LaunchCfg::one_d(PARTS as u32, 256), a)?;
+            let parts_i = PARTS as i32;
+            let mut a = <B::Args<'_>>::default();
+            a.push_arg(&pv);
+            a.push_arg(&pi);
+            a.push_arg(&parts_i);
+            a.push_arg(&o);
+            B::launch(&final_k, stream, LaunchCfg::one_d(1, 256), a)?;
+            stream.synchronize()?;
+        }
+        let mut got = [0i32; 1];
+        unsafe {
+            dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost,
+                DevicePtr(got.as_mut_ptr() as usize), d_out, 4)?;
+        }
+        dev.default_stream().synchronize()?;
+        unsafe {
+            dev.dealloc(d_logits, vocab * 4)?;
+            dev.dealloc(d_ids, ids.len().max(1) * 4)?;
+            dev.dealloc(d_vals, vals.len().max(1) * 4)?;
+            dev.dealloc(d_counts, flat.len().max(1) * 4)?;
+            dev.dealloc(d_pv, PARTS * 4)?;
+            dev.dealloc(d_pi, PARTS * 4)?;
+            dev.dealloc(d_out, 4)?;
+        }
+        let err = (got[0] as u32 != want) as u32 as f32;
+        results.push(ShapeResult { m: vocab, k: case, n: adds.len() + counts.len(), seed, max_rel_err: err, tolerance: 0.0, pass: err == 0.0 });
+    }
+    finish_cert(&dev, repo_root, arch, "sampler_argmax_f32", "sampler_argmax_f32", "F32", "F32",
+        "exact (index equal to the host argmax after the sparse additions and penalties)", results, pmc)
 }

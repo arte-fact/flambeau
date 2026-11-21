@@ -735,6 +735,21 @@ pub struct GdnSplitQkvShape {
 // Sampling penalty aggregates.
 // ---------------------------------------------------------------------------
 
+/// Buffers for [`Ops::argmax_f32`]: `logits` (adjusted in place by the
+/// sparse `(add_ids, add_vals)` list, then the `(token, count)` pairs of
+/// `penalty_counts`), the per-block winners `part_v` / `part_i`
+/// (`ARGMAX_PARTS` each) and the winning index `out`.
+#[derive(Copy, Clone, Debug)]
+pub struct ArgmaxBuffers {
+    pub logits: DevicePtr,
+    pub add_ids: DevicePtr,
+    pub add_vals: DevicePtr,
+    pub penalty_counts: DevicePtr,
+    pub part_v: DevicePtr,
+    pub part_i: DevicePtr,
+    pub out: DevicePtr,
+}
+
 /// Buffers for [`Ops::apply_penalties_f32`].
 #[derive(Copy, Clone, Debug)]
 pub struct PenaltyBuffers {

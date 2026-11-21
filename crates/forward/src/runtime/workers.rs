@@ -104,7 +104,7 @@ impl WorkerRole {
 }
 
 /// Sampler closure: logits row -> (sampled token, full truncated dist).
-pub(crate) type SampleFn = Box<dyn FnMut(&[f32]) -> (u32, Vec<(u32, f32)>) + Send>;
+pub(crate) type SampleFn = flambeau_runtime::MtpSampler;
 /// Factory rebuilding the sampler from a seed — every TP rank must draw
 /// the SAME draft tokens, so all ranks build their sampler from `seed`.
 pub type SampleFactory = std::sync::Arc<dyn Fn(u64) -> SampleFn + Send + Sync>;

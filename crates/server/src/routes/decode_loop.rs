@@ -977,13 +977,30 @@ fn mtp_sample_factory(
             })
             .collect()
     });
+    // Greedy without logit_bias, the draw below is the argmax of the logits
+    // after the stop adjustments then the history penalties (see
+    // `build_distribution`), so it can run on device.
+    let argmax = (sampling.is_greedy() && sampling.logit_bias.as_deref().is_none_or(|b| b.is_empty()))
+        .then(|| {
+            let mut penalty_counts = Vec::new();
+            if sampling.has_penalties() {
+                flambeau_runtime::sampling::build_history_counts(&history, &mut Vec::new(), &mut penalty_counts);
+            }
+            std::sync::Arc::new(flambeau_runtime::MtpArgmax {
+                adds: stop_adjust.to_vec(),
+                penalty_counts,
+                repetition: sampling.repetition_penalty,
+                presence: sampling.presence_penalty,
+                frequency: sampling.frequency_penalty,
+            })
+        });
     std::sync::Arc::new(move |seed: u64| {
         let sampling = sampling.clone();
         let history = history.clone();
         let stop_adjust = std::sync::Arc::clone(&stop_adjust);
         let mut adjusted: Vec<f32> = Vec::new();
         let mut rng = flambeau_runtime::Rng::from_seed(seed);
-        Box::new(move |logits: &[f32]| -> (u32, Vec<(u32, f32)>) {
+        let draw = Box::new(move |logits: &[f32]| -> (u32, Vec<(u32, f32)>) {
             adjusted.clear();
             adjusted.extend_from_slice(logits);
             for &(sid, delta) in stop_adjust.iter() {
@@ -1003,6 +1020,7 @@ fn mtp_sample_factory(
                 }
             }
             (tok, dist)
-        })
+        });
+        flambeau_runtime::MtpSampler { draw, argmax: argmax.clone() }
     })
 }

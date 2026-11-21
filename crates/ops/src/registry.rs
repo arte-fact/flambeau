@@ -289,6 +289,7 @@ pub const KERNEL_STEMS: &[&str] = &[
     "dense_gemv_f16_f16_batched",
     // GPU-side sampler kernels for the chat hot path.
     "sampler_topk_softmax_f32",
+    "sampler_argmax_f32",
     "sampler_apply_penalties_f32",
     // Gemma4 — final logit softcap.
     "apply_softcap_f32",

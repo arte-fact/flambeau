@@ -341,6 +341,28 @@ impl Sampler {
 /// `true`, the returned distribution is one-hot at the argmax of the
 /// **penalty-adjusted** logits (history is still applied so penalty
 /// effects on the argmax are respected).
+/// One MTP draw: `draw(logits)` returns the sampled token and the
+/// distribution it was drawn from. `argmax` is `Some` exactly when
+/// `draw(logits)` is `(t, [(t, 1.0)])` with `t` the host `argmax` of the
+/// logits after the [`MtpArgmax`] adjustments — the draw then needs no host
+/// logits and can run where the logits are.
+pub struct MtpSampler {
+    pub draw: Box<dyn FnMut(&[f32]) -> (u32, Vec<(u32, f32)>) + Send>,
+    pub argmax: Option<std::sync::Arc<MtpArgmax>>,
+}
+
+/// The adjustments of a greedy draw, in the host order: each `(id, delta)` of
+/// `adds` added in list order, then the repetition / presence / frequency
+/// penalties over the deduplicated `(token, count)` pairs of
+/// `penalty_counts` (empty when no penalty applies).
+pub struct MtpArgmax {
+    pub adds: Vec<(u32, f32)>,
+    pub penalty_counts: Vec<(u32, u32)>,
+    pub repetition: f32,
+    pub presence: f32,
+    pub frequency: f32,
+}
+
 pub fn build_distribution(logits: &[f32], mode: &Sampling, history: &[u32]) -> Vec<(u32, f32)> {
     // /h penalty-aware path. If neither penalties nor logit_bias are
     // active, skip the O(V)-byte clone and operate on the input slice.

@@ -20,6 +20,68 @@ use flambeau_core::{LaunchArgs, LaunchCfg};
 /// positions (one-sentence-then-stop chat-truncation bug).
 pub const SAMPLER_K_OUT_MAX: usize = 2048;
 
+/// Blocks of the first argmax pass (and partial winners it writes).
+pub const ARGMAX_PARTS: usize = 128;
+
+/// `out[0]` = the host `argmax` (first maximum, NaN and -inf never win, 0
+/// when nothing qualifies) of `logits` adjusted in place, in the host order:
+/// the `n_adds` sparse additions in list order, then `penalties` = the
+/// `(n_pairs, knobs)` of [`apply_penalties_f32`] over `penalty_counts`.
+pub fn argmax_f32<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
+    bufs: crate::ArgmaxBuffers,
+    vocab: usize,
+    n_adds: usize,
+    penalties: Option<(usize, crate::PenaltyKnobs)>,
+) -> Result<()> {
+    let crate::ArgmaxBuffers { logits, add_ids, add_vals, penalty_counts, part_v, part_i, out } = bufs;
+    let module = reg.expect_module("sampler_argmax_f32")?;
+    let l_ptr: u64 = logits.as_usize() as u64;
+    if n_adds > 0 {
+        let kernel = B::kernel(module, "flambeau_sampler_sparse_add_f32")?;
+        let ids_ptr: u64 = add_ids.as_usize() as u64;
+        let vals_ptr: u64 = add_vals.as_usize() as u64;
+        let n_i = n_adds as i32;
+        let mut args = <B::Args<'_>>::default();
+        args.push_arg(&l_ptr);
+        args.push_arg(&ids_ptr);
+        args.push_arg(&vals_ptr);
+        args.push_arg(&n_i);
+        B::launch(&kernel, stream, LaunchCfg::one_d(1, 1), args)?;
+    }
+    if let Some((n_pairs, knobs)) = penalties.filter(|(n_pairs, _)| *n_pairs > 0) {
+        apply_penalties_f32(
+            reg,
+            stream,
+            crate::PenaltyBuffers { logits, token_counts: penalty_counts },
+            n_pairs,
+            vocab,
+            knobs,
+        )?;
+    }
+    let pv_ptr: u64 = part_v.as_usize() as u64;
+    let pi_ptr: u64 = part_i.as_usize() as u64;
+    let vocab_i = vocab as i32;
+    let kernel = B::kernel(module, "flambeau_sampler_argmax_partial_f32")?;
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&l_ptr);
+    args.push_arg(&vocab_i);
+    args.push_arg(&pv_ptr);
+    args.push_arg(&pi_ptr);
+    B::launch(&kernel, stream, LaunchCfg::one_d(ARGMAX_PARTS as u32, 256), args)?;
+    let kernel = B::kernel(module, "flambeau_sampler_argmax_final_f32")?;
+    let o_ptr: u64 = out.as_usize() as u64;
+    let parts_i = ARGMAX_PARTS as i32;
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&pv_ptr);
+    args.push_arg(&pi_ptr);
+    args.push_arg(&parts_i);
+    args.push_arg(&o_ptr);
+    B::launch(&kernel, stream, LaunchCfg::one_d(1, 256), args)?;
+    Ok(())
+}
+
 /// Apply repetition / presence / frequency
 /// penalties in place on `[V]` F32 logits. `token_counts` is a flat
 /// device buffer of `n_pairs * 2` u32s laid out as

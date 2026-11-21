@@ -65,6 +65,10 @@ pub const DIRECT_CALL_KERNELS_SM86: &[DirectCallKernel] = &[
         cert_rel_path: "certs/cuda/sm_86/rmsnorm_f32.json",
     },
     DirectCallKernel {
+        impl_id: "sampler_argmax_f32",
+        cert_rel_path: "certs/cuda/sm_86/sampler_argmax_f32.json",
+    },
+    DirectCallKernel {
         impl_id: "scale_f32",
         cert_rel_path: "certs/cuda/sm_86/scale_f32.json",
     },

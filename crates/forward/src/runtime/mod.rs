@@ -147,7 +147,7 @@ pub trait Arch: Send + Sync + 'static {
         _anchor_pos: usize,
         _slot_id: usize,
         _n_draft: usize,
-        _sample: &mut dyn FnMut(&[f32]) -> (u32, Vec<(u32, f32)>),
+        _sample: &mut flambeau_runtime::MtpSampler,
         _seed: u64,
         _out_logits: &mut Vec<f32>,
     ) -> Result<Vec<u32>> {

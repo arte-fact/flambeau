@@ -236,7 +236,7 @@ pub trait ForwardCtx {
         _slot_id: usize,
         _mtp_layer_idx: usize,
         _n_draft: usize,
-        _sample: &mut dyn FnMut(&[f32]) -> (u32, Vec<(u32, f32)>),
+        _sample: &mut flambeau_runtime::MtpSampler,
         _drafts: &mut Vec<MtpDraft>,
     ) -> Result<()> {
         anyhow::bail!("mtp_draft: not implemented on this ctx")
