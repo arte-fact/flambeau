@@ -1204,11 +1204,13 @@ fn mmvq_m1_recipe<B: flambeau_core::KernelBackend>(dtype_weight: QDtype) -> Resu
 /// Most activation columns one batched MMVQ launch covers (its `_n8` entry).
 const MMVQ_BATCH_MAX: usize = 8;
 
-/// (threads, rows per block) of every batched-MMVQ entry: one warp, two
-/// weight rows sharing each activation load (fastest of 32/64/128 threads x
-/// 1/2/4 rows for N = 1..8 at the FFN shapes on sm_86).
-pub const fn mmvq_batched_shape(_cols: usize) -> (u32, u32) {
-    (32, 2)
+/// (threads, rows per block) of a batched-MMVQ impl's entries — one warp, the
+/// rows its cell was instantiated with — or `None` if `impl_id` is not one.
+pub fn mmvq_batched_shape(impl_id: &str) -> Option<(u32, u32)> {
+    Recipe::from_impl_id(impl_id)
+        .ok()
+        .filter(|recipe| recipe.kind == RecipeKind::MmvqBatched)
+        .map(|recipe| (recipe.threads, recipe.rows_per_block))
 }
 
 /// The `<base>_n1` .. `<base>_n8` entry names of a batched MMVQ cell.
@@ -1230,6 +1232,7 @@ macro_rules! batched_entries {
 /// Per batched-MMVQ stem, its entry for 1..=`MMVQ_BATCH_MAX` columns. Each
 /// name is `<recipe.entry>_n<cols>` (checked by `recipe_table_tests`).
 const MMVQ_BATCHED_ENTRIES: &[(&str, [&str; MMVQ_BATCH_MAX])] = &[
+    ("mmvq_q3_k_dp4a_t128_vdr2_batched", batched_entries!("flambeau_mmvq_q3_k_dp4a_t128_vdr2_batched_q8_1")),
     ("mmvq_q6_k_dp4a_vdr2_batched", batched_entries!("flambeau_mmvq_q6_k_dp4a_vdr2_batched_q8_1")),
     ("mmvq_q4_k_dp4a_t128_vdr2_batched", batched_entries!("flambeau_mmvq_q4_k_dp4a_t128_vdr2_batched_q8_1")),
     ("mmvq_q5_k_dp4a_t128_vdr2_batched", batched_entries!("flambeau_mmvq_q5_k_dp4a_t128_vdr2_batched_q8_1")),
@@ -1297,8 +1300,8 @@ fn mmvq_batched_launch<B: flambeau_core::KernelBackend>(
         args.push_arg(&d_ptr);
         args.push_arg(&n_rows_i);
         args.push_arg(&n_blocks_i);
-        let (threads, rows) = mmvq_batched_shape(cols);
-        B::launch(&kernel, stream, LaunchCfg::one_d((n_rows as u32).div_ceil(rows), threads), args)?;
+        let grid = (n_rows as u32).div_ceil(recipe.rows_per_block);
+        B::launch(&kernel, stream, LaunchCfg::one_d(grid, recipe.threads), args)?;
         c0 += cols;
     }
     Ok(())
@@ -1717,6 +1720,18 @@ const QMATMUL_RECIPES: &[RecipeRow] = &[
             entry_f16: Some("flambeau_mmvq_q3_k_dp4a_t128_vdr2_q8_1_f16"),
             threads: 128,
             rows_per_block: 1,
+            mmq_tile: (0, 0),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_q3_k_mmvq_dp4a_t128_vdr2_batched"],
+        recipe: Recipe {
+            kind: RecipeKind::MmvqBatched,
+            stem: "mmvq_q3_k_dp4a_t128_vdr2_batched",
+            entry: "flambeau_mmvq_q3_k_dp4a_t128_vdr2_batched_q8_1",
+            entry_f16: None,
+            threads: 32,
+            rows_per_block: 4,
             mmq_tile: (0, 0),
         },
     },
