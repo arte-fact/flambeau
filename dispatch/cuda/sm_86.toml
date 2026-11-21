@@ -225,6 +225,6 @@ notes   = "Single-pass up to 32 KV rows, flash-decoding split-K above (attention
 dtype   = "Q8_0"          # KV dtype
 dtype_q = "F16"           # Q / output dtype
 shape   = { m = "1..4", k = "any", n = "any" }
-impl    = "attention_decode_q8_kv"
-cert    = "certs/cuda/sm_86/attention_decode_q8_kv.json"
-notes   = "Single-pass up to 32 KV rows, flash-decoding split-K above (attention_decode_q8_kv_splitk, _dpos under graph capture)."
+impl    = "attention_decode_q8_kv_vec_dpos_sm_86"
+cert    = "certs/cuda/sm_86/attention_decode_q8_kv_vec_dpos_sm_86.json"
+notes   = "Global layers: 128-thread warp-per-token-group kernel, 14 KV parts per Q head, position on device (graph and eager). x1.65 at a 181-token tail, x1.6 at 1k, x2.3 at 4k over the split-K path. SWA layers keep split-K."

@@ -537,12 +537,11 @@ impl<B: KernelBackend> Ops for OpsImpl<'_, B> {
         match row.impl_id {
             "attention_decode_f16" | "attention_decode_q8_kv" | "attention_decode_f16_gfx906"
             | "attention_decode_q8_kv_gfx906" => Ok(crate::AttnDecodeVariant::SplitK),
+            "attention_decode_q8_kv_vec_dpos_sm_86" => Ok(crate::AttnDecodeVariant::VecDpos),
             other => anyhow::bail!("attention_decode: dispatch row impl {other} has no decode path"),
         }
     }
 
-    // why: microbench null on sm_86 (x0.83 vs split-K at a 181-token tail, x1.28 at 8k with 8 parts).
-    #[cfg(unverified)]
     fn attention_decode_q8_kv_vec_dpos(
         &self,
         buffers: crate::AttnBuffers,

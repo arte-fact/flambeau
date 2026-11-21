@@ -16,8 +16,9 @@ pub fn dispatch_qmatmul(cfg: &QMatMulCfg) -> Option<&'static KernelDescriptor> {
 
 /// `[[attention_decode]]` rows of `dispatch/cuda/sm_86.toml`, keyed on the KV
 /// dtype (`dtype_weight`) with F16 Q / output. Each row names the decode path
-/// the composite runs for that KV layout: single-pass up to the split-K
-/// threshold, split-K above it (the split-K kernels are direct calls).
+/// the composite runs for that KV layout: F16 single-pass up to the split-K
+/// threshold and split-K above it (direct calls); Q8_0 the 128-thread
+/// vec_dpos kernel on global layers (SWA layers keep the split-K path).
 pub const ATTENTION_DECODE_SM86: &[KernelDescriptor] = &[
     KernelDescriptor {
         op_name: "AttentionDecode",
@@ -31,13 +32,13 @@ pub const ATTENTION_DECODE_SM86: &[KernelDescriptor] = &[
     },
     KernelDescriptor {
         op_name: "AttentionDecode",
-        impl_id: "attention_decode_q8_kv",
+        impl_id: "attention_decode_q8_kv_vec_dpos_sm_86",
         backend: "cuda",
         arch: "sm_86",
         dtype_weight: QDtype::Q8_0,
         dtype_activation: QDtype::F16,
         m_range: (1, 4),
-        cert_rel_path: "certs/cuda/sm_86/attention_decode_q8_kv.json",
+        cert_rel_path: "certs/cuda/sm_86/attention_decode_q8_kv_vec_dpos_sm_86.json",
     },
 ];
 

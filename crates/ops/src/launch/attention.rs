@@ -966,8 +966,12 @@ pub fn attention_decode_q8_kv_splitk_dpos<B: flambeau_core::KernelBackend>(
     Ok(())
 }
 
-// why: microbench null on sm_86 (x0.83 vs split-K at a 181-token tail, x1.28 at 8k with 8 parts).
-#[cfg(unverified)]
+/// KV parts (gridDim.y) of `attention_decode_q8_kv_vec_dpos` per Q head:
+/// about 4 blocks per SM of an 82-SM sm_86 for 24 Q heads. One baked grid
+/// for every position: x1.65 to x2.7 over the split-K path from a 181- to an
+/// 8192-token tail (g5b microbench).
+pub const ATTN_VEC_DPOS_PARTS: usize = 14;
+
 /// Device-position Q8_0-KV decode attention with 128-thread blocks
 /// (`attention_decode_q8_kv_vec_dpos`, CUDA-only): grid (n_heads_q, n_par).
 /// With `n_par == 1` the chunk pass writes `out`; above, it writes split-K

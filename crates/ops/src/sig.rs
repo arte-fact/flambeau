@@ -303,6 +303,9 @@ pub enum AttnDecodeVariant {
     /// Single-pass kernel up to `SPLITK_MIN_TOKENS_KV` KV rows, split-K
     /// (flash-decoding chunk + combine) above.
     SplitK,
+    /// `attention_decode_q8_kv_vec_dpos` (Q8_0 KV, global layers, head_dim
+    /// 128 / 256) at every KV tail; other layers keep the SplitK path.
+    VecDpos,
 }
 
 #[derive(Copy, Clone, Debug)]

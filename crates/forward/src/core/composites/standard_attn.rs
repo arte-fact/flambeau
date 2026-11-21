@@ -700,14 +700,42 @@ pub fn standard_attn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
         let mut attn_out = unsafe { Tensor::<F16>::from_raw(state.pool.attn_out_f16, n * q_width) };
         if n == 1 {
             let kv_dtype = if is_q8 { flambeau_core::QDtype::Q8_0 } else { flambeau_core::QDtype::F16 };
-            let flambeau_ops::AttnDecodeVariant::SplitK = ops.attention_decode_variant(kv_dtype, n)?;
+            let variant = ops.attention_decode_variant(kv_dtype, n)?;
             let n_tokens_kv = start_position + 1;
             // Ring addressing kicks in only once the window-sized slab has
             // wrapped; below the wrap the slab is contiguous and the slide
             // path is bit-identical.
             let ring_active = is_ring_layer && n_tokens_kv > slab_depth;
             let ring_depth_arg: i32 = if ring_active { slab_depth as i32 } else { 0 };
-            if is_q8 {
+            // A global layer's whole KV tail from row 0: the vec kernel reads
+            // the position from `pool.position_i32` (uploaded above, or by the
+            // graph driver before a replay) and runs one baked grid, so it
+            // needs no capture witness.
+            let vec_dpos = is_q8
+                && variant == flambeau_ops::AttnDecodeVariant::VecDpos
+                && !is_ring_layer
+                && weights.window_size == 0
+                && matches!(weights.head_dim, 128 | 256)
+                && state.pool.splitk_partials_m.as_usize() != 0;
+            if vec_dpos {
+                ops.attention_decode_q8_kv_vec_dpos(
+                    flambeau_ops::AttnBuffers { q: q_f16_rope.ptr, k: k_slot_ptr, v: v_slot_ptr, out: attn_out.ptr },
+                    flambeau_ops::AttnSplitkPartials {
+                        partials_m: state.pool.splitk_partials_m,
+                        partials_s: state.pool.splitk_partials_s,
+                        partials_o: state.pool.splitk_partials_o,
+                    },
+                    flambeau_ops::AttnVecDposShape {
+                        n_heads_q: weights.n_heads,
+                        n_heads_kv: weights.n_kv_heads,
+                        head_dim: weights.head_dim,
+                        n_par: flambeau_ops::attention::ATTN_VEC_DPOS_PARTS,
+                    },
+                    scale,
+                    state.pool.position_i32,
+                )?;
+                let _ = (k_cache, v_cache);
+            } else if is_q8 {
                 // SWA at decode, same lever as the F16 path below: when
                 // window_size < n_tokens_kv, slide the Q8 cache pointer to the
                 // window start and pass n_tokens_kv = window. The kernel's
