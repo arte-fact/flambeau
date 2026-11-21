@@ -363,6 +363,56 @@ mod tests {
         }
     }
 
+    /// The streamed `(reasoning_content, content)` of `raw`, fed in chunks of
+    /// `chunk` bytes to the template-primed (in-think) parser of the SSE path.
+    fn streamed_thinking(raw: &str, chunk: usize) -> (String, String) {
+        use crate::tool_call_parser::{hermes::HermesJsonParser, ParserEvent, ReasoningTrim, ToolCallParser};
+        let mut parser = HermesJsonParser::new_in_think();
+        let mut trim = ReasoningTrim::default();
+        let mut events = Vec::new();
+        let bytes: Vec<char> = raw.chars().collect();
+        for piece in bytes.chunks(chunk) {
+            let piece: String = piece.iter().collect();
+            events.extend(trim.apply(parser.push(&piece)));
+        }
+        events.extend(trim.apply(parser.finish()));
+        let (mut think, mut text) = (String::new(), String::new());
+        for e in events {
+            match e {
+                ParserEvent::ThinkDelta(s) => think.push_str(&s),
+                ParserEvent::TextDelta(s) => text.push_str(&s),
+                other => panic!("unexpected event {other:?}"),
+            }
+        }
+        (think, text)
+    }
+
+    #[test]
+    fn thinking_response_equals_streamed_deltas() {
+        let markers = crate::model_handle::ReasoningMarkers {
+            style: crate::model_handle::ReasoningStyle::ThinkTag,
+            open: "<think>",
+            close: "</think>",
+        };
+        let raws = [
+            "\nLet me think.\n\nTwo steps.\n</think>\n\nThe answer is 4.\n",
+            "plain reasoning</think>answer",
+            "  spaced  out  \n</think>  \n  indented answer  ",
+            "\n\n</think>\n\nOnly an answer.",
+            "unterminated reasoning \n with a tail   ",
+            "a</think>\n\n",
+        ];
+        for raw in raws {
+            let mut text = raw.to_owned();
+            let cot = super::split_think_reasoning(&mut text, markers).unwrap_or_default();
+            for chunk in [1, 2, 3, 7, 64] {
+                let (think, content) = streamed_thinking(raw, chunk);
+                assert_eq!(think, cot, "reasoning of {raw:?} in {chunk}-char chunks");
+                assert_eq!(content, text, "content of {raw:?} in {chunk}-char chunks");
+            }
+        }
+    }
+
     #[test]
     fn stop_cut_keeps_trailing_whitespace() {
         let mut text = "class LRUCache:\n    def get(self):".to_owned();

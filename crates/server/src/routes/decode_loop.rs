@@ -162,8 +162,9 @@ pub(crate) fn stream_completion_sse(
         // sampled token (or coalesced multi-byte run). We push into the
         // parser and stream out events as they come. Never buffer to
         // end-of-stream.
+        let mut reasoning_trim = crate::tool_call_parser::ReasoningTrim::default();
         let mut emit_delta = |text: &str| -> bool {
-            let events = parser.push(text);
+            let events = reasoning_trim.apply(parser.push(text));
             let sent = emit_events(events, &mut has_tool_calls, &mut abort_after_close);
             sent && !abort_after_close
         };
@@ -184,7 +185,7 @@ pub(crate) fn stream_completion_sse(
 
         // Flush the parser — dumps any buffered mid-tag content and
         // closes out pending think text.
-        let tail = parser.finish();
+        let tail = reasoning_trim.apply(parser.finish());
         let _ = emit_events(tail, &mut has_tool_calls, &mut abort_after_close);
 
         // finish_reason flips to "tool_calls" when the turn produced

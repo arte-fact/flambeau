@@ -96,6 +96,71 @@ impl ParserEvent {
     }
 }
 
+/// llama-server's reasoning whitespace rule (`string_strip` on the
+/// reasoning, `consume_spaces` after its close), applied to a parser event
+/// stream as it arrives: a think block's reasoning loses its leading and
+/// trailing whitespace, and the whitespace that follows the block is
+/// consumed. Trailing whitespace is held until more reasoning follows it,
+/// so the deltas concatenate to what the non-streamed split computes over
+/// the whole text.
+#[derive(Debug, Default)]
+pub struct ReasoningTrim {
+    in_block: bool,
+    started: bool,
+    held_ws: String,
+    after_close: bool,
+}
+
+impl ReasoningTrim {
+    pub fn apply(&mut self, events: Vec<ParserEvent>) -> Vec<ParserEvent> {
+        let mut out = Vec::with_capacity(events.len());
+        for e in events {
+            if let ParserEvent::ThinkDelta(s) = e {
+                if !self.in_block {
+                    self.in_block = true;
+                    self.started = false;
+                    self.held_ws.clear();
+                }
+                self.after_close = false;
+                let s = if self.started { s.as_str() } else { s.trim_start() };
+                if s.is_empty() {
+                    continue;
+                }
+                self.started = true;
+                let body = s.trim_end();
+                if body.is_empty() {
+                    self.held_ws.push_str(s);
+                    continue;
+                }
+                let mut delta = std::mem::take(&mut self.held_ws);
+                delta.push_str(body);
+                self.held_ws.push_str(&s[body.len()..]);
+                out.push(ParserEvent::ThinkDelta(delta));
+                continue;
+            }
+            if self.in_block {
+                self.in_block = false;
+                self.held_ws.clear();
+                self.after_close = true;
+            }
+            match e {
+                ParserEvent::TextDelta(s) if self.after_close => {
+                    let t = s.trim_start();
+                    if !t.is_empty() {
+                        self.after_close = false;
+                        out.push(ParserEvent::TextDelta(t.to_owned()));
+                    }
+                }
+                other => {
+                    self.after_close = false;
+                    out.push(other);
+                }
+            }
+        }
+        out
+    }
+}
+
 /// Assembler: walk a (coalesced) parser-event stream and split it
 /// into the assistant `content` string and the `tool_calls[]` list that
 /// go into the OpenAI response body.
