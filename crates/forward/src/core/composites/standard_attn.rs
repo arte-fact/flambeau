@@ -664,10 +664,22 @@ pub fn standard_attn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
                         &ops,
                     )?;
                 }
+            } else if state.capture.is_some() {
+                // The plain append is a DtoD copy whose destination depends on
+                // the position; under capture a kernel reads the write row from
+                // `decode_ctx_i32[0]` instead.
+                ops.kv_append_f16_dpos(
+                    flambeau_ops::KvAppendBuffers {
+                        k_src: k_f16_rope.ptr,
+                        v_src: v_f16_view.ptr,
+                        k_dst: k_cache.ptr,
+                        v_dst: v_cache.ptr,
+                    },
+                    kv_width,
+                    if is_ring_layer { slab_depth } else { 0 },
+                    state.pool.decode_ctx_i32,
+                )?;
             } else {
-                if let Some(cap) = state.capture.as_deref_mut() {
-                    cap.mark_uncapturable("kv_append: plain F16 append (no _slots) not captured");
-                }
                 flambeau_model_ops::kv_append_f16(
                     &k_f16_rope,
                     &v_f16_view,

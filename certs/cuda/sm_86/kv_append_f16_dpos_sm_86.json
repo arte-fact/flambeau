@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "impl_id": "kv_append_f16_dpos_sm_86",
+  "backend": "cuda",
+  "arch": "sm_86",
+  "op": "kv_append",
+  "dtype_weight": "F16",
+  "dtype_activation": "F16",
+  "tolerance_formula": "bit-exact copy of the K/V rows; other rows untouched",
+  "results": [
+    {
+      "m": 0,
+      "k": 32,
+      "n": 1024,
+      "seed": 8121754,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 0,
+      "k": 300,
+      "n": 1024,
+      "seed": 8099686,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 0,
+      "k": 1641,
+      "n": 1024,
+      "seed": 7956055,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 0,
+      "k": 511,
+      "n": 2048,
+      "seed": 16247969,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 0,
+      "k": 77,
+      "n": 512,
+      "seed": 4037979,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 1152,
+      "k": 4000,
+      "n": 1024,
+      "seed": 8253850,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 1152,
+      "k": 1200,
+      "n": 2048,
+      "seed": 16172746,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-11-21T06:19:49Z",
+  "rig": "threadreaper-sm_86",
+  "pmc": {
+    "vgpr_count": 18,
+    "sgpr_count": null,
+    "waves_per_simd": null,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

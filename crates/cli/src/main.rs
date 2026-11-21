@@ -1646,6 +1646,7 @@ fn sweep_cuda(root: &std::path::Path, op: &str, dtype: &str) -> Result<()> {
         ("attention_decode_batched_splitk", flambeau_bench::sweep_attention_batched_splitk::run_sweep::<Cuda>),
         ("attention_decode_f16_splitk_dpos", flambeau_bench::sweep_attention_splitk_dpos::run_sweep::<Cuda>),
         ("kv_append_v_unit_norm_f16_dpos", flambeau_bench::sweep_kv_append_v_unit_norm_dpos::run_sweep::<Cuda>),
+        ("kv_append_f16_dpos", flambeau_bench::sweep_kv_append_f16_dpos::run_sweep::<Cuda>),
         ("embed_gather_f16_dpos", flambeau_bench::sweep_embed_gather_dpos::run_sweep::<Cuda>),
         ("attention_decode_q8_kv_splitk_dpos", flambeau_bench::sweep_attention_q8_kv_splitk_dpos::run_sweep::<Cuda>),
         ("quantize_f16_q8_0_dpos", flambeau_bench::sweep_quantize_f16_q8_0_dpos::run_sweep::<Cuda>),

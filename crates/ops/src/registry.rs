@@ -244,6 +244,7 @@ pub const KERNEL_STEMS: &[&str] = &[
     "kv_append_v_unit_norm_f16",
     // Device-position decode-graph kernels (CUDA-only).
     "kv_append_v_unit_norm_f16_dpos",
+    "kv_append_f16_dpos",
     "embed_gather_f16_dpos",
     "softmax_masked_f16",
     // Attention.

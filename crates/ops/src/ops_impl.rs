@@ -421,6 +421,18 @@ impl<B: KernelBackend> Ops for OpsImpl<'_, B> {
         )
     }
 
+    fn kv_append_f16_dpos(
+        &self,
+        buf: crate::KvAppendBuffers,
+        kv_width: usize,
+        ring_depth: usize,
+        pos_ptr: DevicePtr,
+    ) -> Result<()> {
+        crate::launch::attention::kv_append_f16_dpos(
+            self.reg, self.stream, buf, kv_width, ring_depth, pos_ptr,
+        )
+    }
+
     fn embed_gather_f16_dpos(
         &self,
         embd: DevicePtr,

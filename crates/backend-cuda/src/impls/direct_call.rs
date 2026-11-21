@@ -37,6 +37,10 @@ pub const DIRECT_CALL_KERNELS_SM86: &[DirectCallKernel] = &[
         cert_rel_path: "certs/cuda/sm_86/embed_gather_f16_dpos_sm_86.json",
     },
     DirectCallKernel {
+        impl_id: "kv_append_f16_dpos_sm_86",
+        cert_rel_path: "certs/cuda/sm_86/kv_append_f16_dpos_sm_86.json",
+    },
+    DirectCallKernel {
         impl_id: "kv_append_v_unit_norm_f16_dpos_sm_86",
         cert_rel_path: "certs/cuda/sm_86/kv_append_v_unit_norm_f16_dpos_sm_86.json",
     },

@@ -1757,6 +1757,44 @@ pub fn kv_append_v_unit_norm_f16_dpos<B: flambeau_core::KernelBackend>(
     Ok(())
 }
 
+/// Device-position F16 KV append: one K and one V row of `kv_width` written at
+/// row `ring_depth > 0 ? position % ring_depth : position` of the unslid slot
+/// bases, `position` read on-device from `pos_ptr[0]`. CUDA-only kernel
+/// (`kv_append_f16_dpos`).
+pub fn kv_append_f16_dpos<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
+    buf: crate::KvAppendBuffers,
+    kv_width: usize,
+    ring_depth: usize,
+    pos_ptr: flambeau_core::DevicePtr,
+) -> Result<()> {
+    let module = reg.expect_module("kv_append_f16_dpos")?;
+    let kernel = B::kernel(module, "flambeau_kv_append_f16_dpos")?;
+    let kv_width_i = kv_width as i32;
+    let ring_depth_i = ring_depth as i32;
+    let k_src_p: u64 = buf.k_src.as_usize() as u64;
+    let v_src_p: u64 = buf.v_src.as_usize() as u64;
+    let k_dst_p: u64 = buf.k_dst.as_usize() as u64;
+    let v_dst_p: u64 = buf.v_dst.as_usize() as u64;
+    let pos_p: u64 = pos_ptr.as_usize() as u64;
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&k_src_p);
+    args.push_arg(&v_src_p);
+    args.push_arg(&k_dst_p);
+    args.push_arg(&v_dst_p);
+    args.push_arg(&kv_width_i);
+    args.push_arg(&ring_depth_i);
+    args.push_arg(&pos_p);
+    let cfg = LaunchCfg {
+        grid: (kv_width.div_ceil(256) as u32, 1, 1),
+        block: (256, 1, 1),
+        shared_bytes: 0,
+    };
+    B::launch(&kernel, stream, cfg, args)?;
+    Ok(())
+}
+
 /// Device-position embedding-row gather, F16. Copies one hidden-width
 /// row `embd[token_id * hidden + j]` → `dst[j]`, reading `token_id` on-device
 /// from `ctx_ptr[1]` (the decode-graph `[position, token_id]` context). Used

@@ -306,6 +306,16 @@ pub trait Ops {
         pos_ptr: DevicePtr,
     ) -> Result<()>;
 
+    /// Device-position F16 KV append of one K and one V row of `kv_width`;
+    /// the write row is read from `pos_ptr[0]` on-device. CUDA-only.
+    fn kv_append_f16_dpos(
+        &self,
+        buf: crate::KvAppendBuffers,
+        kv_width: usize,
+        ring_depth: usize,
+        pos_ptr: DevicePtr,
+    ) -> Result<()>;
+
     /// Device-position embedding-row gather. Reads `token_id` from `ctx_ptr[1]`
     /// on-device and copies `embd[token_id * hidden + j]` → `dst[j]`. CUDA-only.
     fn embed_gather_f16_dpos(

@@ -108,6 +108,7 @@ pub mod sweep_attention_q8_kv_splitk_dpos;
 
 #[cfg(any(feature = "hip", feature = "cuda"))]
 pub mod sweep_quantize_f16_q8_0_dpos;
+pub mod sweep_kv_append_f16_dpos;
 
 #[cfg(feature = "hip")]
 pub mod sweep_q4_0_q5_0;
