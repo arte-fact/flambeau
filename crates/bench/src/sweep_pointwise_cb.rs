@@ -96,6 +96,7 @@ pub fn run_pointwise_sweep<B: BenchBackend>(
         "gdn_state_step_f32" => run_gdn_state_step_sweep::<B>(repo_root, arch),
         "gdn_state_step_alphabeta_f32" => run_gdn_alphabeta_sweep::<B>(repo_root, arch, false),
         "gdn_state_step_alphabeta_f32_batched_slots" => run_gdn_alphabeta_sweep::<B>(repo_root, arch, true),
+        "gdn_state_step_alphabeta_f32_kstates" => crate::sweep_gdn_kstates::run_sweep::<B>(repo_root, arch),
         "kv_append_f16_paged_slots" => run_kv_append_paged_slots_sweep::<B>(repo_root, arch),
         "kv_append_f16_paged_prefill" => run_kv_append_paged_prefill_sweep::<B>(repo_root, arch),
         "attention_prefill_f16" => run_attention_prefill_f16_sweep::<B>(repo_root, arch),
