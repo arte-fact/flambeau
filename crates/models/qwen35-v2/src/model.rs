@@ -236,7 +236,7 @@ pub fn mtp_cycle<C: ForwardCtx>(
             accepted += 1;
         }
         emitted.push(tokens[accepted]);
-        ctx.logits_row_to_host(accepted, vocab, out_logits)?;
+        out_logits.clear();
     } else {
         let all_logits = ctx.logits();
         anyhow::ensure!(all_logits.len() >= (k + 1) * vocab, "verify logits short");

@@ -137,7 +137,8 @@ pub trait Arch: Send + Sync + 'static {
     /// `sample` (greedy = one-hot dists), and return the tokens to emit
     /// (accepted drafts + bonus token). `seed` drives the accept / residual
     /// draws, so every TP rank reaches the same verdicts. `out_logits`
-    /// receives the target logits row the bonus token was drawn from.
+    /// receives the target logits row the bonus token was drawn from; it is
+    /// left empty when every row was drawn on device (greedy plan).
     /// Default impl bails (arch has no MTP).
     fn mtp_cycle<C: ForwardCtx>(
         _model: &Self::Model,

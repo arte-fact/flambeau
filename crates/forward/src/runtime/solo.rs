@@ -362,7 +362,7 @@ impl<B: Backend, A: Arch> SoloSession<B, A> {
 
     /// One greedy MTP cycle (single-device). `Ok(None)` when the model has
     /// no MTP head. Returns (accepted draft tokens, logits at the last
-    /// accepted position).
+    /// accepted position, empty when the cycle drew on device).
     pub fn mtp_step(
         &mut self,
         token: u32,

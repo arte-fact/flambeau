@@ -84,7 +84,7 @@ pub trait V2BatchableSession: Send {
 
     /// One greedy MTP cycle. `Ok(None)` when unsupported (arch without MTP
     /// head, or non-single-device topology). Returns (accepted draft
-    /// tokens, logits at the last accepted position).
+    /// tokens, logits at the last accepted position (empty when the cycle drew on device)).
     fn mtp_step(
         &mut self,
         _token: u32,

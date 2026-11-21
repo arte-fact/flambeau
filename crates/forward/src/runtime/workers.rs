@@ -149,7 +149,7 @@ pub(crate) enum Command {
         reply: SyncSender<Result<()>>,
     },
     /// Greedy MTP cycle (single-device role only). Returns
-    /// (accepted draft tokens, logits at the last accepted position).
+    /// (accepted draft tokens, logits at the last accepted position (empty when the cycle drew on device)).
     MtpStep {
         token: u32,
         position: usize,

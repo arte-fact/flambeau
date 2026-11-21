@@ -198,7 +198,8 @@ pub trait Session: Send + 'static {
     /// One greedy MTP speculative-decode step. `Ok(None)` when the session
     /// doesn't support MTP (arch without nextn head, non-SD topology) —
     /// caller falls back to plain decode. On `Some(accepted)`, `logits_out`
-    /// holds the logits at the last accepted position.
+    /// holds the logits at the last accepted position, or is empty when the
+    /// cycle drew greedily on device.
     fn mtp_step(
         &mut self,
         _token: u32,

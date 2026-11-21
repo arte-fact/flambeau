@@ -1171,23 +1171,6 @@ impl<B: Backend, H: TopologyHooks<B>, S: StageHooks<B>> ForwardCtx for ForwardEn
         composites::argmax_rows_local(&mut self.core, plan, n_rows, lm_head.vocab_size).map(Some)
     }
 
-    fn logits_row_to_host(&mut self, row: usize, vocab: usize, out: &mut Vec<f32>) -> Result<()> {
-        out.resize(vocab, 0.0);
-        // SAFETY: `out` holds `vocab` f32; the source is row `row` of
-        // logits_f32_dev (>= logits_rows * vocab f32); synced below.
-        unsafe {
-            self.core.device.memcpy_async(
-                self.core.stream,
-                flambeau_core::CopyDirection::DeviceToHost,
-                flambeau_core::DevicePtr(out.as_mut_ptr() as usize),
-                self.core.pool.logits_f32_dev.offset_bytes(row * vocab * 4),
-                vocab * 4,
-            )?;
-        }
-        flambeau_core::Stream::synchronize(self.core.stream)?;
-        Ok(())
-    }
-
     fn gdn_snapshot(&mut self, slot_id: usize) -> Result<Vec<u8>> {
         let Some(g) = self.core.pool.config.gdn else {
             return Ok(Vec::new());

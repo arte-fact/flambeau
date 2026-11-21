@@ -247,8 +247,8 @@ pub trait ForwardCtx {
     /// Default impl falls back to `output_head` when `n_rows == 1`.
     /// MTP verification under a greedy plan: the LM head over the first
     /// `n_rows` rows of `input`, then each row's [`flambeau_runtime::MtpArgmax`]
-    /// draw on device. `Some(tokens)` leaves the logits on device (see
-    /// [`Self::logits_row_to_host`]); `None` when the plan does not fit the
+    /// draw on device. `Some(tokens)` leaves the logits on device; `None`
+    /// when the plan does not fit the
     /// device scratch, the logits then being on the host as after
     /// [`Self::output_head_all`].
     fn output_head_argmax_rows(
@@ -260,11 +260,6 @@ pub trait ForwardCtx {
         _plan: &flambeau_runtime::MtpArgmax,
     ) -> Result<Option<Vec<u32>>> {
         anyhow::bail!("output_head_argmax_rows: not implemented on this ctx")
-    }
-
-    /// Copy row `row` (`vocab` F32) of the last LM head's device logits.
-    fn logits_row_to_host(&mut self, _row: usize, _vocab: usize, _out: &mut Vec<f32>) -> Result<()> {
-        anyhow::bail!("logits_row_to_host: not implemented on this ctx")
     }
 
     fn output_head_all(
