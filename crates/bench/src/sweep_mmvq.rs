@@ -3832,28 +3832,38 @@ pub fn run_mmq_4warp_lds_sweep<B: BenchBackend>(
     let k_grid = vec![2048usize, 4096];
     let seed = 0xC0FFEE_u64;
 
-    let mut results = Vec::new();
+    // (n_rows, n_cols, k): the grid, plus for Q4_K the 27B FFN projections
+    // (hidden 5120, intermediate 17408) a prefill row would serve.
+    let mut shapes: Vec<(usize, usize, usize)> = Vec::new();
     for &n_rows in &rows_grid {
         for &n_cols in &cols_grid {
             for &k in &k_grid {
-                let s = seed
-                    .wrapping_add((n_rows as u64).wrapping_mul(0x1234567))
-                    .wrapping_add((n_cols as u64).wrapping_mul(0x85EBCA6B))
-                    .wrapping_add((k as u64).wrapping_mul(0x9E3779B97F4A7C15));
-                let (got, reference) = run_shape_mmq_4warp_lds::<B>(&dev, dtype, n_rows, n_cols, k, s)?;
-                let max_rel_err = max_rel_err_with_floor(&got, &reference, (k as f32).sqrt());
-                let tolerance = cert_tol(k);
-                results.push(ShapeResult {
-                    m: n_rows,
-                    k,
-                    n: n_cols,
-                    seed: s,
-                    max_rel_err,
-                    tolerance,
-                    pass: max_rel_err <= tolerance,
-                });
+                shapes.push((n_rows, n_cols, k));
             }
         }
+    }
+    if matches!(dtype, Mmq4WarpLdsDtype::Q4K) {
+        shapes.extend([(17408, 64, 5120), (5120, 64, 17408), (17408, 512, 5120), (5120, 512, 17408)]);
+    }
+
+    let mut results = Vec::new();
+    for &(n_rows, n_cols, k) in &shapes {
+        let s = seed
+            .wrapping_add((n_rows as u64).wrapping_mul(0x1234567))
+            .wrapping_add((n_cols as u64).wrapping_mul(0x85EBCA6B))
+            .wrapping_add((k as u64).wrapping_mul(0x9E3779B97F4A7C15));
+        let (got, reference) = run_shape_mmq_4warp_lds::<B>(&dev, dtype, n_rows, n_cols, k, s)?;
+        let max_rel_err = max_rel_err_with_floor(&got, &reference, (k as f32).sqrt());
+        let tolerance = cert_tol(k);
+        results.push(ShapeResult {
+            m: n_rows,
+            k,
+            n: n_cols,
+            seed: s,
+            max_rel_err,
+            tolerance,
+            pass: max_rel_err <= tolerance,
+        });
     }
 
     let pass = results.iter().all(|r| r.pass);
