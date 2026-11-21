@@ -1,0 +1,103 @@
+{
+  "schema_version": 1,
+  "impl_id": "gdn_state_step_alphabeta_f32_kstates",
+  "backend": "cuda",
+  "arch": "sm_86",
+  "op": "gdn_state_step_alphabeta",
+  "dtype_weight": "F32",
+  "dtype_activation": "F32",
+  "tolerance_formula": "bit-identical to gdn_state_step_alphabeta_f32_s128: kstates slot t == base state after L = t + 1 from the same input, attn_out == base attn_out at L; max_rel_err = number of differing f32 elements",
+  "results": [
+    {
+      "m": 1,
+      "k": 0,
+      "n": 2,
+      "seed": 1836392464,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 5,
+      "k": 0,
+      "n": 2,
+      "seed": 1836392528,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 5,
+      "k": 0,
+      "n": 48,
+      "seed": 1836449872,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 5,
+      "k": 0,
+      "n": 48,
+      "seed": 1835401296,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 5,
+      "k": 1,
+      "n": 48,
+      "seed": 1836449873,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 5,
+      "k": 3,
+      "n": 48,
+      "seed": 1836449875,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 5,
+      "k": 5,
+      "n": 48,
+      "seed": 1836449877,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 2,
+      "k": 2,
+      "n": 24,
+      "seed": 1836351522,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 9,
+      "k": 7,
+      "n": 24,
+      "seed": 1836351639,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-11-21T18:58:34Z",
+  "rig": "threadreaper-sm_86",
+  "pmc": {
+    "vgpr_count": 47,
+    "sgpr_count": null,
+    "waves_per_simd": null,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

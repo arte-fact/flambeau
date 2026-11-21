@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "impl_id": "embed_gather_q4_k_f16",
+  "backend": "hip",
+  "arch": "gfx906",
+  "op": "embed",
+  "dtype_weight": "Q4_K",
+  "dtype_activation": "I32",
+  "tolerance_formula": "bit-identical to host dequantize_to_vec(Q4K) + f16::from_f32; max_rel_err = number of differing F16 elements",
+  "results": [
+    {
+      "m": 248320,
+      "k": 248320,
+      "n": 256,
+      "seed": 260622067456,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 4096,
+      "n": 5120,
+      "seed": 4536134913,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 4096,
+      "n": 5120,
+      "seed": 4536134913,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 8,
+      "k": 4096,
+      "n": 5120,
+      "seed": 4536134920,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 9,
+      "k": 4096,
+      "n": 5120,
+      "seed": 4536134921,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 513,
+      "k": 4096,
+      "n": 5120,
+      "seed": 4536135425,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 64,
+      "k": 1024,
+      "n": 2816,
+      "seed": 1312877888,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 324,
+      "k": 324,
+      "n": 256,
+      "seed": 936935,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-11-21T19:09:56Z",
+  "rig": "threadreaper-gfx906",
+  "pmc": {
+    "vgpr_count": 9,
+    "sgpr_count": null,
+    "waves_per_simd": 10,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}
