@@ -472,6 +472,13 @@ pub struct EmbeddingWeights {
 }
 
 impl EmbeddingWeights {
+    /// Whether `embed` can read token ids that are already on the device
+    /// outside decode-graph capture (the quantized gather kernel exists on
+    /// every backend; the F16 table copies rows from host token ids).
+    pub fn gathers_device_ids(&self) -> bool {
+        matches!(self.token_embd, EmbeddingTable::Quant(_))
+    }
+
     /// NULL-ptr placeholder for PP ranks that don't own layer 0.
     /// `PpForwardCtx::embed` only dereferences the weights on the
     /// first rank; non-first ranks peer-receive into the residual
