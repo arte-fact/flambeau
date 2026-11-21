@@ -140,6 +140,7 @@ pub(super) fn finalise(
     stop_strings: &[String],
     mut logprobs: Option<Vec<ChatLogProbContent>>,
     enable_thinking: bool,
+    relax_stop_mask: bool,
 ) -> Result<CompletionOutput> {
     let stop_ids = &state.tokenizer.stop_ids;
     let completion_tokens = generated.len() as u32;
@@ -174,10 +175,10 @@ pub(super) fn finalise(
     // splits only when `enable_thinking`, else truncates a leaked marker.
     let markers = state.model.reasoning_markers();
     let reasoning_content: Option<String> = match markers.style {
-        ReasoningStyle::Channel => split_channel_reasoning(&mut text, markers, state),
+        ReasoningStyle::Channel => split_channel_reasoning(&mut text, markers, state, relax_stop_mask),
         ReasoningStyle::ThinkTag if enable_thinking => split_think_reasoning(&mut text, markers),
         ReasoningStyle::ThinkTag => {
-            truncate_leaked_reasoning(&mut text, state);
+            truncate_leaked_reasoning(&mut text, state.model.chat_stop_markers(), !relax_stop_mask);
             None
         }
     };
@@ -224,9 +225,10 @@ fn split_channel_reasoning(
     text: &mut String,
     markers: ReasoningMarkers,
     state: &ServerState,
+    relax_stop_mask: bool,
 ) -> Option<String> {
     let Some(close) = text.find(markers.close) else {
-        truncate_leaked_reasoning(text, state);
+        truncate_leaked_reasoning(text, state.model.chat_stop_markers(), !relax_stop_mask);
         return None;
     };
     // `text[..close]` is `{open}{name}\n{reasoning}` (or just the marker for
@@ -284,16 +286,24 @@ fn split_think_reasoning(text: &mut String, markers: ReasoningMarkers) -> Option
     }
 }
 
-/// When thinking is off, cut the answer at any leaked reasoning marker or
-/// arch chat-template fragment so confused-mode scaffolding never reaches
-/// the client.
-fn truncate_leaked_reasoning(text: &mut String, state: &ServerState) {
-    for marker in ["</think>", "<end_thought>", "<end_think>", "</thought>"] {
-        if let Some(idx) = text.find(marker) {
-            text.truncate(idx);
+/// Reasoning close markers that end a non-thinking reply unless the stop
+/// mask is relaxed (requests with `tools`): stop sequences of the decode
+/// loop then, cut points here.
+pub(super) const LEAKED_REASONING_MARKERS: [&str; 4] = ["</think>", "<end_thought>", "<end_think>", "</thought>"];
+
+/// When thinking is off, cut the answer where the decode loop stopped it:
+/// at an arch chat-template fragment, and at a leaked reasoning marker when
+/// those are stop sequences (`reasoning_markers_stop`). The text is then the
+/// one the streamed path sends.
+fn truncate_leaked_reasoning(text: &mut String, chat_stop_markers: &[&str], reasoning_markers_stop: bool) {
+    if reasoning_markers_stop {
+        for marker in LEAKED_REASONING_MARKERS {
+            if let Some(idx) = text.find(marker) {
+                text.truncate(idx);
+            }
         }
     }
-    for marker in state.model.chat_stop_markers() {
+    for marker in chat_stop_markers {
         if let Some(idx) = text.find(*marker) {
             text.truncate(idx);
         }
@@ -411,6 +421,81 @@ mod tests {
                 assert_eq!(content, text, "content of {raw:?} in {chunk}-char chunks");
             }
         }
+    }
+
+    /// Token i decodes to TOOLS_PIECES[i]: a non-thinking reply that leaks
+    /// a think block mid-answer.
+    const TOOLS_PIECES: &[&str] = &["Sure.", "<think>", "\n  hmm, ", "check  ", "</think>", "\n\n", "Done.", "\n"];
+
+    /// Streamed `(content, reasoning)` and non-streamed `(content, reasoning)`
+    /// of a non-thinking request, `relax_stop_mask` as for a request with
+    /// `tools`.
+    fn both_non_thinking(run: &[u32], relax_stop_mask: bool) -> ((String, String), (String, String)) {
+        use crate::tool_call_parser::{
+            hermes::HermesJsonParser, split_events_with_reasoning, ParserEvent, ReasoningTrim, ToolCallParser,
+        };
+        let decode = |ids: &[u32]| -> anyhow::Result<String> {
+            Ok(ids.iter().map(|&t| TOOLS_PIECES[t as usize]).collect())
+        };
+        // The decode loop's stop sequences (decode_loop::stop_patterns).
+        let patterns: Vec<String> = if relax_stop_mask {
+            Vec::new()
+        } else {
+            super::LEAKED_REASONING_MARKERS.iter().map(|m| (*m).to_owned()).collect()
+        };
+        let stop_ids = [STOP_TOKEN];
+        let mut sink = Collect(String::new());
+        let mut e = Emitter::new(patterns, None, &stop_ids, 100, &mut sink);
+        for &t in run {
+            if e.accept(t, &decode).unwrap().is_some() {
+                break;
+            }
+        }
+        let kept: Vec<u32> = e.generated.iter().copied().filter(|&t| t != STOP_TOKEN).collect();
+        drop(e);
+
+        // SSE path: the streamed text, one char at a time, through the parser.
+        let mut parser = HermesJsonParser::new();
+        let mut trim = ReasoningTrim::default();
+        let (mut s_content, mut s_reasoning) = (String::new(), String::new());
+        let mut events = Vec::new();
+        for c in sink.0.chars() {
+            events.extend(trim.apply(parser.push(&c.to_string())));
+        }
+        events.extend(trim.apply(parser.finish()));
+        for ev in events {
+            match ev {
+                ParserEvent::TextDelta(s) => s_content.push_str(&s),
+                ParserEvent::ThinkDelta(s) => s_reasoning.push_str(&s),
+                other => panic!("unexpected event {other:?}"),
+            }
+        }
+
+        // Non-streamed path: finalise's cuts, then chat's parse.
+        let mut text = decode(&kept).unwrap();
+        super::truncate_leaked_reasoning(&mut text, &[], !relax_stop_mask);
+        cut_at_stop_strings(&mut text, &[]);
+        let mut parser = HermesJsonParser::new();
+        let mut events = parser.push(&text);
+        events.extend(parser.finish());
+        let (content, reasoning, tool_calls) = split_events_with_reasoning(events);
+        assert!(tool_calls.is_empty());
+        ((s_content, s_reasoning), (content, reasoning))
+    }
+
+    #[test]
+    fn non_thinking_response_equals_streamed_deltas_with_and_without_tools() {
+        let runs: [&[u32]; 3] = [&[0, 1, 2, 3, 4, 5, 6, 7, STOP_TOKEN], &[0, 1, 2, 3, STOP_TOKEN], &[0, 5, 6, 7, STOP_TOKEN]];
+        for run in runs {
+            for relax_stop_mask in [false, true] {
+                let (streamed, response) = both_non_thinking(run, relax_stop_mask);
+                assert_eq!(response, streamed, "run {run:?} relax_stop_mask {relax_stop_mask}");
+            }
+        }
+        // With tools the reply goes on past the leaked block, which is
+        // reported as reasoning on both paths.
+        let (streamed, _) = both_non_thinking(runs[0], true);
+        assert_eq!(streamed, ("Sure.Done.\n".to_owned(), "hmm, check".to_owned()));
     }
 
     #[test]

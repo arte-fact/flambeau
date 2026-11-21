@@ -315,8 +315,8 @@ pub async fn chat_completions(
         .await
         .map_err(ApiError::internal)?;
 
-    let (final_content, mut final_tool_calls) = {
-        use crate::tool_call_parser::{dispatcher_with_prompt, split_events, ParserEvent};
+    let (final_content, parsed_reasoning, mut final_tool_calls) = {
+        use crate::tool_call_parser::{dispatcher_with_prompt, split_events_with_reasoning};
         if dev_flag("FLAMBEAU_DEBUG_TOOL_RAW") {
             tracing::info!(
                 target: "server.tool_raw",
@@ -340,8 +340,12 @@ pub async fn chat_completions(
         }
         events.extend(parser.push(&text));
         events.extend(parser.finish());
-        split_events(ParserEvent::coalesce(events))
+        split_events_with_reasoning(events)
     };
+    // A <think> block the parser found in a non-thinking reply is reasoning,
+    // as the streamed path reports it.
+    let final_reasoning_content =
+        final_reasoning_content.or_else(|| (!parsed_reasoning.is_empty()).then_some(parsed_reasoning));
     if tools_forbidden {
         final_tool_calls.clear();
     }

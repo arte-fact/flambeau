@@ -591,6 +591,7 @@ fn run_completion_blocking_ids(
         &params.stop_strings,
         out.logprobs,
         params.enable_thinking,
+        relax_stop_mask,
     )?;
     tracing::info!(
         target: "server.resp",
@@ -721,11 +722,7 @@ fn decode_tokens(
 fn stop_patterns(state: &ServerState, params: &SamplingParams, relax_stop_mask: bool) -> Vec<String> {
     let mut patterns: Vec<String> = Vec::new();
     if !relax_stop_mask && !params.enable_thinking {
-        patterns.extend(
-            ["</think>", "<end_thought>", "<end_think>", "</thought>"]
-                .iter()
-                .map(|s| (*s).to_owned()),
-        );
+        patterns.extend(super::finalise::LEAKED_REASONING_MARKERS.iter().map(|s| (*s).to_owned()));
     }
     patterns.extend(state.model.chat_stop_markers().iter().map(|s| (*s).to_owned()));
     patterns.extend(params.stop_strings.iter().filter(|s| !s.is_empty()).cloned());

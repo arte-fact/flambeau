@@ -161,6 +161,22 @@ impl ReasoningTrim {
     }
 }
 
+/// Non-streamed counterpart of the SSE path: `events` (the parser's whole
+/// output) through [`ReasoningTrim`], then split into `content`, the
+/// reasoning of any `<think>` block the parser surfaced, and `tool_calls`.
+pub fn split_events_with_reasoning(events: Vec<ParserEvent>) -> (String, String, Vec<crate::api::ToolCall>) {
+    let events = ParserEvent::coalesce(ReasoningTrim::default().apply(events));
+    let reasoning: String = events
+        .iter()
+        .filter_map(|e| match e {
+            ParserEvent::ThinkDelta(s) => Some(s.as_str()),
+            _ => None,
+        })
+        .collect();
+    let (content, tool_calls) = split_events(events);
+    (content, reasoning, tool_calls)
+}
+
 /// Assembler: walk a (coalesced) parser-event stream and split it
 /// into the assistant `content` string and the `tool_calls[]` list that
 /// go into the OpenAI response body.
