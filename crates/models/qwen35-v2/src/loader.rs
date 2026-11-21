@@ -294,31 +294,15 @@ fn load_with_shard(
             shard,
             &mut allocs,
         )?;
-        // eh_proj: [2*hidden, hidden] column-major (ne0 = 2h contiguous).
-        // Split the input dim per output column: e-half = [0..h),
-        // h-half = [h..2h). Dequantize to F32, split, upload as F16.
         let h = config.hidden;
-        let eh_raw = file
-            .dequantize_tensor(&nl("nextn.eh_proj.weight"))
-            .with_context(|| format!("dequantize {p}.nextn.eh_proj.weight"))?;
-        anyhow::ensure!(
-            eh_raw.len() == 2 * h * h,
-            "eh_proj: {} elems, expected {}",
-            eh_raw.len(),
-            2 * h * h
-        );
-        let mut w_e = vec![0f32; h * h];
-        let mut w_h = vec![0f32; h * h];
-        for j in 0..h {
-            for i in 0..h {
-                w_e[i + j * h] = eh_raw[i + j * 2 * h];
-                w_h[i + j * h] = eh_raw[h + i + j * 2 * h];
-            }
-        }
-        let eh_proj_e =
-            flambeau_forward::loader::upload_f16_from_f32(device, &w_e, &mut allocs)?;
-        let eh_proj_h =
-            flambeau_forward::loader::upload_f16_from_f32(device, &w_h, &mut allocs)?;
+        let (eh_proj_e, eh_proj_h) = flambeau_forward::loader::upload_quant_input_halves(
+            file,
+            device,
+            &nl("nextn.eh_proj.weight"),
+            h,
+            h,
+            &mut allocs,
+        )?;
         let enorm = flambeau_forward::loader::upload_dequant_to_f16(
             file,
             device,

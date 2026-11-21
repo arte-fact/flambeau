@@ -105,8 +105,8 @@ fn run<B: Backend>(dev: &B::Device, reg: &B::Registry, allocs: &mut DeviceAllocs
     };
     let seed = 200;
     let mtp = MtpWeights {
-        eh_proj_e: allocs.upload_f16(&det_signal(HIDDEN * HIDDEN, seed)),
-        eh_proj_h: allocs.upload_f16(&det_signal(HIDDEN * HIDDEN, seed + 1)),
+        eh_proj_e: allocs.upload_q8_0(&det_signal(HIDDEN * HIDDEN, seed), HIDDEN, HIDDEN),
+        eh_proj_h: allocs.upload_q8_0(&det_signal(HIDDEN * HIDDEN, seed + 1), HIDDEN, HIDDEN),
         enorm: allocs.upload_f16(&vec![1.0_f32; HIDDEN]),
         hnorm: allocs.upload_f16(&vec![1.0_f32; HIDDEN]),
         shared_head_norm: allocs.upload_f16(&vec![1.0_f32; HIDDEN]),

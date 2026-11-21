@@ -14,7 +14,7 @@ use flambeau_model_ops::{Tensor, F16, F32, Q8_1};
 use flambeau_ops::Ops;
 
 use crate::core::{CoreState, TokenBatch, TopologyHooks};
-use crate::ctx::{EmbeddingWeights, LmHeadWeights, MtpDraft, MtpWeights};
+use crate::ctx::{EmbeddingWeights, LmHeadWeights, MtpDraft, MtpWeights, QuantWeight};
 
 use super::{dense_ffn_local, embed_ids, residual_add_local, standard_attn_local, TokenIds};
 
@@ -90,6 +90,33 @@ pub fn mtp_stage_hidden_local<B: flambeau_backend::Backend>(
     Ok(())
 }
 
+/// One `[hidden, hidden]` half of `eh_proj` over `n` F16 rows into F32,
+/// quantising the rows into the activation layout the dispatched kernel reads.
+fn eh_proj_half<B: flambeau_backend::Backend>(
+    state: &mut CoreState<'_, B>,
+    w: &QuantWeight,
+    x: &Tensor<F16>,
+    out: &mut Tensor<F32>,
+    n: usize,
+) -> Result<()> {
+    let hidden = state.hidden();
+    let ops = state.ops();
+    let shape = flambeau_ops::MatmulShape {
+        m: n,
+        k: hidden,
+        n: hidden,
+    };
+    let mut act = unsafe { Tensor::<Q8_1>::from_raw(state.pool.norm_q8_1, n * hidden) };
+    let mut act_mmq = unsafe { Tensor::<Q8_1>::from_raw(DevicePtr::NULL, 0) };
+    if w.reads_mmq_activation(shape, &ops) {
+        act_mmq = unsafe { Tensor::<Q8_1>::from_raw(state.pool.norm_q8_1_mmq, n * hidden) };
+        flambeau_model_ops::quantize_f16_to_q8_1_mmq(x, &mut act_mmq, hidden, n, &ops)?;
+    } else {
+        flambeau_model_ops::quantize_f16_to_q8_1(x, &mut act, n * hidden, &ops)?;
+    }
+    w.qmatmul(&act, &act_mmq, out, shape, &ops)
+}
+
 /// The draft layer up to and including attention for `tokens.len()` rows:
 /// `eh_proj(concat(enorm(embed(token)), hnorm(h)))`, then attention through
 /// the layer's own KV slab at `positions` (which writes those KV rows).
@@ -120,12 +147,16 @@ fn mtp_attn_rows<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
     let mut h_n = slot_f16(state.pool.mtp_h_f16, n * hidden);
     flambeau_model_ops::rmsnorm_f16(&h_in, &w.hnorm, &mut h_n, n, hidden, w.rms_eps, &ops)
         .context("mtp hnorm")?;
-    let pa = slot_f32(state.pool.mtp_proj_a_f32, n * hidden);
-    ops.dense_gemv_f16_f16_batched(w.eh_proj_e.ptr, e_n.ptr, pa.ptr, hidden, hidden, n)
-        .context("mtp eh_proj_e")?;
-    let pb = slot_f32(state.pool.mtp_proj_b_f32, n * hidden);
-    ops.dense_gemv_f16_f16_batched(w.eh_proj_h.ptr, h_n.ptr, pb.ptr, hidden, hidden, n)
-        .context("mtp eh_proj_h")?;
+    if n > state.pool.config.max_prefill_tokens {
+        bail!(
+            "mtp_attn_rows: {n} rows > max_prefill_tokens {}",
+            state.pool.config.max_prefill_tokens
+        );
+    }
+    let mut pa = slot_f32(state.pool.mtp_proj_a_f32, n * hidden);
+    eh_proj_half(state, &w.eh_proj_e, &e_n, &mut pa, n).context("mtp eh_proj_e")?;
+    let mut pb = slot_f32(state.pool.mtp_proj_b_f32, n * hidden);
+    eh_proj_half(state, &w.eh_proj_h, &h_n, &mut pb, n).context("mtp eh_proj_h")?;
     let mut psum = slot_f32(pa.ptr, n * hidden);
     flambeau_model_ops::add_f32(&pa, &pb, &mut psum, n * hidden, &ops).context("mtp proj add")?;
     let mut inp = slot_f16(state.pool.mtp_in_f16, n * hidden);

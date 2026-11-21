@@ -57,6 +57,72 @@ pub fn upload_quant_weight(
     wrap_quant(ptr, n_elems, GgmlDType::Q8_0)
 }
 
+/// Upload a `[n_rows, 2 * half]` GGUF matrix (input dim contiguous) as two
+/// `[n_rows, half]` `QuantWeight`s, the first multiplying input elements
+/// `[0, half)`, the second `[half, 2 * half)`. Native dtypes whose block
+/// does not straddle the split are cut byte-wise per row, unchanged;
+/// otherwise each half is host-dequantised and re-quantised to Q8_0.
+pub fn upload_quant_input_halves(
+    file: &GgufFile,
+    device: &impl Device,
+    name: &str,
+    n_rows: usize,
+    half: usize,
+    allocs: &mut Vec<(DevicePtr, usize)>,
+) -> Result<(QuantWeight, QuantWeight)> {
+    let info = file
+        .info(name)
+        .with_context(|| format!("tensor info {name}"))?;
+    let dtype = info.dtype;
+    let block = dtype.block_size();
+    if dtype_qmatmul_native(dtype) && half % block == 0 {
+        let raw = file
+            .tensor_raw(name)
+            .with_context(|| format!("tensor_raw {name}"))?;
+        let half_bytes = half / block * dtype.type_size();
+        if raw.len() != n_rows * 2 * half_bytes {
+            bail!(
+                "{name}: {} bytes, expected {n_rows} rows of 2 x {half_bytes}",
+                raw.len()
+            );
+        }
+        let mut lo = Vec::with_capacity(n_rows * half_bytes);
+        let mut hi = Vec::with_capacity(n_rows * half_bytes);
+        for row in raw.chunks_exact(2 * half_bytes) {
+            lo.extend_from_slice(&row[..half_bytes]);
+            hi.extend_from_slice(&row[half_bytes..]);
+        }
+        let lo_ptr = upload_bytes(device, &lo, allocs)?;
+        let hi_ptr = upload_bytes(device, &hi, allocs)?;
+        return Ok((
+            wrap_quant(lo_ptr, n_rows * half, dtype)?,
+            wrap_quant(hi_ptr, n_rows * half, dtype)?,
+        ));
+    }
+    let f32_vec = file
+        .dequantize_tensor(name)
+        .with_context(|| format!("dequantize {name}"))?;
+    if f32_vec.len() != n_rows * 2 * half {
+        bail!(
+            "{name}: dequant produced {} elems, expected {}",
+            f32_vec.len(),
+            n_rows * 2 * half
+        );
+    }
+    let mut lo = Vec::with_capacity(n_rows * half);
+    let mut hi = Vec::with_capacity(n_rows * half);
+    for row in f32_vec.chunks_exact(2 * half) {
+        lo.extend_from_slice(&row[..half]);
+        hi.extend_from_slice(&row[half..]);
+    }
+    let lo_ptr = upload_bytes(device, &f32_to_q8_0_bytes(name, &lo)?, allocs)?;
+    let hi_ptr = upload_bytes(device, &f32_to_q8_0_bytes(name, &hi)?, allocs)?;
+    Ok((
+        wrap_quant(lo_ptr, n_rows * half, GgmlDType::Q8_0)?,
+        wrap_quant(hi_ptr, n_rows * half, GgmlDType::Q8_0)?,
+    ))
+}
+
 /// Upload a host-dequantised tensor as an F16 `QuantWeight`. The
 /// returned weight dispatches through `ops.dense_gemv_f16_f16` (no
 /// per-call activation re-quantise to Q8_1). Use for small dense

@@ -564,11 +564,11 @@ pub struct MtpDraft {
 /// and whose logits go through the shared LM head after `shared_head_norm`.
 /// Loaded only when the GGUF reports `nextn_predict_layers > 0`.
 pub struct MtpWeights {
-    /// F16 halves of the dequantized `nextn.eh_proj` `[2*hidden, hidden]`
-    /// weight, split along the input dim: `eh_proj_e` multiplies the normed
-    /// token embedding, `eh_proj_h` the normed target hidden.
-    pub eh_proj_e: Tensor<F16>,
-    pub eh_proj_h: Tensor<F16>,
+    /// `nextn.eh_proj` `[2*hidden, hidden]` split along the input dim, each
+    /// half `[hidden, hidden]` in the GGUF dtype: `eh_proj_e` multiplies the
+    /// normed token embedding, `eh_proj_h` the normed target hidden.
+    pub eh_proj_e: QuantWeight,
+    pub eh_proj_h: QuantWeight,
     pub enorm: Tensor<F16>,
     pub hnorm: Tensor<F16>,
     pub shared_head_norm: Tensor<F16>,
