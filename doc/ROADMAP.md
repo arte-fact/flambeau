@@ -15,6 +15,28 @@ cert diff). Null results are first-class.
 
 ---
 
+## Current state (measured, Qwen3.8-27B UD-Q4_K_M, single stream)
+
+Greedy without repetition penalty on both sides, q8 KV, 1 slot, 5 prompts
+× 400 tokens (`lp_timings.py` / `lp_g.py`), t/s excluding TTFT.
+
+| Rig | Mode | flambeau | llama.cpp | ratio | acceptance (fl / llama) |
+| --- | --- | --- | --- | --- | --- |
+| RTX 3090 sm_86 | plain | **44.66** | 43.49 | 1.03× | — |
+| RTX 3090 sm_86 | MTP-4 | 77.96 | 77.97 | 1.00× | 59.0 % / 59.6 % |
+| RTX 3090 sm_86 | plain, 4 127-token prompt | 43.11 | — | — | — |
+| 2× MI50 gfx906 (fl TP2, llama `-sm layer`) | plain | **29.77** | 25.7 | 1.16× | — |
+| 2× MI50 gfx906 (fl TP2, llama `-sm layer`) | MTP-4 | **41.63** | 37.3 | 1.12× | 58.1 % / 58.8 % |
+
+RTX plain decode by lever, same harness: 41.13 (host argmax) → 42.91
+(device greedy argmax) → 43.78 (in-graph argmax, 4-byte readback) → 44.11
+(decode graph grid fixed at 32 split-K chunks, position read on device) →
+44.66 (`attention_decode_q8_kv_vec_dpos` for Q8_0 KV global layers; 40.4 →
+43.11 at a 4 127-token prompt, text bit-identical). RTX VRAM with the server
+loaded: flambeau 19.5 GB (ctx cap 8 192), llama.cpp 16.8 GB (ctx 32 768).
+RTX prefill: TTFT 22.4 s for 4 127 tokens (m ≥ 2 projections use batched
+MMVQ in packs of 8; no MMQ row on sm_86 for these types).
+
 ## Current state (measured, gemma-4-12b-qat-q4_0, RTX 3090 sm_86)
 
 | Axis | flambeau | llama.cpp | ratio | verdict |
@@ -300,18 +322,68 @@ recover the last decode kernel. Lower priority than Track A.
     94 / 86 / 80 % but not throughput (38.8 / 37.5 vs 39.3 t/s without, same
     session): a draft step and a verify row are each ~5 % of a cycle, so
     dropping them buys less than the shorter runs lose. Not shipped.
-  - To do: (1) the residual acceptance gap to llama.cpp (cause not found: the
-    cycle, pairing, norms and KV contents now match `graph_mtp`); (2) row-tile
-    traits for the remaining dtypes; (3) scheduler + SSE paths; (4) DFlash2
-    drafter (`dflash` GGUF arch: 5 layers, block 8, target taps at layers
-    6/20/34/48/62, selector rank 256 / top-k 16) — reuses this verify cycle;
-    (5) sm_86 e2e.
+  - Greedy without penalty on both sides (table in "Current state"): MTP-4 is
+    at parity on sm_86 (77.96 vs 77.97 t/s, acceptance 59.0 vs 59.6 %) and
+    ahead on 2×MI50 (41.63 vs 37.3, acceptance 58.1 vs 58.8 %). The earlier
+    92 / 76 / 53 % llama.cpp figures above compare our 1.05-penalized greedy
+    with llama's pure greedy (see open point "penalty default").
+  - sm_86 batched MMVQ at m ≥ 2 covers the eight Qwen3.8-27B weight types,
+    IQ3_S included (`qmatmul_iq3_s_mmvq_dp4a_t128_vdr2_batched`, 120 shapes):
+    m = 5 (MTP-4 verify) 172 → 87 µs (5120×17408) and 144 → 70 µs
+    (17408×5120); m = 9 499 → 160 / 513 → 146 µs; m = 1 unchanged.
+  - Null results (kept local or behind `cfg(unverified)`):
+    - Decode launch-ahead pipeline on sm_86: the next graph starts 22 ms early
+      and the inter-graph gap is 27 µs under nsys, but decode moves 43.71 →
+      43.75 t/s (+0.1 %). The host gap was already ~0.1 ms/token; the rest of
+      the steady-state gap came from graph recaptures (12 per 400 tokens,
+      ~15 ms each), removed by the fixed 32-chunk grid.
+    - `attention_decode_q8_kv_vec_dpos`, first pass (one block per Q head, a
+      `break` on the KV tail): ×1.56 at a 33-token tail, ×0.83 at 181, ×0.26
+      at 1 024 (n_par 1), ×1.28 at 4 001 / 8 192 (n_par 8) vs graph split-K.
+      Latency-bound (unrolled loop lost to the `break`; 24 of 82 SMs busy).
+      The second pass (masked unrolled loop, NB-lane token groups, 14 KV
+      parts per head) is the shipped kernel.
+    - sm_86 MMQ for prefill (`qmatmul-cut`, Qwen3.8-27B shapes, m 2..64): the
+      certified dp4a `mmq_wave64` / `tile16` kernels lose to the dispatched
+      batched path on every shape and type (×0.07 to ×0.33 at m = 16 and
+      64). The LDS-tiled family is faster at m = 64 on several shapes (Q4_K
+      10240×5120: 236 µs vs 590; IQ4_XS 5120×17408: 706 vs 739); its sweeps
+      pass on sm_86 (Q4_K) and gfx906 (whole family, 27B FFN shapes), the
+      microbench's own weight generator does not exercise it correctly.
+  - Open:
+    - **DFlash2 drafter** (`dflash` GGUF arch, 2.06 GB Q8_0: 5 layers,
+      block 8, target taps at layers 6/20/34/48/62, non-causal attention,
+      2-tap causal conv, selector rank 256 / top-k 16, shares `token_embd`
+      and the output head with the target). Baseline first: llama.cpp HEAD
+      `draft-dflash2` (`build-cuda-hd` sm_86, `build-hip-hd` gfx906) vs
+      `draft-mtp` n 4 vs plain, same flags. flambeau side: taps of the
+      pre-`attn_norm` residual for 5 layers × all rows (only the final
+      post-norm row is captured today), a verify cycle sharing "verify +
+      accept + GDN replay" with MTP (2 sites, rule 14), a 2-tap conv mixing
+      kernel, a selector pair-score kernel, a second-GGUF loader and
+      `--draft-model`. Verify runs at m = 8 (9 with n_max 8), inside the
+      batched MMVQ coverage on sm_86 and the MMQ certs (m = 8) on gfx906,
+      not measured at m = 9 on gfx906.
+    - **sm_86 MMQ prefill**: cut row `m = "2..T"` batched / `m = ">=T+1"`
+      LDS-tiled MMQ per type, T ≥ 8 so MTP verify stays batched; needs sm_86
+      LDS-tiled certs per type, a T measured per type with a correct weight
+      generator, and an e2e TTFT A/B against llama.cpp at pp 512 / 2 048.
+    - **Penalty default 1.05**: `crates/server/src/state.rs` forces
+      `repetition_penalty` 1.05 when temperature < 0.1 and neither the request
+      nor the GGUF sets it, over the whole generated history (no `last_n`);
+      llama-server defaults to 1.0 (`last_n` 64). MI50 plain: 29.23 t/s
+      penalized vs 29.75 greedy (+1.8 %); text, EOS length and MTP acceptance
+      differ. Comparisons pass `repetition_penalty: 1.0` explicitly. Decision
+      pending: keep, drop, or align on llama's default.
+    - The residual MTP acceptance gap on gfx906 (58.1 vs 58.8 %); row-tile
+      traits for the remaining dtypes; scheduler + SSE paths.
   - Open stability item: GPU page faults on host↔device copies of transient
-    host buffers (three on 2026-11-18, fault addresses inside the mimalloc
+    host buffers (three occurrences, fault addresses inside the mimalloc
     arena). The GDN reset no longer uses a host buffer; per-step logits copies
     still target a per-command Vec (~1 MB). Not reproduced in isolation.
   - **Done when:** speculative decode beats plain decode e2e on at least one backend
-    (met for MTP on gfx906 TP2; open for DFlash and for parity with llama.cpp).
+    (met for MTP on gfx906 TP2 and sm_86; parity with llama.cpp met on sm_86,
+    ahead on gfx906; open for DFlash).
 
 ---
 
