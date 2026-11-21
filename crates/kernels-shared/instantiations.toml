@@ -4642,6 +4642,100 @@ params = """
     const int n_blocks_per_row"""
 body = "mmvq_vdr_batched_row<mmvq_vdr::Q3K, 8, 32, 4, float>(x, y, dst, n_rows, n_blocks_per_row);"
 
+# Batched MMVQ (IQ3_S), N = 1..8 activation columns per launch,
+# 32 threads x 4 rows per block (`mmvq_batched_shape`).
+[[kernel]]
+stem = "mmvq_iq3_s_dp4a_t128_vdr2_batched"
+includes = ["mmvq_vdr_batched_iq3_s.cuh"]
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq3_s_dp4a_t128_vdr2_batched_q8_1_n1"
+launch_bounds = "32"
+params = """
+    const flambeau_block_iq3_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Iq3S, 1, 32, 4, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq3_s_dp4a_t128_vdr2_batched_q8_1_n2"
+launch_bounds = "32"
+params = """
+    const flambeau_block_iq3_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Iq3S, 2, 32, 4, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq3_s_dp4a_t128_vdr2_batched_q8_1_n3"
+launch_bounds = "32"
+params = """
+    const flambeau_block_iq3_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Iq3S, 3, 32, 4, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq3_s_dp4a_t128_vdr2_batched_q8_1_n4"
+launch_bounds = "32"
+params = """
+    const flambeau_block_iq3_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Iq3S, 4, 32, 4, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq3_s_dp4a_t128_vdr2_batched_q8_1_n5"
+launch_bounds = "32"
+params = """
+    const flambeau_block_iq3_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Iq3S, 5, 32, 4, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq3_s_dp4a_t128_vdr2_batched_q8_1_n6"
+launch_bounds = "32"
+params = """
+    const flambeau_block_iq3_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Iq3S, 6, 32, 4, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq3_s_dp4a_t128_vdr2_batched_q8_1_n7"
+launch_bounds = "32"
+params = """
+    const flambeau_block_iq3_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Iq3S, 7, 32, 4, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
+[[kernel.entry]]
+name = "flambeau_mmvq_iq3_s_dp4a_t128_vdr2_batched_q8_1_n8"
+launch_bounds = "32"
+params = """
+    const flambeau_block_iq3_s* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row"""
+body = "mmvq_vdr_batched_row<mmvq_vdr::Iq3S, 8, 32, 4, float>(x, y, dst, n_rows, n_blocks_per_row);"
+
 # Batched MMVQ (IQ4_NL), N = 1..8 activation columns per launch,
 # 32 threads x 4 rows per block (`mmvq_batched_shape`).
 [[kernel]]

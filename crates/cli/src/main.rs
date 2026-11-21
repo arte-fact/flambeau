@@ -1397,6 +1397,7 @@ fn batched_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::BatchedDtype
     match dtype {
         "Q8_0_vdr_batched" => Some(BatchedDtype::Q8_0Vdr2Batched),
         "IQ4_NL_vdr_batched" => Some(BatchedDtype::Iq4NlT128Vdr2Batched),
+        "IQ3_S_vdr_batched" => Some(BatchedDtype::Iq3ST128Vdr2Batched),
         "Q3_K_vdr_batched" => Some(BatchedDtype::Q3KT128Vdr2Batched),
         "Q6_K_vdr_batched" => Some(BatchedDtype::Q6KVdr2Batched),
         "Q4_K_vdr_batched" => Some(BatchedDtype::Q4KT128Vdr2Batched),
