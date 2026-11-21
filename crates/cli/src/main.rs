@@ -1395,6 +1395,7 @@ fn gate_up_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::GateUpDtype>
 fn batched_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::BatchedDtype> {
     use flambeau_bench::sweep_mmvq::BatchedDtype;
     match dtype {
+        "IQ4_NL_vdr_batched" => Some(BatchedDtype::Iq4NlT128Vdr2Batched),
         "Q3_K_vdr_batched" => Some(BatchedDtype::Q3KT128Vdr2Batched),
         "Q6_K_vdr_batched" => Some(BatchedDtype::Q6KVdr2Batched),
         "Q4_K_vdr_batched" => Some(BatchedDtype::Q4KT128Vdr2Batched),

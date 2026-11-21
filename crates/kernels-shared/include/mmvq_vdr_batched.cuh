@@ -275,6 +275,51 @@ struct Q3K {
     }
 };
 
+// IQ4_NL, VDR 2: 2 threads per 32-element block, 2 ints of `qs` each.
+struct Iq4Nl {
+    typedef flambeau_block_iq4_nl block_t;
+    static constexpr int TPB = 2;
+    static constexpr int YPB = 1;
+    template<int N, int R>
+    static __device__ __forceinline__ void step(
+        const block_t* const (&bk)[R], const flambeau_block_q8_1* y, size_t ys, int lane,
+        float (&acc)[R][N])
+    {
+        const int iqs = 2 * lane;
+        int lo[R][2], hi[R][2];
+        float d[R];
+        #pragma unroll
+        for (int r = 0; r < R; ++r) {
+            #pragma unroll
+            for (int l = 0; l < 2; ++l) {
+                iq4_nl_table_8((unsigned int) load_int_b2((const int8_t*) bk[r]->qs, iqs + l), lo[r][l], hi[r][l]);
+            }
+            d[r] = (float) bk[r]->d;
+        }
+        #pragma unroll
+        for (int c = 0; c < N; ++c) {
+            const flambeau_block_q8_1* ya = y + c * ys;
+            int u[4];
+            #pragma unroll
+            for (int l = 0; l < 2; ++l) {
+                u[l]     = load_int_b4(ya->qs, iqs + l);
+                u[l + 2] = load_int_b4(ya->qs, iqs + l + 4);
+            }
+            const float dy = (float) ya->d;
+            #pragma unroll
+            for (int r = 0; r < R; ++r) {
+                int sumi = 0;
+                #pragma unroll
+                for (int l = 0; l < 2; ++l) {
+                    sumi = dp4a(lo[r][l], u[l], sumi);
+                    sumi = dp4a(hi[r][l], u[l + 2], sumi);
+                }
+                acc[r][c] += d[r] * dy * (float) sumi;
+            }
+        }
+    }
+};
+
 }  // namespace mmvq_vdr
 
 // One block of G threads (G <= the hardware warp) owns R output rows: each
