@@ -91,6 +91,7 @@ pub fn gdn_layer_mixed_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
         }
     }
 
+    super::gdn::gdn_rs_make_live(state)?;
     let dims = weights.dims;
     let layer_state = state.pool.gdn_state[local_idx];
     let state_bytes_per_slot = dims.num_v_heads * dims.head_k_dim * dims.head_v_dim * 4;
@@ -182,6 +183,7 @@ pub fn gdn_layer_mixed_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
             flambeau_model_ops::GdnPrefillSeq {
                 n_tokens: k,
                 state_event: None,
+                kstates: None,
             },
             Some(&mut ar_cb),
         )?;

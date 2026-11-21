@@ -325,23 +325,17 @@ pub trait ForwardCtx {
         anyhow::bail!("mtp_catchup: not implemented on this ctx")
     }
 
-    /// Toggle the GDN verify mode: while on, multi-row GDN layers keep
-    /// their state-step inputs so [`Self::gdn_replay_rows`] can roll the
-    /// recurrent state back to a row prefix.
+    /// Toggle the GDN verify mode: while on, a multi-row GDN pass of one
+    /// sequence keeps every row's recurrent state (and its conv inputs), so
+    /// [`Self::gdn_select_rows`] can roll back to a row prefix.
     fn mtp_spec_rows(&mut self, _on: bool) {}
 
-    /// Rebuild layer `layer_idx`'s recurrent state as "snapshot advanced
-    /// over the first `n_keep` rows of the last verify batch". Requires a
-    /// prior [`Self::gdn_snapshot`] and a verify forward under
-    /// [`Self::mtp_spec_rows`].
-    fn gdn_replay_rows(
-        &mut self,
-        _weights: &GdnWeights,
-        _layer_idx: usize,
-        _slot_id: usize,
-        _n_keep: usize,
-    ) -> Result<()> {
-        anyhow::bail!("gdn_replay_rows: not implemented on this ctx")
+    /// After a verify of `n_rows` rows under [`Self::mtp_spec_rows`], make
+    /// the recurrent state of `slot_id` the one after its first `n_keep` rows
+    /// (every GDN layer this ctx owns). Moves the device state index; no
+    /// copy of the state, no sync.
+    fn gdn_select_rows(&mut self, _slot_id: usize, _n_keep: usize, _n_rows: usize) -> Result<()> {
+        anyhow::bail!("gdn_select_rows: not implemented on this ctx")
     }
 
     /// Record that the MTP anchor buffer holds the target hidden of

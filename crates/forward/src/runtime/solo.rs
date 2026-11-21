@@ -484,7 +484,7 @@ impl<B: Backend, A: Arch> SoloSession<B, A> {
         self.pool.reset_gdn_state_slot(slot_id, &self.device)
     }
 
-    pub fn snapshot_kv_slot(&self, slot_id: usize, n_tokens: usize) -> Result<Vec<Vec<u8>>> {
+    pub fn snapshot_kv_slot(&mut self, slot_id: usize, n_tokens: usize) -> Result<Vec<Vec<u8>>> {
         let bytes = self.pool.snapshot_slot_bytes(slot_id, n_tokens, &self.device)?;
         Ok(vec![bytes])
     }

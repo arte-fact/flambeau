@@ -32,7 +32,7 @@ pub use flambeau_ops::{
 pub use delta_net::{
     BackendCtx, DeltaNetDims, DeltaNetLayer, DeltaNetLayerDecodeBatchedScratch,
     DeltaNetLayerDecodeScratch, DeltaNetLayerPrefillScratch, DeltaNetScratchDims, DeltaNetWeights,
-    GdnDecodeBatchedBuffers, GdnDecodeBuffers, GdnPrefillSeq,
+    GdnDecodeBatchedBuffers, GdnDecodeBuffers, GdnKStates, GdnPrefillSeq,
     OwnedDeltaNetLayerDecodeBatchedScratch, OwnedDeltaNetLayerDecodeScratch,
     OwnedDeltaNetLayerPrefillScratch,
 };

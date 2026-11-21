@@ -207,7 +207,6 @@ pub fn mtp_cycle<C: ForwardCtx>(
         return Ok(vec![(sample.draw)(out_logits).0]);
     }
     ctx.mtp_set_pending(None);
-    ctx.gdn_snapshot(slot_id)?;
     ctx.mtp_spec_rows(true);
     let verified = verify_layers(model, ctx, &tokens, &positions, &slots);
     ctx.mtp_spec_rows(false);
@@ -266,14 +265,7 @@ pub fn mtp_cycle<C: ForwardCtx>(
         *out_logits = row.to_vec();
     }
 
-    if accepted < k {
-        let layers: Vec<usize> = ctx.layer_range(&model.layout).collect();
-        for li in layers {
-            if let (LayerKind::Gdn, Some(w)) = (model.layer_kinds[li], model.gdn[li].as_ref()) {
-                ctx.gdn_replay_rows(w, li, slot_id, accepted + 1)?;
-            }
-        }
-    }
+    ctx.gdn_select_rows(slot_id, accepted + 1, k + 1)?;
     ctx.mtp_stage_hidden(&model.lm_head, &resid, accepted, MtpLead::None)?;
     capture_pending(model, ctx, &resid, accepted, slot_id, pos + accepted)?;
     ctx.mtp_catchup(
