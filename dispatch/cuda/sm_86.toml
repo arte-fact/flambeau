@@ -114,10 +114,18 @@ notes   = "batched, 1..8 columns per launch"
 [[qmatmul]]
 dtype   = "Q4_0"
 dtype_q = "Q8_1"
-shape   = { m = "any", k = "any", n = "any" }
+shape   = { m = "1..127", k = "any", n = "any" }
 impl    = "qmatmul_q4_0_mmvq_dp4a"
 cert    = "certs/cuda/sm_86/qmatmul_q4_0_mmvq_dp4a.json"
 notes   = "autotuned"
+
+[[qmatmul]]
+dtype   = "Q4_0"
+dtype_q = "Q8_1"
+shape   = { m = ">=128", k = "any", n = "any" }
+impl    = "qmatmul_q4_0_mma"
+cert    = "certs/cuda/sm_86/qmatmul_q4_0_mma.json"
+notes   = "int8 tensor-core MMQ (mma.sync), 256x128 double-buffered tile, DS4 activation; k % 128 != 0 re-dispatches to the MMVQ row"
 
 [[qmatmul]]
 dtype   = "Q4_1"

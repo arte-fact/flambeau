@@ -56,6 +56,80 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap().to_path_buf()
     }
 
+    /// `(dtype, dtype_q, m predicate, impl)` of every `[[section]]` row of
+    /// `dispatch/cuda/sm_86.toml`.
+    fn toml_rows(section: &str) -> std::collections::BTreeSet<(String, String, String, String)> {
+        let src = std::fs::read_to_string(repo_root().join("dispatch/cuda/sm_86.toml")).expect("read sm_86.toml");
+        let header = format!("[[{section}]]");
+        let field = |block: &str, key: &str| -> String {
+            block
+                .lines()
+                .find_map(|l| {
+                    let (k, v) = l.split_once('=')?;
+                    (k.trim() == key).then(|| v.split('#').next().unwrap_or("").trim().to_owned())
+                })
+                .unwrap_or_default()
+        };
+        let unquote = |v: String| v.trim_matches('"').to_owned();
+        // Blocks start at a line that is a table header; a `[[x]]` inside a
+        // comment is not one.
+        let mut blocks: Vec<(String, String)> = Vec::new();
+        for line in src.lines() {
+            let t = line.trim();
+            if t.starts_with("[[") {
+                blocks.push((t.to_owned(), String::new()));
+            } else if let Some((_, body)) = blocks.last_mut() {
+                body.push_str(line);
+                body.push('\n');
+            }
+        }
+        blocks
+            .iter()
+            .filter(|(h, _)| *h == header)
+            .map(|(_, block)| {
+                let shape = field(block, "shape");
+                let m = shape
+                    .split_once("m =")
+                    .and_then(|(_, rest)| rest.split('"').nth(1))
+                    .unwrap_or("")
+                    .to_owned();
+                (unquote(field(block, "dtype")), unquote(field(block, "dtype_q")), m, unquote(field(block, "impl")))
+            })
+            .collect()
+    }
+
+    /// The same rows from a Rust dispatch table, `m_range` written the TOML way.
+    fn rust_rows(table: &[KernelDescriptor]) -> std::collections::BTreeSet<(String, String, String, String)> {
+        table
+            .iter()
+            .map(|d| {
+                let m = match d.m_range {
+                    (1, usize::MAX) => "any".to_owned(),
+                    (lo, usize::MAX) => format!(">={lo}"),
+                    (lo, hi) if lo == hi => lo.to_string(),
+                    (lo, hi) => format!("{lo}..{hi}"),
+                };
+                (d.dtype_weight.name().to_owned(), d.dtype_activation.name().to_owned(), m, d.impl_id.to_owned())
+            })
+            .collect()
+    }
+
+    /// The runtime dispatches from the Rust tables, cert-check reads the TOML:
+    /// they must name the same rows.
+    #[test]
+    fn rust_tables_match_the_toml() {
+        for (section, table) in [("qmatmul", QMATMUL_SM86), ("attention_decode", ATTENTION_DECODE_SM86)] {
+            let toml = toml_rows(section);
+            let rust = rust_rows(table);
+            let only_toml: Vec<_> = toml.difference(&rust).collect();
+            let only_rust: Vec<_> = rust.difference(&toml).collect();
+            assert!(
+                only_toml.is_empty() && only_rust.is_empty(),
+                "[[{section}]] disagrees — TOML only: {only_toml:?}; Rust only: {only_rust:?}"
+            );
+        }
+    }
+
     fn registered() -> impl Iterator<Item = (&'static str, &'static str)> {
         QMATMUL_SM86
             .iter()
