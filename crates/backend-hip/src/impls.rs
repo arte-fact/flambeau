@@ -335,6 +335,14 @@ pub fn dispatch_attention_decode(
     flambeau_core::first_match(ATTENTION_DECODE_GFX906, kv_dtype, QDtype::F16, m)
 }
 
+/// Pick the prefill-attention row for a `kv_dtype` KV cache (Q / output F16).
+pub fn dispatch_attention_prefill(
+    kv_dtype: flambeau_core::QDtype,
+    m: usize,
+) -> Option<&'static KernelDescriptor> {
+    flambeau_core::first_match(ATTENTION_PREFILL_GFX906, kv_dtype, QDtype::F16, m)
+}
+
 pub fn dispatch_swiglu(
     dtype: flambeau_core::QDtype,
     m: usize,

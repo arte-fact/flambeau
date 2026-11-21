@@ -55,6 +55,10 @@ pub trait KernelBackend: 'static {
     /// (`ATTENTION_DECODE_GFX906` / `ATTENTION_DECODE_SM86`).
     fn dispatch_attention_decode(kv_dtype: QDtype, m: usize) -> Option<&'static KernelDescriptor>;
 
+    /// Pick the prefill-attention row for a `kv_dtype` KV cache at `m` query
+    /// rows from this backend's committed `[[attention_prefill]]` table.
+    fn dispatch_attention_prefill(kv_dtype: QDtype, m: usize) -> Option<&'static KernelDescriptor>;
+
     /// Compiled kernel image (`.hsaco` / `.cubin`) for catalogue `stem`, if the
     /// kernel was compiled into this build.
     fn image(stem: &str) -> Option<&'static [u8]>;

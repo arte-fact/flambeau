@@ -101,6 +101,8 @@ const DISPATCH_SWEEPS: &[(&str, &str, &str, &str)] = &[
     ("gfx906", "topk_f32_gfx906", "topk", "all"),
     ("sm_86", "attention_decode_f16", "attention_decode_f16", "all"),
     ("sm_86", "attention_decode_q8_kv_vec_dpos_sm_86", "attention_decode_q8_kv_vec_dpos", "all"),
+    ("sm_86", "attention_prefill_flash_tile_f16", "attention_prefill_flash_tile_f16", "all"),
+    ("sm_86", "attention_prefill_mma", "attention_prefill_mma", "all"),
     ("sm_86", "qmatmul_iq1_m_mmvq_dp4a", "qmatmul", "IQ1_M_dp4a"),
     ("sm_86", "qmatmul_iq1_s_mmvq_dp4a", "qmatmul", "IQ1_S_dp4a"),
     ("sm_86", "qmatmul_iq2_s_mmvq_dp4a", "qmatmul", "IQ2_S_dp4a"),

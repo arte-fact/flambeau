@@ -1601,36 +1601,40 @@ pub fn attention_prefill_f16_slots<B: flambeau_core::KernelBackend>(
     // kernel bounds-clamps a partial final tile, so any n_q ≥ 16 is fine. d512
     // (gemma global layers) uses the DV-split variant; head_dims outside
     // {128,256,512} fall through to flash_tile.
-    if (head_dim == 128 || head_dim == 256 || head_dim == 512) && n_q_tokens >= 16 {
-        if let Some(module) = reg.module("attention_prefill_mma") {
-            let entry = match head_dim {
-                128 => "flambeau_attention_prefill_mma_d128_f16",
-                256 => "flambeau_attention_prefill_mma_d256_f16",
-                512 => "flambeau_attention_prefill_mma_d512_f16",
-                _ => unreachable!(),
-            };
-            let kernel = B::kernel(module, entry)?;
-            let mut args = <B::Args<'_>>::default();
-            args.push_arg(&q_ptr);
-            args.push_arg(&k_ptr);
-            args.push_arg(&v_ptr);
-            args.push_arg(&o_ptr);
-            args.push_arg(&n_q_i);
-            args.push_arg(&n_heads_q_i);
-            args.push_arg(&n_heads_kv_i);
-            push_scalar_maybe_slot(&mut args, &n_k_i, n_k_slot);
-            push_scalar_maybe_slot(&mut args, &q_off_i, q_off_slot);
-            args.push_arg(&scale);
-            args.push_arg(&window_size);
-            args.push_arg(&ring_depth);
-            let cfg = LaunchCfg {
-                grid: ((n_q_tokens as u32).div_ceil(128), n_heads_q as u32, 1),
-                block: (32, 8, 1),
-                shared_bytes: 0,
-            };
-            B::launch(&kernel, stream, cfg, args)?;
-            return Ok(());
-        }
+    // Tensor-core prefill when the backend's [[attention_prefill]] table picks
+    // it for this width (sm_86 from 16 query rows) at a head_dim it serves.
+    let mma_row = matches!(head_dim, 128 | 256 | 512)
+        && B::dispatch_attention_prefill(flambeau_core::QDtype::F16, n_q_tokens)
+            .is_some_and(|row| row.impl_id == "attention_prefill_mma");
+    if mma_row {
+        let module = reg.expect_module("attention_prefill_mma")?;
+        let entry = match head_dim {
+            128 => "flambeau_attention_prefill_mma_d128_f16",
+            256 => "flambeau_attention_prefill_mma_d256_f16",
+            512 => "flambeau_attention_prefill_mma_d512_f16",
+            _ => unreachable!(),
+        };
+        let kernel = B::kernel(module, entry)?;
+        let mut args = <B::Args<'_>>::default();
+        args.push_arg(&q_ptr);
+        args.push_arg(&k_ptr);
+        args.push_arg(&v_ptr);
+        args.push_arg(&o_ptr);
+        args.push_arg(&n_q_i);
+        args.push_arg(&n_heads_q_i);
+        args.push_arg(&n_heads_kv_i);
+        push_scalar_maybe_slot(&mut args, &n_k_i, n_k_slot);
+        push_scalar_maybe_slot(&mut args, &q_off_i, q_off_slot);
+        args.push_arg(&scale);
+        args.push_arg(&window_size);
+        args.push_arg(&ring_depth);
+        let cfg = LaunchCfg {
+            grid: ((n_q_tokens as u32).div_ceil(128), n_heads_q as u32, 1),
+            block: (32, 8, 1),
+            shared_bytes: 0,
+        };
+        B::launch(&kernel, stream, cfg, args)?;
+        return Ok(());
     }
 
     if use_flash_tile {

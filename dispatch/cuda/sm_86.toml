@@ -236,3 +236,21 @@ shape   = { m = "1..4", k = "any", n = "any" }
 impl    = "attention_decode_q8_kv_vec_dpos_sm_86"
 cert    = "certs/cuda/sm_86/attention_decode_q8_kv_vec_dpos_sm_86.json"
 notes   = "Global layers: 128-thread warp-per-token-group kernel, 14 KV parts per Q head, position on device (graph and eager). x1.65 at a 181-token tail, x1.6 at 1k, x2.3 at 4k over the split-K path. SWA layers keep split-K."
+
+# ----- Attention prefill (F16 KV, keyed on the query rows) ------------------
+
+[[attention_prefill]]
+dtype   = "F16"           # KV dtype
+dtype_q = "F16"           # Q / output dtype
+shape   = { m = "1..15", k = "any", n = "any" }
+impl    = "attention_prefill_flash_tile_f16"
+cert    = "certs/cuda/sm_86/attention_prefill_flash_tile_f16.json"
+notes   = "LDS-tiled flash attention from 4 query rows, the scalar kernel below."
+
+[[attention_prefill]]
+dtype   = "F16"           # KV dtype
+dtype_q = "F16"           # Q / output dtype
+shape   = { m = ">=16", k = "any", n = "any" }
+impl    = "attention_prefill_mma"
+cert    = "certs/cuda/sm_86/attention_prefill_mma.json"
+notes   = "f16 tensor-core flash attention (mma.sync), BR = 128, head_dim 128 / 256 / 512 (d512 DV-split); other head_dims keep flash_tile."

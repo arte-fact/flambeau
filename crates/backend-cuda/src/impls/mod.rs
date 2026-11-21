@@ -42,6 +42,38 @@ pub const ATTENTION_DECODE_SM86: &[KernelDescriptor] = &[
     },
 ];
 
+/// `[[attention_prefill]]` rows of `dispatch/cuda/sm_86.toml` (F16 KV and
+/// Q / output). From 16 query rows the f16 tensor-core flash attention
+/// (head_dim 128 / 256 / 512; other head_dims stay on flash_tile); below,
+/// the LDS-tiled flash_tile path (4+ rows) or the scalar kernel.
+pub const ATTENTION_PREFILL_SM86: &[KernelDescriptor] = &[
+    KernelDescriptor {
+        op_name: "AttentionPrefill",
+        impl_id: "attention_prefill_flash_tile_f16",
+        backend: "cuda",
+        arch: "sm_86",
+        dtype_weight: QDtype::F16,
+        dtype_activation: QDtype::F16,
+        m_range: (1, 15),
+        cert_rel_path: "certs/cuda/sm_86/attention_prefill_flash_tile_f16.json",
+    },
+    KernelDescriptor {
+        op_name: "AttentionPrefill",
+        impl_id: "attention_prefill_mma",
+        backend: "cuda",
+        arch: "sm_86",
+        dtype_weight: QDtype::F16,
+        dtype_activation: QDtype::F16,
+        m_range: (16, usize::MAX),
+        cert_rel_path: "certs/cuda/sm_86/attention_prefill_mma.json",
+    },
+];
+
+/// Pick the prefill-attention row for a `kv_dtype` KV cache from the sm_86 table.
+pub fn dispatch_attention_prefill(kv_dtype: QDtype, m: usize) -> Option<&'static KernelDescriptor> {
+    first_match(ATTENTION_PREFILL_SM86, kv_dtype, QDtype::F16, m)
+}
+
 /// Pick the decode-attention row for a `kv_dtype` KV cache from the sm_86 table.
 pub fn dispatch_attention_decode(kv_dtype: QDtype, m: usize) -> Option<&'static KernelDescriptor> {
     first_match(ATTENTION_DECODE_SM86, kv_dtype, QDtype::F16, m)
@@ -118,7 +150,11 @@ mod tests {
     /// they must name the same rows.
     #[test]
     fn rust_tables_match_the_toml() {
-        for (section, table) in [("qmatmul", QMATMUL_SM86), ("attention_decode", ATTENTION_DECODE_SM86)] {
+        for (section, table) in [
+            ("qmatmul", QMATMUL_SM86),
+            ("attention_decode", ATTENTION_DECODE_SM86),
+            ("attention_prefill", ATTENTION_PREFILL_SM86),
+        ] {
             let toml = toml_rows(section);
             let rust = rust_rows(table);
             let only_toml: Vec<_> = toml.difference(&rust).collect();
@@ -134,6 +170,7 @@ mod tests {
         QMATMUL_SM86
             .iter()
             .chain(ATTENTION_DECODE_SM86)
+            .chain(ATTENTION_PREFILL_SM86)
             .map(|d| (d.impl_id, d.cert_rel_path))
             .chain(DIRECT_CALL_KERNELS_SM86.iter().map(|d| (d.impl_id, d.cert_rel_path)))
             .chain(BENCH_REFERENCE_KERNELS_SM86.iter().map(|d| (d.impl_id, d.cert_rel_path)))
@@ -171,10 +208,7 @@ mod tests {
 
     /// Known rule-2 holes: certs on disk that no sweep writes, so they cannot
     /// be registered as certified. Shrinks only.
-    const UNCERTIFIED_CERTS: &[&str] = &[
-        // why: no sweep for the CUDA tensor-core prefill attention yet (step 5).
-        "attention_prefill_mma",
-    ];
+    const UNCERTIFIED_CERTS: &[&str] = &[];
 
     /// Every cert JSON under `certs/cuda/sm_86/` is registered in
     /// `QMATMUL_SM86`, `DIRECT_CALL_KERNELS_SM86` or

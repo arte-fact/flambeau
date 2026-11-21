@@ -43,6 +43,10 @@ impl KernelBackend for CudaKernels {
         crate::impls::dispatch_attention_decode(kv_dtype, m)
     }
 
+    fn dispatch_attention_prefill(kv_dtype: flambeau_core::QDtype, m: usize) -> Option<&'static KernelDescriptor> {
+        crate::impls::dispatch_attention_prefill(kv_dtype, m)
+    }
+
     fn image(stem: &str) -> Option<&'static [u8]> {
         flambeau_kernels_cuda::cubin(stem)
     }
