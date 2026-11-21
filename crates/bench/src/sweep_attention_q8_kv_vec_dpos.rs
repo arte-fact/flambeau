@@ -31,7 +31,12 @@ const MAX_SPLITK_CHUNKS: usize = 32;
 const SPLITK_MIN_TOKENS_KV: usize = 32;
 const BENCH_WARMUP: usize = 20;
 const BENCH_ITERS: usize = 200;
+/// Parts the microbench tries at every KV tail (parts past the tail exit
+/// early, as in a baked graph grid): up to 14, about 4 blocks per SM of the
+/// RTX 3090's 82 for 24 Q heads; 7 is 2 per SM.
+const BENCH_N_PAR: &[usize] = &[1, 2, 4, 7, 14];
 
+#[derive(Clone, Copy)]
 struct Case {
     head_dim: usize,
     n_heads_q: usize,
@@ -58,9 +63,9 @@ const CASES: &[Case] = &[
     case(256, 24, 4, 8191, 1, true),
     // Split over parts + combine, including parts with no token in the tail.
     case(256, 24, 4, 180, 4, false),
-    case(256, 24, 4, 1023, 4, true),
-    case(256, 24, 4, 4000, 8, true),
-    case(256, 24, 4, 8191, 8, true),
+    case(256, 24, 4, 1023, 4, false),
+    case(256, 24, 4, 4000, 7, false),
+    case(256, 24, 4, 8191, 14, false),
     // Other GQA groupings / head_dim 128.
     case(256, 16, 2, 1641, 1, false),
     case(128, 4, 1, 300, 2, false),
@@ -211,7 +216,12 @@ fn run_case<B: BenchBackend>(
     let got: Vec<f32> = out_f16.iter().map(|v| v.to_f32()).collect();
 
     if bench {
-        let vec_us = time_us::<B>(dev, || launch_vec::<B>(vec_kernel, &kernels.combine, stream, &bufs, case, scale))?;
+        let mut vec_runs: Vec<(usize, f32)> = Vec::new();
+        for &n_par in BENCH_N_PAR {
+            let c = Case { n_par, ..*case };
+            vec_runs.push((n_par, time_us::<B>(dev, || launch_vec::<B>(vec_kernel, &kernels.combine, stream, &bufs, &c, scale))?));
+        }
+        let (best_par, vec_us) = vec_runs.iter().copied().fold((0, f32::INFINITY), |b, r| if r.1 < b.1 { r } else { b });
         let exact_chunk = splitk_chunk_size(n_kv).max(1);
         let exact_chunks = n_kv.div_ceil(exact_chunk);
         let exact_us = time_us::<B>(dev, || {
@@ -223,16 +233,18 @@ fn run_case<B: BenchBackend>(
         })?;
         tracing::info!(
             target: "flambeau_bench::sweep_attention_q8_kv_vec_dpos",
-            head_dim, n_heads_q, n_heads_kv, position, n_par,
+            head_dim, n_heads_q, n_heads_kv, position, best_par,
             vec_us, splitk_exact_us = exact_us, splitk_exact_chunks = exact_chunks,
             splitk_baked32_us = baked_us,
             speedup_vs_baked32 = baked_us / vec_us,
             "q8 kv vec decode microbench"
         );
+        let runs: Vec<String> = vec_runs.iter().map(|(p, us)| format!("{p}:{us:.2}")).collect();
         println!(
-            "microbench D={head_dim} {n_heads_q}/{n_heads_kv} pos={position} n_par={n_par}: \
-             vec {vec_us:.2} us | split-K exact ({exact_chunks} chunks) {exact_us:.2} us | \
+            "microbench D={head_dim} {n_heads_q}/{n_heads_kv} pos={position}: vec by n_par [{}] us, \
+             best n_par={best_par} {vec_us:.2} us | split-K exact ({exact_chunks} chunks) {exact_us:.2} us | \
              split-K baked 32 {baked_us:.2} us | x{:.2} vs baked, x{:.2} vs exact",
+            runs.join(" "),
             baked_us / vec_us,
             exact_us / vec_us
         );
