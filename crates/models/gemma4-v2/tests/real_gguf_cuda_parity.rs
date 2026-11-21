@@ -15,7 +15,7 @@ use flambeau_backend_cuda::CudaDevice;
 use flambeau_backend_hip::HipDevice;
 use flambeau_core::Device;
 use flambeau_forward::ctx::ForwardCtx;
-use flambeau_forward::loader::ShardMode;
+use flambeau_forward::loader::{LoadOptions, ShardMode};
 use flambeau_forward::{Arch, ForwardEngine, KvLayout, ScratchPool};
 use flambeau_gemma4_v2::Gemma4V2;
 use flambeau_quant::GgufFile;
@@ -47,7 +47,8 @@ fn run<B: Backend>(
     prompt: &[u32],
     n_gen: usize,
 ) -> anyhow::Result<RunOut> {
-    let mut model = Gemma4V2::load(file, device, ShardMode::Replicated, None, Some(CTX_CAP))?;
+    let opts = LoadOptions::with_ctx_cap(CTX_CAP);
+    let mut model = Gemma4V2::load(file, device, ShardMode::Replicated, None, opts)?;
     // prefill_ubatch must cover the whole prompt — embed writes one residual row
     // per token and CUDA validates the DtoD copy stays inside the scratch slot.
     let cfg = Gemma4V2::scratch_config(

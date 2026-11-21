@@ -11,7 +11,7 @@ use flambeau_forward::ctx::{
 use flambeau_forward::loader::{
     gdn_tp_mode_for, load_dense_attn_layer, load_dense_ffn_layer, load_embedding, load_gdn_layer,
     load_lm_head, per_rank_gdn_dims, DenseAttnLayerSpec, DenseFfnLayerSpec, EmbeddingSpec,
-    GdnLayerSpec, LmHeadSpec, ShardMode,
+    GdnLayerSpec, LmHeadSpec, LoadOptions, ShardMode,
 };
 use flambeau_quant::GgufFile;
 
@@ -59,10 +59,10 @@ fn load_with_shard(
     device: &impl Device,
     shard: ShardMode,
     layer_range: Option<(usize, usize)>,
-    ctx_cap: Option<usize>,
+    opts: LoadOptions,
 ) -> Result<Qwen35V2Model> {
     let mut config = Qwen35V2Config::from_gguf(file).context("parse qwen35 config")?;
-    if let Some(cap) = ctx_cap {
+    if let Some(cap) = opts.ctx_cap {
         if cap > 0 && cap < config.context_length {
             config.context_length = cap;
         }
@@ -242,9 +242,10 @@ fn load_with_shard(
         LmHeadWeights::placeholder(config.vocab_size, config.hidden, config.rms_eps)
     };
 
-    // MTP/nextn draft head: loaded only when the GGUF embeds it and the
-    // shard is replicated (SD). The draft block is `blk.{num_layers}`.
-    let mtp = if config.nextn_layers > 0 && owns_lm_head {
+    // MTP/nextn draft head: loaded only when requested, the GGUF embeds
+    // it and this rank owns the LM head. The draft block is
+    // `blk.{num_layers}`.
+    let mtp = if mtp_head_wanted(opts, config.nextn_layers, owns_lm_head) {
         let p = format!("blk.{}", config.num_layers);
         let nl = |s: &str| format!("{p}.{s}");
         let attn = load_dense_attn_layer(
@@ -378,9 +379,9 @@ pub fn load_from_gguf(
     file: &GgufFile,
     device: &impl Device,
     layer_range: Option<(usize, usize)>,
-    ctx_cap: Option<usize>,
+    opts: LoadOptions,
 ) -> Result<Qwen35V2Model> {
-    load_with_shard(file, device, ShardMode::Replicated, layer_range, ctx_cap)
+    load_with_shard(file, device, ShardMode::Replicated, layer_range, opts)
 }
 
 pub fn load_tp_shard_from_gguf(
@@ -389,13 +390,35 @@ pub fn load_tp_shard_from_gguf(
     rank: usize,
     n_ranks: usize,
     layer_range: Option<(usize, usize)>,
-    ctx_cap: Option<usize>,
+    opts: LoadOptions,
 ) -> Result<Qwen35V2Model> {
     load_with_shard(
         file,
         device,
         ShardMode::Tp { rank, n_ranks },
         layer_range,
-        ctx_cap,
+        opts,
     )
+}
+
+fn mtp_head_wanted(opts: LoadOptions, nextn_layers: usize, owns_lm_head: bool) -> bool {
+    opts.draft_head && nextn_layers > 0 && owns_lm_head
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mtp_head_loads_only_when_requested() {
+        let on = LoadOptions {
+            ctx_cap: None,
+            draft_head: true,
+        };
+        let off = LoadOptions::default();
+        assert!(mtp_head_wanted(on, 1, true));
+        assert!(!mtp_head_wanted(off, 1, true));
+        assert!(!mtp_head_wanted(on, 0, true));
+        assert!(!mtp_head_wanted(on, 1, false));
+    }
 }

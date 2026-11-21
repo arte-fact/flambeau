@@ -14,7 +14,7 @@ use flambeau_quant::GgufFile;
 
 use crate::core::{KvLayout, ScratchConfig};
 use crate::ctx::{ForwardCtx, LayerKind};
-use crate::loader::ShardMode;
+use crate::loader::{LoadOptions, ShardMode};
 
 /// Operator-facing topology selection.
 #[derive(Clone, Debug)]
@@ -70,15 +70,14 @@ pub trait Arch: Send + Sync + 'static {
     /// being the inner ring of Hybrid stages). `layer_range` is
     /// `Some((start, end))` for PP / Hybrid ranks (load only layers
     /// `[start, end)` to keep per-rank VRAM bounded); `None` for SD /
-    /// TP (every layer loads). `ctx_cap` clamps the model's GGUF
-    /// `context_length` to the operator's `--ctx-cap` so per-layer KV
-    /// slabs don't allocate for the full 128–256k context.
+    /// TP (every layer loads). See [`LoadOptions`] for the context cap
+    /// and the embedded draft head.
     fn load(
         file: &GgufFile,
         device: &impl Device,
         shard: ShardMode,
         layer_range: Option<(usize, usize)>,
-        ctx_cap: Option<usize>,
+        opts: LoadOptions,
     ) -> Result<Self::Model>;
 
     /// Run forward over `tokens` (length 1 = single decode; >1 =

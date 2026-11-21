@@ -19,7 +19,7 @@ use flambeau_backend_cuda::CudaDevice;
 use flambeau_backend_hip::HipDevice;
 use flambeau_core::Device;
 use flambeau_forward::ctx::ForwardCtx;
-use flambeau_forward::loader::ShardMode;
+use flambeau_forward::loader::{LoadOptions, ShardMode};
 use flambeau_forward::{Arch, ForwardEngine, KvLayout, ScratchPool};
 use flambeau_qwen35_v2::Qwen35V2;
 use flambeau_quant::GgufFile;
@@ -43,7 +43,8 @@ fn run<B: Backend>(
     prompt: &[u32],
     n_gen: usize,
 ) -> anyhow::Result<RunOut> {
-    let mut model = Qwen35V2::load(file, device, ShardMode::Replicated, None, Some(CTX_CAP))?;
+    let opts = LoadOptions::with_ctx_cap(CTX_CAP);
+    let mut model = Qwen35V2::load(file, device, ShardMode::Replicated, None, opts)?;
     let cfg = Qwen35V2::scratch_config(&model, ShardMode::Replicated, prompt.len(), 1, None, KvLayout::F16Contig, 0);
     let mut pool = ScratchPool::new(device, cfg)?;
     let stream = device.default_stream();
