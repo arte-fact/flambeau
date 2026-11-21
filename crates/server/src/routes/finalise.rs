@@ -182,6 +182,24 @@ pub(super) fn finalise(
         }
     };
 
+    let matched_stop = cut_at_stop_strings(&mut text, stop_strings);
+    Ok((
+        text,
+        prompt_tokens,
+        completion_tokens,
+        reason.to_owned(),
+        logprobs,
+        reasoning_content,
+        matched_stop,
+    ))
+}
+
+/// Cut `text` before the earliest caller stop sequence and return the one
+/// that matched. Everything before it is kept, whitespace included, as
+/// OpenAI and llama-server return it, so the response is the concatenation
+/// of the deltas the streamed path sends. A trailing U+FFFD (a glyph whose
+/// bytes the cut split) is dropped, as the stream holds it back.
+fn cut_at_stop_strings(text: &mut String, stop_strings: &[String]) -> Option<String> {
     let mut earliest = text.len();
     let mut matched_stop: Option<String> = None;
     for s in stop_strings {
@@ -193,17 +211,9 @@ pub(super) fn finalise(
         }
     }
     text.truncate(earliest);
-    let trimmed_len = text.trim_end().len();
-    text.truncate(trimmed_len);
-    Ok((
-        text,
-        prompt_tokens,
-        completion_tokens,
-        reason.to_owned(),
-        logprobs,
-        reasoning_content,
-        matched_stop,
-    ))
+    let complete = text.trim_end_matches('\u{FFFD}').len();
+    text.truncate(complete);
+    matched_stop
 }
 
 /// Split a harmony-style channel (`<|channel>{name}\n{cot} <channel|>
@@ -287,5 +297,77 @@ fn truncate_leaked_reasoning(text: &mut String, state: &ServerState) {
         if let Some(idx) = text.find(*marker) {
             text.truncate(idx);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cut_at_stop_strings;
+    use crate::routes::token_emit::{Emitter, TokenSink};
+
+    /// Token i decodes to PIECES[i].
+    const PIECES: &[&str] = &["class LRUCache:", "\n", "    ", "def", " get", "(self):", "\n\n", " ", "x"];
+    const STOP_TOKEN: u32 = 99;
+
+    fn decode(ids: &[u32]) -> anyhow::Result<String> {
+        Ok(ids.iter().map(|&t| PIECES[t as usize]).collect())
+    }
+
+    struct Collect(String);
+    impl TokenSink for Collect {
+        fn text(&mut self, delta: &str) -> bool {
+            self.0.push_str(delta);
+            true
+        }
+    }
+
+    /// The streamed deltas of `run` and the non-streamed response
+    /// (`finalise`'s cut over the decoded ids the same run kept).
+    fn both(run: &[u32], stops: &[&str], max_tokens: usize) -> (String, String) {
+        let patterns: Vec<String> = stops.iter().map(|s| (*s).to_owned()).collect();
+        let stop_ids = [STOP_TOKEN];
+        let mut sink = Collect(String::new());
+        let mut e = Emitter::new(patterns.clone(), None, &stop_ids, max_tokens, &mut sink);
+        let mut finish = None;
+        for &t in run {
+            finish = e.accept(t, &decode).unwrap();
+            if finish.is_some() {
+                break;
+            }
+        }
+        assert!(finish.is_some(), "run {run:?} must end");
+        let kept: Vec<u32> = e.generated.iter().copied().filter(|&t| t != STOP_TOKEN).collect();
+        drop(e);
+        let mut text = decode(&kept).unwrap();
+        cut_at_stop_strings(&mut text, &patterns);
+        (sink.0, text)
+    }
+
+    #[test]
+    fn response_equals_streamed_deltas_whitespace_included() {
+        let cases: [(&[u32], &[&str], usize); 5] = [
+            // Stop sequence right after indentation: the indentation stays.
+            (&[0, 1, 2, 3, 4, 5], &["def "], 100),
+            // Stop sequence that starts with whitespace: cut before it.
+            (&[0, 1, 2, 3, 4, 5], &["\n    def"], 100),
+            // Trailing blank lines before a stop token.
+            (&[0, 5, 6, STOP_TOKEN], &[], 100),
+            // Trailing space at max_tokens.
+            (&[0, 8, 7, 8], &["zzz"], 3),
+            // Earliest of several stop sequences.
+            (&[0, 1, 2, 3, 4, 5], &["(self)", " get"], 100),
+        ];
+        for (run, stops, max_tokens) in cases {
+            let (streamed, response) = both(run, stops, max_tokens);
+            assert_eq!(response, streamed, "run {run:?} stops {stops:?}");
+        }
+    }
+
+    #[test]
+    fn stop_cut_keeps_trailing_whitespace() {
+        let mut text = "class LRUCache:\n    def get(self):".to_owned();
+        let matched = cut_at_stop_strings(&mut text, &["def ".to_owned()]);
+        assert_eq!(text, "class LRUCache:\n    ");
+        assert_eq!(matched.as_deref(), Some("def "));
     }
 }
