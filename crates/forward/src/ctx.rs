@@ -449,8 +449,21 @@ impl QuantWeight {
     }
 }
 
+/// Device copy of `token_embd`: dequantized to F16 at load, or kept in its
+/// GGUF dtype and dequantized row by row on gather.
+pub enum EmbeddingTable {
+    F16(Tensor<F16>),
+    Quant(QuantWeight),
+}
+
+impl From<Tensor<F16>> for EmbeddingTable {
+    fn from(t: Tensor<F16>) -> Self {
+        Self::F16(t)
+    }
+}
+
 pub struct EmbeddingWeights {
-    pub token_embd: Tensor<F16>,
+    pub token_embd: EmbeddingTable,
     pub vocab_size: usize,
     pub hidden: usize,
     /// Optional post-embed scalar multiply applied in-place
@@ -467,7 +480,9 @@ impl EmbeddingWeights {
         Self {
             // SAFETY: NULL ptr + 0 elems makes the tensor opaque;
             // safe construction since no read ever fires on it.
-            token_embd: unsafe { Tensor::<F16>::from_raw(flambeau_core::DevicePtr::NULL, 0) },
+            token_embd: EmbeddingTable::F16(unsafe {
+                Tensor::<F16>::from_raw(flambeau_core::DevicePtr::NULL, 0)
+            }),
             vocab_size,
             hidden,
             post_scale: None,

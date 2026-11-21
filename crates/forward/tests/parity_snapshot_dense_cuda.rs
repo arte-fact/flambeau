@@ -63,7 +63,7 @@ fn parity_snapshot_dense_single_token_cuda() {
     let mut allocs = DeviceAllocs::new(CudaDevice::new(0).expect("CudaDevice 0 alias"));
 
     let embd = EmbeddingWeights {
-        token_embd: allocs.upload_f16(&det_signal(VOCAB * HIDDEN, 1)),
+        token_embd: allocs.upload_f16(&det_signal(VOCAB * HIDDEN, 1)).into(),
         vocab_size: VOCAB,
         hidden: HIDDEN,
         post_scale: None,

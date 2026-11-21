@@ -919,6 +919,11 @@ pub struct ScratchPool {
     /// positions tensor; that mechanism is left untouched).
     pub decode_ctx_i32: DevicePtr,
 
+    /// Token ids of the current non-captured embed pass (`max_prefill_tokens`
+    /// i32), uploaded from [`Self::embed_ids_host`] and read by the quantized
+    /// embedding gather.
+    pub embed_ids_i32: DevicePtr,
+
     /// Device scratch of the on-device greedy draw (`Ops::argmax_f32`, see
     /// [`Self::argmax_buffers`]): `ARGMAX_MAX_ADDS` ids and values, the
     /// first-pass winners, `ARGMAX_MAX_ROWS` result indices, then up to
@@ -1084,6 +1089,10 @@ pub struct ScratchPool {
     /// both entries then issues one uncaptured 8-byte HtoD before each replay.
     pub decode_ctx_host: Vec<i32>,
 
+    /// Stable host staging for [`Self::embed_ids_i32`]; index-assigned only,
+    /// never reallocated.
+    pub embed_ids_host: Vec<i32>,
+
     allocs: Vec<(DevicePtr, usize)>,
 }
 
@@ -1240,6 +1249,7 @@ impl ScratchPool {
         let logits_f32_dev = alloc_bytes(logits_rows * config.vocab * f32)?;
         let position_i32 = alloc_bytes(n * i32_b)?;
         let decode_ctx_i32 = alloc_bytes(2 * i32_b)?;
+        let embed_ids_i32 = alloc_bytes(n * i32_b)?;
         let argmax_max_pairs = config.max_seq_len;
         let argmax_scratch = alloc_bytes(ARGMAX_FIXED_BYTES + argmax_max_pairs * 8)?;
 
@@ -1712,6 +1722,7 @@ impl ScratchPool {
             logits_rows,
             position_i32,
             decode_ctx_i32,
+            embed_ids_i32,
             argmax_scratch,
             argmax_max_pairs,
             router_logits_f32,
@@ -1767,6 +1778,7 @@ impl ScratchPool {
             fused_residual_already_done: false,
             position_stage_host: vec![0i32; n],
             decode_ctx_host: vec![0i32; 2],
+            embed_ids_host: vec![0i32; n],
             allocs,
         })
     }
