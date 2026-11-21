@@ -183,6 +183,13 @@ pub struct Gemma4ToolCallParser {
     /// decoded bytes. Cleared after the first `push()` that sees
     /// non-prefix content. See [`Self::with_pending_channel_close`].
     pending_thought_echo: bool,
+    /// A `<|channel>` block's first line is its channel name, not reasoning:
+    /// set on the open, cleared once that line is dropped.
+    channel_name_pending: bool,
+    /// After a channel block, a first answer line that is blank or the
+    /// `final` channel name is scaffolding: set on the close, cleared once
+    /// that line is seen.
+    answer_head_pending: bool,
 }
 
 impl Default for Gemma4ToolCallParser {
@@ -229,6 +236,35 @@ impl Gemma4ToolCallParser {
             args_depth: 0,
             args_in_string: false,
             pending_thought_echo,
+            channel_name_pending: false,
+            answer_head_pending: false,
+        }
+    }
+
+    /// Drop the answer's first line when it is blank or `final` (the
+    /// channel name the model may repeat after a close). Returns `false`
+    /// while that line is still streaming and could be one.
+    fn consume_answer_head(&mut self, is_finish: bool) -> bool {
+        if !self.answer_head_pending {
+            return true;
+        }
+        match self.buf.find('\n') {
+            Some(nl) => {
+                let line = self.buf[..nl].trim();
+                if line.is_empty() || line == "final" {
+                    self.buf.drain(..=nl);
+                }
+                self.answer_head_pending = false;
+                true
+            }
+            None => {
+                let line = self.buf.trim();
+                if !is_finish && "final".starts_with(line) {
+                    return false;
+                }
+                self.answer_head_pending = false;
+                true
+            }
         }
     }
 
@@ -309,6 +345,9 @@ impl Gemma4ToolCallParser {
     }
 
     fn step_text(&mut self, out: &mut Vec<ParserEvent>, is_finish: bool) -> bool {
+        if !self.consume_answer_head(is_finish) {
+            return false;
+        }
         let earliest = TEXT_OPEN_TAGS
             .iter()
             .filter_map(|tag| self.buf.find(tag).map(|p| (p, *tag)))
@@ -325,7 +364,11 @@ impl Gemma4ToolCallParser {
                 // the residual `NAME{…}` parses uniformly.
                 "<|tool_call>" | TOOL_CALL_OPEN_SYM | TOOL_DEF_OPEN | CALL_OPEN_BARE
                 | HERMES_CALL_OPEN => State::InCallHeader,
-                "<|channel>" | THINK_OPEN => State::InChannel,
+                "<|channel>" => {
+                    self.channel_name_pending = true;
+                    State::InChannel
+                }
+                THINK_OPEN => State::InChannel,
                 t if t == TOOL_CODE_OPEN => State::InToolCode,
                 t if t == TOOL_RESPONSE_OPEN => State::InToolResponse,
                 t if t == TURN_OPEN => State::InTurnHeader,
@@ -397,12 +440,28 @@ impl Gemma4ToolCallParser {
             .iter()
             .filter_map(|m| self.buf.find(m).map(|p| (p, *m)))
             .min_by_key(|(p, _)| *p);
+        if self.channel_name_pending {
+            let name_end = match (self.buf.find('\n'), close) {
+                (Some(nl), Some((pos, _))) if nl < pos => Some(nl + 1),
+                (Some(nl), None) => Some(nl + 1),
+                (_, Some((pos, _))) => Some(pos),
+                (None, None) if is_finish => Some(self.buf.len()),
+                (None, None) => None,
+            };
+            let Some(end) = name_end else {
+                return false;
+            };
+            self.buf.drain(..end);
+            self.channel_name_pending = false;
+            return true;
+        }
         if let Some((pos, marker)) = close {
-            if pos > 0 {
-                out.push(ParserEvent::ThinkDelta(self.buf[..pos].to_owned()));
-            }
+            // Pushed even when empty: the block's close is what lets the
+            // reasoning whitespace rule consume the spaces that follow.
+            out.push(ParserEvent::ThinkDelta(self.buf[..pos].to_owned()));
             self.buf.drain(..pos + marker.len());
             self.state = State::Text;
+            self.answer_head_pending = true;
             return true;
         }
         let total = self.buf.len();
@@ -1084,7 +1143,9 @@ const SCAFFOLD_WORDS: &[&str] = &[
 /// alongside a scaffolding word or is the bare `thought` echo.
 fn is_scaffolding_line(line: &str) -> bool {
     let s = line.trim();
-    if s.is_empty() || s.len() > 40 {
+    // A well-formed channel open is a real reasoning block (an echoed empty
+    // one parses to empty reasoning), not an echo to strip.
+    if s.is_empty() || s.len() > 40 || s.starts_with("<|channel>") {
         return false;
     }
     if !s.chars().all(is_scaffold_char) {
@@ -1557,7 +1618,7 @@ mod tests {
     #[test]
     fn channel_block_emits_think_delta() {
         let events = collect(
-            "before<|channel>reasoning content<channel|>after<|tool_call>call:f{}<tool_call|>",
+            "before<|channel>thought\nreasoning content<channel|>after<|tool_call>call:f{}<tool_call|>",
         );
         assert!(events
             .iter()

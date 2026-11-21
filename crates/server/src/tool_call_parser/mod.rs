@@ -123,6 +123,8 @@ impl ReasoningTrim {
                 }
                 self.after_close = false;
                 let s = if self.started { s.as_str() } else { s.trim_start() };
+                // An empty delta only marks the block (gemma4's close of an
+                // empty channel).
                 if s.is_empty() {
                     continue;
                 }
