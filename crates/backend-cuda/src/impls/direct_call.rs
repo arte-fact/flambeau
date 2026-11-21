@@ -186,6 +186,14 @@ pub const BENCH_REFERENCE_KERNELS_SM86: &[DirectCallKernel] = &[
         cert_rel_path: "certs/cuda/sm_86/gdn_state_step_alphabeta_f32_batched_slots.json",
     },
     DirectCallKernel {
+        impl_id: "gdn_state_step_alphabeta_f32_kstates",
+        cert_rel_path: "certs/cuda/sm_86/gdn_state_step_alphabeta_f32_kstates.json",
+    },
+    DirectCallKernel {
+        impl_id: "embed_gather_q4_k_f16",
+        cert_rel_path: "certs/cuda/sm_86/embed_gather_q4_k_f16.json",
+    },
+    DirectCallKernel {
         impl_id: "gdn_state_step_f32",
         cert_rel_path: "certs/cuda/sm_86/gdn_state_step_f32.json",
     },

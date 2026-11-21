@@ -858,6 +858,14 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
         impl_id: "gdn_state_step_alphabeta_f32_batched_slots",
         cert_rel_path: "certs/hip/gfx906/gdn_state_step_alphabeta_f32_batched_slots.json",
     },
+    DirectCallKernel {
+        impl_id: "gdn_state_step_alphabeta_f32_kstates",
+        cert_rel_path: "certs/hip/gfx906/gdn_state_step_alphabeta_f32_kstates.json",
+    },
+    DirectCallKernel {
+        impl_id: "embed_gather_q4_k_f16",
+        cert_rel_path: "certs/hip/gfx906/embed_gather_q4_k_f16.json",
+    },
     // P3 Wave 3 — paged KV append + attention serving paths.
     DirectCallKernel {
         impl_id: "kv_append_f16_paged_slots",
