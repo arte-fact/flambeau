@@ -104,6 +104,9 @@ pub mod sweep_kv_append_v_unit_norm_dpos;
 pub mod sweep_embed_gather_dpos;
 
 #[cfg(any(feature = "hip", feature = "cuda"))]
+pub mod sweep_embed_gather_q4k;
+
+#[cfg(any(feature = "hip", feature = "cuda"))]
 pub mod sweep_attention_q8_kv_splitk_dpos;
 pub mod sweep_attention_q8_kv_vec_dpos;
 
