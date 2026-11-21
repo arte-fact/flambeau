@@ -3744,26 +3744,29 @@ pub enum Mmq4WarpLdsDtype {
     Q4_0,
     Q4_1,
     Q4K,
+    /// Int8 tensor-core Q4_0 MMQ (mma.sync, CUDA sm_80+), same DS4 activation
+    /// and 9-arg ABI.
+    Q4_0Mma,
 }
 
 impl Mmq4WarpLdsDtype {
     pub fn name(self) -> &'static str {
         match self {
-            Mmq4WarpLdsDtype::Q4_0 => "Q4_0",
+            Mmq4WarpLdsDtype::Q4_0 | Mmq4WarpLdsDtype::Q4_0Mma => "Q4_0",
             Mmq4WarpLdsDtype::Q4_1 => "Q4_1",
             Mmq4WarpLdsDtype::Q4K => "Q4_K",
         }
     }
     fn weight_dtype(self) -> Dtype {
         match self {
-            Mmq4WarpLdsDtype::Q4_0 => Dtype::Q4_0,
+            Mmq4WarpLdsDtype::Q4_0 | Mmq4WarpLdsDtype::Q4_0Mma => Dtype::Q4_0,
             Mmq4WarpLdsDtype::Q4_1 => Dtype::Q4_1Dp4a,
             Mmq4WarpLdsDtype::Q4K => Dtype::Q4K,
         }
     }
     fn block_bytes(self) -> usize {
         match self {
-            Mmq4WarpLdsDtype::Q4_0 => 18,
+            Mmq4WarpLdsDtype::Q4_0 | Mmq4WarpLdsDtype::Q4_0Mma => 18,
             Mmq4WarpLdsDtype::Q4_1 => 20,
             Mmq4WarpLdsDtype::Q4K => 144,
         }
@@ -3773,6 +3776,7 @@ impl Mmq4WarpLdsDtype {
             Mmq4WarpLdsDtype::Q4_0 => "mmq_q4_0_4warp_lds",
             Mmq4WarpLdsDtype::Q4_1 => "mmq_q4_1_4warp_lds",
             Mmq4WarpLdsDtype::Q4K => "mmq_q4_K_lds_tiled",
+            Mmq4WarpLdsDtype::Q4_0Mma => "mmq_q4_0_mma",
         }
     }
     fn kernel_entry(self) -> &'static str {
@@ -3780,6 +3784,7 @@ impl Mmq4WarpLdsDtype {
             Mmq4WarpLdsDtype::Q4_0 => "flambeau_mmq_q4_0_4warp_lds_q8_1",
             Mmq4WarpLdsDtype::Q4_1 => "flambeau_mmq_q4_1_4warp_lds_q8_1",
             Mmq4WarpLdsDtype::Q4K => "flambeau_mmq_q4_K_lds_tiled_q8_1",
+            Mmq4WarpLdsDtype::Q4_0Mma => "flambeau_mmq_q4_0_mma_q8_1",
         }
     }
     fn impl_id(self) -> &'static str {
@@ -3787,15 +3792,19 @@ impl Mmq4WarpLdsDtype {
             Mmq4WarpLdsDtype::Q4_0 => "qmatmul_q4_0_mmq_4warp_lds",
             Mmq4WarpLdsDtype::Q4_1 => "qmatmul_q4_1_mmq_4warp_lds",
             Mmq4WarpLdsDtype::Q4K => "qmatmul_q4_k_mmq_lds_tiled",
+            Mmq4WarpLdsDtype::Q4_0Mma => "qmatmul_q4_0_mma",
         }
     }
-    /// (MMQ_X cols/block, dynamic-LDS bytes). MMQ_Y is 128 for all.
-    fn launch(self) -> (u32, u32) {
+    /// (MMQ_Y rows/block, MMQ_X cols/block, block dims, dynamic-LDS bytes),
+    /// as `ops::launch::qmatmul` launches each kernel.
+    fn launch(self) -> (u32, u32, (u32, u32, u32), u32) {
         match self {
             // tile_y 64*36 + x_qs 128*33 + x_dm 128*8 (half2) ints = 7584 → 30336 B.
-            Mmq4WarpLdsDtype::Q4_0 | Mmq4WarpLdsDtype::Q4_1 => (64, 30336),
+            Mmq4WarpLdsDtype::Q4_0 | Mmq4WarpLdsDtype::Q4_1 => (128, 64, (64, 4, 1), 30336),
             // tile_y 16*36 + x_qs 4224 + x_dm 128 + x_sc 528 = 5456 ints → 21824 B.
-            Mmq4WarpLdsDtype::Q4K => (16, 21824),
+            Mmq4WarpLdsDtype::Q4K => (128, 16, (64, 4, 1), 21824),
+            // 256x128 double-buffered tile, (32, 16) warps, static shared.
+            Mmq4WarpLdsDtype::Q4_0Mma => (256, 128, (32, 16, 1), 0),
         }
     }
 }
@@ -3845,6 +3854,10 @@ pub fn run_mmq_4warp_lds_sweep<B: BenchBackend>(
     if matches!(dtype, Mmq4WarpLdsDtype::Q4K) {
         shapes.extend([(17408, 64, 5120), (5120, 64, 17408), (17408, 512, 5120), (5120, 512, 17408)]);
     }
+    // The MMA row serves m >= 128 prefill: full and partial 128-column tiles.
+    if matches!(dtype, Mmq4WarpLdsDtype::Q4_0Mma) {
+        shapes.extend([(4096, 512, 4096), (4096, 300, 4096), (5120, 512, 5120), (17408, 512, 5120)]);
+    }
 
     let mut results = Vec::new();
     for &(n_rows, n_cols, k) in &shapes {
@@ -3874,7 +3887,8 @@ pub fn run_mmq_4warp_lds_sweep<B: BenchBackend>(
         arch: arch.to_string(),
         op: "qmatmul_mmq".to_string(),
         dtype_weight: dtype.name().to_string(),
-        dtype_activation: "Q8_1_MMQ".to_string(),
+        // The dispatch key (DS4 is a Q8_1 layout), as a [[qmatmul]] row reads it.
+        dtype_activation: "Q8_1".to_string(),
         tolerance_formula: "|err| <= 3e-2 * max(|ref|, sqrt(k))".to_string(),
         results,
         pass,
@@ -3964,10 +3978,10 @@ fn run_shape_mmq_4warp_lds<B: BenchBackend>(
         args.push_arg(&stride_col_y);
         args.push_arg(&stride_row_x);
         args.push_arg(&nrows_dst);
-        let (mmq_x, shared_bytes) = dtype.launch();
+        let (mmq_y, mmq_x, block, shared_bytes) = dtype.launch();
         let cfg = LaunchCfg {
-            grid: ((n_rows as u32).div_ceil(128), (n_cols as u32).div_ceil(mmq_x), 1),
-            block: (64, 4, 1),
+            grid: ((n_rows as u32).div_ceil(mmq_y), (n_cols as u32).div_ceil(mmq_x), 1),
+            block,
             shared_bytes,
         };
         B::launch(&k_mmq, stream, cfg, args)?;

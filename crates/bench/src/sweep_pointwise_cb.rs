@@ -102,6 +102,7 @@ pub fn run_pointwise_sweep<B: BenchBackend>(
         "attention_decode_f16_paged" => run_attention_paged_sweep::<B>(repo_root, arch, false),
         "attention_prefill_f16_paged" => run_attention_paged_sweep::<B>(repo_root, arch, true),
         "attention_prefill_flash_tile_f16" => run_attention_flash_tile_sweep::<B>(repo_root, arch),
+        "attention_prefill_mma" => run_attention_prefill_mma_sweep::<B>(repo_root, arch),
         "attention_decode_q8_kv" => run_attention_q8_kv_sweep::<B>(repo_root, arch, false),
         "attention_prefill_q8_kv" => run_attention_q8_kv_sweep::<B>(repo_root, arch, true),
         "attention_decode_q8_kv_splitk" => run_attention_q8_kv_splitk_sweep::<B>(repo_root, arch),
@@ -1503,57 +1504,117 @@ pub fn run_attention_flash_tile_sweep<B: BenchBackend>(repo_root: &Path, arch: &
     for (entry, head_dim, br, n_q, n_k, n_heads_q, n_heads_kv) in cases {
         let kernel = B::kernel(&module, entry)?;
         let seed = 0xC0FFEE ^ ((n_q as u64) * 1049 + (head_dim as u64) * 11);
-        let scale = 1.0f32 / (head_dim as f32).sqrt();
-        let group = n_heads_q / n_heads_kv;
-        let q = f16_input(seed, n_q * n_heads_q * head_dim);
-        let k = f16_input(seed ^ 0xAA, n_k * n_heads_kv * head_dim);
-        let v = f16_input(seed ^ 0xBB, n_k * n_heads_kv * head_dim);
-        let mut reference = vec![0.0f32; n_q * n_heads_q * head_dim];
-        for qt in 0..n_q {
-            for h in 0..n_heads_q {
-                let kvh = h / group;
-                let limit = (qt + 1).min(n_k);
-                let qr: Vec<f32> = (0..head_dim).map(|d| q[(qt * n_heads_q + h) * head_dim + d].to_f32()).collect();
-                let ctx: Vec<(Vec<f32>, Vec<f32>)> = (0..limit).map(|t| {
-                    let base = (t * n_heads_kv + kvh) * head_dim;
-                    ((0..head_dim).map(|d| k[base + d].to_f32()).collect(),
-                     (0..head_dim).map(|d| v[base + d].to_f32()).collect())
-                }).collect();
-                let o = attn_oracle_row(&qr, &ctx, scale as f64, head_dim);
-                for d in 0..head_dim { reference[(qt * n_heads_q + h) * head_dim + d] = f16::from_f32(o[d]).to_f32(); }
-            }
-        }
-
-        let d_q = alloc_and_upload(&dev, &q);
-        let d_k = alloc_and_upload(&dev, &k);
-        let d_v = alloc_and_upload(&dev, &v);
-        let d_o = dev.alloc(n_q * n_heads_q * head_dim * 2)?;
-        {
-            let stream = dev.default_stream();
-            let (nqi, nhq, nhkv, nki, qoff, ws, rd) = (n_q as i32, n_heads_q as i32, n_heads_kv as i32, n_k as i32, 0i32, 0i32, 0i32);
-            let qp: u64 = d_q.as_usize() as u64; let kp: u64 = d_k.as_usize() as u64;
-            let vp: u64 = d_v.as_usize() as u64; let op: u64 = d_o.as_usize() as u64;
-            let mut a = <B::Args<'_>>::default();
-            a.push_arg(&qp); a.push_arg(&kp); a.push_arg(&vp); a.push_arg(&op);
-            a.push_arg(&nqi); a.push_arg(&nhq); a.push_arg(&nhkv); a.push_arg(&nki);
-            a.push_arg(&qoff); a.push_arg(&scale); a.push_arg(&ws); a.push_arg(&rd);
-            let grid_x = (n_q as u32).div_ceil(br as u32);
-            let cfg = LaunchCfg { grid: (grid_x, n_heads_q as u32, 1), block: (warp_size, br as u32, 1), shared_bytes: 0 };
-            B::launch(&kernel, stream, cfg, a)?;
-            stream.synchronize()?;
-        }
-        let mut got_f16 = vec![f16::from_f32(0.0); n_q * n_heads_q * head_dim];
-        unsafe { dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost, DevicePtr(got_f16.as_mut_ptr() as usize), d_o, n_q * n_heads_q * head_dim * 2)?; }
-        dev.default_stream().synchronize()?;
-        unsafe {
-            dev.dealloc(d_q, n_q * n_heads_q * head_dim * 2)?; dev.dealloc(d_k, n_k * n_heads_kv * head_dim * 2)?;
-            dev.dealloc(d_v, n_k * n_heads_kv * head_dim * 2)?; dev.dealloc(d_o, n_q * n_heads_q * head_dim * 2)?;
-        }
-        let got: Vec<f32> = got_f16.iter().map(|v| v.to_f32()).collect();
+        let cfg = LaunchCfg {
+            grid: ((n_q as u32).div_ceil(br as u32), n_heads_q as u32, 1),
+            block: (warp_size, br as u32, 1),
+            shared_bytes: 0,
+        };
+        let (got, reference) =
+            prefill_attention_case::<B>(&dev, &kernel, cfg, head_dim, n_q, n_k, n_heads_q, n_heads_kv, seed)?;
         let err = max_rel_err_with_floor(&got, &reference, 1.0);
         results.push(ShapeResult { m: n_q, k: head_dim, n: n_k, seed, max_rel_err: err, tolerance: 5e-3, pass: err <= 5e-3 });
     }
     finish_cert(&dev, repo_root, arch, "attention_prefill_flash_tile_f16", "attention_prefill_flash_tile_f16", "F16", "F16",
+        "|err| <= 5e-3 * max(|ref|, 1) vs F64 attention oracle", results, pmc)
+}
+
+/// One causal prefill case (`q_offset` 0, no window) of an F16 attention
+/// kernel with the 12-arg prefill ABI, launched with `cfg`: the F16 output
+/// and the F64 oracle's, both widened to F32.
+#[allow(clippy::too_many_arguments, clippy::undocumented_unsafe_blocks)]
+fn prefill_attention_case<B: BenchBackend>(
+    dev: &B::Device,
+    kernel: &B::Kernel<'_>,
+    cfg: LaunchCfg,
+    head_dim: usize,
+    n_q: usize,
+    n_k: usize,
+    n_heads_q: usize,
+    n_heads_kv: usize,
+    seed: u64,
+) -> Result<(Vec<f32>, Vec<f32>)> {
+    let scale = 1.0f32 / (head_dim as f32).sqrt();
+    let group = n_heads_q / n_heads_kv;
+    let q = f16_input(seed, n_q * n_heads_q * head_dim);
+    let k = f16_input(seed ^ 0xAA, n_k * n_heads_kv * head_dim);
+    let v = f16_input(seed ^ 0xBB, n_k * n_heads_kv * head_dim);
+    let mut reference = vec![0.0f32; n_q * n_heads_q * head_dim];
+    for qt in 0..n_q {
+        for h in 0..n_heads_q {
+            let kvh = h / group;
+            let limit = (qt + 1).min(n_k);
+            let qr: Vec<f32> = (0..head_dim).map(|d| q[(qt * n_heads_q + h) * head_dim + d].to_f32()).collect();
+            let ctx: Vec<(Vec<f32>, Vec<f32>)> = (0..limit).map(|t| {
+                let base = (t * n_heads_kv + kvh) * head_dim;
+                ((0..head_dim).map(|d| k[base + d].to_f32()).collect(),
+                 (0..head_dim).map(|d| v[base + d].to_f32()).collect())
+            }).collect();
+            let o = attn_oracle_row(&qr, &ctx, scale as f64, head_dim);
+            for d in 0..head_dim { reference[(qt * n_heads_q + h) * head_dim + d] = f16::from_f32(o[d]).to_f32(); }
+        }
+    }
+
+    let d_q = alloc_and_upload(dev, &q);
+    let d_k = alloc_and_upload(dev, &k);
+    let d_v = alloc_and_upload(dev, &v);
+    let d_o = dev.alloc(n_q * n_heads_q * head_dim * 2)?;
+    {
+        let stream = dev.default_stream();
+        let (nqi, nhq, nhkv, nki, qoff, ws, rd) = (n_q as i32, n_heads_q as i32, n_heads_kv as i32, n_k as i32, 0i32, 0i32, 0i32);
+        let qp: u64 = d_q.as_usize() as u64; let kp: u64 = d_k.as_usize() as u64;
+        let vp: u64 = d_v.as_usize() as u64; let op: u64 = d_o.as_usize() as u64;
+        let mut a = <B::Args<'_>>::default();
+        a.push_arg(&qp); a.push_arg(&kp); a.push_arg(&vp); a.push_arg(&op);
+        a.push_arg(&nqi); a.push_arg(&nhq); a.push_arg(&nhkv); a.push_arg(&nki);
+        a.push_arg(&qoff); a.push_arg(&scale); a.push_arg(&ws); a.push_arg(&rd);
+        B::launch(kernel, stream, cfg, a)?;
+        stream.synchronize()?;
+    }
+    let mut got_f16 = vec![f16::from_f32(0.0); n_q * n_heads_q * head_dim];
+    unsafe { dev.memcpy_async(dev.default_stream(), CopyDirection::DeviceToHost, DevicePtr(got_f16.as_mut_ptr() as usize), d_o, n_q * n_heads_q * head_dim * 2)?; }
+    dev.default_stream().synchronize()?;
+    unsafe {
+        dev.dealloc(d_q, n_q * n_heads_q * head_dim * 2)?; dev.dealloc(d_k, n_k * n_heads_kv * head_dim * 2)?;
+        dev.dealloc(d_v, n_k * n_heads_kv * head_dim * 2)?; dev.dealloc(d_o, n_q * n_heads_q * head_dim * 2)?;
+    }
+    let got: Vec<f32> = got_f16.iter().map(|v| v.to_f32()).collect();
+    Ok((got, reference))
+}
+/// `attention_prefill_mma` — f16 tensor-core flash-attention prefill (CUDA
+/// sm_80+), 8 warps x 16 query rows per block (BR = 128), partial tiles
+/// bounds-clamped; d512 runs the DV-split variant. GQA cases at the qwen35 /
+/// gemma head_dims, from the smallest width the launcher sends it (n_q 16)
+/// to a partial multi-tile prompt, against the F64 causal oracle, 5e-3.
+pub fn run_attention_prefill_mma_sweep<B: BenchBackend>(repo_root: &Path, arch: &str) -> Result<Cert> {
+    let dev = B::new_device(0)?;
+    let image = B::image("attention_prefill_mma").ok_or_else(|| anyhow!("attention_prefill_mma not compiled (CUDA-only)"))?;
+    let module = B::load(&dev, image)?;
+    let pmc = B::attributes(&B::kernel(&module, "flambeau_attention_prefill_mma_d256_f16")?)?;
+    // (entry, D, n_q, n_heads_q, n_heads_kv)
+    let cases = [
+        ("flambeau_attention_prefill_mma_d128_f16", 128usize, 16usize, 8usize, 2usize),
+        ("flambeau_attention_prefill_mma_d128_f16", 128, 300, 16, 4),
+        ("flambeau_attention_prefill_mma_d256_f16", 256, 16, 24, 4),
+        ("flambeau_attention_prefill_mma_d256_f16", 256, 128, 24, 4),
+        ("flambeau_attention_prefill_mma_d256_f16", 256, 300, 24, 4),
+        ("flambeau_attention_prefill_mma_d512_f16", 512, 16, 8, 2),
+        ("flambeau_attention_prefill_mma_d512_f16", 512, 200, 8, 1),
+    ];
+    let mut results = Vec::new();
+    for (entry, head_dim, n_q, n_heads_q, n_heads_kv) in cases {
+        let kernel = B::kernel(&module, entry)?;
+        let seed = 0xA77E ^ ((n_q as u64) * 1049 + (head_dim as u64) * 11 + n_heads_q as u64);
+        let cfg = LaunchCfg {
+            grid: ((n_q as u32).div_ceil(128), n_heads_q as u32, 1),
+            block: (32, 8, 1),
+            shared_bytes: 0,
+        };
+        let (got, reference) =
+            prefill_attention_case::<B>(&dev, &kernel, cfg, head_dim, n_q, n_q, n_heads_q, n_heads_kv, seed)?;
+        let err = max_rel_err_with_floor(&got, &reference, 1.0);
+        results.push(ShapeResult { m: n_q, k: head_dim, n: n_q, seed, max_rel_err: err, tolerance: 5e-3, pass: err <= 5e-3 });
+    }
+    finish_cert(&dev, repo_root, arch, "attention_prefill_mma", "attention_prefill_mma", "F16", "F16",
         "|err| <= 5e-3 * max(|ref|, 1) vs F64 attention oracle", results, pmc)
 }
 

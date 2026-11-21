@@ -1475,6 +1475,7 @@ fn mmq_4warp_lds_dtype(dtype: &str) -> Option<flambeau_bench::sweep_mmvq::Mmq4Wa
         "Q4_0_mmq_4warp_lds" => Some(Mmq4WarpLdsDtype::Q4_0),
         "Q4_1_mmq_4warp_lds" => Some(Mmq4WarpLdsDtype::Q4_1),
         "Q4_K_mmq_lds_tiled" => Some(Mmq4WarpLdsDtype::Q4K),
+        "Q4_0_mma" => Some(Mmq4WarpLdsDtype::Q4_0Mma),
         _ => None,
     }
 }
