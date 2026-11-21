@@ -1296,13 +1296,13 @@ impl<B: Backend, H: TopologyHooks<B>, S: StageHooks<B>> ForwardCtx for ForwardEn
         if n_keep < n_rows {
             let row_b = g.conv_channels * 4;
             let hist_b = (g.conv_kernel - 1) * row_b;
-            for local_idx in 0..self.core.pool.gdn_state.len() {
+            for gdn_idx in 0..self.core.pool.gdn_state.len() {
                 let rows = self
                     .core
                     .pool
-                    .gdn_spec_rows(local_idx, &g)
+                    .gdn_spec_rows(gdn_idx, &g)
                     .ok_or_else(|| anyhow::anyhow!("gdn_select_rows: pool has no MTP row store"))?;
-                let hist = self.core.pool.gdn_state[local_idx].conv_history;
+                let hist = self.core.pool.gdn_state[gdn_idx].conv_history;
                 // SAFETY: conv_input holds conv_kernel - 1 history rows then
                 // the verify rows, so rows [n_keep, n_keep + conv_kernel - 1)
                 // exist; the dst is slot_id's history inside the slab.

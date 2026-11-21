@@ -21,7 +21,7 @@
 //!
 //! See `doc/MIXED_BATCH_V2_PLAN.md`.
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use flambeau_core::{Device, DevicePtr};
 use flambeau_model_ops::delta_net::DeltaNetLayer;
 use flambeau_model_ops::WeightHandle;
@@ -78,12 +78,10 @@ pub fn gdn_layer_mixed_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
                 state.layer_idx_offset
             )
         })?;
-    if local_idx >= state.pool.gdn_state.len() {
-        bail!(
-            "gdn_layer_mixed: local_idx {local_idx} >= gdn_state.len {}",
-            state.pool.gdn_state.len()
-        );
-    }
+    let gdn_idx = state
+        .pool
+        .gdn_index(local_idx)
+        .with_context(|| format!("gdn_layer_mixed: layer {layer_idx}"))?;
     let max_slots = state.pool.config.max_slots.max(1);
     for (i, &slot) in slot_ids.iter().enumerate() {
         if slot >= max_slots {
@@ -93,7 +91,7 @@ pub fn gdn_layer_mixed_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
 
     super::gdn::gdn_rs_make_live(state)?;
     let dims = weights.dims;
-    let layer_state = state.pool.gdn_state[local_idx];
+    let layer_state = state.pool.gdn_state[gdn_idx];
     let state_bytes_per_slot = dims.num_v_heads * dims.head_k_dim * dims.head_v_dim * 4;
     let hist_bytes_per_slot = (dims.conv_kernel - 1) * dims.conv_channels * 4;
 

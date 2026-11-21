@@ -381,6 +381,25 @@ pub fn scratch_config_for<S: ScratchShape + ?Sized>(
     }
 }
 
+/// Owned layer -> dense GDN index (see [`ScratchPool::gdn_index`]).
+fn gdn_layer_index(config: &ScratchConfig) -> Vec<Option<usize>> {
+    match (config.gdn, &config.per_layer_kv_widths) {
+        (None, _) => vec![None; config.num_layers],
+        (Some(_), None) => (0..config.num_layers).map(Some).collect(),
+        (Some(_), Some(per)) => {
+            let mut next = 0usize;
+            per.iter()
+                .map(|&w| {
+                    (w == 0).then(|| {
+                        next += 1;
+                        next - 1
+                    })
+                })
+                .collect()
+        }
+    }
+}
+
 /// KV cache element layout. Selected at [`ScratchConfig`] construction;
 /// the composite branches on `state.pool.kv_layout` for kv_append /
 /// attention_decode dispatch.
@@ -995,7 +1014,8 @@ pub struct ScratchPool {
     pub mtp_proj_b_f32: DevicePtr,
     /// Per-token GDN states of the last verify batch, one sequence:
     /// `max_draft + 1` slots of `[num_v_heads, head_k_dim, head_v_dim]` f32
-    /// per local GDN layer (`mtp_gdn_kstates_layer_bytes` apart). NULL when
+    /// per owned GDN layer (`mtp_gdn_kstates_layer_bytes` apart, `gdn_state`
+    /// order). NULL when
     /// MTP is off or the arch has no GDN layer.
     pub mtp_gdn_kstates: DevicePtr,
     pub mtp_gdn_kstates_layer_bytes: usize,
@@ -1036,9 +1056,13 @@ pub struct ScratchPool {
     /// per-slot ownership for the page-acquire / release lifecycle.
     pub page_pools: Vec<PagePool>,
 
-    /// Per-owned-layer recurrent state + conv history. Empty when
-    /// `config.gdn` is None.
+    /// Recurrent state + conv history of each owned GDN layer, in layer
+    /// order. Empty when `config.gdn` is None.
     pub gdn_state: Vec<GdnLayerState>,
+    /// Owned layer index -> index into `gdn_state` (and into the per-GDN-layer
+    /// MTP stores), `None` for a layer without recurrent state. See
+    /// [`ScratchPool::gdn_index`].
+    pub gdn_layer_index: Vec<Option<usize>>,
     /// One slot's worth of zeros (`max(state, conv_history)` bytes), the
     /// device-side source for GDN resets. NULL when `config.gdn` is None.
     pub gdn_zero_slot: DevicePtr,
@@ -1153,7 +1177,18 @@ impl ScratchPool {
     }
 
     /// Layer `local_idx`'s slice of `mtp_gdn_rows`.
-    pub fn gdn_spec_rows(&self, local_idx: usize, g: &GdnDims) -> Option<GdnSpecRows> {
+    /// Index into `gdn_state` of owned layer `local_idx`. With
+    /// `per_layer_kv_widths` set, the GDN layers of a GDN arch are the ones
+    /// without a KV slab (width 0); without it every owned layer is GDN.
+    pub fn gdn_index(&self, local_idx: usize) -> Result<usize> {
+        self.gdn_layer_index
+            .get(local_idx)
+            .copied()
+            .flatten()
+            .ok_or_else(|| anyhow::anyhow!("layer {local_idx} has no GDN state in this pool"))
+    }
+
+    pub fn gdn_spec_rows(&self, gdn_idx: usize, g: &GdnDims) -> Option<GdnSpecRows> {
         let rows = self.mtp_verify_rows();
         if self.mtp_gdn_rows == DevicePtr::NULL
             || GdnSpecRows::layer_bytes(g, rows) > self.mtp_gdn_rows_layer_bytes
@@ -1162,7 +1197,7 @@ impl ScratchPool {
         }
         let base = self
             .mtp_gdn_rows
-            .offset_bytes(local_idx * self.mtp_gdn_rows_layer_bytes);
+            .offset_bytes(gdn_idx * self.mtp_gdn_rows_layer_bytes);
         Some(GdnSpecRows::carve(base, g, rows))
     }
 
@@ -1391,6 +1426,8 @@ impl ScratchPool {
                 }
             }
         }
+        let gdn_layer_index = gdn_layer_index(&config);
+        let n_gdn = gdn_layer_index.iter().flatten().count();
         let n_slots = config.max_slots.max(1);
         // Skip the contiguous KV slab allocation when paged is
         // configured — the paged path covers prefill + decode and the
@@ -1473,7 +1510,7 @@ impl ScratchPool {
                     alloc_bytes(h * f32)?,
                     alloc_bytes(h * f32)?,
                     if rows_layer_bytes > 0 {
-                        alloc_bytes(config.num_layers * rows_layer_bytes)?
+                        alloc_bytes(n_gdn * rows_layer_bytes)?
                     } else {
                         DevicePtr::NULL
                     },
@@ -1553,7 +1590,7 @@ impl ScratchPool {
         };
 
         let (gdn_state, gdn_zero_slot, gdn_decode_scratch, gdn_decode_batched_scratch, gdn_prefill_scratch) = if let Some(g) = config.gdn {
-            let mut state_vec = Vec::with_capacity(config.num_layers);
+            let mut state_vec = Vec::with_capacity(n_gdn);
             let state_bytes = n_slots * g.num_v_heads * g.head_k_dim * g.head_v_dim * f32;
             let hist_bytes = n_slots * (g.conv_kernel - 1) * g.conv_channels * f32;
             // Recurrent state + conv history must start at zero —
@@ -1561,7 +1598,7 @@ impl ScratchPool {
             // position=0. `device.alloc` is uninitialised.
             let zero_buf = vec![0u8; state_bytes.max(hist_bytes)];
             let stream = device.default_stream();
-            for _ in 0..config.num_layers {
+            for _ in 0..n_gdn {
                 let state = alloc_bytes(state_bytes)?;
                 let conv_history = alloc_bytes(hist_bytes)?;
                 // SAFETY: state owns state_bytes, conv_history owns
@@ -1795,6 +1832,7 @@ impl ScratchPool {
             paged_kv_caches,
             page_pools,
             gdn_state,
+            gdn_layer_index,
             gdn_zero_slot,
             gdn_decode_scratch,
             gdn_decode_batched_scratch,
@@ -2176,6 +2214,31 @@ impl ScratchPool {
 #[cfg(test)]
 mod kv_layout_tests {
     use super::*;
+
+    #[test]
+    fn gdn_index_skips_layers_with_a_kv_slab() {
+        let dims = GdnDims {
+            d_inner: 8,
+            num_v_heads: 1,
+            num_k_heads: 1,
+            head_k_dim: 8,
+            head_v_dim: 8,
+            conv_channels: 24,
+            conv_kernel: 4,
+        };
+        let mut cfg = ScratchConfig {
+            num_layers: 9,
+            gdn: Some(dims),
+            per_layer_kv_widths: Some(vec![0, 0, 0, 64, 0, 0, 0, 64, 64]),
+            ..ScratchConfig::default()
+        };
+        let want = [Some(0), Some(1), Some(2), None, Some(3), Some(4), Some(5), None, None];
+        assert_eq!(gdn_layer_index(&cfg), want);
+        cfg.per_layer_kv_widths = None;
+        assert_eq!(gdn_layer_index(&cfg), (0..9).map(Some).collect::<Vec<_>>());
+        cfg.gdn = None;
+        assert_eq!(gdn_layer_index(&cfg), vec![None; 9]);
+    }
 
     /// The multi-slot decode branch of `standard_attn` writes and reads F16
     /// rows; a layout without that branch must keep the server from putting
