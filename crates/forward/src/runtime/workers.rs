@@ -537,7 +537,11 @@ fn init_rank<A: Arch>(
     let device = HipDevice::new(device_id).context("HipDevice::new")?;
     device.bind().context("device.bind")?;
     let shard = role.shard();
-    let model = A::load(file, &device, shard, role.layer_slice(), ctx_cap).context("Arch::load")?;
+    let opts = crate::loader::LoadOptions {
+        ctx_cap,
+        draft_head: mtp_max_draft > 0,
+    };
+    let model = A::load(file, &device, shard, role.layer_slice(), opts).context("Arch::load")?;
     let mut cfg = A::scratch_config(
         &model,
         shard,

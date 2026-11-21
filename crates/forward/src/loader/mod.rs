@@ -61,3 +61,23 @@ impl ShardMode {
         }
     }
 }
+
+/// Load-time knobs shared by every arch.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LoadOptions {
+    /// Clamps the GGUF `context_length` so per-layer KV slabs do not
+    /// allocate for the full 128–256k context.
+    pub ctx_cap: Option<usize>,
+    /// Upload a draft head the GGUF embeds (e.g. qwen35 `nextn`). Off
+    /// when speculative decoding is off: the head is never read then.
+    pub draft_head: bool,
+}
+
+impl LoadOptions {
+    pub fn with_ctx_cap(ctx_cap: usize) -> Self {
+        Self {
+            ctx_cap: Some(ctx_cap),
+            draft_head: false,
+        }
+    }
+}

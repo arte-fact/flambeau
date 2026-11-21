@@ -8,7 +8,7 @@
 use anyhow::Result;
 use flambeau_core::Device;
 use flambeau_forward::ctx::{ForwardCtx, GdnDims};
-use flambeau_forward::loader::{per_rank_gdn_dims, ShardMode};
+use flambeau_forward::loader::{per_rank_gdn_dims, LoadOptions, ShardMode};
 use flambeau_forward::runtime::Arch;
 use flambeau_forward::{scratch_config_for, KvLayout, MoeShape, ScratchConfig, ScratchShape};
 use flambeau_quant::GgufFile;
@@ -30,12 +30,12 @@ impl Arch for Qwen35V2 {
         device: &impl Device,
         shard: ShardMode,
         layer_range: Option<(usize, usize)>,
-        ctx_cap: Option<usize>,
+        opts: LoadOptions,
     ) -> Result<Self::Model> {
         match shard {
-            ShardMode::Replicated => load_from_gguf(file, device, layer_range, ctx_cap),
+            ShardMode::Replicated => load_from_gguf(file, device, layer_range, opts),
             ShardMode::Tp { rank, n_ranks } => {
-                load_tp_shard_from_gguf(file, device, rank, n_ranks, layer_range, ctx_cap)
+                load_tp_shard_from_gguf(file, device, rank, n_ranks, layer_range, opts)
             }
         }
     }

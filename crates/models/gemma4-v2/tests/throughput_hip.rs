@@ -28,7 +28,7 @@ use flambeau_backend::HipBackend;
 use flambeau_backend_hip::HipDevice;
 use flambeau_core::{Device, Stream};
 use flambeau_forward::ctx::ForwardCtx;
-use flambeau_forward::loader::ShardMode;
+use flambeau_forward::loader::{LoadOptions, ShardMode};
 use flambeau_forward::{Arch, ForwardEngine, KvLayout, ScratchPool};
 use flambeau_gemma4_v2::Gemma4V2;
 use flambeau_quant::GgufFile;
@@ -53,8 +53,9 @@ fn gemma_q8_0_prefill_decode_throughput() {
     let dev = HipDevice::new(0).expect("HipDevice 0");
     dev.bind().expect("bind");
     let reg = flambeau_ops::OpsRegistry::new(&dev).expect("OpsRegistry");
+    let opts = LoadOptions::with_ctx_cap(ctx_cap);
     let mut model =
-        Gemma4V2::load(&file, &dev, ShardMode::Replicated, None, Some(ctx_cap)).expect("load");
+        Gemma4V2::load(&file, &dev, ShardMode::Replicated, None, opts).expect("load");
     let cfg =
         Gemma4V2::scratch_config(&model, ShardMode::Replicated, pp, 1, None, KvLayout::F16Contig, 0);
     let mut pool = ScratchPool::new(&dev, cfg).expect("pool");

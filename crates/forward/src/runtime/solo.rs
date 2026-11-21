@@ -13,7 +13,7 @@ use flambeau_quant::GgufFile;
 use crate::core::{DecodeCapture, DecodeRebindPlan, RebindValue, ScratchPool};
 use crate::ctx::ForwardCtx;
 use crate::engine::ForwardEngine;
-use crate::loader::ShardMode;
+use crate::loader::{LoadOptions, ShardMode};
 use crate::runtime::orchestrate::LaunchParams;
 use crate::runtime::Arch;
 
@@ -86,7 +86,11 @@ impl<B: Backend, A: Arch> SoloSession<B, A> {
         }
         let device = B::new_device(device_id)?;
         device.bind().map_err(|e| anyhow!("device.bind: {e:?}"))?;
-        let model = A::load(&file, &device, ShardMode::Replicated, None, ctx_cap)?;
+        let opts = LoadOptions {
+            ctx_cap,
+            draft_head: mtp_max_draft > 0,
+        };
+        let model = A::load(&file, &device, ShardMode::Replicated, None, opts)?;
         let cfg = A::scratch_config(
             &model,
             ShardMode::Replicated,

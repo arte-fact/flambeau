@@ -17,7 +17,7 @@ use std::time::Instant;
 
 use flambeau_backend_hip::{device_count, HipDevice};
 use flambeau_core::{Device, Stream};
-use flambeau_forward::loader::ShardMode;
+use flambeau_forward::loader::{LoadOptions, ShardMode};
 use flambeau_forward::runtime::Arch;
 use flambeau_forward::{ScratchPool, SingleDeviceForwardCtx};
 use flambeau_ops::OpsRegistry;
@@ -175,7 +175,8 @@ fn microbench_mixed_vs_separate() {
     let file = GgufFile::open(&path).expect("open gguf");
     // Cap ctx so the smallest per-rank KV doesn't OOM; we don't generate
     // long sequences in this bench anyway.
-    let model = Qwen35V2::load(&file, &device, ShardMode::Replicated, None, Some(4096))
+    let opts = LoadOptions::with_ctx_cap(4096);
+    let model = Qwen35V2::load(&file, &device, ShardMode::Replicated, None, opts)
         .expect("Qwen35V2::load");
 
     // Per `doc/MIXED_BATCH_V2_PLAN.md` "Past results to beat (v1
