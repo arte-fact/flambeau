@@ -326,6 +326,18 @@ pub trait Ops {
         ctx_ptr: DevicePtr,
     ) -> Result<()>;
 
+    /// Q4_K embedding gather: row `r` of `dst` ([n_rows, hidden] F16) is row
+    /// `ids[r]` of the Q4_K table `embd`, dequantized bit-identically to the
+    /// host load path. `ids` is an i32 device buffer of `n_rows` entries.
+    fn embed_gather_q4_k_f16(
+        &self,
+        embd: DevicePtr,
+        dst: DevicePtr,
+        ids: DevicePtr,
+        n_rows: usize,
+        hidden: usize,
+    ) -> Result<()>;
+
     fn attention_decode_f16_batched_splitk(
         &self,
         buffers: crate::AttnBatchedBuffers,

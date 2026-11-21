@@ -445,6 +445,19 @@ impl<B: KernelBackend> Ops for OpsImpl<'_, B> {
         )
     }
 
+    fn embed_gather_q4_k_f16(
+        &self,
+        embd: DevicePtr,
+        dst: DevicePtr,
+        ids: DevicePtr,
+        n_rows: usize,
+        hidden: usize,
+    ) -> Result<()> {
+        crate::launch::attention::embed_gather_q4_k_f16(
+            self.reg, self.stream, embd, dst, ids, n_rows, hidden,
+        )
+    }
+
     fn attention_decode_f16_batched_splitk(
         &self,
         buffers: crate::AttnBatchedBuffers,
