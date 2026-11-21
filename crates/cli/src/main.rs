@@ -293,6 +293,28 @@ enum Cmd {
         #[arg(long, value_delimiter = ',')]
         k: Vec<usize>,
     },
+    /// Launch QMatMul implementations over (rows, k) shapes and activation
+    /// counts for a kernel profiler to time (coord/mmq-few-plan.md, step 0).
+    /// Bench-only candidates are never reachable from the dispatch table.
+    QmatmulBench {
+        #[arg(long)]
+        arch: String,
+        #[arg(long)]
+        dtype: String,
+        /// `rows:k` pairs, comma-separated.
+        #[arg(long, value_delimiter = ',')]
+        shapes: Vec<String>,
+        /// Activation counts (the matmul's m).
+        #[arg(long, value_delimiter = ',')]
+        m: Vec<usize>,
+        /// `C0` (production path) .. `C4`, or impl ids.
+        #[arg(long, value_delimiter = ',', default_value = "C0,C1,C2,C3,C4")]
+        r#impl: Vec<String>,
+        #[arg(long, default_value_t = 200)]
+        iters: usize,
+        #[arg(long, default_value_t = 0)]
+        device: i32,
+    },
     /// Validate that every dispatch row has a matching green cert (+).
     CertCheck {
         #[arg(long, default_value = "gfx906")]
@@ -430,6 +452,9 @@ fn main() -> Result<()> {
         }
         Cmd::Autotune { arch, op, dtype, emit, check, rows, k } => {
             autotune(&arch, &op, &dtype, emit, check, &rows, &k)?
+        }
+        Cmd::QmatmulBench { arch, dtype, shapes, m, r#impl, iters, device } => {
+            qmatmul_bench(&arch, &dtype, &shapes, &m, &r#impl, iters, device)?
         }
         Cmd::CertCheck { arch, backend } => cert_check(&backend, &arch)?,
         Cmd::PmcProbe { kernel, m, k, n } => pmc_probe(&kernel, m, k, n)?,
@@ -1352,6 +1377,43 @@ fn autotune(
     {
         let _ = (arch, dtype, emit, check, rows, k);
         anyhow::bail!("autotune requires --features hip_sweep and/or cuda_sweep")
+    }
+}
+
+fn qmatmul_bench(
+    arch: &str,
+    dtype: &str,
+    shapes: &[String],
+    ms: &[usize],
+    impls: &[String],
+    iters: usize,
+    device: i32,
+) -> Result<()> {
+    let shapes: Vec<(usize, usize)> = shapes
+        .iter()
+        .map(|s| {
+            let (r, k) = s
+                .split_once(':')
+                .ok_or_else(|| anyhow::anyhow!("qmatmul-bench: shape {s:?} is not rows:k"))?;
+            Ok((r.parse()?, k.parse()?))
+        })
+        .collect::<Result<_>>()?;
+    #[cfg(any(feature = "hip_sweep", feature = "cuda_sweep"))]
+    {
+        use flambeau_bench::qmatmul_bench::QmatmulBenchSpec;
+        let spec = QmatmulBenchSpec { dtype, shapes: &shapes, ms, impls, iters };
+        match arch {
+            #[cfg(feature = "hip_sweep")]
+            "gfx906" => flambeau_bench::qmatmul_bench::run_hip(device, &spec),
+            #[cfg(feature = "cuda_sweep")]
+            "sm_86" => flambeau_bench::qmatmul_bench::run_cuda(device, &spec),
+            other => anyhow::bail!("qmatmul-bench: unsupported --arch {other:?}"),
+        }
+    }
+    #[cfg(not(any(feature = "hip_sweep", feature = "cuda_sweep")))]
+    {
+        let _ = (arch, dtype, shapes, ms, impls, iters, device);
+        anyhow::bail!("qmatmul-bench requires --features hip_sweep and/or cuda_sweep")
     }
 }
 

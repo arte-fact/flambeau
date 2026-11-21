@@ -176,7 +176,37 @@ pub fn qmatmul<B: flambeau_core::KernelBackend>(
     }
 
     let recipe = resolve_dispatch_recipe::<B>(dtype_weight, m, k, n)?;
+    launch_recipe(
+        reg,
+        stream,
+        recipe,
+        crate::QmatmulBuffers {
+            weights,
+            act_q8_1,
+            act_q8_1_mmq,
+            dst,
+        },
+        shape,
+        dtype_weight,
+    )
+}
 
+/// Launch `recipe` over the whole `shape`.
+fn launch_recipe<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
+    recipe: Recipe,
+    buf: crate::QmatmulBuffers,
+    shape: crate::MatmulShape,
+    dtype_weight: QDtype,
+) -> Result<()> {
+    let crate::QmatmulBuffers {
+        weights,
+        act_q8_1,
+        act_q8_1_mmq,
+        dst,
+    } = buf;
+    let crate::MatmulShape { m, k, n } = shape;
     match recipe.kind {
         RecipeKind::Mmvq => {
             // `nb_per_row` (kernel arg) counts WEIGHT superblocks (size =
@@ -1642,6 +1672,10 @@ fn mmq_lds_x64_params(stem: &str) -> Result<(u32, u32)> {
         "mmq_q4_K_lds_tiled_y64_x8" => (256, 4 * (8 * 36 + 2440)),
         "mmq_q3_K_lds_tiled_x8" => (256, 4 * (8 * 36 + 4488)),
         "mmq_iq4_nl_lds_tiled_x8" => (32, 4 * (8 * 36 + 4688)),
+        #[cfg(feature = "bench")]
+        "mmq_q5_K_lds_tiled_x16" | "mmq_q3_K_lds_tiled_x16" => (256, 4 * (16 * 36 + 4488)),
+        #[cfg(feature = "bench")]
+        "mmq_q4_K_lds_tiled_y64_x16" => (256, 4 * (16 * 36 + 2440)),
         other => bail!("mmq_lds_x64_params: no entry for stem {other}"),
     })
 }
@@ -1654,6 +1688,167 @@ impl Recipe {
             .map(|row| row.recipe)
             .ok_or_else(|| anyhow!("no launch recipe registered for impl_id {impl_id}"))
     }
+}
+
+/// `impl_id` that [`qmatmul_bench`] launches through the production path
+/// ([`qmatmul`], dispatch table and its short-circuits included).
+#[cfg(feature = "bench")]
+pub const QMATMUL_BENCH_PRODUCTION: &str = "dispatch";
+
+/// Bench-only candidates that reuse a registered recipe: bench id -> recipe
+/// impl_id. No dispatch descriptor names a bench id, so [`qmatmul`] never
+/// resolves one.
+#[cfg(feature = "bench")]
+const BENCH_QMATMUL_ALIASES: &[(&str, &str)] = &[
+    ("bench:q3_k_lds_x8", "qmatmul_q3_K_mmq_lds_tiled_x8_gfx906"),
+    ("bench:q4_k_lds_x8", "qmatmul_q4_K_mmq_lds_tiled_y64_x8_gfx906"),
+    ("bench:q5_k_lds_x8", "qmatmul_q5_K_mmq_lds_tiled_x8_gfx906"),
+    ("bench:q3_k_lds_x64", "qmatmul_q3_K_mmq_lds_tiled_gfx906"),
+    ("bench:q4_k_lds_x64", "qmatmul_q4_K_mmq_lds_tiled_y64_gfx906"),
+    ("bench:q5_k_lds_x64", "qmatmul_q5_K_mmq_lds_tiled_gfx906"),
+];
+
+/// Bench-only candidates without a registered recipe (uncertified: the
+/// 16-column LDS-tiled cells and the wave64 K-quant MMQ, never dispatched).
+#[cfg(feature = "bench")]
+const BENCH_QMATMUL_RECIPES: &[RecipeRow] = &[
+    RecipeRow {
+        ids: &["bench:q3_k_lds_x16"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqLdsX64,
+            stem: "mmq_q3_K_lds_tiled_x16",
+            entry: "flambeau_mmq_q3_K_lds_tiled_x16_q8_1",
+            entry_f16: None,
+            threads: 0,
+            rows_per_block: 0,
+            mmq_tile: (64, 16),
+        },
+    },
+    RecipeRow {
+        ids: &["bench:q3_k_wave64"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqWave64,
+            stem: "mmq_q3_K_wave64",
+            entry: "flambeau_mmq_q3_K_wave64_q8_1",
+            entry_f16: None,
+            threads: 64,
+            rows_per_block: 0,
+            mmq_tile: (64, 8),
+        },
+    },
+    RecipeRow {
+        ids: &["bench:q4_k_lds_x16"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqLdsX64,
+            stem: "mmq_q4_K_lds_tiled_y64_x16",
+            entry: "flambeau_mmq_q4_K_lds_tiled_y64_x16_q8_1",
+            entry_f16: None,
+            threads: 0,
+            rows_per_block: 0,
+            mmq_tile: (64, 16),
+        },
+    },
+    RecipeRow {
+        ids: &["bench:q4_k_wave64"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqWave64,
+            stem: "mmq_q4_K_wave64",
+            entry: "flambeau_mmq_q4_K_wave64_q8_1",
+            entry_f16: None,
+            threads: 64,
+            rows_per_block: 0,
+            mmq_tile: (64, 8),
+        },
+    },
+    RecipeRow {
+        ids: &["bench:q5_k_lds_x16"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqLdsX64,
+            stem: "mmq_q5_K_lds_tiled_x16",
+            entry: "flambeau_mmq_q5_K_lds_tiled_x16_q8_1",
+            entry_f16: None,
+            threads: 0,
+            rows_per_block: 0,
+            mmq_tile: (64, 16),
+        },
+    },
+    RecipeRow {
+        ids: &["bench:q5_k_wave64"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqWave64,
+            stem: "mmq_q5_K_wave64",
+            entry: "flambeau_mmq_q5_K_wave64_q8_1",
+            entry_f16: None,
+            threads: 64,
+            rows_per_block: 0,
+            mmq_tile: (64, 8),
+        },
+    },
+];
+
+#[cfg(feature = "bench")]
+fn bench_recipe(impl_id: &str) -> Result<Recipe> {
+    if let Some(row) = BENCH_QMATMUL_RECIPES.iter().find(|row| row.ids.contains(&impl_id)) {
+        return Ok(row.recipe);
+    }
+    match BENCH_QMATMUL_ALIASES.iter().find(|(bench, _)| *bench == impl_id) {
+        Some((_, id)) => Recipe::from_impl_id(id),
+        None => Recipe::from_impl_id(impl_id),
+    }
+}
+
+/// QMatMul through one named implementation, for timing: `impl_id` is
+/// [`QMATMUL_BENCH_PRODUCTION`], a bench id, or any registered impl_id. The
+/// caller provides the activation layout [`qmatmul_bench_reads_mmq`] names.
+#[cfg(feature = "bench")]
+pub fn qmatmul_bench<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
+    impl_id: &str,
+    buf: crate::QmatmulBuffers,
+    shape: crate::MatmulShape,
+    dtype_weight: QDtype,
+) -> Result<()> {
+    if impl_id == QMATMUL_BENCH_PRODUCTION {
+        return qmatmul::<B>(reg, stream, buf, shape, dtype_weight);
+    }
+    let recipe = bench_recipe(impl_id)?;
+    if recipe.kind == RecipeKind::MmvqBatched {
+        return mmvq_batched_launch(
+            reg,
+            stream,
+            recipe,
+            crate::MmvqBuffers {
+                weights: buf.weights,
+                act_q8_1: buf.act_q8_1,
+                dst: buf.dst,
+            },
+            crate::MmvqBatchShape {
+                n_rows: shape.n,
+                k: shape.k,
+                n_slots: shape.m,
+            },
+            block_elems(dtype_weight),
+        );
+    }
+    launch_recipe(reg, stream, recipe, buf, shape, dtype_weight)
+}
+
+/// Whether [`qmatmul_bench`] with `impl_id` reads the DS4 MMQ activation
+/// (`true`) or the standard Q8_1 one.
+#[cfg(feature = "bench")]
+pub fn qmatmul_bench_reads_mmq<B: flambeau_core::KernelBackend>(
+    impl_id: &str,
+    shape: crate::MatmulShape,
+    dtype_weight: QDtype,
+) -> Result<bool> {
+    if impl_id == QMATMUL_BENCH_PRODUCTION {
+        return Ok(qmatmul_reads_mmq_activation::<B>(shape, dtype_weight));
+    }
+    Ok(matches!(
+        bench_recipe(impl_id)?.kind,
+        RecipeKind::MmqLdsX64 | RecipeKind::MmqMma
+    ))
 }
 
 /// Launch recipe of every QMatMul impl a dispatch descriptor (or an alias of

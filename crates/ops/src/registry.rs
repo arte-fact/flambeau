@@ -196,6 +196,12 @@ pub const KERNEL_STEMS: &[&str] = &[
     "mmq_q4_K_lds_tiled_y64_x8",
     "mmq_q3_K_lds_tiled_x8",
     "mmq_iq4_nl_lds_tiled_x8",
+    #[cfg(feature = "bench")]
+    "mmq_q5_K_lds_tiled_x16",
+    #[cfg(feature = "bench")]
+    "mmq_q4_K_lds_tiled_y64_x16",
+    #[cfg(feature = "bench")]
+    "mmq_q3_K_lds_tiled_x16",
     "mmq_q4_K_wave64",
     "mmq_q2_K_wave64",
     "mmq_q3_K_wave64",

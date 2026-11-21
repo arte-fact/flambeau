@@ -10,9 +10,9 @@ description = "First-class correctness-sweep + perf-matrix + cert-diff harness. 
 default = []
 # Pulls in backend-hip so `sweep` can run on real MI50. Off by default so
 # `cargo check -p flambeau-bench` stays ROCm-free.
-hip = ["dep:flambeau-backend-hip", "dep:flambeau-kernels-hip", "dep:flambeau-quant", "dep:half", "dep:bytemuck"]
+hip = ["dep:flambeau-backend-hip", "dep:flambeau-kernels-hip", "dep:flambeau-quant", "dep:half", "dep:bytemuck", "flambeau-ops/bench"]
 # Same, for the CUDA backend on sm_86 (RTX 3090). Independent of `hip`.
-cuda = ["dep:flambeau-backend-cuda", "dep:flambeau-kernels-cuda", "dep:flambeau-quant", "dep:half", "dep:bytemuck"]
+cuda = ["dep:flambeau-backend-cuda", "dep:flambeau-kernels-cuda", "dep:flambeau-quant", "dep:half", "dep:bytemuck", "flambeau-ops/bench"]
 
 [dependencies]
 flambeau-core = { path = "../core" }

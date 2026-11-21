@@ -12,6 +12,9 @@ default = []
 # backend's launch-plane impl + kernel catalogue. Both can be enabled at once.
 hip = ["dep:flambeau-backend-hip", "dep:flambeau-kernels-hip"]
 cuda = ["dep:flambeau-backend-cuda", "dep:flambeau-kernels-cuda"]
+# `qmatmul_bench` / `qmatmul_bench_reads_mmq` and the bench-only recipes and
+# stems they launch (`flambeau qmatmul-bench`); never reached by dispatch.
+bench = []
 
 [dependencies]
 flambeau-core = { path = "../core" }

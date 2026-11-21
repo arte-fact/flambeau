@@ -19,6 +19,9 @@ pub mod harness;
 #[cfg(any(feature = "hip", feature = "cuda"))]
 pub mod sweep_mmvq;
 
+#[cfg(any(feature = "hip", feature = "cuda"))]
+pub mod qmatmul_bench;
+
 #[cfg(feature = "hip")]
 pub mod sweep_mmq;
 
