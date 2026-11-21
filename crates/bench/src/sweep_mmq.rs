@@ -134,6 +134,26 @@ fn tile_shape(dtype: Dtype) -> (u32, u32) {
 }
 
 impl Dtype {
+    /// The LDS-tiled MMQ family (full and 8-column tiles).
+    fn is_lds_tiled(self) -> bool {
+        matches!(
+            self,
+            Dtype::Q5KLdsTiled
+                | Dtype::Q6KLdsTiled
+                | Dtype::Iq4XsLdsTiled
+                | Dtype::Q4KLdsTiledY64
+                | Dtype::Q3KLdsTiled
+                | Dtype::Iq4NlLdsTiled
+                | Dtype::Q8_0LdsTiled
+                | Dtype::Q5KLdsTiledX8
+                | Dtype::Q6KLdsTiledX8
+                | Dtype::Iq4XsLdsTiledX8
+                | Dtype::Q4KLdsTiledY64X8
+                | Dtype::Q3KLdsTiledX8
+                | Dtype::Iq4NlLdsTiledX8
+        )
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Dtype::Q8_0Oracle | Dtype::Q8_0LdsTiled => {
@@ -500,12 +520,30 @@ impl SweepSpec {
                 n: 2048,
             },
         ];
+        let mut shapes = shapes;
+        if dtype.is_lds_tiled() {
+            shapes.extend(ffn_17408_shapes());
+        }
         Self {
             dtype,
             shapes,
             seed: 0xC0FFEE,
         }
     }
+}
+
+/// The 27B-class FFN projections (hidden 5120, intermediate 17408) the
+/// LDS-tiled rows serve at prefill: up/gate `k = 5120 → n = 17408` and down
+/// `k = 17408 → n = 5120`, from the first batched width the rows take to a
+/// full ubatch, a partial final tile (33) included.
+fn ffn_17408_shapes() -> Vec<Shape> {
+    let mut v = Vec::new();
+    for (k, n) in [(5120, 17408), (17408, 5120)] {
+        for m in [3, 8, 16, 32, 33, 64, 512] {
+            v.push(Shape { m, k, n });
+        }
+    }
+    v
 }
 
 pub fn run_sweep(spec: &SweepSpec, repo_root: &Path) -> Result<Cert> {
