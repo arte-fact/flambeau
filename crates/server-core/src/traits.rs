@@ -211,6 +211,19 @@ pub trait Session: Send + 'static {
         Ok(None)
     }
 
+    /// One single-token decode step under a greedy draw: forwards `token` at
+    /// `position`, then draws `plan`'s argmax where the logits are and
+    /// returns it. `Ok(None)` when the session has no such draw — nothing has
+    /// run, and the caller takes the logits path.
+    fn decode_greedy(
+        &mut self,
+        _token: u32,
+        _position: usize,
+        _plan: &flambeau_runtime::MtpArgmax,
+    ) -> Result<Option<u32>> {
+        Ok(None)
+    }
+
     fn dispose(self: Box<Self>) -> Result<()>;
 
     /// Single-token decode. Default bails — only archs that fall

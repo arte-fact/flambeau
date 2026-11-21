@@ -96,6 +96,17 @@ pub trait V2BatchableSession: Send {
     ) -> Result<Option<(Vec<u32>, Vec<f32>)>> {
         Ok(None)
     }
+
+    /// See [`flambeau_server_core::Session::decode_greedy`].
+    fn decode_greedy(
+        &mut self,
+        _token: u32,
+        _position: usize,
+        _slot_id: usize,
+        _plan: &flambeau_runtime::MtpArgmax,
+    ) -> Result<Option<u32>> {
+        Ok(None)
+    }
 }
 
 #[cfg(feature = "hip")]
@@ -296,6 +307,16 @@ impl<B: flambeau_backend::Backend, A: Arch> V2BatchableSession for SoloSession<B
         seed: u64,
     ) -> Result<Option<(Vec<u32>, Vec<f32>)>> {
         SoloSession::mtp_step(self, token, position, slot_id, n_draft, sample_factory, seed)
+    }
+
+    fn decode_greedy(
+        &mut self,
+        token: u32,
+        position: usize,
+        slot_id: usize,
+        plan: &flambeau_runtime::MtpArgmax,
+    ) -> Result<Option<u32>> {
+        SoloSession::decode_greedy(self, token, position, slot_id, plan)
     }
 }
 
@@ -553,6 +574,16 @@ impl ServerSession for V2Conv {
             }
             None => Ok(None),
         }
+    }
+
+    fn decode_greedy(
+        &mut self,
+        token: u32,
+        position: usize,
+        plan: &flambeau_runtime::MtpArgmax,
+    ) -> Result<Option<u32>> {
+        let mut shared = self.shared.blocking_lock();
+        shared.decode_greedy(token, position, self.slot_id, plan)
     }
 
     fn bos_id(&self) -> Option<u32> {

@@ -144,7 +144,7 @@ impl<B: Backend, A: Arch> SoloSession<B, A> {
             && tokens.len() == 1
             && self.pool.paged_kv_caches.is_none()
         {
-            return self.forward_decode_graph(tokens[0], positions[0], slot_ids[0]);
+            return self.forward_decode_graph(tokens[0], positions[0], slot_ids[0], true);
         }
         self.forward_general(tokens, positions, slot_ids)
     }
@@ -174,7 +174,9 @@ impl<B: Backend, A: Arch> SoloSession<B, A> {
     /// this token). Early tokens (`position + 1 < DECODE_GRAPH_MIN_KV`) and any
     /// pass a composite flagged uncapturable (SWA SlideBand, Q8, single-pass)
     /// fall back to the plain forward.
-    fn forward_decode_graph(&mut self, token: u32, position: usize, slot_id: usize) -> Result<()> {
+    /// With `download` off, a replayed or captured token leaves its logits on
+    /// device (`pool.logits_f32_dev`) and `last_logits` stale.
+    fn forward_decode_graph(&mut self, token: u32, position: usize, slot_id: usize, download: bool) -> Result<()> {
         let vocab = self.pool.config.vocab;
         let reusable = self.graph.as_ref().is_some_and(|g| {
             g.slot_id == slot_id
@@ -182,7 +184,7 @@ impl<B: Backend, A: Arch> SoloSession<B, A> {
                     .reusable_at(position, |cl| flambeau_model_ops::splitk_chunk_size(cl, MAX_SPLITK_CHUNKS))
         });
         if reusable {
-            return self.graph_set_and_launch(token, position, vocab);
+            return self.graph_set_and_launch(token, position, vocab, download);
         }
         // Below the split-K threshold the attention takes the single-pass
         // (uncapturable) path — run the plain forward and keep any stale graph
@@ -237,12 +239,12 @@ impl<B: Backend, A: Arch> SoloSession<B, A> {
         self.graph_block = None;
         let plan = capture.into_plan();
         self.graph = Some(DecodeGraphCache { exec, plan, slot_id });
-        self.graph_set_and_launch(token, position, vocab)
+        self.graph_set_and_launch(token, position, vocab, download)
     }
 
     /// Rebind every slot for `(position, token)`, upload the position (uncaptured
     /// — kept out of the graph), replay the captured graph, then D2H the logits.
-    fn graph_set_and_launch(&mut self, token: u32, position: usize, vocab: usize) -> Result<()> {
+    fn graph_set_and_launch(&mut self, token: u32, position: usize, vocab: usize, download: bool) -> Result<()> {
         // Uncaptured positions upload into the fixed device buffer the captured
         // RoPE kernels read. Same stream as the launch, so it is ordered before
         // the graph; the host staging buffer stays valid until the D2H sync.
@@ -298,7 +300,10 @@ impl<B: Backend, A: Arch> SoloSession<B, A> {
             }
             exec.launch(stream).context("decode-graph: launch")?;
         }
-        self.graph_download_logits(vocab)
+        if download {
+            self.graph_download_logits(vocab)?;
+        }
+        Ok(())
     }
 
     /// Uncaptured D2H of the softcapped logits from `pool.logits_f32_dev`
@@ -332,6 +337,37 @@ impl<B: Backend, A: Arch> SoloSession<B, A> {
         out.clear();
         out.extend_from_slice(&self.last_logits);
         Ok(())
+    }
+
+    /// One single-token decode step whose greedy draw (`plan`'s additions,
+    /// then its penalties, then the argmax) runs on device after the
+    /// forward: only the drawn token comes back, not the logits row.
+    /// `Ok(None)` — nothing has run — when the backend has no decode graph or
+    /// the plan does not fit the draw scratch; the caller then takes the
+    /// logits path.
+    pub fn decode_greedy(
+        &mut self,
+        token: u32,
+        position: usize,
+        slot_id: usize,
+        plan: &flambeau_runtime::MtpArgmax,
+    ) -> Result<Option<u32>> {
+        if !(B::supports_decode_graph() && self.decode_graph && self.pool.paged_kv_caches.is_none()) {
+            return Ok(None);
+        }
+        let vocab = self.pool.config.vocab;
+        {
+            let stream = self.device.default_stream();
+            let ctx = ForwardEngine::<B>::new_solo(&self.device, stream, &self.reg, &mut self.pool);
+            if !crate::core::composites::argmax_plan_fits(&ctx.core, plan, 1) {
+                return Ok(None);
+            }
+        }
+        self.forward_decode_graph(token, position, slot_id, false)?;
+        let stream = self.device.default_stream();
+        let mut ctx = ForwardEngine::<B>::new_solo(&self.device, stream, &self.reg, &mut self.pool);
+        let drawn = crate::core::composites::argmax_rows_local(&mut ctx.core, plan, 1, vocab)?;
+        Ok(Some(drawn[0]))
     }
 
     /// One greedy MTP cycle (single-device). `Ok(None)` when the model has

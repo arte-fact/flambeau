@@ -827,6 +827,9 @@ fn decode_in_slot(
         && json_state.is_none()
         && logprobs_acc.is_none()
         && params.reasoning_budget.is_none();
+    // A plain step's greedy draw can run where the logits are when nothing
+    // else reads them: no JSON mask, no logprobs, no forced reasoning close.
+    let device_draw = json_state.is_none() && logprobs_acc.is_none() && params.reasoning_budget.is_none();
     let mut emitter = Emitter::new(
         stop_patterns(state, params, relax_stop_mask),
         json_state,
@@ -902,6 +905,18 @@ fn decode_in_slot(
                 continue;
             }
         }
+        if let Some(inflight) = inflight_guard.as_mut().filter(|_| device_draw) {
+            let adds = stop_adjustments(stop_ids, always_stop_ids, relax_stop_mask, in_stop_window, stop_bias);
+            if let Some(plan) = greedy_argmax_plan(sampling, &emitter.generated, &adds) {
+                if let Some(next) = inflight.decode_greedy(last_token, pos, &plan).context("decode step draw")? {
+                    last_token = next;
+                    if let Some(finish) = emitter.accept(next, &decode)? {
+                        break 'decode finish;
+                    }
+                    continue;
+                }
+            }
+        }
         match inflight_guard.as_mut() {
             Some(inflight) => state.dispatch_decode_one(&mut ***inflight, last_token, pos, &mut logits_buf),
             None => state.decode_via_scheduler_into(slot_idx, last_token, pos, &mut logits_buf),
@@ -947,6 +962,56 @@ fn decode_in_slot(
     Ok(outcome(emitter, finish, logprobs_acc, mtp_cycles))
 }
 
+/// The plain path's stop-id rule as logit additions: stop ids masked inside
+/// the minimum-response window and `always_stop_ids` always, the others
+/// biased by `-stop_bias`; none when the stop mask is relaxed.
+fn stop_adjustments(
+    stop_ids: &[u32],
+    always_stop_ids: &[u32],
+    relax_stop_mask: bool,
+    in_stop_window: bool,
+    stop_bias: f32,
+) -> Vec<(u32, f32)> {
+    if relax_stop_mask {
+        return Vec::new();
+    }
+    stop_ids
+        .iter()
+        .map(|&sid| {
+            let delta = if in_stop_window || always_stop_ids.contains(&sid) {
+                f32::NEG_INFINITY
+            } else {
+                -stop_bias
+            };
+            (sid, delta)
+        })
+        .collect()
+}
+
+/// Greedy without logit_bias, the draw is the argmax of the logits after
+/// `adds` then the `history` penalties (see `build_distribution`), so it can
+/// run where the logits are. `None` for any other sampling.
+fn greedy_argmax_plan(
+    sampling: &flambeau_runtime::Sampling,
+    history: &[u32],
+    adds: &[(u32, f32)],
+) -> Option<flambeau_runtime::MtpArgmax> {
+    if !sampling.is_greedy() || sampling.logit_bias.as_deref().is_some_and(|b| !b.is_empty()) {
+        return None;
+    }
+    let mut penalty_counts = Vec::new();
+    if sampling.has_penalties() {
+        flambeau_runtime::sampling::build_history_counts(history, &mut Vec::new(), &mut penalty_counts);
+    }
+    Some(flambeau_runtime::MtpArgmax {
+        adds: adds.to_vec(),
+        penalty_counts,
+        repetition: sampling.repetition_penalty,
+        presence: sampling.presence_penalty,
+        frequency: sampling.frequency_penalty,
+    })
+}
+
 /// Sampler handed to an MTP cycle: the plain path's stop-id rule (mask
 /// inside the window, bias after, `always_stop_ids` always masked) applied
 /// to every draft and verify row, then the request's sampling transforms.
@@ -962,38 +1027,9 @@ fn mtp_sample_factory(
 ) -> std::sync::Arc<dyn Fn(u64) -> flambeau_server_core::MtpSampleFn + Send + Sync> {
     let sampling = sampling.clone();
     let history = history.to_vec();
-    let stop_adjust: std::sync::Arc<Vec<(u32, f32)>> = std::sync::Arc::new(if relax_stop_mask {
-        Vec::new()
-    } else {
-        stop_ids
-            .iter()
-            .map(|&sid| {
-                let delta = if in_stop_window || always_stop_ids.contains(&sid) {
-                    f32::NEG_INFINITY
-                } else {
-                    -stop_bias
-                };
-                (sid, delta)
-            })
-            .collect()
-    });
-    // Greedy without logit_bias, the draw below is the argmax of the logits
-    // after the stop adjustments then the history penalties (see
-    // `build_distribution`), so it can run on device.
-    let argmax = (sampling.is_greedy() && sampling.logit_bias.as_deref().is_none_or(|b| b.is_empty()))
-        .then(|| {
-            let mut penalty_counts = Vec::new();
-            if sampling.has_penalties() {
-                flambeau_runtime::sampling::build_history_counts(&history, &mut Vec::new(), &mut penalty_counts);
-            }
-            std::sync::Arc::new(flambeau_runtime::MtpArgmax {
-                adds: stop_adjust.to_vec(),
-                penalty_counts,
-                repetition: sampling.repetition_penalty,
-                presence: sampling.presence_penalty,
-                frequency: sampling.frequency_penalty,
-            })
-        });
+    let stop_adjust =
+        std::sync::Arc::new(stop_adjustments(stop_ids, always_stop_ids, relax_stop_mask, in_stop_window, stop_bias));
+    let argmax = greedy_argmax_plan(&sampling, &history, &stop_adjust).map(std::sync::Arc::new);
     std::sync::Arc::new(move |seed: u64| {
         let sampling = sampling.clone();
         let history = history.clone();
