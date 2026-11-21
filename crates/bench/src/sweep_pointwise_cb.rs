@@ -71,6 +71,7 @@ pub fn run_pointwise_sweep<B: BenchBackend>(
         "softmax_masked_f16" => run_softmax_masked_f16_sweep::<B>(repo_root, arch),
         "sampler_topk_softmax_f32" => run_sampler_topk_softmax_sweep::<B>(repo_root, arch),
         "sampler_argmax_f32" => run_sampler_argmax_sweep::<B>(repo_root, arch),
+        "embed_gather_q4_k_f16" => crate::sweep_embed_gather_q4k::run_sweep::<B>(repo_root, arch),
         "kv_append_f16_batched_slots" => run_kv_append_f16_batched_slots_sweep::<B>(repo_root, arch),
         "attention_decode_f16" => run_attention_decode_f16_sweep::<B>(repo_root, arch),
         "attention_decode_f16_splitk" => run_attention_decode_splitk_sweep::<B>(repo_root, arch),
