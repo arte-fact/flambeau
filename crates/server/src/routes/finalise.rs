@@ -498,6 +498,79 @@ mod tests {
         assert_eq!(streamed, ("Sure.Done.\n".to_owned(), "hmm, check".to_owned()));
     }
 
+    /// Streamed and non-streamed `(text, reasoning)` of the /v1/messages
+    /// route for `raw`: thinking on (template-primed parser, finalise's
+    /// split) or off (finalise's cuts, `relax_stop_mask` for tools), the
+    /// non-streamed reply always parsed like the stream.
+    fn both_messages(raw: &str, enable_thinking: bool, relax_stop_mask: bool) -> ((String, String), (String, String)) {
+        use crate::tool_call_parser::{
+            hermes::HermesJsonParser, split_events_with_reasoning, ParserEvent, ReasoningTrim, ToolCallParser,
+        };
+        let markers = crate::model_handle::ReasoningMarkers {
+            style: crate::model_handle::ReasoningStyle::ThinkTag,
+            open: "<think>",
+            close: "</think>",
+        };
+        // The decode loop stops the text at its stop sequences.
+        let mut streamed_text = raw.to_owned();
+        if !relax_stop_mask && !enable_thinking {
+            cut_at_stop_strings(
+                &mut streamed_text,
+                &super::LEAKED_REASONING_MARKERS.map(str::to_owned),
+            );
+        }
+        let mut parser =
+            if enable_thinking { HermesJsonParser::new_in_think() } else { HermesJsonParser::new() };
+        let mut trim = ReasoningTrim::default();
+        let mut events = Vec::new();
+        for c in streamed_text.chars() {
+            events.extend(trim.apply(parser.push(&c.to_string())));
+        }
+        events.extend(trim.apply(parser.finish()));
+        let (mut s_text, mut s_reasoning) = (String::new(), String::new());
+        for ev in events {
+            match ev {
+                ParserEvent::TextDelta(s) => s_text.push_str(&s),
+                ParserEvent::ThinkDelta(s) => s_reasoning.push_str(&s),
+                other => panic!("unexpected event {other:?}"),
+            }
+        }
+
+        let mut text = raw.to_owned();
+        let split = if enable_thinking {
+            super::split_think_reasoning(&mut text, markers)
+        } else {
+            super::truncate_leaked_reasoning(&mut text, &[], !relax_stop_mask);
+            None
+        };
+        let mut parser = HermesJsonParser::new();
+        let mut events = parser.push(&text);
+        events.extend(parser.finish());
+        let (content, parsed, _) = split_events_with_reasoning(events);
+        let reasoning = split.unwrap_or(parsed);
+        ((s_text, s_reasoning), (content, reasoning))
+    }
+
+    #[test]
+    fn messages_response_equals_streamed_blocks() {
+        let raws = [
+            "\nweighing it\n</think>\n\nAnswer.\n",
+            "Sure.<think>\n  hmm  </think>\n\nDone.",
+            "no reasoning at all  ",
+        ];
+        for raw in raws {
+            for enable_thinking in [false, true] {
+                for relax_stop_mask in [false, true] {
+                    let (streamed, response) = both_messages(raw, enable_thinking, relax_stop_mask);
+                    assert_eq!(
+                        response, streamed,
+                        "{raw:?} thinking {enable_thinking} tools {relax_stop_mask}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn stop_cut_keeps_trailing_whitespace() {
         let mut text = "class LRUCache:\n    def get(self):".to_owned();
