@@ -1192,43 +1192,8 @@ impl<B: Backend, H: TopologyHooks<B>, S: StageHooks<B>> ForwardCtx for ForwardEn
         let Some(g) = self.core.pool.config.gdn else {
             return Ok(Vec::new());
         };
-        // MTP fast path: snapshot stays on device (D2D) — no host round trip.
-        if self.core.pool.mtp_gdn_snap != DevicePtr::NULL {
-            let f32b = 4usize;
-            let state_b = g.num_v_heads * g.head_k_dim * g.head_v_dim * f32b;
-            let hist_b = (g.conv_kernel - 1) * g.conv_channels * f32b;
-            let mut off = 0usize;
-            for ls in &self.core.pool.gdn_state {
-                unsafe {
-                    self.core
-                        .device
-                        .memcpy_async(
-                            self.core.stream,
-                            CopyDirection::DeviceToDevice,
-                            self.core.pool.mtp_gdn_snap.offset_bytes(off),
-                            ls.state.offset_bytes(slot_id * state_b),
-                            state_b,
-                        )
-                        .context("gdn_snapshot dev state")?;
-                }
-                off += state_b;
-                unsafe {
-                    self.core
-                        .device
-                        .memcpy_async(
-                            self.core.stream,
-                            CopyDirection::DeviceToDevice,
-                            self.core.pool.mtp_gdn_snap.offset_bytes(off),
-                            ls.conv_history.offset_bytes(slot_id * hist_b),
-                            hist_b,
-                        )
-                        .context("gdn_snapshot dev hist")?;
-                }
-                off += hist_b;
-            }
-            flambeau_core::Stream::synchronize(self.core.stream)?;
-            self.core.pool.mtp_snap_valid = true;
-            return Ok(Vec::new());
+        if self.core.pool.gdn_rs_slot == slot_id {
+            self.core.pool.gdn_rs_materialize(self.core.device, self.core.stream)?;
         }
         let n_slots = self.core.pool.config.max_slots.max(1);
         if slot_id >= n_slots {
@@ -1318,123 +1283,54 @@ impl<B: Backend, H: TopologyHooks<B>, S: StageHooks<B>> ForwardCtx for ForwardEn
         self.core.pool.mtp_pending
     }
 
-    fn gdn_replay_rows(
-        &mut self,
-        weights: &crate::ctx::GdnWeights,
-        layer_idx: usize,
-        slot_id: usize,
-        n_keep: usize,
-    ) -> Result<()> {
-        let pool = &self.core.pool;
-        let Some(g) = pool.config.gdn else {
+    fn gdn_select_rows(&mut self, slot_id: usize, n_keep: usize, n_rows: usize) -> Result<()> {
+        let Some(g) = self.core.pool.config.gdn else {
             return Ok(());
         };
-        if !pool.mtp_snap_valid {
-            anyhow::bail!("gdn_replay_rows: no device snapshot");
+        if self.core.pool.gdn_state.is_empty() {
+            return Ok(());
         }
-        let dims = weights.dims;
-        let local_idx = layer_idx
-            .checked_sub(self.core.layer_idx_offset)
-            .filter(|&i| i < pool.gdn_state.len())
-            .ok_or_else(|| anyhow::anyhow!("gdn_replay_rows: layer {layer_idx} not owned"))?;
-        let rows = pool
-            .gdn_spec_rows(local_idx, &dims)
-            .ok_or_else(|| anyhow::anyhow!("gdn_replay_rows: pool has no MTP row store"))?;
-        if n_keep == 0 || n_keep > pool.mtp_verify_rows() {
-            anyhow::bail!("gdn_replay_rows: n_keep {n_keep} out of range");
+        if n_keep == 0 || n_keep > n_rows || n_rows > self.core.pool.mtp_verify_rows() {
+            anyhow::bail!("gdn_select_rows: keep {n_keep} of {n_rows} rows out of range");
         }
-        let attn_out = pool
-            .gdn_prefill_scratch
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("gdn_replay_rows: no prefill scratch"))?
-            .state_out;
-        let snap_state_b = g.num_v_heads * g.head_k_dim * g.head_v_dim * 4;
-        let snap_hist_b = (g.conv_kernel - 1) * g.conv_channels * 4;
-        let snap = pool
-            .mtp_gdn_snap
-            .offset_bytes(local_idx * (snap_state_b + snap_hist_b));
-        let ls = pool.gdn_state[local_idx];
-        let state_b = dims.num_v_heads * dims.head_k_dim * dims.head_v_dim * 4;
-        let row_b = dims.conv_channels * 4;
-        let hist_b = (dims.conv_kernel - 1) * row_b;
-        let ops = self.core.ops();
-        ops.gdn_state_step_alphabeta_f32_s128(
-            flambeau_ops::GdnStepAlphaBetaBuffers {
-                q: rows.q,
-                k: rows.k,
-                v: rows.v,
-                alpha_in: rows.alpha,
-                beta_in: rows.beta,
-                ssm_dt_bias: weights.ssm_dt_bias.ptr,
-                ssm_a: weights.ssm_a.ptr,
-                state_in: snap,
-                state_out: ls.state.offset_bytes(slot_id * state_b),
-                attn_out,
-            },
-            flambeau_ops::GdnStepShape {
-                b: 1,
-                h_v: dims.num_v_heads,
-                l: n_keep,
-                n_rep: dims.num_v_heads / dims.num_k_heads,
-                rep_inner_layout: weights.rep_inner_layout,
-            },
-        )
-        .context("gdn_replay_rows: state step")?;
-        unsafe {
-            self.core
-                .device
-                .memcpy_async(
-                    self.core.stream,
-                    CopyDirection::DeviceToDevice,
-                    ls.conv_history.offset_bytes(slot_id * hist_b),
-                    rows.conv_input.offset_bytes(n_keep * row_b),
-                    hist_b,
-                )
-                .context("gdn_replay_rows: conv history")?;
+        if n_keep < n_rows {
+            let row_b = g.conv_channels * 4;
+            let hist_b = (g.conv_kernel - 1) * row_b;
+            for local_idx in 0..self.core.pool.gdn_state.len() {
+                let rows = self
+                    .core
+                    .pool
+                    .gdn_spec_rows(local_idx, &g)
+                    .ok_or_else(|| anyhow::anyhow!("gdn_select_rows: pool has no MTP row store"))?;
+                let hist = self.core.pool.gdn_state[local_idx].conv_history;
+                // SAFETY: conv_input holds conv_kernel - 1 history rows then
+                // the verify rows, so rows [n_keep, n_keep + conv_kernel - 1)
+                // exist; the dst is slot_id's history inside the slab.
+                unsafe {
+                    self.core
+                        .device
+                        .memcpy_async(
+                            self.core.stream,
+                            CopyDirection::DeviceToDevice,
+                            hist.offset_bytes(slot_id * hist_b),
+                            rows.conv_input.offset_bytes(n_keep * row_b),
+                            hist_b,
+                        )
+                        .context("gdn_select_rows: conv history")?;
+                }
+            }
         }
-        Ok(())
+        self.core
+            .pool
+            .gdn_rs_select(slot_id, n_keep, self.core.device, self.core.stream)
     }
 
     fn gdn_restore(&mut self, slot_id: usize, snap: &[u8]) -> Result<()> {
         let Some(g) = self.core.pool.config.gdn else {
             return Ok(());
         };
-        if self.core.pool.mtp_snap_valid && snap.is_empty() {
-            let f32b = 4usize;
-            let state_b = g.num_v_heads * g.head_k_dim * g.head_v_dim * f32b;
-            let hist_b = (g.conv_kernel - 1) * g.conv_channels * f32b;
-            let mut off = 0usize;
-            for ls in &self.core.pool.gdn_state {
-                unsafe {
-                    self.core
-                        .device
-                        .memcpy_async(
-                            self.core.stream,
-                            CopyDirection::DeviceToDevice,
-                            ls.state.offset_bytes(slot_id * state_b),
-                            self.core.pool.mtp_gdn_snap.offset_bytes(off),
-                            state_b,
-                        )
-                        .context("gdn_restore dev state")?;
-                }
-                off += state_b;
-                unsafe {
-                    self.core
-                        .device
-                        .memcpy_async(
-                            self.core.stream,
-                            CopyDirection::DeviceToDevice,
-                            ls.conv_history.offset_bytes(slot_id * hist_b),
-                            self.core.pool.mtp_gdn_snap.offset_bytes(off),
-                            hist_b,
-                        )
-                        .context("gdn_restore dev hist")?;
-                }
-                off += hist_b;
-            }
-            flambeau_core::Stream::synchronize(self.core.stream)?;
-            self.core.pool.mtp_snap_valid = false;
-            return Ok(());
+        if self.core.pool.gdn_rs_slot == slot_id {
+            self.core.pool.gdn_rs_discard(self.core.device, self.core.stream)?;
         }
         let f32b = 4usize;
         let state_b = g.num_v_heads * g.head_k_dim * g.head_v_dim * f32b;

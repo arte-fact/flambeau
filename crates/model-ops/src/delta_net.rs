@@ -377,6 +377,18 @@ pub struct GdnDecodeBatchedBuffers {
 pub struct GdnPrefillSeq<'a, D: Device = HipDevice> {
     pub n_tokens: usize,
     pub state_event: Option<&'a D::Event>,
+    /// Speculative verify: keep every token's state (see [`GdnKStates`])
+    /// instead of updating `state` in place.
+    pub kstates: Option<GdnKStates>,
+}
+
+/// Per-token state slots of one layer for a speculative verify batch: the
+/// input state is the layer's live state when `*rs_idx == 0`, else slot
+/// `*rs_idx - 1` of `states`; the state after token t lands in slot t.
+#[derive(Clone, Copy, Debug)]
+pub struct GdnKStates {
+    pub states: DevicePtr,
+    pub rs_idx: DevicePtr,
 }
 
 impl<D: Device> Copy for GdnPrefillSeq<'_, D> {}
@@ -1386,6 +1398,7 @@ impl DeltaNetLayer {
         let GdnPrefillSeq {
             n_tokens,
             state_event,
+            kstates,
         } = seq;
         if n_tokens == 0 {
             bail!("DeltaNetLayer::forward_prefill called with n_tokens = 0");
@@ -1589,28 +1602,50 @@ impl DeltaNetLayer {
             ev.stream_wait(stream)
                 .context("gdn prefill state_step stream_wait")?;
         }
-        ops.gdn_state_step_alphabeta_f32_s128(
-            flambeau_ops::GdnStepAlphaBetaBuffers {
-                q: scratch.q_norm_f32,
-                k: scratch.k_norm_f32,
-                v: scratch.v_f32,
-                alpha_in: scratch.alpha_f32,
-                beta_in: scratch.beta_f32,
-                ssm_dt_bias: self.ssm_dt_bias,
-                ssm_a: self.ssm_a,
-                state_in: state,
-                state_out: state,
-                attn_out: scratch.state_out,
-            },
-            flambeau_ops::GdnStepShape {
-                b: 1,
-                h_v: num_v_heads,
-                l: n_tokens,
-                n_rep,
-                rep_inner_layout: self.rep_inner_layout,
-            },
-        )
-        .context("gdn prefill gdn_state_step_alphabeta_f32_s128")?;
+        let step_shape = flambeau_ops::GdnStepShape {
+            b: 1,
+            h_v: num_v_heads,
+            l: n_tokens,
+            n_rep,
+            rep_inner_layout: self.rep_inner_layout,
+        };
+        match kstates {
+            Some(ks) => ops
+                .gdn_state_step_alphabeta_f32_s128_kstates(
+                    flambeau_ops::GdnStepKStatesBuffers {
+                        q: scratch.q_norm_f32,
+                        k: scratch.k_norm_f32,
+                        v: scratch.v_f32,
+                        alpha_in: scratch.alpha_f32,
+                        beta_in: scratch.beta_f32,
+                        ssm_dt_bias: self.ssm_dt_bias,
+                        ssm_a: self.ssm_a,
+                        state_live: state,
+                        kstates: ks.states,
+                        rs_idx: ks.rs_idx,
+                        attn_out: scratch.state_out,
+                    },
+                    step_shape,
+                )
+                .context("gdn prefill gdn_state_step_alphabeta_f32_s128_kstates")?,
+            None => ops
+                .gdn_state_step_alphabeta_f32_s128(
+                    flambeau_ops::GdnStepAlphaBetaBuffers {
+                        q: scratch.q_norm_f32,
+                        k: scratch.k_norm_f32,
+                        v: scratch.v_f32,
+                        alpha_in: scratch.alpha_f32,
+                        beta_in: scratch.beta_f32,
+                        ssm_dt_bias: self.ssm_dt_bias,
+                        ssm_a: self.ssm_a,
+                        state_in: state,
+                        state_out: state,
+                        attn_out: scratch.state_out,
+                    },
+                    step_shape,
+                )
+                .context("gdn prefill gdn_state_step_alphabeta_f32_s128")?,
+        }
         if let Some(ev) = state_event {
             ev.record(stream).context("gdn prefill state_step record")?;
         }

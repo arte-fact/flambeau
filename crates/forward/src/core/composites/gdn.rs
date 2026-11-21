@@ -63,6 +63,15 @@ pub fn gdn_layer_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
             bail!("gdn_layer: slot_ids[{i}]={slot} >= max_slots {max_slots}");
         }
     }
+    // A speculative verify reads its input state through `gdn_rs_idx`; every
+    // other pass needs the live state current.
+    let kstates = state.pool.mtp_spec_rows
+        && state.pool.mtp_gdn_kstates != DevicePtr::NULL
+        && slot_ids.iter().all(|&s| s == slot_ids[0])
+        && (state.pool.gdn_rs_pending == 0 || state.pool.gdn_rs_slot == slot_ids[0]);
+    if !kstates {
+        gdn_rs_make_live(state)?;
+    }
     let dims = weights.dims;
     let layer_state = state.pool.gdn_state[local_idx];
     let state_bytes_per_slot = dims.num_v_heads * dims.head_k_dim * dims.head_v_dim * 4;
@@ -157,6 +166,13 @@ pub fn gdn_layer_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
             flambeau_model_ops::GdnPrefillSeq {
                 n_tokens,
                 state_event: None,
+                kstates: kstates.then(|| flambeau_model_ops::GdnKStates {
+                    states: state
+                        .pool
+                        .mtp_gdn_kstates
+                        .offset_bytes(local_idx * state.pool.mtp_gdn_kstates_layer_bytes),
+                    rs_idx: state.pool.gdn_rs_idx,
+                }),
             },
             Some(&mut ar_cb),
         )?;
@@ -315,6 +331,23 @@ pub fn gdn_layer_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
 /// multi-slot batched kernels; a single row always takes the per-slot path.
 fn uses_batched_slots(n_tokens: usize) -> bool {
     n_tokens > 1
+}
+
+/// Copy a pending per-token MTP state back over the live GDN state before a
+/// pass that reads the live state. Under decode-graph capture the copy would
+/// be recorded for every replay, so the capture is refused instead and the
+/// driver's plain forward does the copy.
+pub(crate) fn gdn_rs_make_live<B: flambeau_backend::Backend>(
+    state: &mut CoreState<'_, B>,
+) -> Result<()> {
+    if state.pool.gdn_rs_pending == 0 {
+        return Ok(());
+    }
+    if let Some(cap) = state.capture.as_deref_mut() {
+        cap.mark_uncapturable("gdn: per-token MTP state pending");
+        return Ok(());
+    }
+    state.pool.gdn_rs_materialize(state.device, state.stream)
 }
 
 #[cfg(test)]

@@ -993,13 +993,21 @@ pub struct ScratchPool {
     pub mtp_in_f16: DevicePtr,
     pub mtp_proj_a_f32: DevicePtr,
     pub mtp_proj_b_f32: DevicePtr,
-    /// Device-side GDN snapshot for MTP rollback (one slot's worth of
-    /// per-layer state+history). NULL when MTP off or arch non-GDN.
-    pub mtp_gdn_snap: DevicePtr,
-    /// Bytes per slot in `mtp_gdn_snap`.
-    pub mtp_gdn_snap_slot_bytes: usize,
-    /// Set when `mtp_gdn_snap` holds a valid snapshot.
-    pub mtp_snap_valid: bool,
+    /// Per-token GDN states of the last verify batch, one sequence:
+    /// `max_draft + 1` slots of `[num_v_heads, head_k_dim, head_v_dim]` f32
+    /// per local GDN layer (`mtp_gdn_kstates_layer_bytes` apart). NULL when
+    /// MTP is off or the arch has no GDN layer.
+    pub mtp_gdn_kstates: DevicePtr,
+    pub mtp_gdn_kstates_layer_bytes: usize,
+    /// Device i32: 0 when slot `gdn_rs_slot`'s live GDN state is current,
+    /// `j > 0` when its current state is `mtp_gdn_kstates` slot `j - 1`.
+    /// Read by the verify kernel; written only from `gdn_rs_idx_host`.
+    pub gdn_rs_idx: DevicePtr,
+    /// Stable host staging for `gdn_rs_idx` (index-assigned only).
+    pub gdn_rs_idx_host: Vec<i32>,
+    /// Host mirror of `gdn_rs_idx` and the slot it applies to.
+    pub gdn_rs_pending: usize,
+    pub gdn_rs_slot: usize,
     /// Per-GDN-layer state-step inputs of the last verify batch
     /// (`max_draft + 1` rows), see [`GdnSpecRows`]. NULL when MTP off or
     /// arch non-GDN.
@@ -1011,8 +1019,8 @@ pub struct ScratchPool {
     pub mtp_rows_f16: DevicePtr,
     pub mtp_zero_f16: DevicePtr,
     /// While set, the GDN prefill path keeps its state-step inputs in
-    /// `mtp_gdn_rows` so a rejected draft suffix can be rolled back by
-    /// replaying the state step alone.
+    /// `mtp_gdn_rows` and every token's state in `mtp_gdn_kstates`, so a
+    /// rejected draft suffix is rolled back by moving `gdn_rs_idx`.
     pub mtp_spec_rows: bool,
     /// `(slot, position)` whose target hidden `mtp_anchor_f16` holds.
     pub mtp_pending: Option<(usize, usize)>,
@@ -1447,8 +1455,6 @@ impl ScratchPool {
             mtp_in_f16,
             mtp_proj_a_f32,
             mtp_proj_b_f32,
-            mtp_gdn_snap,
-            mtp_gdn_snap_slot_bytes,
             mtp_gdn_rows,
             mtp_gdn_rows_layer_bytes,
         ) = match config.mtp {
@@ -1458,15 +1464,6 @@ impl ScratchPool {
                     .gdn
                     .map(|g| GdnSpecRows::layer_bytes(&g, m.max_draft + 1))
                     .unwrap_or(0);
-                let snap_bytes = match config.gdn {
-                    Some(g) => {
-                        let f32b = 4usize;
-                        let per_layer = g.num_v_heads * g.head_k_dim * g.head_v_dim * f32b
-                            + (g.conv_kernel - 1) * g.conv_channels * f32b;
-                        config.num_layers * per_layer
-                    }
-                    None => 0,
-                };
                 (
                     alloc_bytes(h * f16)?,
                     alloc_bytes(h * f16)?,
@@ -1475,8 +1472,6 @@ impl ScratchPool {
                     alloc_bytes(h * f16)?,
                     alloc_bytes(h * f32)?,
                     alloc_bytes(h * f32)?,
-                    if snap_bytes > 0 { alloc_bytes(snap_bytes)? } else { DevicePtr::NULL },
-                    snap_bytes,
                     if rows_layer_bytes > 0 {
                         alloc_bytes(config.num_layers * rows_layer_bytes)?
                     } else {
@@ -1493,8 +1488,6 @@ impl ScratchPool {
                 DevicePtr::NULL,
                 DevicePtr::NULL,
                 DevicePtr::NULL,
-                DevicePtr::NULL,
-                0,
                 DevicePtr::NULL,
                 0,
             ),
@@ -1688,6 +1681,38 @@ impl ScratchPool {
                 None
             };
 
+        // MTP speculative GDN states, sized from the GDN layers this pool
+        // actually holds; the index starts at 0 (live state current).
+        let (mtp_gdn_kstates, mtp_gdn_kstates_layer_bytes, gdn_rs_idx) = match (config.mtp, config.gdn)
+        {
+            (Some(m), Some(g)) if !gdn_state.is_empty() => {
+                let layer_bytes =
+                    (m.max_draft + 1) * g.num_v_heads * g.head_k_dim * g.head_v_dim * f32;
+                let states_bytes = gdn_state.len() * layer_bytes;
+                let states = device.alloc(states_bytes).context("alloc mtp gdn kstates")?;
+                allocs.push((states, states_bytes));
+                let idx = device.alloc(i32_b).context("alloc gdn rs_idx")?;
+                allocs.push((idx, i32_b));
+                let zero = [0i32; 1];
+                let stream = device.default_stream();
+                // SAFETY: idx owns one i32; `zero` outlives the sync below.
+                unsafe {
+                    device
+                        .memcpy_async(
+                            stream,
+                            CopyDirection::HostToDevice,
+                            idx,
+                            DevicePtr(zero.as_ptr() as usize),
+                            i32_b,
+                        )
+                        .context("zero gdn rs_idx")?;
+                }
+                flambeau_core::Stream::synchronize(stream).context("sync gdn rs_idx")?;
+                (states, layer_bytes, idx)
+            }
+            _ => (DevicePtr::NULL, 0, DevicePtr::NULL),
+        };
+
         // Drain the paged-KV local allocations into the unified
         // `allocs` list so `dispose` walks every allocation in one pass.
         allocs.append(&mut paged_local_allocs);
@@ -1755,9 +1780,12 @@ impl ScratchPool {
             mtp_in_f16,
             mtp_proj_a_f32,
             mtp_proj_b_f32,
-            mtp_gdn_snap,
-            mtp_gdn_snap_slot_bytes,
-            mtp_snap_valid: false,
+            mtp_gdn_kstates,
+            mtp_gdn_kstates_layer_bytes,
+            gdn_rs_idx,
+            gdn_rs_idx_host: vec![0i32; 1],
+            gdn_rs_pending: 0,
+            gdn_rs_slot: 0,
             mtp_gdn_rows,
             mtp_gdn_rows_layer_bytes,
             mtp_rows_f16,
@@ -1821,11 +1849,84 @@ impl ScratchPool {
         }
     }
 
+    /// Point slot `slot_id`'s current GDN state at `mtp_gdn_kstates` slot
+    /// `idx - 1` (`idx == 0`: its live state). One 4-byte HtoD on `stream`.
+    pub fn gdn_rs_select<D: Device>(
+        &mut self,
+        slot_id: usize,
+        idx: usize,
+        device: &D,
+        stream: &D::Stream,
+    ) -> Result<()> {
+        if self.gdn_rs_idx == DevicePtr::NULL {
+            anyhow::bail!("gdn_rs_select: pool has no per-token GDN states (MTP off or no GDN layer)");
+        }
+        if idx > self.mtp_verify_rows() {
+            anyhow::bail!("gdn_rs_select: index {idx} > {} state slots", self.mtp_verify_rows());
+        }
+        self.gdn_rs_idx_host[0] = idx as i32;
+        let src = DevicePtr(self.gdn_rs_idx_host.as_ptr() as usize);
+        // SAFETY: gdn_rs_idx holds one i32; src is the pool's stable staging.
+        unsafe {
+            device
+                .memcpy_async(stream, CopyDirection::HostToDevice, self.gdn_rs_idx, src, 4)
+                .context("gdn rs_idx HtoD")?;
+        }
+        self.gdn_rs_pending = idx;
+        self.gdn_rs_slot = slot_id;
+        Ok(())
+    }
+
+    /// Make the live GDN state of `gdn_rs_slot` current again: copy the
+    /// selected per-token state over it (queued on `stream`) and reset the
+    /// index. No-op when the live state is already current.
+    pub fn gdn_rs_materialize<D: Device>(&mut self, device: &D, stream: &D::Stream) -> Result<()> {
+        if self.gdn_rs_pending == 0 {
+            return Ok(());
+        }
+        let Some(g) = self.config.gdn else {
+            return Ok(());
+        };
+        let state_bytes = g.num_v_heads * g.head_k_dim * g.head_v_dim * 4;
+        let src_off = (self.gdn_rs_pending - 1) * state_bytes;
+        for (li, ls) in self.gdn_state.iter().enumerate() {
+            let src = self
+                .mtp_gdn_kstates
+                .offset_bytes(li * self.mtp_gdn_kstates_layer_bytes + src_off);
+            // SAFETY: src is one state slot inside layer li's kstates; the dst
+            // is slot gdn_rs_slot of the live state slab.
+            unsafe {
+                device
+                    .memcpy_async(
+                        stream,
+                        CopyDirection::DeviceToDevice,
+                        ls.state.offset_bytes(self.gdn_rs_slot * state_bytes),
+                        src,
+                        state_bytes,
+                    )
+                    .context("gdn rs materialize")?;
+            }
+        }
+        let slot = self.gdn_rs_slot;
+        self.gdn_rs_select(slot, 0, device, stream)
+    }
+
+    /// Forget the selected per-token state (the live state is about to be
+    /// overwritten) and reset the index.
+    pub fn gdn_rs_discard<D: Device>(&mut self, device: &D, stream: &D::Stream) -> Result<()> {
+        if self.gdn_rs_pending == 0 {
+            return Ok(());
+        }
+        let slot = self.gdn_rs_slot;
+        self.gdn_rs_select(slot, 0, device, stream)
+    }
+
     /// Zero per-layer GDN recurrent state + conv-history slabs so the
     /// next request starts fresh. No-op when the arch is non-GDN.
     /// KV-cache positions are caller-supplied (no counter on the
     /// pool), so this is the only stateful slot that needs reset.
-    pub fn reset_gdn_state(&self, device: &impl Device) -> Result<()> {
+    pub fn reset_gdn_state(&mut self, device: &impl Device) -> Result<()> {
+        self.gdn_rs_discard(device, device.default_stream())?;
         for slot_id in 0..self.config.max_slots.max(1) {
             self.queue_gdn_slot_reset(slot_id, device)?;
         }
@@ -1836,10 +1937,13 @@ impl ScratchPool {
     /// Used by the server's shared-Session pool to reset a single
     /// conversation slot without touching others. No-op for non-GDN
     /// archs.
-    pub fn reset_gdn_state_slot(&self, slot_id: usize, device: &impl Device) -> Result<()> {
+    pub fn reset_gdn_state_slot(&mut self, slot_id: usize, device: &impl Device) -> Result<()> {
         let n_slots = self.config.max_slots.max(1);
         if slot_id >= n_slots {
             anyhow::bail!("reset_gdn_state_slot: slot_id {slot_id} >= max_slots {n_slots}");
+        }
+        if self.gdn_rs_slot == slot_id {
+            self.gdn_rs_discard(device, device.default_stream())?;
         }
         self.queue_gdn_slot_reset(slot_id, device)?;
         flambeau_core::Stream::synchronize(device.default_stream()).context("sync gdn reset slot")
@@ -1919,7 +2023,7 @@ impl ScratchPool {
     /// [`restore_slot_bytes`](Self::restore_slot_bytes) reject a mismatched
     /// snapshot; section sizes are re-derived from the pool config.
     pub fn snapshot_slot_bytes(
-        &self,
+        &mut self,
         slot_id: usize,
         n_tokens: usize,
         device: &impl Device,
@@ -1928,6 +2032,9 @@ impl ScratchPool {
         let n_slots = self.config.max_slots.max(1);
         if slot_id >= n_slots {
             anyhow::bail!("snapshot_slot_bytes: slot_id {slot_id} >= max_slots {n_slots}");
+        }
+        if self.gdn_rs_slot == slot_id {
+            self.gdn_rs_materialize(device, device.default_stream())?;
         }
         let payload = self.slot_snapshot_payload_bytes(n_tokens)?;
         let mut buf = vec![0u8; 16 + payload];
@@ -1982,7 +2089,7 @@ impl ScratchPool {
     /// snapshot's KV rows + GDN state into `slot_id`. The caller must continue
     /// from position `n_tokens` (recurrent state is only valid there).
     pub fn restore_slot_bytes(
-        &self,
+        &mut self,
         slot_id: usize,
         n_tokens: usize,
         bytes: &[u8],
@@ -1992,6 +2099,9 @@ impl ScratchPool {
         let n_slots = self.config.max_slots.max(1);
         if slot_id >= n_slots {
             anyhow::bail!("restore_slot_bytes: slot_id {slot_id} >= max_slots {n_slots}");
+        }
+        if self.gdn_rs_slot == slot_id {
+            self.gdn_rs_discard(device, device.default_stream())?;
         }
         if bytes.len() < 16 {
             anyhow::bail!(
