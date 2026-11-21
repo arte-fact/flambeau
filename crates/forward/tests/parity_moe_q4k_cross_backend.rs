@@ -39,7 +39,7 @@ fn run<B: Backend>(eng_dev: &B::Device, reg: &B::Registry, allocs: &mut DeviceAl
     let kv_width = N_KV_HEADS * HEAD_DIM;
 
     let embd = EmbeddingWeights {
-        token_embd: allocs.upload_f16(&det_signal(VOCAB * HIDDEN, 1)),
+        token_embd: allocs.upload_f16(&det_signal(VOCAB * HIDDEN, 1)).into(),
         vocab_size: VOCAB,
         hidden: HIDDEN,
         post_scale: None,

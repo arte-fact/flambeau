@@ -1,13 +1,13 @@
 //! Embedding + LM-head: the book-end "global" layer weights, always
 //! replicated across ranks.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use flambeau_core::{Device, DevicePtr};
-use flambeau_quant::GgufFile;
+use flambeau_quant::{GgmlDType, GgufFile, QK_K};
 
-use crate::ctx::{EmbeddingWeights, LmHeadWeights};
+use crate::ctx::{EmbeddingTable, EmbeddingWeights, LmHeadWeights};
 
-use super::primitives::upload_dequant_to_f16;
+use super::primitives::{upload_dequant_to_f16, upload_raw, wrap_quant};
 use super::shard::upload_quant_weight;
 
 pub struct EmbeddingSpec<'a> {
@@ -18,19 +18,35 @@ pub struct EmbeddingSpec<'a> {
     pub post_scale: Option<f32>,
 }
 
+/// Dtypes the device gathers straight from the GGUF bytes (see
+/// `embed_local`); any other dtype is dequantized to F16 at load.
+fn gathered_quant(dtype: GgmlDType, hidden: usize) -> bool {
+    dtype == GgmlDType::Q4K && hidden % QK_K == 0
+}
+
 pub fn load_embedding(
     file: &GgufFile,
     device: &impl Device,
     spec: &EmbeddingSpec,
     allocs: &mut Vec<(DevicePtr, usize)>,
 ) -> Result<EmbeddingWeights> {
-    let token_embd = upload_dequant_to_f16(
-        file,
-        device,
-        spec.token_embd_name,
-        spec.vocab_size * spec.hidden,
-        allocs,
-    )?;
+    let n_elems = spec.vocab_size * spec.hidden;
+    let dtype = file
+        .info(spec.token_embd_name)
+        .with_context(|| format!("tensor info {}", spec.token_embd_name))?
+        .dtype;
+    let token_embd = if gathered_quant(dtype, spec.hidden) {
+        let ptr = upload_raw(file, device, spec.token_embd_name, allocs)?;
+        EmbeddingTable::Quant(wrap_quant(ptr, n_elems, dtype)?)
+    } else {
+        EmbeddingTable::F16(upload_dequant_to_f16(
+            file,
+            device,
+            spec.token_embd_name,
+            n_elems,
+            allocs,
+        )?)
+    };
     Ok(EmbeddingWeights {
         token_embd,
         vocab_size: spec.vocab_size,
