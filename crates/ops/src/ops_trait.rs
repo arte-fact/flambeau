@@ -734,6 +734,16 @@ pub trait Ops {
         shape: crate::GdnStepShape,
     ) -> Result<()>;
 
+    /// Speculative-verify α/β GDN step for one sequence (`shape.b == 1`):
+    /// same per-token compute as `gdn_state_step_alphabeta_f32_s128`, input
+    /// state chosen on device by `rs_idx`, every token's state kept in its own
+    /// `kstates` slot (see [`crate::GdnStepKStatesBuffers`]).
+    fn gdn_state_step_alphabeta_f32_s128_kstates(
+        &self,
+        bufs: crate::GdnStepKStatesBuffers,
+        shape: crate::GdnStepShape,
+    ) -> Result<()>;
+
     /// Batched-slots single-token conv trio (assemble + causal_conv1d
     /// + history shift) collapsed into one launch across N slots, each
     ///   with its own conv-history buffer. `slot_history_ptrs` is

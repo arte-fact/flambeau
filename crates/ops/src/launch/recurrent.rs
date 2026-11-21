@@ -211,6 +211,62 @@ pub fn gdn_state_step_alphabeta_f32_s128<B: flambeau_core::KernelBackend>(
     Ok(())
 }
 
+/// Speculative-verify variant of [`gdn_state_step_alphabeta_f32_s128`]
+/// (`gdn_state_step_alphabeta_f32_kstates`): one sequence, input state picked
+/// by `rs_idx` on device, the state after each of the `l` tokens written to
+/// its own `kstates` slot. Same grid as the base kernel at `b = 1`.
+pub fn gdn_state_step_alphabeta_f32_s128_kstates<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
+    bufs: crate::GdnStepKStatesBuffers,
+    shape: crate::GdnStepShape,
+) -> Result<()> {
+    let crate::GdnStepShape { b, h_v, l, n_rep, rep_inner_layout } = shape;
+    if b != 1 {
+        anyhow::bail!("gdn_state_step_alphabeta_f32_s128_kstates: one sequence only, got b = {b}");
+    }
+    const S_V: u32 = 128;
+    const WARPS_PER_BLOCK: u32 = 4;
+
+    let module = reg.expect_module("gdn_state_step_alphabeta_f32_kstates")?;
+    let kernel = B::kernel(module, "flambeau_gdn_state_step_alphabeta_f32_s128_kstates")?;
+
+    let ptrs: [u64; 11] = [
+        bufs.q,
+        bufs.k,
+        bufs.v,
+        bufs.alpha_in,
+        bufs.beta_in,
+        bufs.ssm_dt_bias,
+        bufs.ssm_a,
+        bufs.state_live,
+        bufs.kstates,
+        bufs.rs_idx,
+        bufs.attn_out,
+    ]
+    .map(|p| p.as_usize() as u64);
+    let h_i = h_v as i32;
+    let l_i = l as i32;
+    let n_rep_i = n_rep as i32;
+    let rep_inner_i: i32 = if rep_inner_layout { 1 } else { 0 };
+    let mut args = <B::Args<'_>>::default();
+    for p in &ptrs {
+        args.push_arg(p);
+    }
+    args.push_arg(&h_i);
+    args.push_arg(&l_i);
+    args.push_arg(&n_rep_i);
+    args.push_arg(&rep_inner_i);
+
+    let cfg = LaunchCfg {
+        grid: (h_v as u32, 1, S_V / WARPS_PER_BLOCK),
+        block: (B::WARP_SIZE, WARPS_PER_BLOCK, 1),
+        shared_bytes: 0,
+    };
+    B::launch(&kernel, stream, cfg, args)?;
+    Ok(())
+}
+
 /// Batched-slots variant of [`gdn_state_step_alphabeta_f32_s128`]. Same
 /// per-(B,H,col) compute and grid shape; the state-in / state-out
 /// pointers per batch are dereferenced through a `[B] u64` device

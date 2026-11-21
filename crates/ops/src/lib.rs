@@ -67,7 +67,7 @@ pub use sig::{
     MoeSortBuffers, MoeSortPaddedBuffers, MoeSortPaddedShape, MoeSortShape,
     MmvqKvF16Buffers, MoeShape, NormBuffers, NormFusedAddBuffers, NormResidualBuffers, NormShape,
     QmatmulBuffers, RopeBuffers, RopeFusedBuffers, RopePartialShape, RopeShape,
-    GdnStepBuffers, GdnStepAlphaBetaBuffers, GdnStepAlphaBetaBatchedSlotsBuffers, GdnStepShape,
+    GdnStepBuffers, GdnStepAlphaBetaBuffers, GdnStepAlphaBetaBatchedSlotsBuffers, GdnStepKStatesBuffers, GdnStepShape,
     GdnAlphaBetaBuffers, GdnAlphaBetaShape, GdnConvTrioBatchedSlotsBuffers, GdnConvTrioShape,
     GdnSplitQkvBuffers, GdnSplitQkvShape,
     ArgmaxBuffers, PenaltyBuffers, PenaltyKnobs,

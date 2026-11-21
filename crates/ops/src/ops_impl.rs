@@ -1013,6 +1013,14 @@ impl<B: KernelBackend> Ops for OpsImpl<'_, B> {
         )
     }
 
+    fn gdn_state_step_alphabeta_f32_s128_kstates(
+        &self,
+        bufs: crate::GdnStepKStatesBuffers,
+        shape: crate::GdnStepShape,
+    ) -> Result<()> {
+        crate::launch::recurrent::gdn_state_step_alphabeta_f32_s128_kstates(self.reg, self.stream, bufs, shape)
+    }
+
     fn gdn_conv_trio_decode_f32_batched_slots(
         &self,
         bufs: crate::GdnConvTrioBatchedSlotsBuffers,

@@ -689,6 +689,25 @@ pub struct GdnStepAlphaBetaBatchedSlotsBuffers {
     pub attn_out: DevicePtr,
 }
 
+/// Buffers for [`Ops::gdn_state_step_alphabeta_f32_s128_kstates`]: the
+/// input state is `state_live` when `rs_idx[0] == 0`, else `kstates` slot
+/// `rs_idx[0] - 1`; the state after token t is written to `kstates` slot t
+/// (`h_v * 128 * 128` f32 per slot), and `state_live` is never written.
+#[derive(Copy, Clone, Debug)]
+pub struct GdnStepKStatesBuffers {
+    pub q: DevicePtr,
+    pub k: DevicePtr,
+    pub v: DevicePtr,
+    pub alpha_in: DevicePtr,
+    pub beta_in: DevicePtr,
+    pub ssm_dt_bias: DevicePtr,
+    pub ssm_a: DevicePtr,
+    pub state_live: DevicePtr,
+    pub kstates: DevicePtr,
+    pub rs_idx: DevicePtr,
+    pub attn_out: DevicePtr,
+}
+
 /// Shared shape carrier for the three GDN state-step variants.
 #[derive(Copy, Clone, Debug)]
 pub struct GdnStepShape {
