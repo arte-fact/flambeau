@@ -1718,6 +1718,7 @@ fn sweep_cuda(root: &std::path::Path, op: &str, dtype: &str) -> Result<()> {
         ("attention_decode_q8_kv_splitk_dpos", flambeau_bench::sweep_attention_q8_kv_splitk_dpos::run_sweep::<Cuda>),
         ("attention_decode_q8_kv_vec_dpos", flambeau_bench::sweep_attention_q8_kv_vec_dpos::run_sweep::<Cuda>),
         ("quantize_f16_q8_0_dpos", flambeau_bench::sweep_quantize_f16_q8_0_dpos::run_sweep::<Cuda>),
+        ("quantize_f16_q8_1_few", flambeau_bench::sweep_quantize_f16_q8_1_few::run_sweep::<Cuda>),
     ];
     if let Some((_, run)) = CUDA_ONLY_SWEEPS.iter().find(|(name, _)| *name == op) {
         let cert = run(root, "sm_86")?;

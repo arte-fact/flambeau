@@ -10,6 +10,7 @@
 use anyhow::{anyhow, bail, Result};
 use flambeau_core::{LaunchArgs, LaunchCfg};
 use flambeau_core::{DevicePtr, QDtype, QMatMulCfg};
+use flambeau_quant::q8_1_few::FewScale;
 
 
 /// Auto-dispatched QMatMul. Given M, selects MMVQ (M=1..3 for Q8_0, M=1..127
@@ -360,6 +361,9 @@ pub enum ActLayout {
     Q8_1,
     /// DS4 144-B [`flambeau_quant::BlockQ8_1Mmq`] blocks (`act_q8_1_mmq`).
     Mmq,
+    /// Int8 MMA B-fragment layout of the few-column MMQ
+    /// ([`flambeau_quant::q8_1_few`]), with its scale record.
+    Few(flambeau_quant::q8_1_few::FewScale),
 }
 
 /// The layouts read by the projections that share one activation.
@@ -367,6 +371,8 @@ pub enum ActLayout {
 pub struct ActLayouts {
     q8_1: bool,
     mmq: bool,
+    few_d4: bool,
+    few_ds4: bool,
 }
 
 impl ActLayouts {
@@ -375,7 +381,14 @@ impl ActLayouts {
         match layout {
             ActLayout::Q8_1 => self.q8_1,
             ActLayout::Mmq => self.mmq,
+            ActLayout::Few(FewScale::D4) => self.few_d4,
+            ActLayout::Few(FewScale::Ds4) => self.few_ds4,
         }
+    }
+
+    /// Whether some projection of the set reads the few-column layout.
+    pub fn reads_few(self) -> bool {
+        self.few_d4 || self.few_ds4
     }
 }
 
@@ -391,6 +404,8 @@ impl FromIterator<ActLayout> for ActLayouts {
             match layout {
                 ActLayout::Q8_1 => set.q8_1 = true,
                 ActLayout::Mmq => set.mmq = true,
+                ActLayout::Few(FewScale::D4) => set.few_d4 = true,
+                ActLayout::Few(FewScale::Ds4) => set.few_ds4 = true,
             }
             set
         })

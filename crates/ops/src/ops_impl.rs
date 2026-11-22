@@ -766,6 +766,17 @@ impl<B: KernelBackend> Ops for OpsImpl<'_, B> {
         crate::launch::norm::quantize_f16_q8_1_mmq(self.reg, self.stream, x_f16, y_q8_1_mmq, ncols, total_b)
     }
 
+    fn quantize_f16_q8_1_few(
+        &self,
+        x_f16: DevicePtr,
+        y: DevicePtr,
+        ncols: usize,
+        total_b: usize,
+        scale: flambeau_quant::q8_1_few::FewScale,
+    ) -> Result<()> {
+        crate::launch::norm::quantize_f16_q8_1_few(self.reg, self.stream, x_f16, y, ncols, total_b, scale)
+    }
+
     fn quantize_f16_q8_1(&self, x_f16: DevicePtr, y_q8_1: DevicePtr, n_elems: usize) -> Result<()> {
         crate::launch::norm::quantize_f16_q8_1(self.reg, self.stream, x_f16, y_q8_1, n_elems)
     }

@@ -1454,6 +1454,9 @@ impl DeltaNetLayer {
             )
         })
         .collect();
+        if x_layouts.reads_few() {
+            anyhow::bail!("gdn prefill x_norm: the few-column layout has no buffer here");
+        }
         if x_layouts.reads(flambeau_ops::ActLayout::Q8_1) {
             ops.quantize_f16_q8_1(scratch.x_norm_f16, scratch.x_q8_1, n_tokens * hidden)
                 .context("gdn prefill x_norm → Q8_1 (std)")?;
@@ -1711,6 +1714,9 @@ impl DeltaNetLayer {
             flambeau_ops::ActLayout::Q8_1 => ops
                 .quantize_q8_1(scratch.gated_f32, scratch.gated_q8_1, n_tokens * d_inner)
                 .context("gdn prefill quantise gated → Q8_1 (std)")?,
+            flambeau_ops::ActLayout::Few(_) => {
+                anyhow::bail!("gdn prefill ssm_out: the few-column layout has no buffer here")
+            }
         }
 
         // 15. ssm_out projection at M = L.

@@ -145,7 +145,8 @@ mod tests {
 }
 
 /// Quantises `input` (`total_b` rows of `ncols`) into each layout of
-/// `layouts`: the standard one into `q8_1`, DS4 into `mmq`.
+/// `layouts`: the standard one into `q8_1`, DS4 into `mmq`. A set holding the
+/// few-column layout is refused.
 pub fn quantize_f16_for_layouts(
     input: &Tensor<F16>,
     layouts: ActLayouts,
@@ -155,6 +156,9 @@ pub fn quantize_f16_for_layouts(
     total_b: usize,
     ops: &impl Ops,
 ) -> Result<()> {
+    if layouts.reads_few() {
+        bail!("quantize_f16_for_layouts: the few-column layout has no buffer at this call site");
+    }
     if layouts.reads(ActLayout::Q8_1) {
         quantize_f16_to_q8_1(input, q8_1, ncols * total_b, ops)?;
     }

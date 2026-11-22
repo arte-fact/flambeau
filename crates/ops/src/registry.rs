@@ -217,6 +217,7 @@ pub const KERNEL_STEMS: &[&str] = &[
     "quantize_f16_q8_0",
     // Device-position decode-graph kernel (CUDA-only).
     "quantize_f16_q8_0_dpos",
+    "quantize_f16_q8_1_few",
     "cast_f32_f16",
     "cast_f16_f32",
     // Norm / pointwise.

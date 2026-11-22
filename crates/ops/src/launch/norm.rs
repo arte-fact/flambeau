@@ -384,6 +384,49 @@ pub fn quantize_f16_q8_1_mmq<B: flambeau_core::KernelBackend>(
     Ok(())
 }
 
+/// F16 activation → Q8_1 in the few-column MMQ B-fragment layout
+/// ([`flambeau_quant::q8_1_few`]), `scale` choosing the sub-block record.
+/// `y` holds [`flambeau_quant::q8_1_few::few_bytes`]`(ncols, total_b)` bytes.
+/// CUDA-only kernel (`quantize_f16_q8_1_few`).
+pub fn quantize_f16_q8_1_few<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
+    x_f16: DevicePtr,
+    y: DevicePtr,
+    ncols: usize,
+    total_b: usize,
+    scale: flambeau_quant::q8_1_few::FewScale,
+) -> Result<()> {
+    use flambeau_quant::q8_1_few::{FewScale, FEW_NCOLS};
+    assert_eq!(ncols % flambeau_quant::QK_K, 0, "quantize_f16_q8_1_few expects ncols % 256 == 0");
+    let module = reg.expect_module("quantize_f16_q8_1_few")?;
+    let entry = match scale {
+        FewScale::D4 => "flambeau_quantize_f16_q8_1_few_d4",
+        FewScale::Ds4 => "flambeau_quantize_f16_q8_1_few_ds4",
+    };
+    let kernel = B::kernel(module, entry)?;
+    let ncols_i = ncols as i32;
+    let total_b_i = total_b as i32;
+    let x_ptr: u64 = x_f16.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&x_ptr);
+    args.push_arg(&y_ptr);
+    args.push_arg(&ncols_i);
+    args.push_arg(&total_b_i);
+    let cfg = LaunchCfg {
+        grid: (
+            total_b.next_multiple_of(FEW_NCOLS) as u32,
+            (ncols / flambeau_quant::QK_K) as u32,
+            1,
+        ),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    B::launch(&kernel, stream, cfg, args)?;
+    Ok(())
+}
+
 /// F16 sibling of [`quantize_q8_1`]. Used by the full-attention forward to
 /// skip the host-roundtrip F16→F32 placeholder between swiglu and the
 /// output-projection MMVQ.

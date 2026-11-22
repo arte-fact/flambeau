@@ -135,6 +135,7 @@ pub fn run<K: KernelBackend>(
                     match layout {
                         ActLayout::Mmq => "ds4",
                         ActLayout::Q8_1 => "q8_1",
+                        ActLayout::Few(_) => "few",
                     }
                 );
             }

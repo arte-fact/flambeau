@@ -118,6 +118,7 @@ pub mod sweep_attention_q8_kv_vec_dpos;
 
 #[cfg(any(feature = "hip", feature = "cuda"))]
 pub mod sweep_quantize_f16_q8_0_dpos;
+pub mod sweep_quantize_f16_q8_1_few;
 pub mod sweep_kv_append_f16_dpos;
 
 #[cfg(feature = "hip")]

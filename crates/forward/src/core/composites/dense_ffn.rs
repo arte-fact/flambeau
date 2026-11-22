@@ -199,12 +199,11 @@ pub fn dense_ffn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
             n,
             &ops,
         )?;
-        match down_layout {
-            ActLayout::Q8_1 => act_gated_mmq = &act_mmq_null,
-            ActLayout::Mmq => {
-                gated_mmq_t = gated_mmq;
-                act_gated_mmq = &gated_mmq_t;
-            }
+        if down_layout == ActLayout::Mmq {
+            gated_mmq_t = gated_mmq;
+            act_gated_mmq = &gated_mmq_t;
+        } else {
+            act_gated_mmq = &act_mmq_null;
         }
     }
     // Decode F16-direct fast path: at n=1 under AR-fold the down

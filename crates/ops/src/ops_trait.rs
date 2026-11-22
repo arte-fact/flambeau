@@ -530,6 +530,17 @@ pub trait Ops {
         total_b: usize,
     ) -> Result<()>;
 
+    /// F16 → Q8_1 in the few-column MMQ B-fragment layout
+    /// ([`flambeau_quant::q8_1_few`]). CUDA only.
+    fn quantize_f16_q8_1_few(
+        &self,
+        x_f16: DevicePtr,
+        y: DevicePtr,
+        ncols: usize,
+        total_b: usize,
+        scale: flambeau_quant::q8_1_few::FewScale,
+    ) -> Result<()>;
+
     fn quantize_f16_q8_1(&self, x_f16: DevicePtr, y_q8_1: DevicePtr, n_elems: usize) -> Result<()>;
 
     fn quantize_f16_q8_0(&self, x_f16: DevicePtr, y_q8_0: DevicePtr, n_elems: usize) -> Result<()>;
