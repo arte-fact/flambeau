@@ -218,6 +218,7 @@ pub const KERNEL_STEMS: &[&str] = &[
     // Device-position decode-graph kernel (CUDA-only).
     "quantize_f16_q8_0_dpos",
     "quantize_f16_q8_1_few",
+    "quantize_f32_q8_1_few",
     #[cfg(feature = "bench")]
     "mmq_few_q4_k_mma",
     "cast_f32_f16",

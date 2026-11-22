@@ -95,10 +95,12 @@ pub fn run<K: KernelBackend>(
         let w_bytes = rows * (k / 256) * block_bytes;
         let act_bytes = m_max * (k / 32) * 36;
         let mmq_bytes = k.div_ceil(128) * m_max.next_multiple_of(MMQ_COL_PAD) * 144;
+        let few_bytes = flambeau_quant::q8_1_few::few_bytes(k, m_max);
         let dst_bytes = m_max.next_multiple_of(MMQ_COL_PAD) * rows * 4;
         let weights = upload_zeros(dev, w_bytes)?;
         let act = upload_zeros(dev, act_bytes)?;
         let act_mmq = upload_zeros(dev, mmq_bytes)?;
+        let act_few = upload_zeros(dev, few_bytes)?;
         let dst = upload_zeros(dev, dst_bytes)?;
         for &m in spec.ms {
             let shape = MatmulShape { m, k, n: rows };
@@ -115,6 +117,7 @@ pub fn run<K: KernelBackend>(
                     weights,
                     act_q8_1: act,
                     act_q8_1_mmq: act_mmq,
+                    act_q8_1_few: act_few,
                     dst,
                 };
                 let launch = || qmatmul_bench::<K>(reg, stream, &id, buf, shape, qdtype);
@@ -147,6 +150,7 @@ pub fn run<K: KernelBackend>(
         unsafe {
             dev.dealloc(weights, w_bytes)?;
             dev.dealloc(act, act_bytes)?;
+            dev.dealloc(act_few, few_bytes)?;
             dev.dealloc(act_mmq, mmq_bytes)?;
             dev.dealloc(dst, dst_bytes)?;
         }

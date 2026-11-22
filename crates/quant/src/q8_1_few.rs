@@ -58,6 +58,12 @@ pub fn few_ds_offset(s: usize, g: usize) -> usize {
 /// `d_inv = 127 / amax`, `q = round(x · d_inv)` (half away from zero),
 /// `d = 1 / d_inv`, both 0 when `amax == 0`.
 pub fn quantize_f16_q8_1_few(x: &[f16], ncols: usize, total_b: usize, scale: FewScale) -> Vec<u8> {
+    let xf: Vec<f32> = x.iter().map(|v| v.to_f32()).collect();
+    quantize_f32_q8_1_few(&xf, ncols, total_b, scale)
+}
+
+/// [`quantize_f16_q8_1_few`] for an F32 source.
+pub fn quantize_f32_q8_1_few(x: &[f32], ncols: usize, total_b: usize, scale: FewScale) -> Vec<u8> {
     assert_eq!(ncols % QK_K, 0, "few layout needs ncols % 256 == 0");
     assert!(x.len() >= ncols * total_b);
     let n_groups = total_b.div_ceil(FEW_NCOLS);
@@ -68,7 +74,7 @@ pub fn quantize_f16_q8_1_few(x: &[f16], ncols: usize, total_b: usize, scale: Few
             let rec = (unit * n_groups + gi) * FEW_UNIT_GROUP_BYTES;
             for s in 0..QK_K / QK8_1 {
                 let base = col * ncols + unit * QK_K + s * QK8_1;
-                let xs: Vec<f32> = x[base..base + QK8_1].iter().map(|v| v.to_f32()).collect();
+                let xs = &x[base..base + QK8_1];
                 let amax = xs.iter().fold(0.0f32, |a, v| a.max(v.abs()));
                 let d_inv = if amax == 0.0 { 0.0 } else { 127.0f32 / amax };
                 let d = if amax == 0.0 { 0.0 } else { 1.0f32 / d_inv };

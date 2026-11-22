@@ -379,6 +379,7 @@ impl QuantWeight {
                 weights: self.ptr,
                 act_q8_1: act_q8_1.ptr,
                 act_q8_1_mmq: act_q8_1_mmq.ptr,
+                act_q8_1_few: flambeau_core::DevicePtr::NULL,
                 dst: output.ptr,
             },
             shape,

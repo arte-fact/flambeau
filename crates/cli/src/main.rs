@@ -1719,6 +1719,7 @@ fn sweep_cuda(root: &std::path::Path, op: &str, dtype: &str) -> Result<()> {
         ("attention_decode_q8_kv_vec_dpos", flambeau_bench::sweep_attention_q8_kv_vec_dpos::run_sweep::<Cuda>),
         ("quantize_f16_q8_0_dpos", flambeau_bench::sweep_quantize_f16_q8_0_dpos::run_sweep::<Cuda>),
         ("quantize_f16_q8_1_few", flambeau_bench::sweep_quantize_f16_q8_1_few::run_sweep::<Cuda>),
+        ("quantize_f32_q8_1_few", flambeau_bench::sweep_quantize_f16_q8_1_few::run_sweep_f32::<Cuda>),
         ("qmatmul_mmq_few_q4_k", flambeau_bench::sweep_mmq_few::run_sweep::<Cuda>),
     ];
     if let Some((_, run)) = CUDA_ONLY_SWEEPS.iter().find(|(name, _)| *name == op) {

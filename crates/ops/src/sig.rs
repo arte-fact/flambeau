@@ -58,15 +58,18 @@ pub struct MmvqBuffers {
     pub dst: DevicePtr,
 }
 
-/// Umbrella `qmatmul` dispatcher buffers. Adds `act_q8_1_mmq` (DS4
-/// 144 B layout) for the MmqLdsX64 prefill recipe; decode-path callers
-/// can pass `DevicePtr(0)` for it (the dispatcher's F16 / MMVQ short-
-/// circuits never read it).
+/// Umbrella `qmatmul` dispatcher buffers: the activation in each layout a
+/// caller produced ([`crate::ActLayout`]). `act_q8_1` (standard) is always
+/// read by the MMVQ paths; `act_q8_1_mmq` (DS4 144 B) by the MMQ recipes;
+/// `act_q8_1_few` (few-column B fragments) by the few-column MMQ. A layout
+/// the caller did not produce is `DevicePtr::NULL`: the MMQ recipes refuse
+/// it, the few-column MMQ falls back to the batched MMVQ.
 #[derive(Copy, Clone, Debug)]
 pub struct QmatmulBuffers {
     pub weights: DevicePtr,
     pub act_q8_1: DevicePtr,
     pub act_q8_1_mmq: DevicePtr,
+    pub act_q8_1_few: DevicePtr,
     pub dst: DevicePtr,
 }
 

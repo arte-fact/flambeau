@@ -678,6 +678,10 @@ pub const BENCH_REFERENCE_KERNELS_SM86: &[DirectCallKernel] = &[
         cert_rel_path: "certs/cuda/sm_86/quantize_f16_q8_1_few_sm_86.json",
     },
     DirectCallKernel {
+        impl_id: "quantize_f32_q8_1_few_sm_86",
+        cert_rel_path: "certs/cuda/sm_86/quantize_f32_q8_1_few_sm_86.json",
+    },
+    DirectCallKernel {
         impl_id: "rmsnorm_f16",
         cert_rel_path: "certs/cuda/sm_86/rmsnorm_f16.json",
     },

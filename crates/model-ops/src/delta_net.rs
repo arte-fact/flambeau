@@ -1107,6 +1107,7 @@ impl DeltaNetLayer {
                     weights: self.ssm_alpha.ptr,
                     act_q8_1: scratch.x_q8_1,
                     act_q8_1_mmq: scratch.x_q8_1,
+                    act_q8_1_few: flambeau_core::DevicePtr::NULL,
                     dst: scratch.alpha_f32,
                 },
                 flambeau_ops::MatmulShape {
@@ -1122,6 +1123,7 @@ impl DeltaNetLayer {
                     weights: self.ssm_beta.ptr,
                     act_q8_1: scratch.x_q8_1,
                     act_q8_1_mmq: scratch.x_q8_1,
+                    act_q8_1_few: flambeau_core::DevicePtr::NULL,
                     dst: scratch.beta_f32,
                 },
                 flambeau_ops::MatmulShape {
@@ -1315,6 +1317,7 @@ impl DeltaNetLayer {
                     weights: self.ssm_out.ptr,
                     act_q8_1: scratch.gated_q8_1,
                     act_q8_1_mmq: scratch.gated_q8_1,
+                    act_q8_1_few: flambeau_core::DevicePtr::NULL,
                     dst: scratch.ssm_out_f32,
                 },
                 flambeau_ops::MatmulShape {
@@ -1473,6 +1476,7 @@ impl DeltaNetLayer {
                 weights: self.attn_qkv.ptr,
                 act_q8_1: scratch.x_q8_1,
                 act_q8_1_mmq: scratch.x_q8_1_mmq,
+                act_q8_1_few: flambeau_core::DevicePtr::NULL,
                 dst: scratch.qkv_mixed_f32,
             },
             flambeau_ops::MatmulShape {
@@ -1488,6 +1492,7 @@ impl DeltaNetLayer {
                 weights: self.attn_gate.ptr,
                 act_q8_1: scratch.x_q8_1,
                 act_q8_1_mmq: scratch.x_q8_1_mmq,
+                act_q8_1_few: flambeau_core::DevicePtr::NULL,
                 dst: scratch.z_f32,
             },
             flambeau_ops::MatmulShape {
@@ -1503,6 +1508,7 @@ impl DeltaNetLayer {
                 weights: self.ssm_alpha.ptr,
                 act_q8_1: scratch.x_q8_1,
                 act_q8_1_mmq: scratch.x_q8_1_mmq,
+                act_q8_1_few: flambeau_core::DevicePtr::NULL,
                 dst: scratch.alpha_f32,
             },
             flambeau_ops::MatmulShape {
@@ -1518,6 +1524,7 @@ impl DeltaNetLayer {
                 weights: self.ssm_beta.ptr,
                 act_q8_1: scratch.x_q8_1,
                 act_q8_1_mmq: scratch.x_q8_1_mmq,
+                act_q8_1_few: flambeau_core::DevicePtr::NULL,
                 dst: scratch.beta_f32,
             },
             flambeau_ops::MatmulShape {
@@ -1725,6 +1732,7 @@ impl DeltaNetLayer {
                 weights: self.ssm_out.ptr,
                 act_q8_1: scratch.gated_q8_1,
                 act_q8_1_mmq: scratch.gated_q8_1_mmq,
+                act_q8_1_few: flambeau_core::DevicePtr::NULL,
                 dst: scratch.ssm_out_f32,
             },
             flambeau_ops::MatmulShape {

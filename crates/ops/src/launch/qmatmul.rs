@@ -34,6 +34,7 @@ pub fn qmatmul<B: flambeau_core::KernelBackend>(
         weights,
         act_q8_1,
         act_q8_1_mmq,
+        act_q8_1_few,
         dst,
     } = buf;
     let crate::MatmulShape { m, k, n } = shape;
@@ -176,7 +177,10 @@ pub fn qmatmul<B: flambeau_core::KernelBackend>(
         return Ok(());
     }
 
-    let recipe = resolve_dispatch_recipe::<B>(dtype_weight, m, k, n)?;
+    let mut recipe = resolve_dispatch_recipe::<B>(dtype_weight, m, k, n)?;
+    if recipe.kind == RecipeKind::MmqFew && act_q8_1_few.as_usize() == 0 {
+        recipe = few_fallback(recipe)?;
+    }
     launch_recipe(
         reg,
         stream,
@@ -185,6 +189,7 @@ pub fn qmatmul<B: flambeau_core::KernelBackend>(
             weights,
             act_q8_1,
             act_q8_1_mmq,
+            act_q8_1_few,
             dst,
         },
         shape,
@@ -205,6 +210,7 @@ fn launch_recipe<B: flambeau_core::KernelBackend>(
         weights,
         act_q8_1,
         act_q8_1_mmq,
+        act_q8_1_few,
         dst,
     } = buf;
     let crate::MatmulShape { m, k, n } = shape;
@@ -287,15 +293,19 @@ fn launch_recipe<B: flambeau_core::KernelBackend>(
                 nb_per_row,
             )
         }
-        RecipeKind::MmvqBatched => {
-            bail!("qmatmul: batched MMVQ recipe {} resolved past the batched path", recipe.stem)
-        }
-        #[cfg(feature = "bench")]
+        RecipeKind::MmvqBatched => mmvq_batched_launch(
+            reg,
+            stream,
+            recipe,
+            crate::MmvqBuffers { weights, act_q8_1, dst },
+            crate::MmvqBatchShape { n_rows: n, k, n_slots: m },
+            block_elems(dtype_weight),
+        ),
         RecipeKind::MmqFew => mmq_few_launch(
             reg,
             stream,
             recipe,
-            crate::MmvqBuffers { weights, act_q8_1: act_q8_1_mmq, dst },
+            crate::MmvqBuffers { weights, act_q8_1: act_q8_1_few, dst },
             shape,
             dtype_weight,
         ),
@@ -359,6 +369,9 @@ fn resolve_dispatch_recipe<B: flambeau_core::KernelBackend>(
             )
         })?;
         recipe = Recipe::from_impl_id(mmvq_desc.impl_id)?;
+    }
+    if recipe.kind == RecipeKind::MmqFew && !mmq_few_serves(m, k) {
+        recipe = few_fallback(recipe)?;
     }
     Ok(recipe)
 }
@@ -1691,9 +1704,8 @@ enum RecipeKind {
     /// Few-column int8 MMA (mma.sync m16n8k32, cp.async ring) for 1..24
     /// activation columns on sm_80+. Reads the B-fragment activation layout
     /// ([`ActLayout::Few`]) through `act_q8_1_mmq`; one entry per column-group
-    /// count (`<entry>_c<ncg>_t1`), dynamic shared memory. CUDA-only; bench
-    /// only until a measured dispatch row names it.
-    #[cfg(feature = "bench")]
+    /// count (`<entry>_c<ncg>_t1`), dynamic shared memory. CUDA-only.
+    #[cfg_attr(not(feature = "bench"), allow(dead_code))]
     MmqFew,
 }
 
@@ -1701,11 +1713,8 @@ impl RecipeKind {
     /// The activation layout a recipe of this kind reads for weights of
     /// `dtype_weight`.
     fn act_layout(self, dtype_weight: QDtype) -> ActLayout {
-        #[cfg(not(feature = "bench"))]
-        let _ = dtype_weight;
         match self {
             RecipeKind::MmqLdsX64 | RecipeKind::MmqMma => ActLayout::Mmq,
-            #[cfg(feature = "bench")]
             RecipeKind::MmqFew => ActLayout::Few(few_scale(dtype_weight)),
             RecipeKind::Mmvq
             | RecipeKind::MmvqBatched
@@ -1717,7 +1726,6 @@ impl RecipeKind {
 
 /// Scale record of the few-column activation the few-column MMQ of
 /// `dtype_weight` reads: Q4_K / Q5_K need `d · Σq` for their mins.
-#[cfg(feature = "bench")]
 fn few_scale(dtype_weight: QDtype) -> FewScale {
     match dtype_weight {
         QDtype::Q4_K | QDtype::Q5_K => FewScale::Ds4,
@@ -2954,8 +2962,40 @@ fn mmq_lds_x64_launch<B: flambeau_core::KernelBackend>(
 /// Launch the int8 tensor-core Q4_0 MMQ (mma.sync). Same 9 args, activation,
 /// and (128, 64) tile as `mmq_lds_x64_launch`; block is (32, NWARPS)=(32, 8)
 /// and shared memory is static (dynamic bytes = 0).
+/// Per few-column MMQ stem, the batched MMVQ impl that serves its shapes
+/// when the few-column kernel cannot: a k it does not tile, more than 24
+/// columns, or a caller that did not produce the few-column activation.
+const MMQ_FEW_FALLBACK: &[(&str, &str)] =
+    &[("mmq_few_q4_k_mma", "qmatmul_q4_k_mmvq_dp4a_t128_vdr2_batched")];
+
+fn few_fallback(recipe: Recipe) -> Result<Recipe> {
+    let id = MMQ_FEW_FALLBACK
+        .iter()
+        .find(|(stem, _)| *stem == recipe.stem)
+        .map(|(_, id)| *id)
+        .ok_or_else(|| anyhow!("few-column MMQ stem {} has no fallback", recipe.stem))?;
+    Recipe::from_impl_id(id)
+}
+
+/// Super-block units per cp.async ring stage of the few-column MMQ at
+/// `ncg` column groups.
+fn mmq_few_units_per_stage(ncg: usize) -> usize {
+    if ncg > 2 { 1 } else { 2 }
+}
+
+/// Whether the few-column MMQ serves `m` columns at contraction `k`: 1..3
+/// groups of 8 columns, whole ring stages of super-blocks, and at least 8
+/// super-blocks so the 4 warps splitting K all work (llama.cpp's gate).
+fn mmq_few_serves(m: usize, k: usize) -> bool {
+    let ncg = m.div_ceil(MMQ_FEW_NCOLS);
+    let nunits = k / flambeau_quant::QK_K;
+    (1..=3).contains(&ncg)
+        && k % flambeau_quant::QK_K == 0
+        && nunits >= 8
+        && nunits % mmq_few_units_per_stage(ncg) == 0
+}
+
 /// Per few-column MMQ stem, its entries for 1, 2 and 3 column groups.
-#[cfg(feature = "bench")]
 const MMQ_FEW_ENTRIES: &[(&str, [&str; 3])] = &[(
     "mmq_few_q4_k_mma",
     [
@@ -2966,13 +3006,11 @@ const MMQ_FEW_ENTRIES: &[(&str, [&str; 3])] = &[(
 )];
 
 /// Activation columns per group of the few-column MMQ.
-#[cfg(feature = "bench")]
 const MMQ_FEW_NCOLS: usize = flambeau_quant::q8_1_few::FEW_NCOLS;
 
 /// Launch a few-column MMQ: `ceil(m / 8)` column groups (at most 3), blocks of
 /// 4 warps over 16 weight rows splitting K by super-blocks. `act` holds the
 /// few-column activation of [`few_scale`]`(dtype_weight)`.
-#[cfg(feature = "bench")]
 fn mmq_few_launch<B: flambeau_core::KernelBackend>(
     reg: &crate::Registry<B>,
     stream: &<B::Device as flambeau_core::Device>::Stream,
@@ -2987,17 +3025,17 @@ fn mmq_few_launch<B: flambeau_core::KernelBackend>(
     let crate::MmvqBuffers { weights, act_q8_1: act, dst } = bufs;
     let crate::MatmulShape { m, k, n } = shape;
     let ncg = m.div_ceil(MMQ_FEW_NCOLS);
-    if !(1..=3).contains(&ncg) {
-        bail!("mmq_few: m = {m} outside 1..=24 columns");
-    }
     let unit_bytes = match dtype_weight {
         QDtype::Q4_K => std::mem::size_of::<flambeau_quant::BlockQ4K>(),
         other => bail!("mmq_few: no few-column decoder for {other:?}"),
     };
     let nunits = k / flambeau_quant::QK_K;
-    let units_per_stage = if ncg > 2 { 1 } else { 2 };
-    if k % flambeau_quant::QK_K != 0 || nunits % units_per_stage != 0 {
-        bail!("mmq_few: k = {k} is not a multiple of {units_per_stage} super-blocks");
+    let units_per_stage = mmq_few_units_per_stage(ncg);
+    if !mmq_few_serves(m, k) {
+        bail!("mmq_few: m = {m}, k = {k} outside the few-column tiling");
+    }
+    if act.as_usize() == 0 {
+        bail!("mmq_few: no few-column activation");
     }
     if weights.as_usize() % 16 != 0 {
         bail!("mmq_few: weight rows must be 16-byte aligned for cp.async");
