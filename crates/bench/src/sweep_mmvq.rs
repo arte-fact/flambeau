@@ -1164,6 +1164,18 @@ pub enum BatchedDtype {
 }
 
 impl BatchedDtype {
+    /// Weight dtype of the batched rows a few-column MMQ falls back to inside
+    /// its band (m up to 24 columns, several launches of <= 8): their cert
+    /// also runs whole `qmatmul` calls at 9, 17 and 24 columns.
+    fn few_fallback_qdtype(self) -> Option<flambeau_core::QDtype> {
+        match self {
+            BatchedDtype::Q4KT128Vdr2Batched => Some(flambeau_core::QDtype::Q4_K),
+            BatchedDtype::Q5KT128Vdr2Batched => Some(flambeau_core::QDtype::Q5_K),
+            BatchedDtype::Q3KT128Vdr2Batched => Some(flambeau_core::QDtype::Q3_K),
+            _ => None,
+        }
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             BatchedDtype::Q8_0 | BatchedDtype::Q8_0RowTile => "Q8_0",
@@ -1461,6 +1473,30 @@ pub fn run_batched_sweep<B: BenchBackend>(
             }
         }
     }
+    // Whole qmatmul calls past 8 columns: the production column chunking
+    // (8 + 1, 8 + 8 + 1, 8 + 8 + 8) of mmvq_batched_launch.
+    if let Some(qdtype) = dtype.few_fallback_qdtype() {
+        let reg = flambeau_ops::Registry::<B>::new(&dev).map_err(|e| anyhow!("{e:?}"))?;
+        let m = 1000;
+        for &k in &[5120usize, 15360] {
+            for &n in &[9usize, 17, 24] {
+                let s = seed ^ 0xC4A1_u64 ^ ((k * 31 + n) as u64);
+                let (got, reference) =
+                    run_shape_batched_via::<B>(&dev, dtype, m, k, n, s, Some((&reg, qdtype)))?;
+                let max_rel_err = max_rel_err_with_floor(&got, &reference, (k as f32).sqrt());
+                let tolerance = cert_tol(k);
+                results.push(ShapeResult {
+                    m,
+                    k,
+                    n,
+                    seed: s,
+                    max_rel_err,
+                    tolerance,
+                    pass: max_rel_err <= tolerance,
+                });
+            }
+        }
+    }
 
     let pass = results.iter().all(|r| r.pass);
     let cert = Cert {
@@ -1497,6 +1533,22 @@ fn run_shape_batched<B: BenchBackend>(
     n_slots: usize,
     seed: u64,
 ) -> Result<(Vec<f32>, Vec<f32>)> {
+    run_shape_batched_via::<B>(dev, dtype, m, k, n_slots, seed, None)
+}
+
+/// [`run_shape_batched`], launched either as the `n_slots`-column entry
+/// (`via` = `None`) or as one `qmatmul` call through the dtype's recipe
+/// (`via` = the registry and weight dtype), which chunks the columns.
+#[allow(clippy::undocumented_unsafe_blocks)]
+fn run_shape_batched_via<B: BenchBackend>(
+    dev: &B::Device,
+    dtype: BatchedDtype,
+    m: usize,
+    k: usize,
+    n_slots: usize,
+    seed: u64,
+    via: Option<(&flambeau_ops::Registry<B>, flambeau_core::QDtype)>,
+) -> Result<(Vec<f32>, Vec<f32>)> {
     let q_bytes =
         B::image("quantize_q8_1").ok_or_else(|| anyhow!("quantize_q8_1 not compiled"))?;
     let m_bytes = B::image(dtype.kernel_stem())
@@ -1504,7 +1556,6 @@ fn run_shape_batched<B: BenchBackend>(
     let q_module = B::load(dev, q_bytes)?;
     let m_module = B::load(dev, m_bytes)?;
     let k_quantize = B::kernel(&q_module, "flambeau_quantize_row_q8_1")?;
-    let k_mmvq = B::kernel(&m_module, dtype.kernel_entry(n_slots))?;
 
     let wd = dtype.weight_dtype();
     let block_elems = wd.block_elem_count();
@@ -1542,7 +1593,25 @@ fn run_shape_batched<B: BenchBackend>(
     }
 
     let d_dst = dev.alloc(n_slots * m * 4)?;
-    {
+    if let Some((reg, qdtype)) = via {
+        let stream = dev.default_stream();
+        flambeau_ops::qmatmul::qmatmul_bench::<B>(
+            reg,
+            stream,
+            dtype.impl_id(),
+            flambeau_ops::QmatmulBuffers {
+                weights: d_x,
+                act_q8_1: d_y_q8_1,
+                act_q8_1_mmq: DevicePtr::NULL,
+                act_q8_1_few: DevicePtr::NULL,
+                dst: d_dst,
+            },
+            flambeau_ops::MatmulShape { m: n_slots, k, n: m },
+            qdtype,
+        )?;
+        stream.synchronize()?;
+    } else {
+        let k_mmvq = B::kernel(&m_module, dtype.kernel_entry(n_slots))?;
         let stream = dev.default_stream();
         let n_rows = m as i32;
         let n_units = n_blocks as i32;
