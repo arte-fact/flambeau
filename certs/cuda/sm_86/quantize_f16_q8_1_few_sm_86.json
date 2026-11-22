@@ -1,0 +1,598 @@
+{
+  "schema_version": 1,
+  "impl_id": "quantize_f16_q8_1_few_sm_86",
+  "backend": "cuda",
+  "arch": "sm_86",
+  "op": "quantize_f16_q8_1_few",
+  "dtype_weight": "F16",
+  "dtype_activation": "Q8_1",
+  "tolerance_formula": "bytes differing from the host reference (q8_1_few::quantize_f16_q8_1_few) / total bytes == 0",
+  "results": [
+    {
+      "m": 1,
+      "k": 2048,
+      "n": 4,
+      "seed": 16179694,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 2,
+      "k": 2048,
+      "n": 4,
+      "seed": 16009925,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 5,
+      "k": 2048,
+      "n": 4,
+      "seed": 15762826,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 8,
+      "k": 2048,
+      "n": 4,
+      "seed": 16494655,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 9,
+      "k": 2048,
+      "n": 4,
+      "seed": 16324886,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 16,
+      "k": 2048,
+      "n": 4,
+      "seed": 15657319,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 17,
+      "k": 2048,
+      "n": 4,
+      "seed": 15487582,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 24,
+      "k": 2048,
+      "n": 4,
+      "seed": 13705903,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 5120,
+      "n": 4,
+      "seed": 40580590,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 2,
+      "k": 5120,
+      "n": 4,
+      "seed": 40476357,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 5,
+      "k": 5120,
+      "n": 4,
+      "seed": 40718730,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 8,
+      "k": 5120,
+      "n": 4,
+      "seed": 40264767,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 9,
+      "k": 5120,
+      "n": 4,
+      "seed": 40160534,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 16,
+      "k": 5120,
+      "n": 4,
+      "seed": 41106791,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 17,
+      "k": 5120,
+      "n": 4,
+      "seed": 40994398,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 24,
+      "k": 5120,
+      "n": 4,
+      "seed": 38598319,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 6144,
+      "n": 4,
+      "seed": 48755182,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 2,
+      "k": 6144,
+      "n": 4,
+      "seed": 48585413,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 5,
+      "k": 6144,
+      "n": 4,
+      "seed": 48338314,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 8,
+      "k": 6144,
+      "n": 4,
+      "seed": 48930879,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 9,
+      "k": 6144,
+      "n": 4,
+      "seed": 48761110,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 16,
+      "k": 6144,
+      "n": 4,
+      "seed": 50329959,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 17,
+      "k": 6144,
+      "n": 4,
+      "seed": 50152030,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 24,
+      "k": 6144,
+      "n": 4,
+      "seed": 46150319,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 17408,
+      "n": 4,
+      "seed": 137815534,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 2,
+      "k": 17408,
+      "n": 4,
+      "seed": 137645765,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 5,
+      "k": 17408,
+      "n": 4,
+      "seed": 137396618,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 8,
+      "k": 17408,
+      "n": 4,
+      "seed": 138130495,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 9,
+      "k": 17408,
+      "n": 4,
+      "seed": 137960726,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 16,
+      "k": 17408,
+      "n": 4,
+      "seed": 137293159,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 17,
+      "k": 17408,
+      "n": 4,
+      "seed": 137123422,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 24,
+      "k": 17408,
+      "n": 4,
+      "seed": 135341743,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 2048,
+      "n": 2,
+      "seed": 16179688,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 2,
+      "k": 2048,
+      "n": 2,
+      "seed": 16009923,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 5,
+      "k": 2048,
+      "n": 2,
+      "seed": 15762828,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 8,
+      "k": 2048,
+      "n": 2,
+      "seed": 16494649,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 9,
+      "k": 2048,
+      "n": 2,
+      "seed": 16324880,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 16,
+      "k": 2048,
+      "n": 2,
+      "seed": 15657313,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 17,
+      "k": 2048,
+      "n": 2,
+      "seed": 15487576,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 24,
+      "k": 2048,
+      "n": 2,
+      "seed": 13705897,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 5120,
+      "n": 2,
+      "seed": 40580584,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 2,
+      "k": 5120,
+      "n": 2,
+      "seed": 40476355,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 5,
+      "k": 5120,
+      "n": 2,
+      "seed": 40718732,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 8,
+      "k": 5120,
+      "n": 2,
+      "seed": 40264761,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 9,
+      "k": 5120,
+      "n": 2,
+      "seed": 40160528,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 16,
+      "k": 5120,
+      "n": 2,
+      "seed": 41106785,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 17,
+      "k": 5120,
+      "n": 2,
+      "seed": 40994392,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 24,
+      "k": 5120,
+      "n": 2,
+      "seed": 38598313,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 6144,
+      "n": 2,
+      "seed": 48755176,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 2,
+      "k": 6144,
+      "n": 2,
+      "seed": 48585411,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 5,
+      "k": 6144,
+      "n": 2,
+      "seed": 48338316,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 8,
+      "k": 6144,
+      "n": 2,
+      "seed": 48930873,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 9,
+      "k": 6144,
+      "n": 2,
+      "seed": 48761104,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 16,
+      "k": 6144,
+      "n": 2,
+      "seed": 50329953,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 17,
+      "k": 6144,
+      "n": 2,
+      "seed": 50152024,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 24,
+      "k": 6144,
+      "n": 2,
+      "seed": 46150313,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 17408,
+      "n": 2,
+      "seed": 137815528,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 2,
+      "k": 17408,
+      "n": 2,
+      "seed": 137645763,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 5,
+      "k": 17408,
+      "n": 2,
+      "seed": 137396620,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 8,
+      "k": 17408,
+      "n": 2,
+      "seed": 138130489,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 9,
+      "k": 17408,
+      "n": 2,
+      "seed": 137960720,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 16,
+      "k": 17408,
+      "n": 2,
+      "seed": 137293153,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 17,
+      "k": 17408,
+      "n": 2,
+      "seed": 137123416,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 24,
+      "k": 17408,
+      "n": 2,
+      "seed": 135341737,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-11-22T07:26:13Z",
+  "rig": "threadreaper-sm_86",
+  "pmc": {
+    "vgpr_count": 24,
+    "sgpr_count": null,
+    "waves_per_simd": null,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}
