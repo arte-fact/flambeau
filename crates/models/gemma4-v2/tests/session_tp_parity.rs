@@ -14,7 +14,7 @@ use flambeau_forward::{Session, Topology};
 use flambeau_gemma4_v2::Gemma4V2;
 use flambeau_quant::GgufFile;
 
-const MODEL_FILE: &str = "gemma-4-31B-it-Q4_0.gguf";
+const MODEL_FILE: &str = "gemma-4-31B_q4_0-it.gguf";
 
 #[test]
 fn session_gemma4_31b_tp_size_2_runs() {
@@ -29,7 +29,7 @@ fn session_gemma4_31b_tp_size_2_runs() {
             devices: vec![0, 1],
         },
         flambeau_forward::LaunchParams {
-            ctx_cap: None,
+            ctx_cap: Some(4096),
             prefill_ubatch: 1,
             max_slots: 1,
             paged_kv_pages: None,

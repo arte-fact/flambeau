@@ -23,7 +23,7 @@ fn session_qwen35_27b_q4_0_tp_size_2_runs() {
             devices: vec![0, 1],
         },
         flambeau_forward::LaunchParams {
-            ctx_cap: None,
+            ctx_cap: Some(4096),
             prefill_ubatch: 1,
             max_slots: 1,
             paged_kv_pages: None,
