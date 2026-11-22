@@ -307,7 +307,8 @@ enum Cmd {
         /// Activation counts (the matmul's m).
         #[arg(long, value_delimiter = ',')]
         m: Vec<usize>,
-        /// `C0` (production path) .. `C4`, or impl ids.
+        /// `C0` (production path) .. `C5`, or impl ids. A candidate the
+        /// backend did not compile is reported as skipped.
         #[arg(long, value_delimiter = ',', default_value = "C0,C1,C2,C3,C4")]
         r#impl: Vec<String>,
         #[arg(long, default_value_t = 200)]

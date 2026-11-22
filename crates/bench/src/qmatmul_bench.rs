@@ -40,7 +40,8 @@ fn weight_dtype(dtype: &str) -> Result<(QDtype, usize)> {
 }
 
 /// Candidate names of coord/mmq-few-plan.md: C0 the production path, C1..C4
-/// the LDS-tiled MMQ at 8 / 16 / 64 columns and the wave64 MMQ.
+/// the LDS-tiled MMQ at 8 / 16 / 64 columns and the wave64 MMQ, C5 the Q4_K
+/// r4 MMVQ of the output head (HIP only).
 pub fn impl_id_for(name: &str, dtype: &str) -> String {
     let d = dtype.to_ascii_lowercase();
     match name {
@@ -49,6 +50,7 @@ pub fn impl_id_for(name: &str, dtype: &str) -> String {
         "C2" => format!("bench:{d}_lds_x16"),
         "C3" => format!("bench:{d}_lds_x64"),
         "C4" => format!("bench:{d}_wave64"),
+        "C5" => format!("bench:{d}_mmvq_r4"),
         other => other.to_string(),
     }
 }
@@ -99,7 +101,13 @@ pub fn run<K: KernelBackend>(
             let shape = MatmulShape { m, k, n: rows };
             for name in spec.impls {
                 let id = impl_id_for(name, spec.dtype);
-                let mmq = qmatmul_bench_reads_mmq::<K>(&id, shape, qdtype)?;
+                let mmq = match qmatmul_bench_reads_mmq::<K>(&id, shape, qdtype) {
+                    Ok(mmq) => mmq,
+                    Err(e) => {
+                        println!("  {name:<3} {id:<26} skipped: {e:#}");
+                        continue;
+                    }
+                };
                 let buf = QmatmulBuffers {
                     weights,
                     act_q8_1: act,
@@ -107,7 +115,11 @@ pub fn run<K: KernelBackend>(
                     dst,
                 };
                 let launch = || qmatmul_bench::<K>(reg, stream, &id, buf, shape, qdtype);
-                for _ in 0..3 {
+                if let Err(e) = launch() {
+                    println!("  {name:<3} {id:<26} rows={rows:<6} k={k:<6} m={m:<3} skipped: {e:#}");
+                    continue;
+                }
+                for _ in 0..2 {
                     launch().with_context(|| format!("{id} rows={rows} k={k} m={m}"))?;
                 }
                 stream.synchronize()?;
@@ -162,6 +174,7 @@ mod tests {
         assert_eq!(impl_id_for("C0", "Q5_K"), QMATMUL_BENCH_PRODUCTION);
         assert_eq!(impl_id_for("C1", "Q5_K"), "bench:q5_k_lds_x8");
         assert_eq!(impl_id_for("C4", "Q3_K"), "bench:q3_k_wave64");
+        assert_eq!(impl_id_for("C5", "Q4_K"), "bench:q4_k_mmvq_r4");
         assert_eq!(impl_id_for("qmatmul_x", "Q4_K"), "qmatmul_x");
     }
 }

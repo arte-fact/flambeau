@@ -1709,9 +1709,23 @@ const BENCH_QMATMUL_ALIASES: &[(&str, &str)] = &[
 ];
 
 /// Bench-only candidates without a registered recipe (uncertified: the
-/// 16-column LDS-tiled cells and the wave64 K-quant MMQ, never dispatched).
+/// 16-column LDS-tiled cells and the wave64 K-quant MMQ, never dispatched;
+/// and the HIP-only Q4_K r4 MMVQ that `output_head` launches outside the
+/// dispatch table).
 #[cfg(feature = "bench")]
 const BENCH_QMATMUL_RECIPES: &[RecipeRow] = &[
+    RecipeRow {
+        ids: &["bench:q4_k_mmvq_r4"],
+        recipe: Recipe {
+            kind: RecipeKind::Mmvq,
+            stem: "mmvq_q4_k_r4",
+            entry: "flambeau_mmvq_q4_k_r4_q8_1",
+            entry_f16: None,
+            threads: 64,
+            rows_per_block: 4,
+            mmq_tile: (0, 0),
+        },
+    },
     RecipeRow {
         ids: &["bench:q3_k_lds_x16"],
         recipe: Recipe {
