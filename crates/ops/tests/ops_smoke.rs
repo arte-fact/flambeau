@@ -67,6 +67,7 @@ const CUDA_ONLY_STEMS: &[&str] = &[
     "kv_append_f16_dpos",
     "quantize_f16_q8_0_dpos",
     "quantize_f16_q8_1_few",
+    "mmq_few_q4_k_mma",
 ];
 
 #[test]

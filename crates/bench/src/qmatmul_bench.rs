@@ -42,7 +42,8 @@ fn weight_dtype(dtype: &str) -> Result<(QDtype, usize)> {
 
 /// Candidate names of coord/mmq-few-plan.md: C0 the production path, C1..C4
 /// the LDS-tiled MMQ at 8 / 16 / 64 columns and the wave64 MMQ, C5 the Q4_K
-/// r4 MMVQ of the output head (HIP only).
+/// r4 MMVQ of the output head (HIP only, `cfg(unverified)`), C6 the
+/// few-column int8 MMA (sm_80+, coord/mmq-few-port-plan.md F2).
 pub fn impl_id_for(name: &str, dtype: &str) -> String {
     let d = dtype.to_ascii_lowercase();
     match name {
@@ -52,6 +53,7 @@ pub fn impl_id_for(name: &str, dtype: &str) -> String {
         "C3" => format!("bench:{d}_lds_x64"),
         "C4" => format!("bench:{d}_wave64"),
         "C5" => format!("bench:{d}_mmvq_r4"),
+        "C6" => format!("bench:{d}_few_mma"),
         other => other.to_string(),
     }
 }
@@ -180,6 +182,7 @@ mod tests {
         assert_eq!(impl_id_for("C1", "Q5_K"), "bench:q5_k_lds_x8");
         assert_eq!(impl_id_for("C4", "Q3_K"), "bench:q3_k_wave64");
         assert_eq!(impl_id_for("C5", "Q4_K"), "bench:q4_k_mmvq_r4");
+        assert_eq!(impl_id_for("C6", "Q4_K"), "bench:q4_k_few_mma");
         assert_eq!(impl_id_for("qmatmul_x", "Q4_K"), "qmatmul_x");
     }
 }
