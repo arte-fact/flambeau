@@ -18,6 +18,16 @@ static __device__ __forceinline__ void cg_16(unsigned int dst_shared, const void
 #endif
 }
 
+// 16-byte copy reading only the first `src_bytes` (0..16) of `src`, the rest
+// of the destination zero-filled; both addresses 16-byte aligned.
+static __device__ __forceinline__ void cg_16_partial(unsigned int dst_shared, const void* src, int src_bytes) {
+#if __CUDA_ARCH__ >= 800
+    asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;" : : "r"(dst_shared), "l"(src), "r"(src_bytes));
+#else
+    (void) dst_shared; (void) src; (void) src_bytes;
+#endif
+}
+
 static __device__ __forceinline__ void commit_group() {
 #if __CUDA_ARCH__ >= 800
     asm volatile("cp.async.commit_group;");

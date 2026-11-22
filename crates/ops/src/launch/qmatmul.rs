@@ -1823,11 +1823,24 @@ const BENCH_QMATMUL_ALIASES: &[(&str, &str)] = &[
     ("bench:q5_k_lds_x64", "qmatmul_q5_K_mmq_lds_tiled_gfx906"),
 ];
 
-/// Bench-only candidates without a dispatch row (uncertified: the Q3_K and
+/// Bench-only candidates without a dispatch row: the Q5_K few-column MMA
+/// (swept, band not yet measured); uncertified, the Q3_K and
 /// Q5_K 16-column LDS-tiled cells and the wave64 K-quant MMQ; and, under
-/// `cfg(unverified)`, the HIP-only Q4_K r4 MMVQ).
+/// `cfg(unverified)`, the HIP-only Q4_K r4 MMVQ.
 #[cfg(feature = "bench")]
 const BENCH_QMATMUL_RECIPES: &[RecipeRow] = &[
+    RecipeRow {
+        ids: &["qmatmul_q5_k_mmq_few_mma", "bench:q5_k_few_mma"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqFew,
+            stem: "mmq_few_q5_k_mma",
+            entry: "flambeau_mmq_few_q5_k_mma",
+            entry_f16: None,
+            threads: 0,
+            rows_per_block: 0,
+            mmq_tile: (0, 0),
+        },
+    },
     #[cfg(unverified)]
     RecipeRow {
         ids: &["bench:q4_k_mmvq_r4"],
@@ -2975,8 +2988,10 @@ fn mmq_lds_x64_launch<B: flambeau_core::KernelBackend>(
 /// Per few-column MMQ stem, the batched MMVQ impl that serves its shapes
 /// when the few-column kernel cannot: a k it does not tile, more than 24
 /// columns, or a caller that did not produce the few-column activation.
-const MMQ_FEW_FALLBACK: &[(&str, &str)] =
-    &[("mmq_few_q4_k_mma", "qmatmul_q4_k_mmvq_dp4a_t128_vdr2_batched")];
+const MMQ_FEW_FALLBACK: &[(&str, &str)] = &[
+    ("mmq_few_q4_k_mma", "qmatmul_q4_k_mmvq_dp4a_t128_vdr2_batched"),
+    ("mmq_few_q5_k_mma", "qmatmul_q5_k_mmvq_dp4a_t128_vdr2_batched"),
+];
 
 fn few_fallback(recipe: Recipe) -> Result<Recipe> {
     let id = MMQ_FEW_FALLBACK
@@ -3006,14 +3021,37 @@ fn mmq_few_serves(m: usize, k: usize) -> bool {
 }
 
 /// Per few-column MMQ stem, its entries for 1, 2 and 3 column groups.
-const MMQ_FEW_ENTRIES: &[(&str, [&str; 3])] = &[(
-    "mmq_few_q4_k_mma",
-    [
-        "flambeau_mmq_few_q4_k_mma_c1_t1",
-        "flambeau_mmq_few_q4_k_mma_c2_t1",
-        "flambeau_mmq_few_q4_k_mma_c3_t1",
-    ],
-)];
+const MMQ_FEW_ENTRIES: &[(&str, [&str; 3])] = &[
+    (
+        "mmq_few_q4_k_mma",
+        [
+            "flambeau_mmq_few_q4_k_mma_c1_t1",
+            "flambeau_mmq_few_q4_k_mma_c2_t1",
+            "flambeau_mmq_few_q4_k_mma_c3_t1",
+        ],
+    ),
+    (
+        "mmq_few_q5_k_mma",
+        [
+            "flambeau_mmq_few_q5_k_mma_c1_t1",
+            "flambeau_mmq_few_q5_k_mma_c2_t1",
+            "flambeau_mmq_few_q5_k_mma_c3_t1",
+        ],
+    ),
+];
+
+/// Ring row stride (bytes) of the few-column MMQ for `units` super-blocks of
+/// `unit_bytes` per stage: whole 16-byte chunks, or for units that do not fill
+/// whole chunks the worst case over the even start offsets, padded to an odd
+/// chunk count (`mmq_few_mma.cuh` `sram_stride`).
+fn mmq_few_sram_stride(unit_bytes: usize, units: usize) -> usize {
+    let bytes = units * unit_bytes;
+    if bytes % 16 == 0 {
+        return bytes;
+    }
+    let chunks = (14 + bytes + 15) / 16;
+    16 * if chunks % 2 == 0 { chunks + 1 } else { chunks }
+}
 
 /// Activation columns per group of the few-column MMQ.
 const MMQ_FEW_NCOLS: usize = flambeau_quant::q8_1_few::FEW_NCOLS;
@@ -3040,6 +3078,7 @@ fn mmq_few_launch<B: flambeau_core::KernelBackend>(
     let ncg = m.div_ceil(MMQ_FEW_NCOLS);
     let unit_bytes = match dtype_weight {
         QDtype::Q4_K => std::mem::size_of::<flambeau_quant::BlockQ4K>(),
+        QDtype::Q5_K => std::mem::size_of::<flambeau_quant::BlockQ5K>(),
         other => bail!("mmq_few: no few-column decoder for {other:?}"),
     };
     let nunits = k / flambeau_quant::QK_K;
@@ -3050,8 +3089,11 @@ fn mmq_few_launch<B: flambeau_core::KernelBackend>(
     if act.as_usize() == 0 {
         bail!("mmq_few: no few-column activation");
     }
-    if weights.as_usize() % 16 != 0 {
-        bail!("mmq_few: weight rows must be 16-byte aligned for cp.async");
+    // Whole-chunk super-blocks are copied as is (16-byte cp.async); the
+    // others from the boundary before them, decoded with 2-byte loads.
+    let align = if unit_bytes % 16 == 0 { 16 } else { 2 };
+    if weights.as_usize() % align != 0 {
+        bail!("mmq_few: weight rows must be {align}-byte aligned");
     }
     let entries = MMQ_FEW_ENTRIES
         .iter()
@@ -3078,7 +3120,8 @@ fn mmq_few_launch<B: flambeau_core::KernelBackend>(
     args.push_arg(&ncols_i);
     args.push_arg(&stride_row_x);
     args.push_arg(&stride_col_dst);
-    let shared_bytes = (NWARPS as usize * NSTAGES * NROWS * units_per_stage * unit_bytes) as u32;
+    let shared_bytes =
+        (NWARPS as usize * NSTAGES * NROWS * mmq_few_sram_stride(unit_bytes, units_per_stage)) as u32;
     let cfg = LaunchCfg {
         grid: (n.div_ceil(NROWS) as u32, 1, 1),
         block: (32, NWARPS, 1),

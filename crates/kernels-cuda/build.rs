@@ -48,9 +48,9 @@ fn main() {
         param_counts = flambeau_kernels_shared::signatures::param_counts(&all_cu);
 
         // Fold included-header contents into the per-kernel cache key so a
-        // change to a shared / arch_primitives header recompiles the kernels
-        // (the .cu source alone is not enough).
-        let headers_hash = hash_headers(&[arch_inc, shared_inc]);
+        // change to a shared / arch_primitives / kernel-directory header
+        // recompiles the kernels (the .cu source alone is not enough).
+        let headers_hash = hash_headers(&[arch_inc, shared_inc, src_dir]);
 
         let cache_dir = out_dir.join("cache");
         let _ = fs::create_dir_all(&cache_dir);
