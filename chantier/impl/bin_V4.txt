@@ -1,0 +1,24 @@
+b0a8d697 — branche v3 (locale, ~/Workspace/flambeau-impl-o, non poussée), 8 commits sur bin_V3 (50864a2f) :
+  41982716 buffer few, repli batched, quantification few F32 (CUDA)
+  791daf50 câblage de l'activation few sur les 7 sites (forward)
+  89237dc6 ligne de dispatch sm_86 Q4_K few MMA, m = 3..24 (seule ligne de table changée depuis V3)
+  8afec00e test des sites few / repli
+  542eb3be F3 few Q5_K MMA (bench seulement)
+  0b54b98e F4 few Q3_K MMA (bench seulement)
+  b4f6a7cf sweep batched : cas qmatmul complets à 9, 17, 24 colonnes
+  b0a8d697 certs sm_86 : few Q5_K/Q3_K, quantize F32 few, batched 126 formes
+bin_V4:      hip_serve,hip_sweep (impl-o/target-o)              sha256 7068b617fb1bcdd8fe831f3f2888699139c462b8ab5c4a650899cbf42f284f21
+bin_V4_CUDA: +cuda_serve,cuda_sweep (impl-o/target-cuda)        sha256 04ac45a7c067d386fdf2a5c88a3622a70b141f98a72200578f19a16b97adb754
+hsaco gfx906 : aucun noyau HIP ni ligne gfx906 modifiés depuis V3 (le binaire HIP diffère par le code Rust partagé).
+cubins CUDA : les 259 de bin_V3_CUDA identiques à l'octet ; + quantize_f32_q8_1_few, mmq_few_q5_k_mma, mmq_few_q3_k_mma.
+mesuré par Opus :
+  cert-check gfx906 90 / 0 ; sm_86 35 / 0 ; all-dispatch sm_86 34 / 34
+  ptxas : 0 spill sur les 9 noyaux few (175 à 252 registres)
+  tests sans GPU : 599 ok, 80 échecs = ceux de V3 (GPU masqués), aucun nouveau
+  tests GPU CUDA : embed_q4k, mtp_draft_chain, mtp_gdn_kstates, parity_snapshot_dense_cuda ok ; cuda_registry_smoke ok (281 stems, mêmes 25 sautés)
+  croisés : parity_moe_q4k_cross_backend cosinus 1.0000000 ; qwen35-v2 real_gguf_cuda_parity cosinus 0,996185 (V3 0,997056),
+    passe ; écart attendu du Q4_K few côté CUDA à m = 3..24
+attendu du Vibe (v4) :
+  RTX : change à m = 3..24 sur Q4_K (prefill court, vérification MTP-4 à m = 5) → sorties RTX MTP-4 pouvant différer de V3 au bit près ;
+    mtp 0 bit-exact attendu (décodage m = 1 inchangé), sauf prefill d'invite ≤ 24 tokens si présent.
+  MI50 : comportement de V3 (même dispatch gfx906).

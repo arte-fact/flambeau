@@ -1,0 +1,22 @@
+50864a2f — branche v3 (locale, ~/Workspace/flambeau-impl-o, non poussée), 6 commits sur cd3ab132 (= origin/feature/cuda-decouple, V2) :
+  6b69f618 raccourcis mesurés -> lignes de table gfx906 (Q4_K row-tile 2..4 / x8 5..8 / x16 9..16 / x8 17..32 ; Q5_K row-tile 2..7 / x8 8..32 ; Q3_K x8 dès m = 2) ; tête Q4_K via qmatmul, mmvq_q4_k_r4 sous cfg(unverified)
+  66c52ff7 F0 : ActLayout (type) à la place du bool reads_mmq (7 sites), refactor pur
+  e2b00e94 F1 : quantize_f16_q8_1_few (CUDA), référence hôte quant::q8_1_few
+  11db931c F2 : mmq_few_q4_k_mma (CUDA, bench seulement, aucune ligne de dispatch)
+  59fb0ba4 tests session : ctx_cap 4096 (27B Q4_0 TP=2, gemma 31B TP=2), nom du GGUF gemma 31B
+  50864a2f certs : gfx906 Q4_K x16 (nouveau), Q3_K x8 et Q4_K x8 re-sweepés ; sm_86 quantize few, Q4_K few MMA
+bin_V3:      hip_serve,hip_sweep (impl-o/target-o)              sha256 5c6bbda212ddad4bb9801d4fc8f1e2ff7f92a48f69c974228e72d28f709c7441
+bin_V3_CUDA: +cuda_serve,cuda_sweep (impl-o/target-cuda)        sha256 eacb135a92c46ece0095cdb9edca1d09a05477228e78c210d8c70960ac22c469
+hsaco gfx906 : 276, identiques à V2 (aucun noyau HIP modifié). cubins CUDA : + quantize_f16_q8_1_few, mmq_few_q4_k_mma
+mesuré par Opus :
+  cert-check gfx906 90 lignes / 0 échec (86 + 4 lignes nouvelles) ; sm_86 33 / 0
+  all-dispatch gfx906 89/89 (90 lignes, le x8 Q4_K y figure deux fois) ; sm_86 33/33
+  tests sans GPU : 595 ok, 80 échecs = les 79 de V2 + session_gemma4_31b_tp_size_2_runs, qui sautait faute de modèle et
+    échoue maintenant comme les autres tests GPU (« no ROCm-capable device », GPU masqués) ; 26 tests dispatch+table ok
+  tests GPU CUDA : embed_q4k, mtp_draft_chain, mtp_gdn_kstates, parity_snapshot_dense_cuda ok ; cuda_registry_smoke ok
+    (279 stems, 25 sautés : sans la feature bench, −3 x16 bench, +1 x16 Q4_K désormais permanent, −1 mmvq_q4_k_r4, +1 quantize few)
+  tests GPU HIP (GPU 1) : 15 fichiers forward (synth_*, parity_snapshot_*, snapshot_restore_parity, gdn_tp_mode, embed_q4k, mtp_*) ok
+  croisés : parity_moe_q4k_cross_backend cosinus 1.0000000 ; qwen35-v2 real_gguf_cuda_parity cosinus 0,997056, préfixe 3 (= V2)
+  session_* (sur v2, puis 27B et gemma 31B sur v3 avec ctx_cap 4096) : 6 ok, 1 échec environnement (pp2tp2 demande 4 GPU), 2 SKIP (Qwen3.6-A3B Q3_K_S absent, forward_mixed sans GGUF)
+attendu du Vibe : textes identiques à V2 (RTX, MI50, ornith). Changent sur MI50 les noyaux à m = 2..32 des Q4_K / Q5_K / Q3_K (prefill court, vérification MTP),
+  donc les sorties MI50 peuvent différer au bit près là où ces bandes sont prises ; la RTX n'a aucune ligne changée (F0 bit-exact attendu).

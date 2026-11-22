@@ -1,0 +1,18 @@
+838f3db3 — branche mtp-gdn-kstates (locale, ~/Workspace/flambeau-impl-o), 8 commits sur f5d29f30 (serie-7) :
+  979ec082 mtp0-noload (blk.64 non chargé si --mtp 0)
+  cbcb01f1 83210609 0353c9fb (a) token_embd Q4_K gardé sur le device + gather embed_gather_q4_k_f16
+  c193cafc D4 brouillon glouton chaîné sur le device (1 readback, 1 synchro)
+  54aeb95d e6d1f1ea GDN : états par token + index rs_idx (plus de snapshot, de synchro ni de rejeu)
+  838f3db3 certs des 2 nouveaux noyaux + entrées direct_call
+bin_V1:      hip_serve,hip_sweep (impl-o/target-o)              sha256 de0b3cfe5fc5b0bbff7ad38650d4bde87862dff28d2113a712aec56b25184218
+bin_V1_CUDA: +cuda_serve,cuda_sweep (impl-o/target-cuda)        sha256 ee137b207e98569fd1f0b76ec26ab53284645a5567cbf85d5f949127b11bb915
+hsaco gfx906 : 0 différent sur les 271 de serie-7, + embed_gather_q4_k_f16, gdn_state_step_alphabeta_f32_kstates
+certs : hip/gfx906 275 fichiers, cuda/sm_86 219 ; cert-check 86 lignes / 0 échec et 33 / 0 ; all-dispatch 86/86 et 33/33 pass
+sweeps nouveaux ops (2 arch) : embed_gather_q4_k_f16 8 formes, gdn kstates 9 formes, 0 élément différent partout
+re-sweep des certs GDN existants (refactor gdn_ab_token_step) : résultats identiques aux JSON commités
+tests sans GPU : 587 ok ; 79 échecs = 73 de référence (failed_o2, GPU requis) + les 6 nouveaux tests GPU (GPU masqués)
+tests GPU : CUDA et HIP (GPU 1) : embed_q4k, mtp_draft_chain, mtp_gdn_kstates, gather GGUF réel Qwen3.8 (248 320 lignes, au bit près),
+  synth_*, parity_*, snapshot_restore_parity, parity_moe_q4k_cross_backend (cosine 1.0000000), cuda_registry_smoke : tous ok
+échec connu, antérieur à V1 : qwen35-v2 real_gguf_cuda_parity (IQ2_XXS, glouton HIP≠CUDA au 4e token), premier commit dee02058,
+  voir coord/v1-parity-iq2xxs.md ; décision provisoire : ce n'est pas un bug, l'assert sera revu après V1
+VRAM calculée (non mesurée), sm_86 Qwen3.8-27B : mtp 0 −394 Mio (blk.64) −1 743 Mio (embedding) ; mtp 4 −1 743 + 517 (K états GDN)

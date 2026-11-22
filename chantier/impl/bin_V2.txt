@@ -1,0 +1,24 @@
+265ea8ef — branche v2 (locale, ~/Workspace/flambeau-impl-o, non poussée), 6 commits sur 2ecc291c (= origin/feature/cuda-decouple, V1) :
+  8dc39193 état GDN, K états MTP et stock de lignes MTP sur les seules couches GDN (index dense)
+  9beeb2de eh_proj gardée dans son dtype GGUF (Q6_K), via le qmatmul dispatché
+  e42da802 plus de copie des logits de la ligne bonus après le tirage glouton sur le device
+  45013ccf quantification unique : seule la disposition lue par le dispatch (attention q/k/v + sortie, préremplissage GDN)
+  1c52145a test : parité IQ2_XXS HIP/CUDA = argmax + cosinus >= 0,995 + préfixe commun >= 2 (cf. dee02058)
+  265ea8ef bench : flambeau qmatmul-bench (étape 0 de coord/mmq-few-plan.md) + 3 cellules x16 (bench seulement)
+bin_V2:      hip_serve,hip_sweep (impl-o/target-o)              sha256 d4b19ba970a16e14a715cb61abeed35913c3c9921cc6790a678f91974bb820e3
+bin_V2_CUDA: +cuda_serve,cuda_sweep (impl-o/target-cuda)        sha256 26e1abc970eb5e85189784d2fb4983d071a4c804baaab0815a67925bb7224885
+hsaco gfx906 : 0 différent sur les 273 de V1, + mmq_q3_K_lds_tiled_x16, mmq_q4_K_lds_tiled_y64_x16, mmq_q5_K_lds_tiled_x16 (276)
+  CUDA : les 3 cubins x16 présents ; registre CUDA 281 stems, 26 sautés (comme V1)
+attendu pour le Vibe (A) : certs hip/gfx906 275 fichiers, cuda/sm_86 219 (aucun nouveau cert) ; cert-check 86 lignes / 0 échec et 33 / 0 ;
+  all-dispatch 86/86 (gfx906) et 33/33 (sm_86)
+mesuré par Opus : cert-check 86/0 et 33/0 ; all-dispatch sm_86 33/33 ; all-dispatch gfx906 86/86
+  (attention : ce dernier a démarré sans la garde thermique, wait_gpu1.sh non exécutable, jonction GPU1 ≈ 58 °C au départ)
+tests sans GPU : 589 ok (+2 tests unitaires) ; 79 échecs, liste identique à V1 (failed_v1 = failed_v2)
+tests GPU CUDA : embed_q4k, mtp_draft_chain, mtp_gdn_kstates, parity_snapshot_dense_cuda, gather GGUF réel Qwen3.8, cuda_registry_smoke : ok
+tests GPU HIP (GPU 1) : les mêmes trois forward, synth_*, parity_*, snapshot_restore_parity, gather GGUF réel : ok
+croisés : parity_moe_q4k_cross_backend ok (cosine 1.0000000) ; qwen35-v2 real_gguf_cuda_parity ok avec le nouveau critère
+  (cosinus 0,997056, préfixe commun 3 ; V1 donne exactement les mêmes séquences et le même cosinus)
+échec antérieur, hors V2 : gemma4-v2 real_gguf_cuda_parity (gemma-4-12B Q4_K) — CUDA diverge de la réf llama.cpp au 5e token,
+  identique token pour token sur V1 (2ecc291c) ; non corrigé
+VRAM calculée (non mesurée), sm_86 Qwen3.8-27B, V2 − V1 : mtp 0 ≈ −53 Mio ; mtp 4 ≈ −370 Mio (−255 K états, −53 état vivant, −62 eh_proj)
+binaire sweep : la feature ops `bench` est active (ids bench:*, x16 chargés), aucun descripteur ne les nomme

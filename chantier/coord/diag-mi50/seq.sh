@@ -1,0 +1,2 @@
+for p in "v2a /home/artefact/Workspace/flambeau-exp/impl/bin_V2" "v3a /home/artefact/Workspace/flambeau-exp/impl/bin_V3" "v2b /home/artefact/Workspace/flambeau-exp/impl/bin_V2" "v3b /home/artefact/Workspace/flambeau-exp/impl/bin_V3"; do set -- $p; echo "=== $1 $(date +%T)"; bash /tmp/claude-1000/-home-artefact-Workspace-flambeau/c651d041-9a81-4a77-af90-27f026cd6d36/scratchpad/diag/d1.sh $1 $2; done
+echo D1DONE

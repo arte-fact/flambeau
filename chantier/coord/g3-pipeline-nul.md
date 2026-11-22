@@ -1,0 +1,4 @@
+# g3 (b) : lancement anticipé, résultat nul (eba8486f, gardé en local, non poussé)
+
+1. Le pipeline fonctionne : la trace nsys (graph trace) montre 27 µs entre deux graphes de décodage, et le lancement part 22 ms en avance. Mais le gain est de +0,1 % seulement : 43,71 → 43,75 t/s avec pénalité, 43,94 → 43,96 en glouton pur, sur le décodage seul. La raison : (a) avait déjà réduit le trou hôte (argmax de 20 µs, 4 octets relus, lancement) à environ 0,1 ms par token hors nsys, et l'ancienne estimation de 1,05 ms était surtout faite de la copie des logits et de l'échantillonnage hôte.
+2. Le reste de l'écart avec le débit en régime établi (22,43 ms par token, soit ≈ 44,6 t/s) vient des recaptures du graphe (12 sur 400 tokens, ≈ 15 ms chacune) et des 33 premiers tokens hors graphe. Le levier suivant est donc la grille figée à 32 chunks, pas le pipeline hôte.

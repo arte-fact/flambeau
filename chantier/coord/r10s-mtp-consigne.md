@@ -1,0 +1,2 @@
+# r10s-mtp — trace nsys de bin_R10s_CUDA en MTP-4 (RTX seule)
+Même protocole que r10s/D (nsys launch / start / stop, --cuda-graph-trace=node, garde ≤ 50 °C), mais serveur `--mtp 4` (ligne de rtx/run_rtx_fl.sh), invite « math » 200 tokens non streamé. Sorties dans r10s/mtp/ : durée client, nombre de cycles MTP et acceptation (log debug), temps GPU total, top 25 noyaux (nom, appels, total, moyenne) ET, pour les noyaux mmvq, la grille (gridX, gridY) et le bloc via le sqlite. Puis `nsys stats` en CSV. Rendu r10s/mtp/RESULTATS.md puis « r10s-mtp terminé ».
