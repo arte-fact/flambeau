@@ -85,6 +85,7 @@ pub use sig::OpCtx;
 // The op-launch bodies are backend-generic; re-export them at the historical
 // crate-root paths so callers say `flambeau_ops::qmatmul::…` for either backend.
 pub use launch::{attention, conv, mlp, moe, norm, pe, qmatmul, sampling, softmax};
+pub use launch::qmatmul::{ActLayout, ActLayouts};
 
 // The portable op contract. Backend-neutral: every method takes `sig` POD +
 // `core` types only (the `Ops` impl — `OpsImpl<B>`, aliased per backend as

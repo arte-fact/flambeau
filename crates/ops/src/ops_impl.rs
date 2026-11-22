@@ -846,12 +846,12 @@ impl<B: KernelBackend> Ops for OpsImpl<'_, B> {
         )
     }
 
-    fn qmatmul_reads_mmq_activation(
+    fn qmatmul_act_layout(
         &self,
         shape: crate::MatmulShape,
         dtype_weight: QDtype,
-    ) -> bool {
-        crate::launch::qmatmul::qmatmul_reads_mmq_activation::<B>(shape, dtype_weight)
+    ) -> crate::ActLayout {
+        crate::launch::qmatmul::qmatmul_act_layout::<B>(shape, dtype_weight)
     }
 
     fn scale_f32(&self, x: DevicePtr, y: DevicePtr, n: usize, scale: f32) -> Result<()> {

@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use flambeau_core::DevicePtr;
+use flambeau_ops::{ActLayout, ActLayouts};
 use flambeau_model_ops::{Tensor, F16, F32, Q8_1};
 
 use crate::core::{CoreState, TopologyHooks};
@@ -22,15 +23,12 @@ pub fn dense_ffn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
     let ops = state.ops();
     let n = n_tokens;
 
-    // Which activation layout each gate/up projection reads at this shape.
-    // `norm_q8_1` (standard) is dead when both use the DS4 MMQ path;
-    // `norm_q8_1_mmq` is dead when neither does. At n==1 both are MMVQ, so
-    // this reduces to standard-only — byte-identical to the pre-gate path.
+    // The activation layouts the gate/up projections read at this shape.
     let gateup_shape = flambeau_ops::MatmulShape { m: n, k: hidden, n: m };
-    let gate_reads_mmq = weights.ffn_gate.reads_mmq_activation(gateup_shape, &ops);
-    let up_reads_mmq = weights.ffn_up.reads_mmq_activation(gateup_shape, &ops);
-    let need_norm_std = !(gate_reads_mmq && up_reads_mmq);
-    let need_norm_mmq = gate_reads_mmq || up_reads_mmq;
+    let norm_layouts: ActLayouts = [&weights.ffn_gate, &weights.ffn_up]
+        .into_iter()
+        .map(|w| w.act_layout(gateup_shape, &ops))
+        .collect();
 
     let mut norm_q8_1 = unsafe { Tensor::<Q8_1>::from_raw(state.pool.norm_q8_1, n * hidden) };
     let act_mmq_null = unsafe { Tensor::<Q8_1>::from_raw(DevicePtr::NULL, 0) };
@@ -51,13 +49,18 @@ pub fn dense_ffn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
             weights.rms_eps,
             &ops,
         )?;
-        if need_norm_std {
-            flambeau_model_ops::quantize_f16_to_q8_1(&norm_f16, &mut norm_q8_1, n * hidden, &ops)?;
-        }
-        if need_norm_mmq {
-            let mut norm_mmq =
-                unsafe { Tensor::<Q8_1>::from_raw(state.pool.norm_q8_1_mmq, n * hidden) };
-            flambeau_model_ops::quantize_f16_to_q8_1_mmq(&norm_f16, &mut norm_mmq, hidden, n, &ops)?;
+        let mut norm_mmq =
+            unsafe { Tensor::<Q8_1>::from_raw(state.pool.norm_q8_1_mmq, n * hidden) };
+        flambeau_model_ops::quantize_f16_for_layouts(
+            &norm_f16,
+            norm_layouts,
+            &mut norm_q8_1,
+            &mut norm_mmq,
+            hidden,
+            n,
+            &ops,
+        )?;
+        if norm_layouts.reads(ActLayout::Mmq) {
             norm_mmq_t = norm_mmq;
             &norm_mmq_t
         } else {
@@ -153,14 +156,12 @@ pub fn dense_ffn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
         )?;
     }
 
-    // Which activation layout the down projection reads. `gated_q8_1`
-    // (standard) is dead when down uses the DS4 MMQ path; the F16 `gated`
-    // intermediate is only needed when we don't fuse straight to MMQ. At
-    // n==1 down is MMVQ, so this stays the standard path, byte-identical.
+    // The activation layout the down projection reads. The F16 `gated`
+    // intermediate is only needed when we don't fuse straight to DS4.
     let down_shape = flambeau_ops::MatmulShape { m: n, k: m, n: hidden };
-    let down_reads_mmq = weights.ffn_down.reads_mmq_activation(down_shape, &ops);
+    let down_layout = weights.ffn_down.act_layout(down_shape, &ops);
     let use_fused_gelu_mmq =
-        down_reads_mmq && matches!(weights.activation, Activation::GeluTanh);
+        down_layout == ActLayout::Mmq && matches!(weights.activation, Activation::GeluTanh);
 
     let mut gated_q8_1 = unsafe { Tensor::<Q8_1>::from_raw(state.pool.gated_q8_1, n * m) };
     let gated_mmq_t;
@@ -188,15 +189,22 @@ pub fn dense_ffn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
                 )?;
             }
         }
-        if !down_reads_mmq {
-            flambeau_model_ops::quantize_f16_to_q8_1(&gated_f16, &mut gated_q8_1, n * m, &ops)?;
-            act_gated_mmq = &act_mmq_null;
-        } else {
-            let mut gated_mmq =
-                unsafe { Tensor::<Q8_1>::from_raw(state.pool.gated_q8_1_mmq, n * m) };
-            flambeau_model_ops::quantize_f16_to_q8_1_mmq(&gated_f16, &mut gated_mmq, m, n, &ops)?;
-            gated_mmq_t = gated_mmq;
-            act_gated_mmq = &gated_mmq_t;
+        let mut gated_mmq = unsafe { Tensor::<Q8_1>::from_raw(state.pool.gated_q8_1_mmq, n * m) };
+        flambeau_model_ops::quantize_f16_for_layouts(
+            &gated_f16,
+            down_layout.into(),
+            &mut gated_q8_1,
+            &mut gated_mmq,
+            m,
+            n,
+            &ops,
+        )?;
+        match down_layout {
+            ActLayout::Q8_1 => act_gated_mmq = &act_mmq_null,
+            ActLayout::Mmq => {
+                gated_mmq_t = gated_mmq;
+                act_gated_mmq = &gated_mmq_t;
+            }
         }
     }
     // Decode F16-direct fast path: at n=1 under AR-fold the down

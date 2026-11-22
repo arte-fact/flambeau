@@ -386,17 +386,16 @@ impl QuantWeight {
         )
     }
 
-    /// Whether this projection's auto-dispatched `qmatmul` at `shape` reads
-    /// the DS4 144-B mmq activation (`true`) or the standard 36-B Q8_1
-    /// activation (`false`). Composites that pre-quantise both layouts use
-    /// this to skip the dead one; the answer comes from the same dispatch
-    /// that launches, so it never disagrees with the kernel actually run.
-    pub fn reads_mmq_activation(
+    /// The activation layout this projection's auto-dispatched `qmatmul`
+    /// reads at `shape`. Composites quantise only the layouts their
+    /// projections read; the answer comes from the same dispatch that
+    /// launches, so it never disagrees with the kernel actually run.
+    pub fn act_layout(
         &self,
         shape: flambeau_ops::MatmulShape,
         ops: &impl flambeau_ops::Ops,
-    ) -> bool {
-        ops.qmatmul_reads_mmq_activation(shape, self.dtype)
+    ) -> flambeau_ops::ActLayout {
+        ops.qmatmul_act_layout(shape, self.dtype)
     }
 
     /// True when the m = 1 MMVQ kernel for this weight's dtype has an

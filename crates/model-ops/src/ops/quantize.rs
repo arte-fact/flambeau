@@ -2,7 +2,7 @@
 //! `[d (fp16), s (fp16), qs[32] (i8)]`, 36 B / 32 elems.
 
 use anyhow::bail;
-use flambeau_ops::Ops;
+use flambeau_ops::{ActLayout, ActLayouts, Ops};
 
 use crate::dtype::{F16, F32, Q8_1};
 use crate::error::Result;
@@ -142,4 +142,24 @@ mod tests {
         free(&device, input_ptr, input_t.bytes());
         free(&device, out_ptr, out_t.bytes());
     }
+}
+
+/// Quantises `input` (`total_b` rows of `ncols`) into each layout of
+/// `layouts`: the standard one into `q8_1`, DS4 into `mmq`.
+pub fn quantize_f16_for_layouts(
+    input: &Tensor<F16>,
+    layouts: ActLayouts,
+    q8_1: &mut Tensor<Q8_1>,
+    mmq: &mut Tensor<Q8_1>,
+    ncols: usize,
+    total_b: usize,
+    ops: &impl Ops,
+) -> Result<()> {
+    if layouts.reads(ActLayout::Q8_1) {
+        quantize_f16_to_q8_1(input, q8_1, ncols * total_b, ops)?;
+    }
+    if layouts.reads(ActLayout::Mmq) {
+        quantize_f16_to_q8_1_mmq(input, mmq, ncols, total_b, ops)?;
+    }
+    Ok(())
 }

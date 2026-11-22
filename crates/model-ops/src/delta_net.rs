@@ -1436,14 +1436,15 @@ impl DeltaNetLayer {
             self.rms_norm_eps,
         )
         .context("gdn prefill attn_norm")?;
-        let x_reads_mmq: [bool; 4] = [
+        let x_layouts: flambeau_ops::ActLayouts = [
             (self.attn_qkv.dtype, conv_channels),
             (self.attn_gate.dtype, d_inner),
             (self.ssm_alpha.dtype, num_v_heads),
             (self.ssm_beta.dtype, num_v_heads),
         ]
+        .into_iter()
         .map(|(dtype, cols)| {
-            ops.qmatmul_reads_mmq_activation(
+            ops.qmatmul_act_layout(
                 flambeau_ops::MatmulShape {
                     m: n_tokens,
                     k: hidden,
@@ -1451,12 +1452,13 @@ impl DeltaNetLayer {
                 },
                 dtype,
             )
-        });
-        if x_reads_mmq.iter().any(|&mmq| !mmq) {
+        })
+        .collect();
+        if x_layouts.reads(flambeau_ops::ActLayout::Q8_1) {
             ops.quantize_f16_q8_1(scratch.x_norm_f16, scratch.x_q8_1, n_tokens * hidden)
                 .context("gdn prefill x_norm → Q8_1 (std)")?;
         }
-        if x_reads_mmq.iter().any(|&mmq| mmq) {
+        if x_layouts.reads(flambeau_ops::ActLayout::Mmq) {
             ops.quantize_f16_q8_1_mmq(scratch.x_norm_f16, scratch.x_q8_1_mmq, hidden, n_tokens)
                 .context("gdn prefill x_norm → Q8_1 (MMQ DS4)")?;
         }
@@ -1702,12 +1704,13 @@ impl DeltaNetLayer {
             k: d_inner,
             n: hidden,
         };
-        if ops.qmatmul_reads_mmq_activation(out_shape, self.ssm_out.dtype) {
-            ops.quantize_q8_1_mmq(scratch.gated_f32, scratch.gated_q8_1_mmq, d_inner, n_tokens)
-                .context("gdn prefill quantise gated → Q8_1 (MMQ DS4)")?;
-        } else {
-            ops.quantize_q8_1(scratch.gated_f32, scratch.gated_q8_1, n_tokens * d_inner)
-                .context("gdn prefill quantise gated → Q8_1 (std)")?;
+        match ops.qmatmul_act_layout(out_shape, self.ssm_out.dtype) {
+            flambeau_ops::ActLayout::Mmq => ops
+                .quantize_q8_1_mmq(scratch.gated_f32, scratch.gated_q8_1_mmq, d_inner, n_tokens)
+                .context("gdn prefill quantise gated → Q8_1 (MMQ DS4)")?,
+            flambeau_ops::ActLayout::Q8_1 => ops
+                .quantize_q8_1(scratch.gated_f32, scratch.gated_q8_1, n_tokens * d_inner)
+                .context("gdn prefill quantise gated → Q8_1 (std)")?,
         }
 
         // 15. ssm_out projection at M = L.

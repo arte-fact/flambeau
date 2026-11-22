@@ -11,7 +11,8 @@ use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
 use flambeau_core::{CopyDirection, Device, DevicePtr, KernelBackend, QDtype, Stream};
-use flambeau_ops::qmatmul::{qmatmul_bench, qmatmul_bench_reads_mmq, QMATMUL_BENCH_PRODUCTION};
+use flambeau_ops::qmatmul::{qmatmul_bench, qmatmul_bench_act_layout, QMATMUL_BENCH_PRODUCTION};
+use flambeau_ops::ActLayout;
 use flambeau_ops::{MatmulShape, QmatmulBuffers, Registry};
 
 /// Activation columns the DS4 buffer is padded to (the widest MMQ tile).
@@ -101,8 +102,8 @@ pub fn run<K: KernelBackend>(
             let shape = MatmulShape { m, k, n: rows };
             for name in spec.impls {
                 let id = impl_id_for(name, spec.dtype);
-                let mmq = match qmatmul_bench_reads_mmq::<K>(&id, shape, qdtype) {
-                    Ok(mmq) => mmq,
+                let layout = match qmatmul_bench_act_layout::<K>(&id, shape, qdtype) {
+                    Ok(layout) => layout,
                     Err(e) => {
                         println!("  {name:<3} {id:<26} skipped: {e:#}");
                         continue;
@@ -131,7 +132,10 @@ pub fn run<K: KernelBackend>(
                 let us = t.elapsed().as_secs_f64() * 1e6 / spec.iters as f64;
                 println!(
                     "  {name:<3} {id:<26} rows={rows:<6} k={k:<6} m={m:<3} act={} wall_us/launch={us:8.1}",
-                    if mmq { "ds4" } else { "q8_1" }
+                    match layout {
+                        ActLayout::Mmq => "ds4",
+                        ActLayout::Q8_1 => "q8_1",
+                    }
                 );
             }
         }

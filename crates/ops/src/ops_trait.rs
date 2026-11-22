@@ -599,16 +599,15 @@ pub trait Ops {
         total_b: usize,
     ) -> Result<()>;
 
-    /// Whether the auto-dispatched [`Ops::qmatmul`] reads the 144-B DS4
-    /// `act_q8_1_mmq` activation (`true`) or the 36-B standard `act_q8_1`
-    /// (`false`) for `(dtype_weight, shape)`. Callers that pre-quantise both
-    /// layouts use this to skip whichever is dead. Backed by the same
-    /// dispatch used to launch, so it never disagrees with the real routing.
-    fn qmatmul_reads_mmq_activation(
+    /// The activation layout the auto-dispatched [`Ops::qmatmul`] reads for
+    /// `(dtype_weight, shape)`. Callers that pre-quantise activations produce
+    /// only this layout. Backed by the same dispatch used to launch, so it
+    /// never disagrees with the real routing.
+    fn qmatmul_act_layout(
         &self,
         shape: crate::MatmulShape,
         dtype_weight: QDtype,
-    ) -> bool;
+    ) -> crate::ActLayout;
 
     /// Fused `y_f16[i] = (fp16)(gelu(a[i]) * b[i])` — Gemma 4 dense
     /// FFN. GELU = ggml tanh-approximation form.

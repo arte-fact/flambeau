@@ -306,7 +306,7 @@ fn launch_recipe<B: flambeau_core::KernelBackend>(
 /// `k % 128 != 0` re-dispatch that swaps a DS4-layout MMQ recipe for the
 /// dtype's MMVQ (which consumes the standard Q8_1 activation and only needs
 /// `k % 32`). Shared by [`qmatmul`] (to launch) and
-/// [`qmatmul_reads_mmq_activation`] (to classify) so the two can never
+/// [`qmatmul_act_layout`] (to classify) so the two can never
 /// disagree on which recipe a shape resolves to.
 fn resolve_dispatch_recipe<B: flambeau_core::KernelBackend>(
     dtype_weight: QDtype,
@@ -353,42 +353,85 @@ fn resolve_dispatch_recipe<B: flambeau_core::KernelBackend>(
     Ok(recipe)
 }
 
-/// Whether the auto-dispatched [`qmatmul`] reads the 144-B DS4 `act_q8_1_mmq`
-/// activation (`true`) or the 36-B standard `act_q8_1` (`false`) for
-/// `(dtype_weight, shape)`. Callers that pre-quantise activations use this to
-/// skip whichever layout is dead.
+/// Activation layout a QMatMul impl reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActLayout {
+    /// Standard 36-B [`flambeau_quant::BlockQ8_1`] rows (`act_q8_1`).
+    Q8_1,
+    /// DS4 144-B [`flambeau_quant::BlockQ8_1Mmq`] blocks (`act_q8_1_mmq`).
+    Mmq,
+}
+
+/// The layouts read by the projections that share one activation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ActLayouts {
+    q8_1: bool,
+    mmq: bool,
+}
+
+impl ActLayouts {
+    /// Whether some projection of the set reads `layout`.
+    pub fn reads(self, layout: ActLayout) -> bool {
+        match layout {
+            ActLayout::Q8_1 => self.q8_1,
+            ActLayout::Mmq => self.mmq,
+        }
+    }
+}
+
+impl From<ActLayout> for ActLayouts {
+    fn from(layout: ActLayout) -> Self {
+        std::iter::once(layout).collect()
+    }
+}
+
+impl FromIterator<ActLayout> for ActLayouts {
+    fn from_iter<I: IntoIterator<Item = ActLayout>>(iter: I) -> Self {
+        iter.into_iter().fold(Self::default(), |mut set, layout| {
+            match layout {
+                ActLayout::Q8_1 => set.q8_1 = true,
+                ActLayout::Mmq => set.mmq = true,
+            }
+            set
+        })
+    }
+}
+
+/// The activation layout the auto-dispatched [`qmatmul`] reads for
+/// `(dtype_weight, shape)`. Callers that pre-quantise activations produce
+/// only this layout.
 ///
 /// MUST track [`qmatmul`]'s routing: every early-return short-circuit there
 /// consumes the standard layout — only the terminal `MmqLdsX64` / `MmqMma`
 /// recipe arms read DS4. The dispatch-table resolution is shared verbatim via
 /// [`resolve_dispatch_recipe`], so the only mirrored logic is the pre-dispatch
 /// short-circuit guards below; keep them in lockstep with `qmatmul`.
-pub fn qmatmul_reads_mmq_activation<B: flambeau_core::KernelBackend>(
+pub fn qmatmul_act_layout<B: flambeau_core::KernelBackend>(
     shape: crate::MatmulShape,
     dtype_weight: QDtype,
-) -> bool {
+) -> ActLayout {
     let crate::MatmulShape { m, k, n } = shape;
     // F16 has no MMQ — all M route through per-row MMVQ (standard layout).
     if dtype_weight == QDtype::F16 {
-        return false;
+        return ActLayout::Q8_1;
     }
     // Compile-time batched MMVQ short-circuits (standard layout).
     if rowtile_batched_k_owns(dtype_weight, m, k) {
-        return false;
+        return ActLayout::Q8_1;
     }
     if matches!(dtype_weight, QDtype::Q4_1 | QDtype::Q8_0) && (2..=4).contains(&m) {
-        return false;
+        return ActLayout::Q8_1;
     }
     // Q4_0/Q5_0/Q5_1 route to per-row / batched MMVQ with no MMQ amortization
     // (m < 32) or non-128-aligned dims (standard layout).
     if (m < 32 || k % 128 != 0 || n % 128 != 0)
         && matches!(dtype_weight, QDtype::Q4_0 | QDtype::Q5_0 | QDtype::Q5_1)
     {
-        return false;
+        return ActLayout::Q8_1;
     }
     match resolve_dispatch_recipe::<B>(dtype_weight, m, k, n) {
-        Ok(recipe) => matches!(recipe.kind, RecipeKind::MmqLdsX64 | RecipeKind::MmqMma),
-        Err(_) => false,
+        Ok(recipe) => recipe.kind.act_layout(),
+        Err(_) => ActLayout::Q8_1,
     }
 }
 
@@ -1623,6 +1666,19 @@ enum RecipeKind {
     MmvqBatched,
 }
 
+impl RecipeKind {
+    /// The activation layout a recipe of this kind reads.
+    fn act_layout(self) -> ActLayout {
+        match self {
+            RecipeKind::MmqLdsX64 | RecipeKind::MmqMma => ActLayout::Mmq,
+            RecipeKind::Mmvq
+            | RecipeKind::MmvqBatched
+            | RecipeKind::MmqOracle
+            | RecipeKind::MmqWave64 => ActLayout::Q8_1,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Recipe {
     kind: RecipeKind,
@@ -1795,7 +1851,7 @@ fn bench_recipe(impl_id: &str) -> Result<Recipe> {
 
 /// QMatMul through one named implementation, for timing: `impl_id` is
 /// [`QMATMUL_BENCH_PRODUCTION`], a bench id, or any registered impl_id. The
-/// caller provides the activation layout [`qmatmul_bench_reads_mmq`] names.
+/// caller provides the activation layout [`qmatmul_bench_act_layout`] names.
 #[cfg(feature = "bench")]
 pub fn qmatmul_bench<B: flambeau_core::KernelBackend>(
     reg: &crate::Registry<B>,
@@ -1830,21 +1886,17 @@ pub fn qmatmul_bench<B: flambeau_core::KernelBackend>(
     launch_recipe(reg, stream, recipe, buf, shape, dtype_weight)
 }
 
-/// Whether [`qmatmul_bench`] with `impl_id` reads the DS4 MMQ activation
-/// (`true`) or the standard Q8_1 one.
+/// The activation layout [`qmatmul_bench`] with `impl_id` reads.
 #[cfg(feature = "bench")]
-pub fn qmatmul_bench_reads_mmq<B: flambeau_core::KernelBackend>(
+pub fn qmatmul_bench_act_layout<B: flambeau_core::KernelBackend>(
     impl_id: &str,
     shape: crate::MatmulShape,
     dtype_weight: QDtype,
-) -> Result<bool> {
+) -> Result<ActLayout> {
     if impl_id == QMATMUL_BENCH_PRODUCTION {
-        return Ok(qmatmul_reads_mmq_activation::<B>(shape, dtype_weight));
+        return Ok(qmatmul_act_layout::<B>(shape, dtype_weight));
     }
-    Ok(matches!(
-        bench_recipe(impl_id)?.kind,
-        RecipeKind::MmqLdsX64 | RecipeKind::MmqMma
-    ))
+    Ok(bench_recipe(impl_id)?.kind.act_layout())
 }
 
 /// Launch recipe of every QMatMul impl a dispatch descriptor (or an alias of

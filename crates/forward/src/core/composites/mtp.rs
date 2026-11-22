@@ -106,14 +106,22 @@ fn eh_proj_half<B: flambeau_backend::Backend>(
         k: hidden,
         n: hidden,
     };
+    let layout = w.act_layout(shape, &ops);
     let mut act = unsafe { Tensor::<Q8_1>::from_raw(state.pool.norm_q8_1, n * hidden) };
-    let mut act_mmq = unsafe { Tensor::<Q8_1>::from_raw(DevicePtr::NULL, 0) };
-    if w.reads_mmq_activation(shape, &ops) {
-        act_mmq = unsafe { Tensor::<Q8_1>::from_raw(state.pool.norm_q8_1_mmq, n * hidden) };
-        flambeau_model_ops::quantize_f16_to_q8_1_mmq(x, &mut act_mmq, hidden, n, &ops)?;
-    } else {
-        flambeau_model_ops::quantize_f16_to_q8_1(x, &mut act, n * hidden, &ops)?;
-    }
+    let (mmq_ptr, mmq_elems) = match layout {
+        flambeau_ops::ActLayout::Mmq => (state.pool.norm_q8_1_mmq, n * hidden),
+        flambeau_ops::ActLayout::Q8_1 => (DevicePtr::NULL, 0),
+    };
+    let mut act_mmq = unsafe { Tensor::<Q8_1>::from_raw(mmq_ptr, mmq_elems) };
+    flambeau_model_ops::quantize_f16_for_layouts(
+        x,
+        layout.into(),
+        &mut act,
+        &mut act_mmq,
+        hidden,
+        n,
+        &ops,
+    )?;
     w.qmatmul(&act, &act_mmq, out, shape, &ops)
 }
 
