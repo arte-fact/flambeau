@@ -87,7 +87,7 @@ pub use sig::OpCtx;
 pub use launch::{attention, conv, mlp, moe, norm, pe, qmatmul, sampling, softmax};
 pub use flambeau_quant::q8_1_few::FewScale;
 pub use launch::norm::FewSource;
-pub use launch::qmatmul::{ActLayout, ActLayouts};
+pub use launch::qmatmul::{ActLayout, ActLayouts, MMQ_FEW_MAX_COLS};
 
 // The portable op contract. Backend-neutral: every method takes `sig` POD +
 // `core` types only (the `Ops` impl — `OpsImpl<B>`, aliased per backend as

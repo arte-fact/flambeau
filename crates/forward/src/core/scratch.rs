@@ -892,6 +892,9 @@ pub struct ScratchPool {
 
     pub norm_q8_1: DevicePtr,
     pub norm_q8_1_mmq: DevicePtr,
+    /// Few-column MMQ activation of `norm` (`flambeau_quant::q8_1_few`),
+    /// for up to `flambeau_ops::MMQ_FEW_MAX_COLS` rows. NULL when the pool holds one row.
+    pub norm_q8_1_few: DevicePtr,
     pub q_f16: DevicePtr,
     pub k_f16: DevicePtr,
     pub v_f16: DevicePtr,
@@ -904,6 +907,8 @@ pub struct ScratchPool {
     pub attn_out_f16: DevicePtr,
     pub attn_out_q8_1: DevicePtr,
     pub attn_out_q8_1_mmq: DevicePtr,
+    /// Few-column activation of `attn_out_f16`, as `norm_q8_1_few`.
+    pub attn_out_q8_1_few: DevicePtr,
     pub attn_proj_f32: DevicePtr,
 
     /// `[n_heads_q * MAX_SPLITK_CHUNKS]` F32 — split-K online-softmax
@@ -922,6 +927,8 @@ pub struct ScratchPool {
     pub gated_f16: DevicePtr,
     pub gated_q8_1: DevicePtr,
     pub gated_q8_1_mmq: DevicePtr,
+    /// Few-column activation of `gated_f16`, as `norm_q8_1_few`.
+    pub gated_q8_1_few: DevicePtr,
     pub down_f32: DevicePtr,
 
     /// Rows `logits_f32_dev` holds: `max_slots`, or the MTP verify batch
@@ -1215,6 +1222,8 @@ impl ScratchPool {
         let q8_1 = |n: usize| n.div_ceil(32) * 36;
         // MMQ block: 144 B per 128 elements, row-major over (ncols/128, total_b).
         let q8_1_mmq = |cols: usize, rows: usize| cols.div_ceil(128) * rows * 144;
+        let q8_1_few =
+            |cols: usize, rows: usize| flambeau_quant::q8_1_few::few_bytes(cols, rows.min(flambeau_ops::MMQ_FEW_MAX_COLS));
 
         let h = config.hidden;
         let m = config.intermediate;
@@ -1233,6 +1242,7 @@ impl ScratchPool {
         } else {
             DevicePtr::NULL
         };
+        let norm_q8_1_few = if n > 1 { alloc_bytes(q8_1_few(h, n))? } else { DevicePtr::NULL };
         let q_f16 = alloc_bytes(n * qw * f16)?;
         let k_f16 = alloc_bytes(n * kvw * f16)?;
         let v_f16 = alloc_bytes(n * kvw * f16)?;
@@ -1248,6 +1258,7 @@ impl ScratchPool {
         } else {
             DevicePtr::NULL
         };
+        let attn_out_q8_1_few = if n > 1 { alloc_bytes(q8_1_few(qw, n))? } else { DevicePtr::NULL };
         let q_or_fused = if config.attn_q_gated { 2 * qw } else { qw };
         let attn_proj_f32 = alloc_bytes(n * q_or_fused.max(kvw).max(h) * f32)?;
 
@@ -1283,6 +1294,7 @@ impl ScratchPool {
         } else {
             DevicePtr::NULL
         };
+        let gated_q8_1_few = if n > 1 { alloc_bytes(q8_1_few(m_buf, n))? } else { DevicePtr::NULL };
         let down_f32 = alloc_bytes(n * h * f32)?;
 
         let logits_rows = config
@@ -1762,6 +1774,7 @@ impl ScratchPool {
             delta,
             norm_q8_1,
             norm_q8_1_mmq,
+            norm_q8_1_few,
             q_f16,
             k_f16,
             v_f16,
@@ -1770,6 +1783,7 @@ impl ScratchPool {
             attn_out_f16,
             attn_out_q8_1,
             attn_out_q8_1_mmq,
+            attn_out_q8_1_few,
             attn_proj_f32,
             splitk_partials_m,
             splitk_partials_s,
@@ -1779,6 +1793,7 @@ impl ScratchPool {
             gated_f16,
             gated_q8_1,
             gated_q8_1_mmq,
+            gated_q8_1_few,
             down_f32,
             logits_f32_dev,
             logits_rows,

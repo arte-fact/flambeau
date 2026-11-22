@@ -29,6 +29,16 @@ impl<T: ElemType> Tensor<T> {
         }
     }
 
+    /// The placeholder tensor (`DevicePtr::NULL`, 0 elements): a layout or
+    /// output the caller does not provide.
+    pub const fn null() -> Self {
+        Self {
+            ptr: DevicePtr::NULL,
+            n_elems: 0,
+            _phantom: PhantomData,
+        }
+    }
+
     pub fn bytes(&self) -> usize {
         T::bytes_for_n_elems(self.n_elems)
     }

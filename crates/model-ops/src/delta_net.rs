@@ -201,6 +201,7 @@ pub struct OwnedDeltaNetLayerPrefillScratch {
     pub x_norm_f16: DevicePtr,
     pub x_q8_1: DevicePtr,
     pub x_q8_1_mmq: DevicePtr,
+    pub x_q8_1_few: DevicePtr,
     pub qkv_mixed_f32: DevicePtr,
     pub z_f32: DevicePtr,
     pub alpha_f32: DevicePtr,
@@ -216,6 +217,7 @@ pub struct OwnedDeltaNetLayerPrefillScratch {
     pub gated_f32: DevicePtr,
     pub gated_q8_1: DevicePtr,
     pub gated_q8_1_mmq: DevicePtr,
+    pub gated_q8_1_few: DevicePtr,
     pub ssm_out_f32: DevicePtr,
 }
 
@@ -226,6 +228,7 @@ impl OwnedDeltaNetLayerPrefillScratch {
             x_norm_f16: self.x_norm_f16,
             x_q8_1: self.x_q8_1,
             x_q8_1_mmq: self.x_q8_1_mmq,
+            x_q8_1_few: self.x_q8_1_few,
             qkv_mixed_f32: self.qkv_mixed_f32,
             z_f32: self.z_f32,
             alpha_f32: self.alpha_f32,
@@ -241,6 +244,7 @@ impl OwnedDeltaNetLayerPrefillScratch {
             gated_f32: self.gated_f32,
             gated_q8_1: self.gated_q8_1,
             gated_q8_1_mmq: self.gated_q8_1_mmq,
+            gated_q8_1_few: self.gated_q8_1_few,
             ssm_out_f32: self.ssm_out_f32,
         }
     }
@@ -254,6 +258,7 @@ pub struct DeltaNetLayerPrefillScratch {
     pub x_norm_f16: DevicePtr, // F16 [L, hidden]
     pub x_q8_1: DevicePtr,
     pub x_q8_1_mmq: DevicePtr,    // DS4 layout sibling for MMQ at L≥128
+    pub x_q8_1_few: DevicePtr,    // few-column MMQ layout, L ≤ MMQ_FEW_MAX_COLS
     pub qkv_mixed_f32: DevicePtr, // [L, conv_channels]
     pub z_f32: DevicePtr,         // [L, d_inner]
     pub alpha_f32: DevicePtr,     // [L, num_v_heads]
@@ -269,6 +274,7 @@ pub struct DeltaNetLayerPrefillScratch {
     pub gated_f32: DevicePtr,
     pub gated_q8_1: DevicePtr,
     pub gated_q8_1_mmq: DevicePtr,
+    pub gated_q8_1_few: DevicePtr,
     pub ssm_out_f32: DevicePtr, // [L, hidden]
 }
 
@@ -596,6 +602,11 @@ impl DeltaNetLayer {
         let (x_norm_f16, _) = tracker.alloc_f16(device, max_tokens * hidden)?;
         let (x_q8_1, _) = tracker.alloc_q8_1(device, max_tokens * hidden)?;
         let (x_q8_1_mmq, _) = tracker.alloc_q8_1_mmq(device, max_tokens * hidden)?;
+        let few_rows = max_tokens.min(flambeau_ops::MMQ_FEW_MAX_COLS);
+        let x_q8_1_few = tracker.alloc_zeroed_tracked(
+            device,
+            flambeau_quant::q8_1_few::few_bytes(hidden, few_rows),
+        )?;
         let (qkv_mixed_f32, _) = tracker.alloc_f32(device, max_tokens * conv_channels)?;
         let (z_f32, _) = tracker.alloc_f32(device, max_tokens * d_inner)?;
         let (alpha_f32, _) = tracker.alloc_f32(device, max_tokens * num_v_heads)?;
@@ -612,12 +623,17 @@ impl DeltaNetLayer {
         let (gated_f32, _) = tracker.alloc_f32(device, max_tokens * d_inner)?;
         let (gated_q8_1, _) = tracker.alloc_q8_1(device, max_tokens * d_inner)?;
         let (gated_q8_1_mmq, _) = tracker.alloc_q8_1_mmq(device, max_tokens * d_inner)?;
+        let gated_q8_1_few = tracker.alloc_zeroed_tracked(
+            device,
+            flambeau_quant::q8_1_few::few_bytes(d_inner, few_rows),
+        )?;
         let (ssm_out_f32, _) = tracker.alloc_f32(device, max_tokens * hidden)?;
         Ok(OwnedDeltaNetLayerPrefillScratch {
             max_tokens,
             x_norm_f16,
             x_q8_1,
             x_q8_1_mmq,
+            x_q8_1_few,
             qkv_mixed_f32,
             z_f32,
             alpha_f32,
@@ -633,6 +649,7 @@ impl DeltaNetLayer {
             gated_f32,
             gated_q8_1,
             gated_q8_1_mmq,
+            gated_q8_1_few,
             ssm_out_f32,
         })
     }
@@ -1457,9 +1474,6 @@ impl DeltaNetLayer {
             )
         })
         .collect();
-        if x_layouts.reads_few() {
-            anyhow::bail!("gdn prefill x_norm: the few-column layout has no buffer here");
-        }
         if x_layouts.reads(flambeau_ops::ActLayout::Q8_1) {
             ops.quantize_f16_q8_1(scratch.x_norm_f16, scratch.x_q8_1, n_tokens * hidden)
                 .context("gdn prefill x_norm → Q8_1 (std)")?;
@@ -1468,6 +1482,21 @@ impl DeltaNetLayer {
             ops.quantize_f16_q8_1_mmq(scratch.x_norm_f16, scratch.x_q8_1_mmq, hidden, n_tokens)
                 .context("gdn prefill x_norm → Q8_1 (MMQ DS4)")?;
         }
+        let x_few = match x_layouts.few_scale()? {
+            Some(scale) => {
+                ops.quantize_q8_1_few(
+                    flambeau_ops::FewSource::F16,
+                    scratch.x_norm_f16,
+                    scratch.x_q8_1_few,
+                    hidden,
+                    n_tokens,
+                    scale,
+                )
+                .context("gdn prefill x_norm → few-column Q8_1")?;
+                scratch.x_q8_1_few
+            }
+            None => DevicePtr::NULL,
+        };
 
         // 2..5. Hidden-input projections at M = L. qmatmul auto-
         // dispatches MMVQ vs MMQ based on M and weight dtype.
@@ -1476,7 +1505,7 @@ impl DeltaNetLayer {
                 weights: self.attn_qkv.ptr,
                 act_q8_1: scratch.x_q8_1,
                 act_q8_1_mmq: scratch.x_q8_1_mmq,
-                act_q8_1_few: flambeau_core::DevicePtr::NULL,
+                act_q8_1_few: x_few,
                 dst: scratch.qkv_mixed_f32,
             },
             flambeau_ops::MatmulShape {
@@ -1492,7 +1521,7 @@ impl DeltaNetLayer {
                 weights: self.attn_gate.ptr,
                 act_q8_1: scratch.x_q8_1,
                 act_q8_1_mmq: scratch.x_q8_1_mmq,
-                act_q8_1_few: flambeau_core::DevicePtr::NULL,
+                act_q8_1_few: x_few,
                 dst: scratch.z_f32,
             },
             flambeau_ops::MatmulShape {
@@ -1508,7 +1537,7 @@ impl DeltaNetLayer {
                 weights: self.ssm_alpha.ptr,
                 act_q8_1: scratch.x_q8_1,
                 act_q8_1_mmq: scratch.x_q8_1_mmq,
-                act_q8_1_few: flambeau_core::DevicePtr::NULL,
+                act_q8_1_few: x_few,
                 dst: scratch.alpha_f32,
             },
             flambeau_ops::MatmulShape {
@@ -1524,7 +1553,7 @@ impl DeltaNetLayer {
                 weights: self.ssm_beta.ptr,
                 act_q8_1: scratch.x_q8_1,
                 act_q8_1_mmq: scratch.x_q8_1_mmq,
-                act_q8_1_few: flambeau_core::DevicePtr::NULL,
+                act_q8_1_few: x_few,
                 dst: scratch.beta_f32,
             },
             flambeau_ops::MatmulShape {
@@ -1714,17 +1743,30 @@ impl DeltaNetLayer {
             k: d_inner,
             n: hidden,
         };
-        match ops.qmatmul_act_layout(out_shape, self.ssm_out.dtype) {
-            flambeau_ops::ActLayout::Mmq => ops
-                .quantize_q8_1_mmq(scratch.gated_f32, scratch.gated_q8_1_mmq, d_inner, n_tokens)
-                .context("gdn prefill quantise gated → Q8_1 (MMQ DS4)")?,
-            flambeau_ops::ActLayout::Q8_1 => ops
-                .quantize_q8_1(scratch.gated_f32, scratch.gated_q8_1, n_tokens * d_inner)
-                .context("gdn prefill quantise gated → Q8_1 (std)")?,
-            flambeau_ops::ActLayout::Few(_) => {
-                anyhow::bail!("gdn prefill ssm_out: the few-column layout has no buffer here")
+        let gated_few = match ops.qmatmul_act_layout(out_shape, self.ssm_out.dtype) {
+            flambeau_ops::ActLayout::Mmq => {
+                ops.quantize_q8_1_mmq(scratch.gated_f32, scratch.gated_q8_1_mmq, d_inner, n_tokens)
+                    .context("gdn prefill quantise gated → Q8_1 (MMQ DS4)")?;
+                DevicePtr::NULL
             }
-        }
+            flambeau_ops::ActLayout::Q8_1 => {
+                ops.quantize_q8_1(scratch.gated_f32, scratch.gated_q8_1, n_tokens * d_inner)
+                    .context("gdn prefill quantise gated → Q8_1 (std)")?;
+                DevicePtr::NULL
+            }
+            flambeau_ops::ActLayout::Few(scale) => {
+                ops.quantize_q8_1_few(
+                    flambeau_ops::FewSource::F32,
+                    scratch.gated_f32,
+                    scratch.gated_q8_1_few,
+                    d_inner,
+                    n_tokens,
+                    scale,
+                )
+                .context("gdn prefill quantise gated → few-column Q8_1")?;
+                scratch.gated_q8_1_few
+            }
+        };
 
         // 15. ssm_out projection at M = L.
         ops.qmatmul(
@@ -1732,7 +1774,7 @@ impl DeltaNetLayer {
                 weights: self.ssm_out.ptr,
                 act_q8_1: scratch.gated_q8_1,
                 act_q8_1_mmq: scratch.gated_q8_1_mmq,
-                act_q8_1_few: flambeau_core::DevicePtr::NULL,
+                act_q8_1_few: gated_few,
                 dst: scratch.ssm_out_f32,
             },
             flambeau_ops::MatmulShape {

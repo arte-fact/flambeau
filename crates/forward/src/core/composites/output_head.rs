@@ -45,7 +45,7 @@ pub fn output_head_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
         k: hidden,
         n: vocab,
     };
-    if n_emit > 1 && lm_head.lm_head.act_layout(head_shape, &ops) != flambeau_ops::ActLayout::Q8_1 {
+    if n_emit > 1 && lm_head.lm_head.act_layout(head_shape, &ops) == flambeau_ops::ActLayout::Mmq {
         bail!(
             "output_head: {:?} lm_head at {n_emit} rows dispatches to an MMQ kernel; \
              only the standard Q8_1 activation is prepared here",
@@ -77,6 +77,7 @@ pub fn output_head_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
     lm_head.lm_head.qmatmul(
         &norm_q8_1,
         &act_mmq_null,
+        &Tensor::null(),
         &mut logits_f32,
         flambeau_ops::MatmulShape {
             m: n_emit,

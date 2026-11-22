@@ -176,6 +176,7 @@ pub fn standard_attn_mixed_local<B: flambeau_backend::Backend, H: TopologyHooks<
         weights.attn_q.qmatmul(
             &norm_q8_1,
             act_norm_mmq,
+            &Tensor::null(),
             &mut q_fused_f32,
             flambeau_ops::MatmulShape {
                 m: n,
@@ -204,6 +205,7 @@ pub fn standard_attn_mixed_local<B: flambeau_backend::Backend, H: TopologyHooks<
         weights.attn_q.qmatmul(
             &norm_q8_1,
             act_norm_mmq,
+            &Tensor::null(),
             &mut q_f32,
             flambeau_ops::MatmulShape {
                 m: n,
@@ -222,6 +224,7 @@ pub fn standard_attn_mixed_local<B: flambeau_backend::Backend, H: TopologyHooks<
         weights.attn_k.qmatmul(
             &norm_q8_1,
             act_norm_mmq,
+            &Tensor::null(),
             &mut k_f32,
             flambeau_ops::MatmulShape {
                 m: n,
@@ -241,6 +244,7 @@ pub fn standard_attn_mixed_local<B: flambeau_backend::Backend, H: TopologyHooks<
         v_w.qmatmul(
             &norm_q8_1,
             act_norm_mmq,
+            &Tensor::null(),
             &mut v_f32,
             flambeau_ops::MatmulShape {
                 m: n,
@@ -668,6 +672,7 @@ pub fn standard_attn_mixed_local<B: flambeau_backend::Backend, H: TopologyHooks<
     weights.attn_output.qmatmul(
         &attn_out_q8_1,
         act_attn_out_mmq,
+        &Tensor::null(),
         &mut proj_f32,
         flambeau_ops::MatmulShape {
             m: n,

@@ -122,6 +122,9 @@ pub fn standard_attn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
 
     let mut norm_q8_1 = unsafe { Tensor::<Q8_1>::from_raw(state.pool.norm_q8_1, n * hidden) };
     let act_mmq_null = unsafe { Tensor::<Q8_1>::from_raw(DevicePtr::NULL, 0) };
+    let few_null = Tensor::<Q8_1>::null();
+    let mut norm_few = unsafe { Tensor::<Q8_1>::from_raw(state.pool.norm_q8_1_few, n * hidden) };
+    let mut norm_reads_few = false;
     let norm_mmq_t;
     let act_norm_mmq: &Tensor<Q8_1> = if input_pre_normed && n == 1 {
         let norm_view = unsafe { Tensor::<F16>::from_raw(state.pool.norm, n * hidden) };
@@ -163,10 +166,12 @@ pub fn standard_attn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
             layouts,
             &mut norm_q8_1,
             &mut norm_mmq,
+            &mut norm_few,
             hidden,
             n,
             &ops,
         )?;
+        norm_reads_few = layouts.reads_few();
         norm_mmq_t = norm_mmq;
         &norm_mmq_t
     } else {
@@ -181,6 +186,7 @@ pub fn standard_attn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
         )?;
         &act_mmq_null
     };
+    let act_norm_few = if norm_reads_few { &norm_few } else { &few_null };
     let q_f32_buf = state.pool.attn_proj_f32;
     if weights.attn_q_gated {
         let fused_n = 2 * q_width;
@@ -188,6 +194,7 @@ pub fn standard_attn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
         weights.attn_q.qmatmul(
             &norm_q8_1,
             act_norm_mmq,
+            act_norm_few,
             &mut q_fused_f32,
             flambeau_ops::MatmulShape {
                 m: n,
@@ -224,6 +231,7 @@ pub fn standard_attn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
         weights.attn_q.qmatmul(
             &norm_q8_1,
             act_norm_mmq,
+            act_norm_few,
             &mut q_f32,
             flambeau_ops::MatmulShape {
                 m: n,
@@ -275,6 +283,7 @@ pub fn standard_attn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
         weights.attn_k.qmatmul(
             &norm_q8_1,
             act_norm_mmq,
+            act_norm_few,
             &mut k_f32,
             flambeau_ops::MatmulShape {
                 m: n,
@@ -298,6 +307,7 @@ pub fn standard_attn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
             v_w.qmatmul(
                 &norm_q8_1,
                 act_norm_mmq,
+                act_norm_few,
                 &mut v_f32,
                 flambeau_ops::MatmulShape {
                     m: n,
@@ -1551,16 +1561,22 @@ pub fn standard_attn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
     };
     let mut attn_out_mmq =
         unsafe { Tensor::<Q8_1>::from_raw(state.pool.attn_out_q8_1_mmq, n * q_width) };
+    let mut attn_out_few =
+        unsafe { Tensor::<Q8_1>::from_raw(state.pool.attn_out_q8_1_few, n * q_width) };
     flambeau_model_ops::quantize_f16_for_layouts(
         &post_attn,
         out_layout.into(),
         &mut attn_out_q8_1,
         &mut attn_out_mmq,
+        &mut attn_out_few,
         q_width,
         n,
         &ops,
     )?;
     let act_attn_out_mmq: &Tensor<Q8_1> = if n > 1 { &attn_out_mmq } else { &act_mmq_null };
+    let few_null = Tensor::<Q8_1>::null();
+    let act_attn_out_few =
+        if matches!(out_layout, flambeau_ops::ActLayout::Few(_)) { &attn_out_few } else { &few_null };
 
     // Decode F16-direct fast path: at n=1 with AR-fold semantics
     // (post_attn_norm=None + caller wants F16 partial), the projection
@@ -1575,6 +1591,7 @@ pub fn standard_attn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
         weights.attn_output.qmatmul(
             &attn_out_q8_1,
             act_attn_out_mmq,
+            act_attn_out_few,
             &mut proj_f32,
             flambeau_ops::MatmulShape {
                 m: n,

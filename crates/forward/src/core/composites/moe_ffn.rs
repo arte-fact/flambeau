@@ -100,6 +100,7 @@ pub fn moe_ffn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
     weights.router.qmatmul(
         &norm_q8_1,
         &act_mmq_null,
+        &Tensor::null(),
         &mut router_logits,
         flambeau_ops::MatmulShape {
             m: 1,
@@ -393,6 +394,7 @@ fn moe_ffn_loop<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
     weights.router.qmatmul(
         &x_q8_1_n,
         &act_mmq_null,
+        &Tensor::null(),
         &mut router_logits,
         flambeau_ops::MatmulShape {
             m: n_tokens,

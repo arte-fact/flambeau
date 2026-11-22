@@ -32,6 +32,8 @@ pub fn dense_ffn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
 
     let mut norm_q8_1 = unsafe { Tensor::<Q8_1>::from_raw(state.pool.norm_q8_1, n * hidden) };
     let act_mmq_null = unsafe { Tensor::<Q8_1>::from_raw(DevicePtr::NULL, 0) };
+    let few_null = Tensor::<Q8_1>::null();
+    let mut norm_few = unsafe { Tensor::<Q8_1>::from_raw(state.pool.norm_q8_1_few, n * hidden) };
     let norm_mmq_t;
     let act_norm_mmq: &Tensor<Q8_1> = if input_pre_normed && n == 1 {
         let norm_view = unsafe { Tensor::<F16>::from_raw(state.pool.norm, n * hidden) };
@@ -56,6 +58,7 @@ pub fn dense_ffn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
             norm_layouts,
             &mut norm_q8_1,
             &mut norm_mmq,
+            &mut norm_few,
             hidden,
             n,
             &ops,
@@ -78,6 +81,7 @@ pub fn dense_ffn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
         )?;
         &act_mmq_null
     };
+    let act_norm_few = if n > 1 && norm_layouts.reads_few() { &norm_few } else { &few_null };
 
     let mut gate_f32 = unsafe { Tensor::<F32>::from_raw(state.pool.gate_f32, n * m) };
     let mut up_f32 = unsafe { Tensor::<F32>::from_raw(state.pool.up_f32, n * m) };
@@ -135,6 +139,7 @@ pub fn dense_ffn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
         weights.ffn_gate.qmatmul(
             &norm_q8_1,
             act_norm_mmq,
+            act_norm_few,
             &mut gate_f32,
             flambeau_ops::MatmulShape {
                 m: n,
@@ -146,6 +151,7 @@ pub fn dense_ffn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
         weights.ffn_up.qmatmul(
             &norm_q8_1,
             act_norm_mmq,
+            act_norm_few,
             &mut up_f32,
             flambeau_ops::MatmulShape {
                 m: n,
@@ -164,6 +170,7 @@ pub fn dense_ffn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
         down_layout == ActLayout::Mmq && matches!(weights.activation, Activation::GeluTanh);
 
     let mut gated_q8_1 = unsafe { Tensor::<Q8_1>::from_raw(state.pool.gated_q8_1, n * m) };
+    let mut gated_few = unsafe { Tensor::<Q8_1>::from_raw(state.pool.gated_q8_1_few, n * m) };
     let gated_mmq_t;
     let act_gated_mmq: &Tensor<Q8_1>;
     if use_fused_gelu_mmq {
@@ -195,6 +202,7 @@ pub fn dense_ffn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
             down_layout.into(),
             &mut gated_q8_1,
             &mut gated_mmq,
+            &mut gated_few,
             m,
             n,
             &ops,
@@ -206,6 +214,7 @@ pub fn dense_ffn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
             act_gated_mmq = &act_mmq_null;
         }
     }
+    let act_gated_few = if matches!(down_layout, ActLayout::Few(_)) { &gated_few } else { &few_null };
     // Decode F16-direct fast path: at n=1 under AR-fold the down
     // projection writes straight to `pool.delta` via mmvq's saturating
     // F16-cast — skips one `cast_f32_to_f16` launch per layer per token.
@@ -218,6 +227,7 @@ pub fn dense_ffn_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
         weights.ffn_down.qmatmul(
             &gated_q8_1,
             act_gated_mmq,
+            act_gated_few,
             &mut down_f32,
             flambeau_ops::MatmulShape {
                 m: n,

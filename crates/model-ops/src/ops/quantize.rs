@@ -2,7 +2,7 @@
 //! `[d (fp16), s (fp16), qs[32] (i8)]`, 36 B / 32 elems.
 
 use anyhow::bail;
-use flambeau_ops::{ActLayout, ActLayouts, Ops};
+use flambeau_ops::{ActLayout, ActLayouts, FewSource, Ops};
 
 use crate::dtype::{F16, F32, Q8_1};
 use crate::error::Result;
@@ -145,25 +145,30 @@ mod tests {
 }
 
 /// Quantises `input` (`total_b` rows of `ncols`) into each layout of
-/// `layouts`: the standard one into `q8_1`, DS4 into `mmq`. A set holding the
-/// few-column layout is refused.
+/// `layouts`: the standard one into `q8_1`, DS4 into `mmq`, the few-column
+/// one into `few`.
+#[allow(clippy::too_many_arguments)]
 pub fn quantize_f16_for_layouts(
     input: &Tensor<F16>,
     layouts: ActLayouts,
     q8_1: &mut Tensor<Q8_1>,
     mmq: &mut Tensor<Q8_1>,
+    few: &mut Tensor<Q8_1>,
     ncols: usize,
     total_b: usize,
     ops: &impl Ops,
 ) -> Result<()> {
-    if layouts.reads_few() {
-        bail!("quantize_f16_for_layouts: the few-column layout has no buffer at this call site");
-    }
     if layouts.reads(ActLayout::Q8_1) {
         quantize_f16_to_q8_1(input, q8_1, ncols * total_b, ops)?;
     }
     if layouts.reads(ActLayout::Mmq) {
         quantize_f16_to_q8_1_mmq(input, mmq, ncols, total_b, ops)?;
+    }
+    if let Some(scale) = layouts.few_scale()? {
+        if few.ptr.as_usize() == 0 {
+            bail!("quantize_f16_for_layouts: no few-column buffer for {total_b} rows of {ncols}");
+        }
+        ops.quantize_q8_1_few(FewSource::F16, input.ptr, few.ptr, ncols, total_b, scale)?;
     }
     Ok(())
 }

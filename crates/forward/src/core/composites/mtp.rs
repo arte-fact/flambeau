@@ -107,23 +107,29 @@ fn eh_proj_half<B: flambeau_backend::Backend>(
         n: hidden,
     };
     let layout = w.act_layout(shape, &ops);
-    let mut act = unsafe { Tensor::<Q8_1>::from_raw(state.pool.norm_q8_1, n * hidden) };
-    let (mmq_ptr, mmq_elems) = if layout == flambeau_ops::ActLayout::Mmq {
-        (state.pool.norm_q8_1_mmq, n * hidden)
-    } else {
-        (DevicePtr::NULL, 0)
+    let (mmq_ptr, few_ptr) = match layout {
+        flambeau_ops::ActLayout::Q8_1 => (DevicePtr::NULL, DevicePtr::NULL),
+        flambeau_ops::ActLayout::Mmq => (state.pool.norm_q8_1_mmq, DevicePtr::NULL),
+        flambeau_ops::ActLayout::Few(_) => (DevicePtr::NULL, state.pool.norm_q8_1_few),
     };
-    let mut act_mmq = unsafe { Tensor::<Q8_1>::from_raw(mmq_ptr, mmq_elems) };
+    // SAFETY: pool buffers sized for `n * hidden` activations, or NULL.
+    let pool = |ptr: DevicePtr| unsafe {
+        Tensor::<Q8_1>::from_raw(ptr, if ptr.as_usize() == 0 { 0 } else { n * hidden })
+    };
+    let mut act = pool(state.pool.norm_q8_1);
+    let mut act_mmq = pool(mmq_ptr);
+    let mut act_few = pool(few_ptr);
     flambeau_model_ops::quantize_f16_for_layouts(
         x,
         layout.into(),
         &mut act,
         &mut act_mmq,
+        &mut act_few,
         hidden,
         n,
         &ops,
     )?;
-    w.qmatmul(&act, &act_mmq, out, shape, &ops)
+    w.qmatmul(&act, &act_mmq, &act_few, out, shape, &ops)
 }
 
 /// The draft layer up to and including attention for `tokens.len()` rows:
@@ -284,6 +290,7 @@ pub fn mtp_draft_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
         lm_head.lm_head.qmatmul(
             &q,
             &act_null,
+            &Tensor::null(),
             &mut logits_dev,
             flambeau_ops::MatmulShape {
                 m: 1,

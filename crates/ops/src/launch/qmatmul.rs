@@ -412,6 +412,17 @@ impl ActLayouts {
     pub fn reads_few(self) -> bool {
         self.few_d4 || self.few_ds4
     }
+
+    /// The scale record of the few-column activation the set reads, if any.
+    /// One activation buffer holds one record: a set reading both is refused.
+    pub fn few_scale(self) -> Result<Option<FewScale>> {
+        match (self.few_d4, self.few_ds4) {
+            (false, false) => Ok(None),
+            (true, false) => Ok(Some(FewScale::D4)),
+            (false, true) => Ok(Some(FewScale::Ds4)),
+            (true, true) => bail!("one activation read in both few-column scale records"),
+        }
+    }
 }
 
 impl From<ActLayout> for ActLayouts {
@@ -2989,7 +3000,7 @@ fn mmq_few_units_per_stage(ncg: usize) -> usize {
 fn mmq_few_serves(m: usize, k: usize) -> bool {
     let ncg = m.div_ceil(MMQ_FEW_NCOLS);
     let nunits = k / flambeau_quant::QK_K;
-    (1..=3).contains(&ncg)
+    (1..=MMQ_FEW_MAX_COLS).contains(&m)
         && k % flambeau_quant::QK_K == 0
         && nunits >= 8
         && nunits % mmq_few_units_per_stage(ncg) == 0
@@ -3007,6 +3018,9 @@ const MMQ_FEW_ENTRIES: &[(&str, [&str; 3])] = &[(
 
 /// Activation columns per group of the few-column MMQ.
 const MMQ_FEW_NCOLS: usize = flambeau_quant::q8_1_few::FEW_NCOLS;
+
+/// Most activation columns the few-column MMQ serves: 3 groups of 8.
+pub const MMQ_FEW_MAX_COLS: usize = 3 * MMQ_FEW_NCOLS;
 
 /// Launch a few-column MMQ: `ceil(m / 8)` column groups (at most 3), blocks of
 /// 4 warps over 16 weight rows splitting K by super-blocks. `act` holds the
