@@ -1,16 +1,15 @@
-//! **#227 P2.10a** — prompt prefix caching: keys, lookup, scaffold.
+//! Prompt prefix caching: keys, lookup, scaffold.
 //! Skips re-prefilling tokens already prefilled by a prior request whose
 //! prompt is a prefix of the current one. Wins big for multi-turn chat,
 //! where every turn N's prompt is `system + user1 + asst1 + ... + userN-1`,
 //! identical KV state to turn N-1's prefill.
 //! Granularity: chunks of `FLAMBEAU_PREFILL_UBATCH` tokens (default 512).
 //! KV at chunk boundaries is bit-identical to single-shot prefill of the
-//! same prefix (Phase A2 + A2-TP parity certs).
-//! V1 scope is design + key types + lookup; KV restore lands in
-//! [`crate::prefix_cache_restore`] (#228) and write/eviction in #229. This
+//! same prefix.
+//! Scope is design + key types + lookup; KV restore lands in
+//! [`crate::prefix_cache_restore`] and write/eviction in the cache. This
 //! module is the index — read-only on the hot path, write-protected on
 //! request end.
-//! Design doc: `doc/V1.x/prefix_cache_design.md`.
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -72,11 +71,11 @@ pub struct PrefixKeys {
 
 impl PrefixKeys {
     /// Compute the chunk-key chain for a prompt at the given chunk size.
-    /// **#229 V1**: the chain includes a final partial-tail chunk when
+    /// The chain includes a final partial-tail chunk when
     /// `prompt.len() % chunk_tokens != 0`, so the last `chunk_keys` entry
     /// always uniquely identifies the *full* prompt. Prefix-only matches
     /// at chunk boundaries are still expressible (callers can probe the
-    /// shorter-chain entries) but are not used in V1 because GDN
+    /// shorter-chain entries) but are not used because GDN
     /// recurrent state isn't snapshotted at chunk boundaries — we only
     /// hit on full-prompt match.
     pub fn from_prompt(prompt: &[u32], chunk_tokens: usize) -> PrefixKeys {
@@ -103,7 +102,7 @@ impl PrefixKeys {
         }
     }
 
-    /// **#229** — token count covered by the i-th chunk key (1-based).
+    /// Token count covered by the i-th chunk key (1-based).
     /// Mostly returns `(i+1) * chunk_tokens` but the last chunk in a
     /// prompt with a partial tail covers `prompt_tokens` total.
     pub fn tokens_for_chunk_index(&self, idx: usize) -> usize {
@@ -136,7 +135,7 @@ pub struct TopologyTag {
 
 /// Host-side KV snapshot covering one rank's full layer set at a given
 /// prefix length.
-/// V1 stores the snapshot in host RAM rather than device VRAM — the
+/// The snapshot lives in host RAM rather than device VRAM — the
 /// per-snapshot footprint is too big to keep many on-device, but host
 /// RAM is plentiful (64+ GB). The DtoH→HtoD round-trip on hit is
 /// ~700 ms at 6 GB/s for a 4 GB snapshot — still a net win vs the
@@ -148,8 +147,8 @@ pub struct TopologyTag {
 /// `#[cfg(feature = "hip")]`.
 /// Opaque per-rank snapshot bytes. Layout is arch-specific; the prefix
 /// cache treats it as bytes for size accounting + storage. After the
-/// legacy qwen3-moe stack was removed (#221) the snapshot/restore path
-/// is on hold pending #219 (v2 prefix-cache reimplementation); the type
+/// legacy qwen3-moe stack was removed the snapshot/restore path
+/// is on hold pending the prefix-cache reimplementation; the type
 /// stays in the public surface as a `Vec<u8>` placeholder.
 #[cfg(feature = "hip")]
 pub type RankSnapshot = Vec<u8>;
@@ -159,7 +158,7 @@ pub type RankSnapshot = Vec<u8>;
 #[cfg(feature = "hip")]
 pub type KvSnapshot = Vec<RankSnapshot>;
 
-/// One cache entry. **#228** adds the optional `kv` snapshot field;
+/// One cache entry. The `kv` snapshot field is optional;
 /// `kv = None` means the entry exists in the index for lookup-only
 /// purposes (e.g. tests, future write-deferred state).
 /// `n_chunks` is the number of chunks this entry covers (so the matched
@@ -179,18 +178,18 @@ pub struct CacheEntry {
     /// Total prompt-token count this entry covers — equals the original
     /// prompt length (chain may include a partial-tail chunk).
     pub n_tokens: usize,
-    /// **#228** — host-side KV snapshot covering every rank's layers at
+    /// Host-side KV snapshot covering every rank's layers at
     /// `n_tokens`. `None` = index-only entry (lookup hits, restore
     /// no-ops).
     #[cfg(feature = "hip")]
     pub kv: Option<std::sync::Arc<KvSnapshot>>,
-    /// **#229 V1** — host-copy of the LAST-position logits row from the
+    /// Host-copy of the LAST-position logits row from the
     /// originating prefill (one F32 per vocab entry, ~600 KB on
     /// Qwen3.6). Returned to the caller on full-prompt hit so it can
     /// sample the first decode token without re-running prefill. None
-    /// means index-only / pre-#229 entry; a full hit with `None`
+    /// means index-only entry; a full hit with `None`
     /// degrades to "restore + re-prefill last token" which doesn't
-    /// work on GDN topologies, so callers treat None as a miss in V1.
+    /// work on GDN topologies, so callers treat None as a miss.
     pub last_logits: Option<std::sync::Arc<Vec<f32>>>,
 }
 
@@ -219,7 +218,7 @@ pub struct CacheHit<'a> {
 /// Multi-reader, single-writer via `RwLock<HashMap>`. The hot path is
 /// read-heavy (every prefill consults it once); writes happen at request
 /// end and on eviction. A more elaborate `DashMap` is justified later
-/// if profiling shows lock contention; for V1 a single RwLock is fine
+/// if profiling shows lock contention; a single RwLock is fine
 /// (the chat handler already serialises on bigger primitives).
 /// Indexed by **terminal chunk key** — `chain[chain.len() - 1]`. The
 /// lookup function walks the prompt's chunk_keys longest-to-shortest,
@@ -237,8 +236,7 @@ pub struct PrefixCacheInsert {
 pub struct PrefixCache {
     inner: RwLock<PrefixCacheInner>,
     /// VRAM budget across all entries (bytes). Sized at construction
-    /// from `cfg.prefix_cache_max_gb`. **#229** uses this for eviction;
-    /// #227 just stores it.
+    /// from `cfg.prefix_cache_max_gb`. Used for eviction.
     pub vram_budget_bytes: usize,
     /// True iff this server has the prefix cache enabled. Stored at
     /// construction (from `cfg.prefix_cache`); read by every cache-
@@ -262,10 +260,18 @@ struct PrefixCacheInner {
 
 /// Floor the clamp never drops below, so a model that nearly fills host
 /// RAM still gets a usable cache. A smaller *requested* cap is honored.
+#[cfg_attr(
+    not(feature = "hip"),
+    allow(dead_code, reason = "used by the hip-gated serve_common; tests run feature-free")
+)]
 const HOST_CACHE_FLOOR_BYTES: usize = 2 * 1024 * 1024 * 1024;
 
 /// Host RAM held back above the resident weights for the OS, request
 /// scratch, and the decode working set.
+#[cfg_attr(
+    not(feature = "hip"),
+    allow(dead_code, reason = "used by the hip-gated serve_common; tests run feature-free")
+)]
 const HOST_CACHE_RESERVE_BYTES: usize = 2 * 1024 * 1024 * 1024;
 
 /// Clamp a requested host-snapshot-cache budget so the live cache plus the
@@ -275,6 +281,10 @@ const HOST_CACHE_RESERVE_BYTES: usize = 2 * 1024 * 1024 * 1024;
 /// below [`HOST_CACHE_FLOOR_BYTES`] unless the request itself is lower.
 /// `resident_weight_bytes` is the GGUF size for TP/hybrid (the mmap stays
 /// mapped after upload) and 0 for PP (the loader drops it post-upload).
+#[cfg_attr(
+    not(feature = "hip"),
+    allow(dead_code, reason = "used by the hip-gated serve_common; tests run feature-free")
+)]
 pub(crate) fn clamp_host_cache_budget(
     requested_bytes: usize,
     mem_total_bytes: usize,
@@ -361,7 +371,7 @@ impl PrefixCache {
         None
     }
 
-    /// **#229 stub** — insert an index-only entry (no KV, no logits).
+    /// Insert an index-only entry (no KV, no logits).
     /// Used by tests and as a fallback path when capture is disabled.
     /// The hit path no-ops on entries without a `kv` snapshot.
     /// `n_tokens` is the prompt-token count this entry covers; for
@@ -391,7 +401,7 @@ impl PrefixCache {
         inner.by_terminal.entry(terminal).or_default().push(entry);
     }
 
-    /// **#228** — clone out the `Arc<KvSnapshot>` for a hit terminal so
+    /// Clone out the `Arc<KvSnapshot>` for a hit terminal so
     /// the caller can drop the read lock before doing the (slow)
     /// host→device restore. Returns `None` when the entry has no
     /// snapshot attached (index-only).
@@ -404,7 +414,7 @@ impl PrefixCache {
             .find_map(|e| e.kv.as_ref().map(std::sync::Arc::clone))
     }
 
-    /// **#229 V1** — clone out the cached last-position logits for a
+    /// Clone out the cached last-position logits for a
     /// hit terminal. Pair with `snapshot_for`; on full-prompt match the
     /// caller restores KV/GDN, then samples first decode token from
     /// these logits without re-running prefill.
@@ -428,7 +438,7 @@ impl PrefixCache {
         inner.lru_order.push_front(terminal);
     }
 
-    /// **#229 P2.10c** — insert an entry with its KV snapshot, account
+    /// Insert an entry with its KV snapshot, account
     /// the bytes against the budget, evict LRU until under cap.
     /// Caller passes `bytes` (size of the snapshot in host RAM).
     /// Touches the entry's terminal as MRU. Idempotent: re-inserting
@@ -497,9 +507,9 @@ impl PrefixCache {
     }
 }
 
-/// **#229** — sum bytes of one snapshot held by `Arc<KvSnapshot>` for
-/// LRU accounting. Mirrors `model::snapshot_bytes` but takes the Arc
-/// view (avoids importing the model crate's helper into this module).
+/// Sum bytes of one snapshot held by `Arc<KvSnapshot>` for
+/// LRU accounting. Takes the Arc view (avoids importing the model
+/// crate's helper into this module).
 #[cfg(feature = "hip")]
 fn snapshot_bytes_arc(snap: &KvSnapshot) -> usize {
     snap.iter().map(|rank| rank.len()).sum()
@@ -525,7 +535,7 @@ impl PrefixCache {
         self.inner.read().unwrap().by_terminal.is_empty()
     }
 
-    /// Used VRAM (bytes) — populated by #229.
+    /// Used VRAM (bytes).
     pub fn used_bytes(&self) -> usize {
         self.inner.read().unwrap().used_bytes
     }
@@ -533,7 +543,7 @@ impl PrefixCache {
 
 /// Public match descriptor. The `terminal` key is exposed so callers
 /// can re-fetch the entry under whatever lock discipline they prefer
-/// (read for KV-restore in #228; write for LRU touch).
+/// (read for KV-restore; write for LRU touch).
 #[derive(Debug, Clone, Copy)]
 pub struct MatchInfo {
     pub n_chunks: usize,
@@ -667,7 +677,7 @@ mod tests {
 
     #[test]
     fn partial_final_chunk_included_in_chain() {
-        // **#229 V1**: 700-token prompt at chunk=512 → 1 full chunk +
+        // 700-token prompt at chunk=512 → 1 full chunk +
         // 1 partial-tail chunk = 2 entries, last covering 700 tokens.
         let prompt: Vec<u32> = (0..700).collect();
         let keys = PrefixKeys::from_prompt(&prompt, 512);

@@ -1,4 +1,4 @@
-//! Parity test — `mmvq_q6_k_batched` vs looping single-row Q6_K MMVQ.
+//! Parity test — batched Q6_K `qmatmul` (m = N slots) vs looping single-row Q6_K MMVQ.
 
 #![cfg(feature = "hip")]
 #![expect(
@@ -170,7 +170,7 @@ fn run_parity(label: &str, shape: Shape, n_slots: usize, seed: u64) -> Result<bo
         let act_row = DevicePtr(d_act_q8_1.as_usize() + s * act_row_bytes);
         let dst_row = DevicePtr(d_out_baseline.as_usize() + s * dst_row_bytes);
         qmatmul(
-            flambeau_ops::OpCtx { reg: &reg, stream },
+            &reg, stream,
             flambeau_ops::QmatmulBuffers {
                 weights: d_w,
                 act_q8_1: act_row,
@@ -184,7 +184,7 @@ fn run_parity(label: &str, shape: Shape, n_slots: usize, seed: u64) -> Result<bo
     stream.synchronize()?;
 
     qmatmul(
-        flambeau_ops::OpCtx { reg: &reg, stream },
+        &reg, stream,
         flambeau_ops::QmatmulBuffers {
             weights: d_w,
             act_q8_1: d_act_q8_1,

@@ -220,7 +220,7 @@ fn swa_decode_window_4_of_8() {
 
     let scale = 1.0 / (head_dim as f32).sqrt();
     attention_decode_f16(
-        flambeau_ops::OpCtx { reg: &reg, stream: dev.default_stream() },
+        &reg, dev.default_stream(),
         flambeau_ops::AttnBuffers { q: d_q, k: d_k, v: d_v, out: d_out },
         flambeau_ops::AttnDecodeShape { n_heads_q, n_heads_kv, head_dim, n_tokens_kv: n_tokens },
         flambeau_ops::AttnKnobs { scale, window_size: window, ring_depth: 0 },
@@ -290,14 +290,14 @@ fn swa_decode_window_geq_ntokens_matches_unbounded() {
 
     let scale = 1.0 / (head_dim as f32).sqrt();
     attention_decode_f16(
-        flambeau_ops::OpCtx { reg: &reg, stream: dev.default_stream() },
+        &reg, dev.default_stream(),
         flambeau_ops::AttnBuffers { q: d_q, k: d_k, v: d_v, out: d_out_off },
         flambeau_ops::AttnDecodeShape { n_heads_q, n_heads_kv, head_dim, n_tokens_kv: n_tokens },
         flambeau_ops::AttnKnobs { scale, window_size: 0, ring_depth: 0 },
     )
     .unwrap();
     attention_decode_f16(
-        flambeau_ops::OpCtx { reg: &reg, stream: dev.default_stream() },
+        &reg, dev.default_stream(),
         flambeau_ops::AttnBuffers { q: d_q, k: d_k, v: d_v, out: d_out_big },
         flambeau_ops::AttnDecodeShape { n_heads_q, n_heads_kv, head_dim, n_tokens_kv: n_tokens },
         flambeau_ops::AttnKnobs { scale, window_size: 16, ring_depth: 0 },
@@ -324,7 +324,7 @@ fn swa_decode_window_geq_ntokens_matches_unbounded() {
 
 /// Gemma4 26B-A4B full-attention layer shape: head_dim=512, GQA-16/2,
 /// SWA window not used (full-attn). Force splitk by n_tokens > 256.
-/// Phase 13: ATTN_SK_MAX_HEAD_DIM bumped 256→512.
+/// ATTN_SK_MAX_HEAD_DIM is 512.
 #[test]
 fn splitk_matches_single_pass_gemma4_hd512() {
     let Some(dev) = dev_or_skip() else {
@@ -360,14 +360,14 @@ fn splitk_matches_single_pass_gemma4_hd512() {
 
     let scale = 1.0 / (head_dim as f32).sqrt();
     attention_decode_f16(
-        flambeau_ops::OpCtx { reg: &reg, stream: dev.default_stream() },
+        &reg, dev.default_stream(),
         flambeau_ops::AttnBuffers { q: d_q, k: d_k, v: d_v, out: d_out_single },
         flambeau_ops::AttnDecodeShape { n_heads_q, n_heads_kv, head_dim, n_tokens_kv: n_tokens },
         flambeau_ops::AttnKnobs { scale, window_size: window, ring_depth: 0 },
     )
     .unwrap();
     attention_decode_f16_splitk(
-        flambeau_ops::OpCtx { reg: &reg, stream: dev.default_stream() },
+        &reg, dev.default_stream(),
         flambeau_ops::AttnBuffers { q: d_q, k: d_k, v: d_v, out: d_out_split },
         flambeau_ops::AttnSplitkPartials { partials_m: d_part_m, partials_s: d_part_s, partials_o: d_part_o },
         flambeau_ops::AttnSplitkShape { n_heads_q, n_heads_kv, head_dim, n_tokens_kv: n_tokens, chunk_size, chunk_base: 0 },
@@ -439,14 +439,14 @@ fn swa_decode_splitk_matches_window_4() {
 
     let scale = 1.0 / (head_dim as f32).sqrt();
     attention_decode_f16(
-        flambeau_ops::OpCtx { reg: &reg, stream: dev.default_stream() },
+        &reg, dev.default_stream(),
         flambeau_ops::AttnBuffers { q: d_q, k: d_k, v: d_v, out: d_out_single },
         flambeau_ops::AttnDecodeShape { n_heads_q, n_heads_kv, head_dim, n_tokens_kv: n_tokens },
         flambeau_ops::AttnKnobs { scale, window_size: window, ring_depth: 0 },
     )
     .unwrap();
     attention_decode_f16_splitk(
-        flambeau_ops::OpCtx { reg: &reg, stream: dev.default_stream() },
+        &reg, dev.default_stream(),
         flambeau_ops::AttnBuffers { q: d_q, k: d_k, v: d_v, out: d_out_split },
         flambeau_ops::AttnSplitkPartials { partials_m: d_part_m, partials_s: d_part_s, partials_o: d_part_o },
         flambeau_ops::AttnSplitkShape { n_heads_q, n_heads_kv, head_dim, n_tokens_kv: n_tokens, chunk_size, chunk_base: 0 },
@@ -512,7 +512,7 @@ fn swa_prefill_window_3_of_8() {
 
     let scale = 1.0 / (head_dim as f32).sqrt();
     attention_prefill_f16(
-        flambeau_ops::OpCtx { reg: &reg, stream: dev.default_stream() },
+        &reg, dev.default_stream(),
         flambeau_ops::AttnBuffers { q: d_q, k: d_k, v: d_v, out: d_out },
         flambeau_ops::AttnPrefillShape { n_q_tokens: n_q, n_heads_q, n_heads_kv, head_dim, n_k_tokens: n_k, q_offset },
         flambeau_ops::AttnKnobs { scale, window_size: window, ring_depth: 0 },
@@ -693,7 +693,7 @@ fn swa_prefill_flash_tile_window_4() {
 
     let scale = 1.0 / (head_dim as f32).sqrt();
     attention_prefill_f16(
-        flambeau_ops::OpCtx { reg: &reg, stream: dev.default_stream() },
+        &reg, dev.default_stream(),
         flambeau_ops::AttnBuffers { q: d_q, k: d_k, v: d_v, out: d_out },
         flambeau_ops::AttnPrefillShape { n_q_tokens: n_q, n_heads_q, n_heads_kv, head_dim, n_k_tokens: n_k, q_offset },
         flambeau_ops::AttnKnobs { scale, window_size: window, ring_depth: 0 },
@@ -744,7 +744,7 @@ fn swa_prefill_flash_tile_window_4() {
 }
 
 /// flash_tile prefill with window=0 must produce output bit-equivalent
-/// to the pre-#15 baseline (regression guard for the kernel change).
+/// to the pre-softcap baseline (regression guard for the kernel change).
 #[test]
 fn flash_tile_window_zero_matches_oracle() {
     let Some(dev) = dev_or_skip() else {
@@ -776,7 +776,7 @@ fn flash_tile_window_zero_matches_oracle() {
     let out_long = n_q_long * n_heads_q * head_dim;
     let d_out_long = dev.alloc(out_long * 2).unwrap();
     attention_prefill_f16(
-        flambeau_ops::OpCtx { reg: &reg, stream: dev.default_stream() },
+        &reg, dev.default_stream(),
         flambeau_ops::AttnBuffers { q: d_q_long, k: d_k, v: d_v, out: d_out_long },
         flambeau_ops::AttnPrefillShape { n_q_tokens: n_q_long, n_heads_q, n_heads_kv, head_dim, n_k_tokens: n_k_long, q_offset },
         flambeau_ops::AttnKnobs { scale, window_size: 0, ring_depth: 0 },
@@ -797,7 +797,7 @@ fn flash_tile_window_zero_matches_oracle() {
         let chunk_out = chunk * n_heads_q * head_dim;
         let d_out_chunk = dev.alloc(chunk_out * 2).unwrap();
         attention_prefill_f16(
-            flambeau_ops::OpCtx { reg: &reg, stream: dev.default_stream() },
+            &reg, dev.default_stream(),
             flambeau_ops::AttnBuffers { q: d_q_chunk, k: d_k, v: d_v, out: d_out_chunk },
             flambeau_ops::AttnPrefillShape { n_q_tokens: chunk, n_heads_q, n_heads_kv, head_dim, n_k_tokens: n_k_long, q_offset: q_off_cur },
             flambeau_ops::AttnKnobs { scale, window_size: 0, ring_depth: 0 },
@@ -859,7 +859,7 @@ fn softcap_f32_inplace() {
     }
 }
 
-// ---- Ring-buffered SWA (Phase 2 ring_depth addressing) -----------------
+// ---- Ring-buffered SWA (ring_depth addressing) -----------------
 //
 // The kernel and CPU reference both read the SAME ring_depth-row K/V slab at
 // physical row `t % ring_depth`. Parameters are chosen so the windowed key
@@ -898,7 +898,7 @@ fn ring_swa_decode_wrap_window4_depth6() {
 
     let scale = 1.0 / (head_dim as f32).sqrt();
     attention_decode_f16(
-        flambeau_ops::OpCtx { reg: &reg, stream: dev.default_stream() },
+        &reg, dev.default_stream(),
         flambeau_ops::AttnBuffers { q: d_q, k: d_k, v: d_v, out: d_out },
         flambeau_ops::AttnDecodeShape { n_heads_q, n_heads_kv, head_dim, n_tokens_kv: n_tokens },
         flambeau_ops::AttnKnobs { scale, window_size: window, ring_depth: ring_depth as i32 },
@@ -972,7 +972,7 @@ fn ring_swa_prefill_wrap_window3_depth8() {
 
     let scale = 1.0 / (head_dim as f32).sqrt();
     attention_prefill_f16(
-        flambeau_ops::OpCtx { reg: &reg, stream: dev.default_stream() },
+        &reg, dev.default_stream(),
         flambeau_ops::AttnBuffers { q: d_q, k: d_k, v: d_v, out: d_out },
         flambeau_ops::AttnPrefillShape { n_q_tokens: n_q, n_heads_q, n_heads_kv, head_dim, n_k_tokens: n_k, q_offset },
         flambeau_ops::AttnKnobs { scale, window_size: window, ring_depth: ring_depth as i32 },
@@ -1058,7 +1058,7 @@ fn ring_swa_prefill_flash_tile_wrap_multichunk() {
 
     let scale = 1.0 / (head_dim as f32).sqrt();
     attention_prefill_f16(
-        flambeau_ops::OpCtx { reg: &reg, stream: dev.default_stream() },
+        &reg, dev.default_stream(),
         flambeau_ops::AttnBuffers { q: d_q, k: d_k, v: d_v, out: d_out },
         flambeau_ops::AttnPrefillShape { n_q_tokens: n_q, n_heads_q, n_heads_kv, head_dim, n_k_tokens: n_k, q_offset },
         flambeau_ops::AttnKnobs { scale, window_size: window, ring_depth: ring_depth as i32 },

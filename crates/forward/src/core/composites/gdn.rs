@@ -11,8 +11,7 @@
 //!   port is a separate, larger slice; per legacy memory the hybrid
 //!   wall stays ~1× even after the full port.
 
-use anyhow::{bail, Result};
-use flambeau_backend_hip::{HipDevice, HipStream};
+use anyhow::{bail, Context, Result};
 use flambeau_core::{Device, DevicePtr};
 use flambeau_model_ops::delta_net::DeltaNetLayer;
 use flambeau_model_ops::WeightHandle;
@@ -29,8 +28,8 @@ fn quant_handle(qw: &QuantWeight, dims: [usize; 2]) -> WeightHandle {
     }
 }
 
-pub fn gdn_layer_local<H: TopologyHooks>(
-    state: &mut CoreState<'_>,
+pub fn gdn_layer_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
+    state: &mut CoreState<'_, B>,
     hooks: &mut H,
     input: &Tensor<F16>,
     weights: &GdnWeights,
@@ -52,20 +51,27 @@ pub fn gdn_layer_local<H: TopologyHooks>(
                 state.layer_idx_offset
             )
         })?;
-    if local_idx >= state.pool.gdn_state.len() {
-        bail!(
-            "gdn_layer: local_idx {local_idx} >= gdn_state.len {}",
-            state.pool.gdn_state.len()
-        );
-    }
+    let gdn_idx = state
+        .pool
+        .gdn_index(local_idx)
+        .with_context(|| format!("gdn_layer: layer {layer_idx}"))?;
     let max_slots = state.pool.config.max_slots.max(1);
     for (i, &slot) in slot_ids.iter().enumerate() {
         if slot >= max_slots {
             bail!("gdn_layer: slot_ids[{i}]={slot} >= max_slots {max_slots}");
         }
     }
+    // A speculative verify reads its input state through `gdn_rs_idx`; every
+    // other pass needs the live state current.
+    let kstates = state.pool.mtp_spec_rows
+        && state.pool.mtp_gdn_kstates != DevicePtr::NULL
+        && slot_ids.iter().all(|&s| s == slot_ids[0])
+        && (state.pool.gdn_rs_pending == 0 || state.pool.gdn_rs_slot == slot_ids[0]);
+    if !kstates {
+        gdn_rs_make_live(state)?;
+    }
     let dims = weights.dims;
-    let layer_state = state.pool.gdn_state[local_idx];
+    let layer_state = state.pool.gdn_state[gdn_idx];
     let state_bytes_per_slot = dims.num_v_heads * dims.head_k_dim * dims.head_v_dim * 4;
     let hist_bytes_per_slot = (dims.conv_kernel - 1) * dims.conv_channels * 4;
 
@@ -115,13 +121,31 @@ pub fn gdn_layer_local<H: TopologyHooks>(
                 )
             })?
             .view();
+        let mut prefill_scratch = prefill_scratch;
+        if state.pool.mtp_spec_rows {
+            let rows = state.pool.gdn_spec_rows(gdn_idx, &dims).ok_or_else(|| {
+                anyhow::anyhow!("gdn_layer: speculative rows requested but pool has no MTP row store")
+            })?;
+            if n_tokens > state.pool.mtp_verify_rows() {
+                bail!(
+                    "gdn_layer: verify batch {n_tokens} > MTP row store {}",
+                    state.pool.mtp_verify_rows()
+                );
+            }
+            prefill_scratch.alpha_f32 = rows.alpha;
+            prefill_scratch.beta_f32 = rows.beta;
+            prefill_scratch.q_norm_f32 = rows.q;
+            prefill_scratch.k_norm_f32 = rows.k;
+            prefill_scratch.v_f32 = rows.v;
+            prefill_scratch.conv_input = rows.conv_input;
+        }
         let slot = slot_ids[0];
         let state_ptr = layer_state.state.offset_bytes(slot * state_bytes_per_slot);
         let hist_ptr = layer_state
             .conv_history
             .offset_bytes(slot * hist_bytes_per_slot);
         let mut ar_cb =
-            |buf: DevicePtr, n_elems: usize, dev: &HipDevice, stm: &HipStream| -> Result<()> {
+            |buf: DevicePtr, n_elems: usize, dev: &B::Device, stm: &B::Stream| -> Result<()> {
                 hooks.ar_sum_f32(buf, n_elems, dev, stm)
             };
         block.forward_prefill_with_ar_hook(
@@ -140,6 +164,13 @@ pub fn gdn_layer_local<H: TopologyHooks>(
             flambeau_model_ops::GdnPrefillSeq {
                 n_tokens,
                 state_event: None,
+                kstates: kstates.then(|| flambeau_model_ops::GdnKStates {
+                    states: state
+                        .pool
+                        .mtp_gdn_kstates
+                        .offset_bytes(gdn_idx * state.pool.mtp_gdn_kstates_layer_bytes),
+                    rs_idx: state.pool.gdn_rs_idx,
+                }),
             },
             Some(&mut ar_cb),
         )?;
@@ -194,10 +225,20 @@ pub fn gdn_layer_local<H: TopologyHooks>(
             return Ok(None);
         }
         let mut ar_cb =
-            |buf: DevicePtr, n_elems: usize, dev: &HipDevice, stm: &HipStream| -> Result<()> {
+            |buf: DevicePtr, n_elems: usize, dev: &B::Device, stm: &B::Stream| -> Result<()> {
                 hooks.ar_sum_f32(buf, n_elems, dev, stm)
             };
-        if let Some(batched_scratch) = state.pool.gdn_decode_batched_scratch.as_ref() {
+        // One row takes the per-slot path even when the pool has multi-slot
+        // scratch: the batched path uploads per-slot pointers and
+        // synchronises the stream, which a decode-graph capture cannot record
+        // (CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED on every capture of a server
+        // configured with more than one slot).
+        let batched = state
+            .pool
+            .gdn_decode_batched_scratch
+            .as_ref()
+            .filter(|_| uses_batched_slots(n_tokens));
+        if let Some(batched_scratch) = batched {
             let batched_view = batched_scratch.view();
             if n_tokens > batched_view.max_slots {
                 bail!(
@@ -282,4 +323,41 @@ pub fn gdn_layer_local<H: TopologyHooks>(
     Ok(Some(unsafe {
         Tensor::<F16>::from_raw(delta_ptr, n_tokens * hidden)
     }))
+}
+
+/// Whether a GDN decode of `n_tokens` rows (one per slot) goes through the
+/// multi-slot batched kernels; a single row always takes the per-slot path.
+fn uses_batched_slots(n_tokens: usize) -> bool {
+    n_tokens > 1
+}
+
+/// Copy a pending per-token MTP state back over the live GDN state before a
+/// pass that reads the live state. Under decode-graph capture the copy would
+/// be recorded for every replay, so the capture is refused instead and the
+/// driver's plain forward does the copy.
+pub(crate) fn gdn_rs_make_live<B: flambeau_backend::Backend>(
+    state: &mut CoreState<'_, B>,
+) -> Result<()> {
+    if state.pool.gdn_rs_pending == 0 {
+        return Ok(());
+    }
+    if let Some(cap) = state.capture.as_deref_mut() {
+        cap.mark_uncapturable("gdn: per-token MTP state pending");
+        return Ok(());
+    }
+    state.pool.gdn_rs_materialize(state.device, state.stream)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::uses_batched_slots;
+
+    /// A single-row decode must stay on the per-slot path: it is the one a
+    /// CUDA decode-graph capture records, and the batched path synchronises
+    /// the stream mid-capture.
+    #[test]
+    fn single_row_decode_never_takes_the_batched_slot_path() {
+        assert!(!uses_batched_slots(1));
+        assert!(uses_batched_slots(2));
+    }
 }

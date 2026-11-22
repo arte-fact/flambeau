@@ -1,9 +1,9 @@
-//! #288-v2 parity test — verify the existing `mmq_q4_1_wave64` kernel
+//! Parity test — verify the existing `mmq_q4_1_wave64` kernel
 //! produces output bit-identical to per-row `qmatmul(m=1)` when invoked
 //! at small N (decode batch dim).
 //! The wave64 kernel was tuned for prefill (large m); this test
 //! confirms it stays correct at decode-N values N ∈ {2, 4, 8}, which
-//! is the regime the #288-v2 dispatch routes through it.
+//! is the regime the small-N dispatch routes through it.
 
 #![cfg(feature = "hip")]
 #![expect(
@@ -165,7 +165,7 @@ fn run_parity(label: &str, n_rows: usize, k: usize, n_slots: usize, seed: u64) -
         let act_row = DevicePtr(d_act_q8_1.as_usize() + s * act_row_bytes);
         let dst_row = DevicePtr(d_out_baseline.as_usize() + s * dst_row_bytes);
         qmatmul(
-            flambeau_ops::OpCtx { reg: &reg, stream },
+            &reg, stream,
             flambeau_ops::QmatmulBuffers {
                 weights: d_w,
                 act_q8_1: act_row,
@@ -183,7 +183,7 @@ fn run_parity(label: &str, n_rows: usize, k: usize, n_slots: usize, seed: u64) -
         std::env::set_var("FLAMBEAU_BATCHED_MMVQ", "1");
     }
     qmatmul(
-        flambeau_ops::OpCtx { reg: &reg, stream },
+        &reg, stream,
         flambeau_ops::QmatmulBuffers {
             weights: d_w,
             act_q8_1: d_act_q8_1,

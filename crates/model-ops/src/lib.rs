@@ -23,10 +23,16 @@ pub use dtype::{ElemType, F16, F32, I32, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q8_1};
 pub use error::{Error, Result};
 pub use tensor::Tensor;
 
+// Graph-capture slot handles threaded through the `_slots` decode ops. Named
+// here so the forward-capture wiring (Stage C) imports them from one place.
+pub use flambeau_ops::{
+    AttnDecodeQ8Slots, AttnDecodeQ8SplitkSlots, AttnSplitkSlots, KvAppendSlots,
+};
+
 pub use delta_net::{
     BackendCtx, DeltaNetDims, DeltaNetLayer, DeltaNetLayerDecodeBatchedScratch,
     DeltaNetLayerDecodeScratch, DeltaNetLayerPrefillScratch, DeltaNetScratchDims, DeltaNetWeights,
-    GdnDecodeBatchedBuffers, GdnDecodeBuffers, GdnPrefillSeq,
+    GdnDecodeBatchedBuffers, GdnDecodeBuffers, GdnKStates, GdnPrefillSeq,
     OwnedDeltaNetLayerDecodeBatchedScratch, OwnedDeltaNetLayerDecodeScratch,
     OwnedDeltaNetLayerPrefillScratch,
 };
@@ -43,23 +49,34 @@ pub use shared_expert::{
 };
 pub use weight_handle::WeightHandle;
 
-pub use ops::activation::{gelu_mul_f32_to_f16, swiglu_f16, swiglu_f32_to_f16};
+pub use ops::activation::{
+    gelu_mul_f32_to_f16, gelu_mul_f32_to_q8_1, gelu_mul_f32_to_q8_1_mmq, swiglu_f16,
+    swiglu_f32_to_f16,
+};
 pub use ops::add::{add_f16, add_f32};
 pub use ops::attn_decode::attn_decode_f16;
 pub use ops::attn_decode_batched::{
-    attn_decode_f16_batched, attn_decode_f16_paged, attn_prefill_f16_paged,
-    kv_append_f16_batched_slots, kv_append_f16_paged_prefill, kv_append_f16_paged_slots,
+    attn_decode_f16_batched, attn_decode_f16_batched_splitk, attn_decode_f16_paged,
+    attn_prefill_f16_paged, kv_append_f16_batched_slots, kv_append_f16_paged_prefill,
+    kv_append_f16_paged_slots,
 };
-pub use ops::attn_decode_splitk::{attn_decode_f16_splitk, splitk_chunk_size, SplitkOutputs};
+pub use ops::attn_decode_splitk::{
+    attn_decode_f16_splitk, attn_decode_f16_splitk_dpos, attn_decode_f16_splitk_slots,
+    splitk_chunk_size, SplitkOutputs,
+};
 // pub use ops::attn_decode_splitk_h2::attn_decode_f16_splitk_h2;
 pub use ops::attn_prefill::attn_prefill_f16;
 pub use ops::cast::{cast_f16_to_f32, cast_f32_to_f16};
 pub use ops::gated_attn::{sigmoid_mul_f16, split_q_gate_f16};
-pub use ops::attn_decode_q8_kv::attn_decode_q8_kv;
-pub use ops::attn_decode_q8_kv_splitk::attn_decode_q8_kv_splitk;
+pub use ops::attn_decode_q8_kv::{attn_decode_q8_kv, attn_decode_q8_kv_slots};
+pub use ops::attn_decode_q8_kv_splitk::{
+    attn_decode_q8_kv_splitk, attn_decode_q8_kv_splitk_dpos, attn_decode_q8_kv_splitk_slots,
+};
 pub use ops::attn_prefill_q8_kv::attn_prefill_q8_kv;
 pub use ops::kv_append::{kv_append_f16, KvAppendSpec};
-pub use ops::kv_append_f16_to_q8::kv_append_f16_to_q8;
+pub use ops::kv_append_f16_to_q8::{
+    kv_append_f16_to_q8, kv_append_f16_to_q8_dpos, kv_append_f16_to_q8_slots, KvAppendQ8DstSlots,
+};
 pub use ops::moe_router::topk_f32 as moe_router_topk_f32;
 pub use ops::qmatmul::{
     mmvq_q4_0_gate_up_t128_decode, mmvq_q4_0_kv_decode_f16, mmvq_q8_0_gate_up_t128_decode,

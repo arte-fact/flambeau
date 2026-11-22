@@ -10,13 +10,21 @@ description = "First-class correctness-sweep + perf-matrix + cert-diff harness. 
 default = []
 # Pulls in backend-hip so `sweep` can run on real MI50. Off by default so
 # `cargo check -p flambeau-bench` stays ROCm-free.
-hip = ["dep:flambeau-backend-hip", "dep:flambeau-kernels-hip", "dep:flambeau-quant", "dep:half", "dep:bytemuck"]
+hip = ["dep:flambeau-backend-hip", "dep:flambeau-kernels-hip", "dep:flambeau-quant", "dep:half", "dep:bytemuck", "flambeau-ops/bench"]
+# Same, for the CUDA backend on sm_86 (RTX 3090). Independent of `hip`.
+cuda = ["dep:flambeau-backend-cuda", "dep:flambeau-kernels-cuda", "dep:flambeau-quant", "dep:half", "dep:bytemuck", "flambeau-ops/bench"]
 
 [dependencies]
 flambeau-core = { path = "../core" }
 flambeau-runtime = { path = "../runtime" }
+# For `qmatmul::recipe_stem_for` — resolves a dispatch impl_id through the
+# launch-layer aliases (e.g. Q8_0 single_row → t128_vdr2) so autotune --check
+# compares the kernel that actually runs, not the literal impl_id. Backend-free.
+flambeau-ops = { path = "../ops" }
 flambeau-backend-hip = { path = "../backend-hip", optional = true }
 flambeau-kernels-hip = { path = "../kernels-hip", optional = true }
+flambeau-backend-cuda = { path = "../backend-cuda", optional = true }
+flambeau-kernels-cuda = { path = "../kernels-cuda", optional = true }
 flambeau-quant = { path = "../quant", optional = true }
 anyhow.workspace = true
 bytemuck = { workspace = true, optional = true }

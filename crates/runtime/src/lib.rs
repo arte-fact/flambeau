@@ -7,6 +7,7 @@
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 
+pub mod cluster;
 pub mod collective;
 pub mod json_grammar;
 pub mod json_schema;
@@ -18,8 +19,10 @@ pub mod sampling;
 pub mod tp_layout;
 pub mod tp_slice;
 
+pub use cluster::Cluster;
 pub use collective::{
-    AllGather, AllReduce, AllToAll, Broadcast, CollectiveError, CollectiveResult, RefMesh,
+    AllGather, AllReduce, AllToAll, ArPostAttnRmsNormHookBuffers, ArResidualRmsNormHookBuffers,
+    Broadcast, CollectiveError, CollectiveResult, DeviceAllReduce, FusedAllReduce, RefMesh,
     RefRankHandle,
 };
 pub use kv_cache::{
@@ -28,6 +31,6 @@ pub use kv_cache::{
 pub use mesh::{CollectiveCfg, CollectiveDType, LayerAssignment, Mesh, RankId, ReduceOp};
 pub use model::{Model, ModelDriver};
 pub use registry::{Registry, RegistryError};
-pub use sampling::{sample, Rng, Sampler, Sampling};
+pub use sampling::{build_distribution, sample, MtpArgmax, MtpSampler, Rng, Sampler, Sampling};
 pub use tp_layout::{LayoutError, WeightLayout};
 pub use tp_slice::{slice_bytes_for_tp, slice_for_tp, SliceError};

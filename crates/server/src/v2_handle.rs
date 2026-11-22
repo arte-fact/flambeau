@@ -8,12 +8,16 @@
 //! a generic parameter. `Session<A>` for every arch satisfies it via
 //! the blanket impl below.
 
-#![cfg(feature = "hip")]
+#![cfg(any(feature = "hip", feature = "cuda"))]
 
 use std::sync::Arc;
 
 use anyhow::Result;
-use flambeau_forward::runtime::{Arch, Session};
+use flambeau_forward::runtime::Arch;
+#[cfg(feature = "hip")]
+use flambeau_forward::runtime::Session;
+#[cfg(feature = "cuda")]
+use flambeau_forward::SoloSession;
 use flambeau_runtime::ModelDriver;
 use tokio::sync::Mutex;
 
@@ -44,7 +48,7 @@ pub trait V2BatchableSession: Send {
     /// the model's vocab. Slot ids must be distinct.
     fn forward_decode_batched(&mut self, slots: &[(u32, usize, usize)]) -> Result<()>;
 
-    /// Sarathi-Serve mixed-batch forward (Phase K4c). Combines one
+    /// Sarathi-Serve mixed-batch forward. Combines one
     /// prefill chunk (`K` tokens starting at `prefill_start_position`
     /// on `prefill_slot_id`) with N decode tokens (`decodes`) into a
     /// single Session::forward_mixed call. Returns Ok(()) iff the arch
@@ -77,8 +81,35 @@ pub trait V2BatchableSession: Send {
     fn release_paged_slot(&mut self, slot_id: usize) -> Result<()>;
 
     fn dispose_in_place(&mut self) -> Result<()>;
+
+    /// One greedy MTP cycle. `Ok(None)` when unsupported (arch without MTP
+    /// head, or non-single-device topology). Returns (accepted draft
+    /// tokens, logits at the last accepted position (empty when the cycle drew on device)).
+    fn mtp_step(
+        &mut self,
+        _token: u32,
+        _position: usize,
+        _slot_id: usize,
+        _n_draft: usize,
+        _sample_factory: flambeau_server_core::SampleFactory,
+        _seed: u64,
+    ) -> Result<Option<(Vec<u32>, Vec<f32>)>> {
+        Ok(None)
+    }
+
+    /// See [`flambeau_server_core::Session::decode_greedy`].
+    fn decode_greedy(
+        &mut self,
+        _token: u32,
+        _position: usize,
+        _slot_id: usize,
+        _plan: &flambeau_runtime::MtpArgmax,
+    ) -> Result<Option<u32>> {
+        Ok(None)
+    }
 }
 
+#[cfg(feature = "hip")]
 impl<A: Arch> V2BatchableSession for Session<A> {
     fn forward_one_token_into_slot(
         &mut self,
@@ -163,6 +194,130 @@ impl<A: Arch> V2BatchableSession for Session<A> {
     fn dispose_in_place(&mut self) -> Result<()> {
         Session::dispose_in_place(self)
     }
+
+    fn mtp_step(
+        &mut self,
+        token: u32,
+        position: usize,
+        slot_id: usize,
+        n_draft: usize,
+        sample_factory: flambeau_server_core::SampleFactory,
+        seed: u64,
+    ) -> Result<Option<(Vec<u32>, Vec<f32>)>> {
+        Session::mtp_step(self, token, position, slot_id, n_draft, sample_factory, seed)
+    }
+}
+
+/// Single-device (`SoloSession<B, A>`) satisfies the same arch-erased trait.
+/// Decode/mixed batching, KV snapshot/restore and paged release route to the
+/// inline executor's methods, identical in shape to the `Session<A>` impl.
+#[cfg(feature = "cuda")]
+impl<B: flambeau_backend::Backend, A: Arch> V2BatchableSession for SoloSession<B, A> {
+    fn forward_one_token_into_slot(
+        &mut self,
+        token: u32,
+        position: usize,
+        slot_id: usize,
+        out: &mut Vec<f32>,
+    ) -> Result<()> {
+        SoloSession::forward_one_token_logits_slot(self, token, position, slot_id, out)
+    }
+
+    fn forward_prefill_into_slot(
+        &mut self,
+        tokens: &[u32],
+        start_position: usize,
+        slot_id: usize,
+        out: &mut Vec<f32>,
+    ) -> Result<()> {
+        SoloSession::forward_prefill_logits_slot(self, tokens, start_position, slot_id, out)
+    }
+
+    fn forward_decode_batched(&mut self, slots: &[(u32, usize, usize)]) -> Result<()> {
+        SoloSession::forward_decode_batched(self, slots)
+    }
+
+    fn forward_mixed(
+        &mut self,
+        prefill_tokens: &[u32],
+        prefill_start_position: usize,
+        prefill_slot_id: usize,
+        decodes: &[(u32, usize, usize)],
+    ) -> Result<()> {
+        let k = prefill_tokens.len();
+        if k == 0 {
+            anyhow::bail!("V2BatchableSession::forward_mixed: empty prefill_tokens");
+        }
+        if decodes.is_empty() {
+            anyhow::bail!("V2BatchableSession::forward_mixed: empty decodes");
+        }
+        let n = k + decodes.len();
+        let mut tokens: Vec<u32> = Vec::with_capacity(n);
+        let mut positions: Vec<usize> = Vec::with_capacity(n);
+        let mut slot_ids: Vec<usize> = Vec::with_capacity(n);
+        tokens.extend_from_slice(prefill_tokens);
+        for i in 0..k {
+            positions.push(prefill_start_position + i);
+            slot_ids.push(prefill_slot_id);
+        }
+        for &(tok, pos, slot) in decodes {
+            tokens.push(tok);
+            positions.push(pos);
+            slot_ids.push(slot);
+        }
+        SoloSession::forward_mixed(self, &tokens, &positions, &slot_ids, k)
+    }
+
+    fn logits_row(&self, i: usize, vocab: usize) -> &[f32] {
+        SoloSession::logits_row(self, i, vocab)
+    }
+
+    fn reset_kv_slot(&mut self, slot_id: usize) -> Result<()> {
+        SoloSession::reset_kv_slot(self, slot_id)
+    }
+
+    fn snapshot_kv_slot(&mut self, slot_id: usize, n_tokens: usize) -> Result<Vec<Vec<u8>>> {
+        SoloSession::snapshot_kv_slot(self, slot_id, n_tokens)
+    }
+
+    fn restore_kv_slot(
+        &mut self,
+        slot_id: usize,
+        n_tokens: usize,
+        snaps: std::sync::Arc<Vec<Vec<u8>>>,
+    ) -> Result<()> {
+        SoloSession::restore_kv_slot(self, slot_id, n_tokens, snaps)
+    }
+
+    fn release_paged_slot(&mut self, slot_id: usize) -> Result<()> {
+        SoloSession::release_paged_slot(self, slot_id)
+    }
+
+    fn dispose_in_place(&mut self) -> Result<()> {
+        SoloSession::dispose_in_place(self)
+    }
+
+    fn mtp_step(
+        &mut self,
+        token: u32,
+        position: usize,
+        slot_id: usize,
+        n_draft: usize,
+        sample_factory: flambeau_server_core::SampleFactory,
+        seed: u64,
+    ) -> Result<Option<(Vec<u32>, Vec<f32>)>> {
+        SoloSession::mtp_step(self, token, position, slot_id, n_draft, sample_factory, seed)
+    }
+
+    fn decode_greedy(
+        &mut self,
+        token: u32,
+        position: usize,
+        slot_id: usize,
+        plan: &flambeau_runtime::MtpArgmax,
+    ) -> Result<Option<u32>> {
+        SoloSession::decode_greedy(self, token, position, slot_id, plan)
+    }
 }
 
 /// Handle to the single shared v2 session. Wrapped in `tokio::sync::Mutex`
@@ -182,6 +337,9 @@ pub struct V2Model {
     /// `forward_decode_batched` impl can slice the `[N, vocab]` logits
     /// buffer without re-reading.
     pub vocab: usize,
+    /// KV cache layout of the shared session. Gates the paths that put
+    /// several slots in one forward (scheduler batching, mixed batches).
+    pub kv_layout: flambeau_forward::KvLayout,
 }
 
 impl Model for V2Model {
@@ -192,7 +350,7 @@ impl Model for V2Model {
         self
     }
     fn supports_scheduler_batching(&self) -> bool {
-        true
+        self.kv_layout.supports_multi_slot_decode()
     }
     fn forward_decode_batched(
         &self,
@@ -259,7 +417,8 @@ impl Model for V2Model {
         Ok(())
     }
     fn supports_mixed_batch(&self) -> bool {
-        matches!(
+        self.kv_layout.supports_multi_slot_decode()
+            && matches!(
             self.gguf_arch,
             "qwen35"
                 | "qwen35moe"
@@ -397,6 +556,36 @@ impl ServerSession for V2Conv {
         shared.forward_one_token_into_slot(token, position, self.slot_id, logits_out)
     }
 
+    fn mtp_step(
+        &mut self,
+        token: u32,
+        position: usize,
+        n_draft: usize,
+        sample_factory: flambeau_server_core::SampleFactory,
+        seed: u64,
+        logits_out: &mut Vec<f32>,
+    ) -> Result<Option<Vec<u32>>> {
+        logits_out.clear();
+        let mut shared = self.shared.blocking_lock();
+        match shared.mtp_step(token, position, self.slot_id, n_draft, sample_factory, seed)? {
+            Some((emitted, logits)) => {
+                logits_out.extend_from_slice(&logits);
+                Ok(Some(emitted))
+            }
+            None => Ok(None),
+        }
+    }
+
+    fn decode_greedy(
+        &mut self,
+        token: u32,
+        position: usize,
+        plan: &flambeau_runtime::MtpArgmax,
+    ) -> Result<Option<u32>> {
+        let mut shared = self.shared.blocking_lock();
+        shared.decode_greedy(token, position, self.slot_id, plan)
+    }
+
     fn bos_id(&self) -> Option<u32> {
         self.bos_id
     }
@@ -498,6 +687,18 @@ pub fn chat_stops_for(gguf_arch: &str) -> &'static [&'static str] {
 /// Whether this arch wants BOS prepended to every fresh prompt.
 pub fn wants_bos_prepend(gguf_arch: &str) -> bool {
     is_gemma_family(gguf_arch)
+}
+
+/// Default KV-cache layout when the request does not force one via `--kv`.
+/// gemma4 decode is certified and quality-neutral on Q8Contig — half the KV
+/// bytes and faster once the decode graph captures the Q8 path — so it defaults
+/// to Q8; every other arch stays on F16Contig until measured on Q8.
+pub fn default_kv_layout(gguf_arch: &str) -> flambeau_forward::KvLayout {
+    if is_gemma_family(gguf_arch) {
+        flambeau_forward::KvLayout::Q8Contig
+    } else {
+        flambeau_forward::KvLayout::F16Contig
+    }
 }
 
 fn is_gemma_family(gguf_arch: &str) -> bool {

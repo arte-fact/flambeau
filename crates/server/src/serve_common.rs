@@ -6,10 +6,10 @@
 //!   system prompt). Computed before the arch dispatch.
 //! - `build_server_state(...)` and `run_axum(state, bind_addr)`: the
 //!   final two boot steps every path shares verbatim. Per-arch boot
-//!   fills the arch-specific parts (model handle, cluster, inflight
+//!   fills the arch-specific parts (model handle, inflight
 //!   pool, qwen3_moe extras, embedding) and hands them in.
 
-#![cfg(feature = "hip")]
+#![cfg(any(feature = "hip", feature = "cuda"))]
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -17,7 +17,6 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use axum::routing::{get, post};
 use axum::Router;
-use flambeau_backend_hip::HipCluster;
 use flambeau_quant::{ChatTemplate, GgufFile};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
@@ -215,7 +214,6 @@ pub struct ServerStateInputs {
     pub model_id: String,
     pub model_cfg: crate::model_cfg::ServerModelCfg,
     pub model: crate::model_handle::LoadedModel,
-    pub cluster: Arc<HipCluster>,
     pub inflight_pool: Vec<Mutex<Box<dyn crate::Session>>>,
     pub embedding: Option<EmbeddingHandle>,
     pub embedding_rank: Option<usize>,
@@ -224,6 +222,7 @@ pub struct ServerStateInputs {
     pub max_queue_depth: usize,
     pub prefill_ubatch: usize,
     pub prefill_chunk_tokens: usize,
+    pub mtp_max_draft: usize,
     pub topology_tag: TopologyTag,
     pub prefix_cache: Arc<PrefixCache>,
     pub boot: BootMetadata,
@@ -235,7 +234,6 @@ pub fn build_server_state(inputs: ServerStateInputs) -> SharedState {
         model_id,
         model_cfg,
         model,
-        cluster,
         inflight_pool,
         embedding,
         embedding_rank,
@@ -244,6 +242,7 @@ pub fn build_server_state(inputs: ServerStateInputs) -> SharedState {
         max_queue_depth,
         prefill_ubatch,
         prefill_chunk_tokens,
+        mtp_max_draft,
         topology_tag,
         prefix_cache,
         boot,
@@ -260,7 +259,6 @@ pub fn build_server_state(inputs: ServerStateInputs) -> SharedState {
         model_id,
         cfg: model_cfg,
         model,
-        cluster,
         tokenizer: boot.tokenizer,
         chat_template: boot.chat_template,
         inflight_pool,
@@ -280,6 +278,7 @@ pub fn build_server_state(inputs: ServerStateInputs) -> SharedState {
         max_queue_depth,
         prefill_ubatch,
         prefill_chunk_tokens,
+        mtp_max_draft,
         gpu_sampler,
         batched_decode,
         decode_batch_window_us,

@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "impl_id": "embed_gather_f16_dpos_sm_86",
+  "backend": "cuda",
+  "arch": "sm_86",
+  "op": "embed",
+  "dtype_weight": "F16",
+  "dtype_activation": "F16",
+  "tolerance_formula": "bit-identical F16 row copy (|err| == 0)",
+  "results": [
+    {
+      "m": 1,
+      "k": 0,
+      "n": 3840,
+      "seed": 30412603,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 2731,
+      "n": 3840,
+      "seed": 30685772,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 4095,
+      "n": 3840,
+      "seed": 30818464,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 511,
+      "n": 2048,
+      "seed": 16236448,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 137,
+      "n": 5376,
+      "seed": 42574646,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 3001,
+      "n": 5120,
+      "seed": 40779206,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-11-21T06:19:49Z",
+  "rig": "threadreaper-sm_86",
+  "pmc": {
+    "vgpr_count": 12,
+    "sgpr_count": null,
+    "waves_per_simd": null,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

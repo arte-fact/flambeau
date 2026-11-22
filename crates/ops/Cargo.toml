@@ -8,9 +8,13 @@ description = "High-level fused ops (Attention, MoE, DenseMlp, SwiGLU, RmsNorm, 
 
 [features]
 default = []
-# V1 ships HIP only. When CUDA lands the crate grows a parallel `cuda`
-# feature without forcing dep re-selection downstream.
+# The op-launch layer is backend-generic; each feature only pulls the matching
+# backend's launch-plane impl + kernel catalogue. Both can be enabled at once.
 hip = ["dep:flambeau-backend-hip", "dep:flambeau-kernels-hip"]
+cuda = ["dep:flambeau-backend-cuda", "dep:flambeau-kernels-cuda"]
+# `qmatmul_bench` / `qmatmul_bench_reads_mmq` and the bench-only recipes and
+# stems they launch (`flambeau qmatmul-bench`); never reached by dispatch.
+bench = []
 
 [dependencies]
 flambeau-core = { path = "../core" }
@@ -20,6 +24,8 @@ flambeau-quant = { path = "../quant" }
 # trait that lives in core or runtime (not here).
 flambeau-backend-hip = { path = "../backend-hip", optional = true }
 flambeau-kernels-hip = { path = "../kernels-hip", optional = true }
+flambeau-backend-cuda = { path = "../backend-cuda", optional = true }
+flambeau-kernels-cuda = { path = "../kernels-cuda", optional = true }
 anyhow.workspace = true
 thiserror.workspace = true
 

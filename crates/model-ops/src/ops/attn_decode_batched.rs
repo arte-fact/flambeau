@@ -8,7 +8,7 @@
 //! filled host-side and uploaded once per forward call.
 
 use anyhow::bail;
-use flambeau_ops::{HipOps, Ops};
+use flambeau_ops::Ops;
 
 use crate::error::Result;
 
@@ -22,7 +22,7 @@ use crate::error::Result;
 pub fn kv_append_f16_batched_slots(
     buffers: flambeau_ops::KvAppendBatchedSlotsBuffers,
     shape: flambeau_ops::KvAppendBatchedSlotsShape,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     if shape.n_slots == 0 {
         bail!("kv_append_f16_batched_slots: n_slots must be > 0");
@@ -39,7 +39,7 @@ pub fn attn_decode_f16_batched(
     buffers: flambeau_ops::AttnBatchedBuffers,
     shape: flambeau_ops::AttnDecodeBatchedShape,
     knobs: flambeau_ops::AttnKnobs,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     if !matches!(shape.head_dim, 64 | 128 | 256 | 512) {
         bail!(
@@ -63,6 +63,43 @@ pub fn attn_decode_f16_batched(
     ops.attention_decode_f16_batched(buffers, shape, knobs)
 }
 
+/// Split-K (flash-decoding) sibling of [`attn_decode_f16_batched`]. Fans each
+/// slot's KV into chunks across grid.z, then merges per (q_head, slot). Caller
+/// sizes partials at `n_heads_q * n_slots * n_chunks` (m, s) and `* head_dim`
+/// (o), with `n_chunks = max_n_tokens_kv.div_ceil(chunk_size)`. CUDA-only at the
+/// kernel layer; the launch falls back to the serial batched kernel elsewhere.
+pub fn attn_decode_f16_batched_splitk(
+    buffers: flambeau_ops::AttnBatchedBuffers,
+    partials: flambeau_ops::AttnSplitkPartials,
+    shape: flambeau_ops::AttnDecodeBatchedSplitkShape,
+    knobs: flambeau_ops::AttnKnobs,
+    ops: &impl Ops,
+) -> Result<()> {
+    if !matches!(shape.head_dim, 64 | 128 | 256 | 512) {
+        bail!(
+            "attn_decode_f16_batched_splitk: head_dim {} not in {{64, 128, 256, 512}}",
+            shape.head_dim
+        );
+    }
+    if shape.n_slots == 0 || shape.n_slots > 32 {
+        bail!(
+            "attn_decode_f16_batched_splitk: n_slots {} out of range [1, 32]",
+            shape.n_slots
+        );
+    }
+    if shape.n_heads_q == 0 || shape.n_heads_kv == 0 || shape.n_heads_q % shape.n_heads_kv != 0 {
+        bail!(
+            "attn_decode_f16_batched_splitk: head counts invalid (q={}, kv={})",
+            shape.n_heads_q,
+            shape.n_heads_kv
+        );
+    }
+    if shape.chunk_size == 0 {
+        bail!("attn_decode_f16_batched_splitk: chunk_size must be > 0");
+    }
+    ops.attention_decode_f16_batched_splitk(buffers, partials, shape, knobs)
+}
+
 /// PagedAttention prefill attention. Same flash-attn-v2 body as
 /// `attn_prefill_f16`; per-`t` K/V row resolved via
 /// `block_table[t / page_size] * page_size + (t & (page_size - 1))`.
@@ -71,7 +108,7 @@ pub fn attn_prefill_f16_paged(
     buffers: flambeau_ops::AttnPagedPrefillBuffers,
     shape: flambeau_ops::AttnPrefillPagedShape,
     knobs: flambeau_ops::AttnKnobs,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     if !matches!(shape.head_dim, 64 | 128 | 256 | 512) {
         bail!(
@@ -109,7 +146,7 @@ pub fn attn_prefill_f16_paged(
 pub fn kv_append_f16_paged_prefill(
     buffers: flambeau_ops::KvAppendPagedPrefillBuffers,
     shape: flambeau_ops::KvAppendPagedPrefillShape,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     if shape.n_tokens == 0 {
         return Ok(());
@@ -135,7 +172,7 @@ pub fn kv_append_f16_paged_prefill(
 pub fn kv_append_f16_paged_slots(
     buffers: flambeau_ops::KvAppendPagedSlotsBuffers,
     shape: flambeau_ops::KvAppendPagedSlotsShape,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     if shape.n_slots == 0 {
         bail!("kv_append_f16_paged_slots: n_slots must be > 0");
@@ -159,7 +196,7 @@ pub fn attn_decode_f16_paged(
     buffers: flambeau_ops::AttnPagedDecodeBuffers,
     shape: flambeau_ops::AttnDecodePagedShape,
     scale: f32,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     if !matches!(shape.head_dim, 64 | 128 | 256 | 512) {
         bail!(

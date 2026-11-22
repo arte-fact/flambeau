@@ -67,6 +67,8 @@ pub struct DispatchTable {
     #[serde(default)]
     pub gdn_state_step: Vec<DispatchRow>,
     #[serde(default)]
+    pub gdn_state_step_alphabeta: Vec<DispatchRow>,
+    #[serde(default)]
     pub quantize_f16_q8_1: Vec<DispatchRow>,
     #[serde(default)]
     pub rmsnorm_f32: Vec<DispatchRow>,
@@ -113,6 +115,46 @@ impl DispatchTable {
             .with_context(|| format!("parsing dispatch table {}", path.display()))?;
         Ok(table)
     }
+
+    /// Every row cert-check validates, i.e. all op lists except the
+    /// informational `qmatmul_example` group.
+    pub fn active_rows(&self) -> impl Iterator<Item = &DispatchRow> {
+        [
+            &self.qmatmul,
+            &self.qmatmul_mmq,
+            &self.qmatmul_mmvq,
+            &self.rmsnorm,
+            &self.swiglu,
+            &self.rope,
+            &self.rope_neox_partial,
+            &self.l2_norm,
+            &self.add_f16,
+            &self.cast_f32_f16,
+            &self.cast_f16_f32,
+            &self.causal_conv1d,
+            &self.dense_gemv_f32_f16,
+            &self.gdn_alpha_beta,
+            &self.gdn_state_step,
+            &self.gdn_state_step_alphabeta,
+            &self.quantize_f16_q8_1,
+            &self.rmsnorm_f32,
+            &self.scale_f32,
+            &self.shared_expert_scale,
+            &self.silu_f32,
+            &self.swiglu_f32,
+            &self.split_q_gate,
+            &self.softmax,
+            &self.attention_decode,
+            &self.attention_prefill,
+            &self.topk,
+            &self.indexed_moe_mmvq,
+            &self.moe_combine,
+            &self.indexed_moe_mmvq_gate_up,
+            &self.indexed_moe_mmq,
+        ]
+        .into_iter()
+        .flatten()
+    }
 }
 
 /// Run cert-check over `dispatch_path`. For every active row (not under an
@@ -122,188 +164,12 @@ pub fn cert_check(repo_root: &Path, dispatch_path: &Path) -> Result<CertCheckRep
     let table = DispatchTable::load(dispatch_path)?;
     let mut rows_checked = 0usize;
     let mut failures = Vec::new();
-
-    for row in &table.qmatmul {
+    for row in table.active_rows() {
         rows_checked += 1;
         if let Err(e) = check_one(repo_root, row) {
             failures.push((row.r#impl.clone(), e));
         }
     }
-    for row in &table.qmatmul_mmq {
-        rows_checked += 1;
-        if let Err(e) = check_one(repo_root, row) {
-            failures.push((row.r#impl.clone(), e));
-        }
-    }
-    for row in &table.qmatmul_mmvq {
-        rows_checked += 1;
-        if let Err(e) = check_one(repo_root, row) {
-            failures.push((row.r#impl.clone(), e));
-        }
-    }
-    for row in &table.rmsnorm {
-        rows_checked += 1;
-        if let Err(e) = check_one(repo_root, row) {
-            failures.push((row.r#impl.clone(), e));
-        }
-    }
-    for row in &table.swiglu {
-        rows_checked += 1;
-        if let Err(e) = check_one(repo_root, row) {
-            failures.push((row.r#impl.clone(), e));
-        }
-    }
-    for row in &table.rope {
-        rows_checked += 1;
-        if let Err(e) = check_one(repo_root, row) {
-            failures.push((row.r#impl.clone(), e));
-        }
-    }
-    for row in &table.rope_neox_partial {
-        rows_checked += 1;
-        if let Err(e) = check_one(repo_root, row) {
-            failures.push((row.r#impl.clone(), e));
-        }
-    }
-    for row in &table.l2_norm {
-        rows_checked += 1;
-        if let Err(e) = check_one(repo_root, row) {
-            failures.push((row.r#impl.clone(), e));
-        }
-    }
-    for row in &table.add_f16 {
-        rows_checked += 1;
-        if let Err(e) = check_one(repo_root, row) {
-            failures.push((row.r#impl.clone(), e));
-        }
-    }
-    for row in &table.cast_f32_f16 {
-        rows_checked += 1;
-        if let Err(e) = check_one(repo_root, row) {
-            failures.push((row.r#impl.clone(), e));
-        }
-    }
-    for row in &table.cast_f16_f32 {
-        rows_checked += 1;
-        if let Err(e) = check_one(repo_root, row) {
-            failures.push((row.r#impl.clone(), e));
-        }
-    }
-    for row in &table.causal_conv1d {
-        rows_checked += 1;
-        if let Err(e) = check_one(repo_root, row) {
-            failures.push((row.r#impl.clone(), e));
-        }
-    }
-    for row in &table.dense_gemv_f32_f16 {
-        rows_checked += 1;
-        if let Err(e) = check_one(repo_root, row) {
-            failures.push((row.r#impl.clone(), e));
-        }
-    }
-    for row in &table.gdn_alpha_beta {
-        rows_checked += 1;
-        if let Err(e) = check_one(repo_root, row) {
-            failures.push((row.r#impl.clone(), e));
-        }
-    }
-    for row in &table.gdn_state_step {
-        rows_checked += 1;
-        if let Err(e) = check_one(repo_root, row) {
-            failures.push((row.r#impl.clone(), e));
-        }
-    }
-    for row in &table.quantize_f16_q8_1 {
-        rows_checked += 1;
-        if let Err(e) = check_one(repo_root, row) {
-            failures.push((row.r#impl.clone(), e));
-        }
-    }
-    for row in &table.rmsnorm_f32 {
-        rows_checked += 1;
-        if let Err(e) = check_one(repo_root, row) {
-            failures.push((row.r#impl.clone(), e));
-        }
-    }
-    for row in &table.scale_f32 {
-        rows_checked += 1;
-        if let Err(e) = check_one(repo_root, row) {
-            failures.push((row.r#impl.clone(), e));
-        }
-    }
-    for row in &table.shared_expert_scale {
-        rows_checked += 1;
-        if let Err(e) = check_one(repo_root, row) {
-            failures.push((row.r#impl.clone(), e));
-        }
-    }
-    for row in &table.silu_f32 {
-        rows_checked += 1;
-        if let Err(e) = check_one(repo_root, row) {
-            failures.push((row.r#impl.clone(), e));
-        }
-    }
-    for row in &table.swiglu_f32 {
-        rows_checked += 1;
-        if let Err(e) = check_one(repo_root, row) {
-            failures.push((row.r#impl.clone(), e));
-        }
-    }
-    for row in &table.split_q_gate {
-        rows_checked += 1;
-        if let Err(e) = check_one(repo_root, row) {
-            failures.push((row.r#impl.clone(), e));
-        }
-    }
-    for row in &table.softmax {
-        rows_checked += 1;
-        if let Err(e) = check_one(repo_root, row) {
-            failures.push((row.r#impl.clone(), e));
-        }
-    }
-    for row in &table.attention_decode {
-        rows_checked += 1;
-        if let Err(e) = check_one(repo_root, row) {
-            failures.push((row.r#impl.clone(), e));
-        }
-    }
-    for row in &table.attention_prefill {
-        rows_checked += 1;
-        if let Err(e) = check_one(repo_root, row) {
-            failures.push((row.r#impl.clone(), e));
-        }
-    }
-    for row in &table.topk {
-        rows_checked += 1;
-        if let Err(e) = check_one(repo_root, row) {
-            failures.push((row.r#impl.clone(), e));
-        }
-    }
-    for row in &table.indexed_moe_mmvq {
-        rows_checked += 1;
-        if let Err(e) = check_one(repo_root, row) {
-            failures.push((row.r#impl.clone(), e));
-        }
-    }
-    for row in &table.moe_combine {
-        rows_checked += 1;
-        if let Err(e) = check_one(repo_root, row) {
-            failures.push((row.r#impl.clone(), e));
-        }
-    }
-    for row in &table.indexed_moe_mmvq_gate_up {
-        rows_checked += 1;
-        if let Err(e) = check_one(repo_root, row) {
-            failures.push((row.r#impl.clone(), e));
-        }
-    }
-    for row in &table.indexed_moe_mmq {
-        rows_checked += 1;
-        if let Err(e) = check_one(repo_root, row) {
-            failures.push((row.r#impl.clone(), e));
-        }
-    }
-
     Ok(CertCheckReport {
         rows_checked,
         failures,

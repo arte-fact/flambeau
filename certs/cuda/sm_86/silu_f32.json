@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "impl_id": "silu_f32",
+  "backend": "cuda",
+  "arch": "sm_86",
+  "op": "silu_f32",
+  "dtype_weight": "F32",
+  "dtype_activation": "F32",
+  "tolerance_formula": "|err| <= 1e-5 * max(|ref|, 1) vs F64 oracle (fast __expf)",
+  "results": [
+    {
+      "m": 64,
+      "k": 1,
+      "n": 1,
+      "seed": 12640045,
+      "max_rel_err": 2.9802322e-8,
+      "tolerance": 0.00001,
+      "pass": true
+    },
+    {
+      "m": 1024,
+      "k": 1,
+      "n": 1,
+      "seed": 12776429,
+      "max_rel_err": 2.9802322e-8,
+      "tolerance": 0.00001,
+      "pass": true
+    },
+    {
+      "m": 4096,
+      "k": 1,
+      "n": 1,
+      "seed": 13160429,
+      "max_rel_err": 2.9802322e-8,
+      "tolerance": 0.00001,
+      "pass": true
+    },
+    {
+      "m": 8192,
+      "k": 1,
+      "n": 1,
+      "seed": 13672429,
+      "max_rel_err": 2.9802322e-8,
+      "tolerance": 0.00001,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-06-18T10:51:26Z",
+  "rig": "threadreaper-sm_86",
+  "pmc": {
+    "vgpr_count": 16,
+    "sgpr_count": null,
+    "waves_per_simd": null,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

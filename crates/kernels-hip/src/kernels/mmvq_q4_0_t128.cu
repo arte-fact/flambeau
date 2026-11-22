@@ -1,5 +1,5 @@
 // mmvq_q4_0_t128 — Q4_0 thin-block MMVQ, gfx906 latency-bound decode lever.
-// Mirror of `mmvq_q4_1_t128` for Q4_0 weights. Motivation: gfx906 at
+// Q4_0 weight counterpart of `mmvq_q4_1_t128`. Motivation: gfx906 at
 // batch=1 sits at ~10% HBM bandwidth
 // utilisation — the kernel is latency-bound, not bandwidth-bound, so the
 // schedule that wins is the one that packs more in-flight blocks per CU,

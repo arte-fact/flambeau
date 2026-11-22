@@ -1,0 +1,264 @@
+# Dispatch table — cuda / sm_86. The [[qmatmul]] rows are autotuned by
+# `flambeau autotune` (median of timed mmvq launches per shape): regenerate,
+# do not hand-edit them. The other sections are maintained by hand.
+
+[[qmatmul]]
+dtype   = "IQ1_M"
+dtype_q = "Q8_1"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "qmatmul_iq1_m_mmvq_dp4a"
+cert    = "certs/cuda/sm_86/qmatmul_iq1_m_mmvq_dp4a.json"
+notes   = "autotuned"
+
+[[qmatmul]]
+dtype   = "IQ1_S"
+dtype_q = "Q8_1"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "qmatmul_iq1_s_mmvq_dp4a"
+cert    = "certs/cuda/sm_86/qmatmul_iq1_s_mmvq_dp4a.json"
+notes   = "autotuned"
+
+[[qmatmul]]
+dtype   = "IQ2_S"
+dtype_q = "Q8_1"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "qmatmul_iq2_s_mmvq_dp4a"
+cert    = "certs/cuda/sm_86/qmatmul_iq2_s_mmvq_dp4a.json"
+notes   = "autotuned"
+
+[[qmatmul]]
+dtype   = "IQ2_XS"
+dtype_q = "Q8_1"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "qmatmul_iq2_xs_mmvq_dp4a"
+cert    = "certs/cuda/sm_86/qmatmul_iq2_xs_mmvq_dp4a.json"
+notes   = "autotuned"
+
+[[qmatmul]]
+dtype   = "IQ2_XXS"
+dtype_q = "Q8_1"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "qmatmul_iq2_xxs_mmvq_dp4a"
+cert    = "certs/cuda/sm_86/qmatmul_iq2_xxs_mmvq_dp4a.json"
+notes   = "autotuned"
+
+[[qmatmul]]
+dtype   = "IQ3_S"
+dtype_q = "Q8_1"
+shape   = { m = "1", k = "any", n = "any" }
+impl    = "qmatmul_iq3_s_mmvq_dp4a_t128_vdr2"
+cert    = "certs/cuda/sm_86/qmatmul_iq3_s_mmvq_dp4a_t128_vdr2.json"
+notes   = "autotuned"
+
+[[qmatmul]]
+dtype   = "IQ3_S"
+dtype_q = "Q8_1"
+shape   = { m = ">=2", k = "any", n = "any" }
+impl    = "qmatmul_iq3_s_mmvq_dp4a_t128_vdr2_batched"
+cert    = "certs/cuda/sm_86/qmatmul_iq3_s_mmvq_dp4a_t128_vdr2_batched.json"
+notes   = "batched, 1..8 columns per launch"
+
+[[qmatmul]]
+dtype   = "IQ3_XXS"
+dtype_q = "Q8_1"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "qmatmul_iq3_xxs_mmvq_dp4a"
+cert    = "certs/cuda/sm_86/qmatmul_iq3_xxs_mmvq_dp4a.json"
+notes   = "autotuned"
+
+[[qmatmul]]
+dtype   = "IQ4_NL"
+dtype_q = "Q8_1"
+shape   = { m = "1", k = "any", n = "any" }
+impl    = "qmatmul_iq4_nl_mmvq_dp4a_t128_vdr2"
+cert    = "certs/cuda/sm_86/qmatmul_iq4_nl_mmvq_dp4a_t128_vdr2.json"
+notes   = "autotuned"
+[[qmatmul]]
+dtype   = "IQ4_NL"
+dtype_q = "Q8_1"
+shape   = { m = ">=2", k = "any", n = "any" }
+impl    = "qmatmul_iq4_nl_mmvq_dp4a_t128_vdr2_batched"
+cert    = "certs/cuda/sm_86/qmatmul_iq4_nl_mmvq_dp4a_t128_vdr2_batched.json"
+notes   = "batched, 1..8 columns per launch"
+
+[[qmatmul]]
+dtype   = "IQ4_XS"
+dtype_q = "Q8_1"
+shape   = { m = "1", k = "any", n = "any" }
+impl    = "qmatmul_iq4_xs_mmvq_dp4a_t128_vdr4"
+cert    = "certs/cuda/sm_86/qmatmul_iq4_xs_mmvq_dp4a_t128_vdr4.json"
+notes   = "autotuned"
+[[qmatmul]]
+dtype   = "IQ4_XS"
+dtype_q = "Q8_1"
+shape   = { m = ">=2", k = "any", n = "any" }
+impl    = "qmatmul_iq4_xs_mmvq_dp4a_t128_vdr4_batched"
+cert    = "certs/cuda/sm_86/qmatmul_iq4_xs_mmvq_dp4a_t128_vdr4_batched.json"
+notes   = "batched, 1..8 columns per launch"
+
+[[qmatmul]]
+dtype   = "Q2_K"
+dtype_q = "Q8_1"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "qmatmul_q2_k_mmvq_dp4a"
+cert    = "certs/cuda/sm_86/qmatmul_q2_k_mmvq_dp4a.json"
+notes   = "autotuned"
+
+[[qmatmul]]
+dtype   = "Q3_K"
+dtype_q = "Q8_1"
+shape   = { m = "1", k = "any", n = "any" }
+impl    = "qmatmul_q3_k_mmvq_dp4a_t128_vdr2"
+cert    = "certs/cuda/sm_86/qmatmul_q3_k_mmvq_dp4a_t128_vdr2.json"
+notes   = "autotuned"
+[[qmatmul]]
+dtype   = "Q3_K"
+dtype_q = "Q8_1"
+shape   = { m = ">=2", k = "any", n = "any" }
+impl    = "qmatmul_q3_k_mmvq_dp4a_t128_vdr2_batched"
+cert    = "certs/cuda/sm_86/qmatmul_q3_k_mmvq_dp4a_t128_vdr2_batched.json"
+notes   = "batched, 1..8 columns per launch"
+
+[[qmatmul]]
+dtype   = "Q4_0"
+dtype_q = "Q8_1"
+shape   = { m = "1..127", k = "any", n = "any" }
+impl    = "qmatmul_q4_0_mmvq_dp4a"
+cert    = "certs/cuda/sm_86/qmatmul_q4_0_mmvq_dp4a.json"
+notes   = "autotuned"
+
+[[qmatmul]]
+dtype   = "Q4_0"
+dtype_q = "Q8_1"
+shape   = { m = ">=128", k = "any", n = "any" }
+impl    = "qmatmul_q4_0_mma"
+cert    = "certs/cuda/sm_86/qmatmul_q4_0_mma.json"
+notes   = "int8 tensor-core MMQ (mma.sync), 256x128 double-buffered tile, DS4 activation; k % 128 != 0 re-dispatches to the MMVQ row"
+
+[[qmatmul]]
+dtype   = "Q4_1"
+dtype_q = "Q8_1"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "qmatmul_q4_1_mmvq_dp4a"
+cert    = "certs/cuda/sm_86/qmatmul_q4_1_mmvq_dp4a.json"
+notes   = "autotuned"
+
+[[qmatmul]]
+dtype   = "Q4_K"
+dtype_q = "Q8_1"
+shape   = { m = "1", k = "any", n = "any" }
+impl    = "qmatmul_q4_k_mmvq_dp4a_t128_vdr2"
+cert    = "certs/cuda/sm_86/qmatmul_q4_k_mmvq_dp4a_t128_vdr2.json"
+notes   = "autotuned"
+[[qmatmul]]
+dtype   = "Q4_K"
+dtype_q = "Q8_1"
+shape   = { m = ">=2", k = "any", n = "any" }
+impl    = "qmatmul_q4_k_mmvq_dp4a_t128_vdr2_batched"
+cert    = "certs/cuda/sm_86/qmatmul_q4_k_mmvq_dp4a_t128_vdr2_batched.json"
+notes   = "batched, 1..8 columns per launch"
+
+[[qmatmul]]
+dtype   = "Q5_0"
+dtype_q = "Q8_1"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "qmatmul_q5_0_mmvq_dp4a"
+cert    = "certs/cuda/sm_86/qmatmul_q5_0_mmvq_dp4a.json"
+notes   = "autotuned"
+
+[[qmatmul]]
+dtype   = "Q5_1"
+dtype_q = "Q8_1"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "qmatmul_q5_1_mmvq_dp4a"
+cert    = "certs/cuda/sm_86/qmatmul_q5_1_mmvq_dp4a.json"
+notes   = "autotuned"
+
+[[qmatmul]]
+dtype   = "Q5_K"
+dtype_q = "Q8_1"
+shape   = { m = "1", k = "any", n = "any" }
+impl    = "qmatmul_q5_k_mmvq_dp4a_t128_vdr2"
+cert    = "certs/cuda/sm_86/qmatmul_q5_k_mmvq_dp4a_t128_vdr2.json"
+notes   = "autotuned"
+[[qmatmul]]
+dtype   = "Q5_K"
+dtype_q = "Q8_1"
+shape   = { m = ">=2", k = "any", n = "any" }
+impl    = "qmatmul_q5_k_mmvq_dp4a_t128_vdr2_batched"
+cert    = "certs/cuda/sm_86/qmatmul_q5_k_mmvq_dp4a_t128_vdr2_batched.json"
+notes   = "batched, 1..8 columns per launch"
+
+[[qmatmul]]
+dtype   = "Q6_K"
+dtype_q = "Q8_1"
+shape   = { m = "1", k = "any", n = "any" }
+impl    = "qmatmul_q6_k_mmvq_dp4a"
+cert    = "certs/cuda/sm_86/qmatmul_q6_k_mmvq_dp4a.json"
+notes   = "autotuned"
+[[qmatmul]]
+dtype   = "Q6_K"
+dtype_q = "Q8_1"
+shape   = { m = ">=2", k = "any", n = "any" }
+impl    = "qmatmul_q6_k_mmvq_dp4a_vdr2_batched"
+cert    = "certs/cuda/sm_86/qmatmul_q6_k_mmvq_dp4a_vdr2_batched.json"
+notes   = "batched, 1..8 columns per launch"
+
+[[qmatmul]]
+dtype   = "Q8_0"
+dtype_q = "Q8_1"
+shape   = { m = "1", k = "any", n = "any" }
+impl    = "qmatmul_q8_0_mmvq_dp4a"
+cert    = "certs/cuda/sm_86/qmatmul_q8_0_mmvq_dp4a.json"
+notes   = "autotuned"
+[[qmatmul]]
+dtype   = "Q8_0"
+dtype_q = "Q8_1"
+shape   = { m = ">=2", k = "any", n = "any" }
+impl    = "qmatmul_q8_0_mmvq_dp4a_vdr2_batched"
+cert    = "certs/cuda/sm_86/qmatmul_q8_0_mmvq_dp4a_vdr2_batched.json"
+notes   = "batched, 1..8 columns per launch"
+
+[[qmatmul]]
+dtype   = "Q8_K"
+dtype_q = "Q8_1"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "qmatmul_q8_k_mmvq_single_row"
+cert    = "certs/cuda/sm_86/qmatmul_q8_k_mmvq_single_row.json"
+notes   = "autotuned"
+
+# ----- Attention decode (m = 1..4, keyed on the KV dtype) -------------------
+
+[[attention_decode]]
+dtype   = "F16"           # KV dtype
+dtype_q = "F16"           # Q / output dtype
+shape   = { m = "1..4", k = "any", n = "any" }
+impl    = "attention_decode_f16"
+cert    = "certs/cuda/sm_86/attention_decode_f16.json"
+notes   = "Single-pass up to 32 KV rows, flash-decoding split-K above (attention_decode_f16_splitk, _dpos under graph capture)."
+
+[[attention_decode]]
+dtype   = "Q8_0"          # KV dtype
+dtype_q = "F16"           # Q / output dtype
+shape   = { m = "1..4", k = "any", n = "any" }
+impl    = "attention_decode_q8_kv_vec_dpos_sm_86"
+cert    = "certs/cuda/sm_86/attention_decode_q8_kv_vec_dpos_sm_86.json"
+notes   = "Global layers: 128-thread warp-per-token-group kernel, 14 KV parts per Q head, position on device (graph and eager). x1.65 at a 181-token tail, x1.6 at 1k, x2.3 at 4k over the split-K path. SWA layers keep split-K."
+
+# ----- Attention prefill (F16 KV, keyed on the query rows) ------------------
+
+[[attention_prefill]]
+dtype   = "F16"           # KV dtype
+dtype_q = "F16"           # Q / output dtype
+shape   = { m = "1..15", k = "any", n = "any" }
+impl    = "attention_prefill_flash_tile_f16"
+cert    = "certs/cuda/sm_86/attention_prefill_flash_tile_f16.json"
+notes   = "LDS-tiled flash attention from 4 query rows, the scalar kernel below."
+
+[[attention_prefill]]
+dtype   = "F16"           # KV dtype
+dtype_q = "F16"           # Q / output dtype
+shape   = { m = ">=16", k = "any", n = "any" }
+impl    = "attention_prefill_mma"
+cert    = "certs/cuda/sm_86/attention_prefill_mma.json"
+notes   = "f16 tensor-core flash attention (mma.sync), BR = 128, head_dim 128 / 256 / 512 (d512 DV-split); other head_dims keep flash_tile."

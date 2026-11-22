@@ -43,7 +43,7 @@ fn synth_gdn_one_token_forward() {
     let mut allocs = DeviceAllocs::new(HipDevice::new(0).expect("HipDevice 0 alias"));
 
     let embd = EmbeddingWeights {
-        token_embd: allocs.upload_f16(&det_signal(VOCAB * HIDDEN, 1)),
+        token_embd: allocs.upload_f16(&det_signal(VOCAB * HIDDEN, 1)).into(),
         vocab_size: VOCAB,
         hidden: HIDDEN,
         post_scale: None,
@@ -100,6 +100,7 @@ fn synth_gdn_one_token_forward() {
     }
 
     let cfg = ScratchConfig {
+        mtp: None,
         hidden: HIDDEN,
         intermediate: 0,
         q_width: 0,

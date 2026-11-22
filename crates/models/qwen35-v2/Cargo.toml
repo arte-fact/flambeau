@@ -8,7 +8,9 @@ description = "qwen35 dense-FFN hybrid (GDN+full-attn) model crate on the v2 sta
 
 [features]
 default = []
-hip = ["dep:flambeau-backend-hip", "flambeau-forward/hip", "flambeau-model-ops/hip", "flambeau-ops/hip"]
+hip = ["dep:flambeau-backend-hip", "dep:flambeau-backend", "flambeau-backend/hip", "flambeau-forward/hip", "flambeau-model-ops/hip", "flambeau-ops/hip"]
+# CUDA alongside hip on the dual rig for the cross-backend parity test.
+cuda = ["dep:flambeau-backend-cuda", "dep:flambeau-backend", "flambeau-backend/cuda", "flambeau-forward/cuda", "flambeau-model-ops/cuda", "flambeau-ops/cuda"]
 
 [dependencies]
 flambeau-core = { path = "../../core" }
@@ -16,7 +18,10 @@ flambeau-quant = { path = "../../quant" }
 flambeau-model-ops = { path = "../../model-ops" }
 flambeau-ops = { path = "../../ops" }
 flambeau-forward = { path = "../../forward" }
+flambeau-runtime = { path = "../../runtime" }
+flambeau-backend = { path = "../../backend", optional = true }
 flambeau-backend-hip = { path = "../../backend-hip", optional = true }
+flambeau-backend-cuda = { path = "../../backend-cuda", optional = true }
 anyhow.workspace = true
 thiserror.workspace = true
 half.workspace = true
@@ -24,6 +29,7 @@ bytemuck.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+flambeau-test-models = { path = "../../test-models" }
 serde_json.workspace = true
 
 [lints]

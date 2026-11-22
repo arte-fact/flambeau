@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "impl_id": "sigmoid_mul_f16",
+  "backend": "hip",
+  "arch": "gfx906",
+  "op": "sigmoid_mul_f16",
+  "dtype_weight": "F16",
+  "dtype_activation": "F16",
+  "tolerance_formula": "|err| <= 5e-3 * max(|ref|, 1e-2) vs F64 oracle (logistic)",
+  "results": [
+    {
+      "m": 256,
+      "k": 1,
+      "n": 1,
+      "seed": 12609725,
+      "max_rel_err": 0.0,
+      "tolerance": 0.005,
+      "pass": true
+    },
+    {
+      "m": 4096,
+      "k": 1,
+      "n": 1,
+      "seed": 13209533,
+      "max_rel_err": 0.0,
+      "tolerance": 0.005,
+      "pass": true
+    },
+    {
+      "m": 8192,
+      "k": 1,
+      "n": 1,
+      "seed": 13770685,
+      "max_rel_err": 0.0,
+      "tolerance": 0.005,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-06-18T10:51:27Z",
+  "rig": "threadreaper-gfx906",
+  "pmc": {
+    "vgpr_count": 10,
+    "sgpr_count": null,
+    "waves_per_simd": 10,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

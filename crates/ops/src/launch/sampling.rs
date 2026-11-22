@@ -1,0 +1,186 @@
+//! GPU-side sampler primitives — Solution D in the sampler-perf plan.
+//! `sampler_topk_softmax_f32` runs on the head rank after the LM head
+//! produces F32 logits and replaces the host-side
+//! `Sampler::sample_stochastic` softmax+sort hot path.
+//! Output is the top-K (id, prob) pairs, sorted descending by prob,
+//! with probs renormalised over the kept K. Caller does host-side
+//! `top_p` filter + multinomial draw on the small K-tuple (DtoH cost
+//! is `K * 8` bytes versus `V * 4` bytes for the full logit slab —
+//! ~37× less PCIe traffic at V=151424, K=256).
+
+use anyhow::{bail, Result};
+use flambeau_core::{LaunchArgs, LaunchCfg};
+
+
+/// Caller-visible upper bound on `K`. Must match `SAMPLER_K_OUT_MAX` in
+/// `kernels-hip/src/kernels/sampler_topk_softmax_f32.cu`. Bumped from
+/// 256 to 2048 to match Sampler-A's host-side
+/// `effective_top_k = mode.top_k.unwrap_or(2048)`; smaller K caused
+/// the GPU sampler to bias multinomial toward EOS at natural-endpoint
+/// positions (one-sentence-then-stop chat-truncation bug).
+pub const SAMPLER_K_OUT_MAX: usize = 2048;
+
+/// Blocks of the first argmax pass (and partial winners it writes).
+pub const ARGMAX_PARTS: usize = 128;
+
+/// `out[0]` = the host `argmax` (first maximum, NaN and -inf never win, 0
+/// when nothing qualifies) of `logits` adjusted in place, in the host order:
+/// the `n_adds` sparse additions in list order, then `penalties` = the
+/// `(n_pairs, knobs)` of [`apply_penalties_f32`] over `penalty_counts`.
+pub fn argmax_f32<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
+    bufs: crate::ArgmaxBuffers,
+    vocab: usize,
+    n_adds: usize,
+    penalties: Option<(usize, crate::PenaltyKnobs)>,
+) -> Result<()> {
+    let crate::ArgmaxBuffers { logits, add_ids, add_vals, penalty_counts, part_v, part_i, out } = bufs;
+    let module = reg.expect_module("sampler_argmax_f32")?;
+    let l_ptr: u64 = logits.as_usize() as u64;
+    if n_adds > 0 {
+        let kernel = B::kernel(module, "flambeau_sampler_sparse_add_f32")?;
+        let ids_ptr: u64 = add_ids.as_usize() as u64;
+        let vals_ptr: u64 = add_vals.as_usize() as u64;
+        let n_i = n_adds as i32;
+        let mut args = <B::Args<'_>>::default();
+        args.push_arg(&l_ptr);
+        args.push_arg(&ids_ptr);
+        args.push_arg(&vals_ptr);
+        args.push_arg(&n_i);
+        B::launch(&kernel, stream, LaunchCfg::one_d(1, 1), args)?;
+    }
+    if let Some((n_pairs, knobs)) = penalties.filter(|(n_pairs, _)| *n_pairs > 0) {
+        apply_penalties_f32(
+            reg,
+            stream,
+            crate::PenaltyBuffers { logits, token_counts: penalty_counts },
+            n_pairs,
+            vocab,
+            knobs,
+        )?;
+    }
+    let pv_ptr: u64 = part_v.as_usize() as u64;
+    let pi_ptr: u64 = part_i.as_usize() as u64;
+    let vocab_i = vocab as i32;
+    let kernel = B::kernel(module, "flambeau_sampler_argmax_partial_f32")?;
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&l_ptr);
+    args.push_arg(&vocab_i);
+    args.push_arg(&pv_ptr);
+    args.push_arg(&pi_ptr);
+    B::launch(&kernel, stream, LaunchCfg::one_d(ARGMAX_PARTS as u32, 256), args)?;
+    let kernel = B::kernel(module, "flambeau_sampler_argmax_final_f32")?;
+    let o_ptr: u64 = out.as_usize() as u64;
+    let parts_i = ARGMAX_PARTS as i32;
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&pv_ptr);
+    args.push_arg(&pi_ptr);
+    args.push_arg(&parts_i);
+    args.push_arg(&o_ptr);
+    B::launch(&kernel, stream, LaunchCfg::one_d(1, 256), args)?;
+    Ok(())
+}
+
+/// Apply repetition / presence / frequency
+/// penalties in place on `[V]` F32 logits. `token_counts` is a flat
+/// device buffer of `n_pairs * 2` u32s laid out as
+/// `[tok0, count0, tok1, count1, ...]`. Caller must dedup the
+/// history before passing — the kernel assumes unique `tok` per
+/// pair (no atomic-add).
+/// # Errors
+/// - `n_pairs == 0` (penalty path should short-circuit on host).
+/// - kernel-launch dispatch failure.
+pub fn apply_penalties_f32<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
+    bufs: crate::PenaltyBuffers,
+    n_pairs: usize,
+    vocab: usize,
+    knobs: crate::PenaltyKnobs,
+) -> Result<()> {
+    let crate::PenaltyBuffers { logits, token_counts } = bufs;
+    let crate::PenaltyKnobs {
+        repetition: repetition_penalty,
+        presence: presence_penalty,
+        frequency: frequency_penalty,
+    } = knobs;
+    if n_pairs == 0 {
+        bail!("sampler::apply_penalties_f32: n_pairs must be >= 1 — caller should short-circuit");
+    }
+    let module = reg.expect_module("sampler_apply_penalties_f32")?;
+    let kernel = B::kernel(module, "flambeau_sampler_apply_penalties_f32")?;
+
+    let n_pairs_i = n_pairs as i32;
+    let vocab_i = vocab as i32;
+    let l_ptr: u64 = logits.as_usize() as u64;
+    let c_ptr: u64 = token_counts.as_usize() as u64;
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&l_ptr);
+    args.push_arg(&c_ptr);
+    args.push_arg(&n_pairs_i);
+    args.push_arg(&vocab_i);
+    args.push_arg(&repetition_penalty);
+    args.push_arg(&presence_penalty);
+    args.push_arg(&frequency_penalty);
+    let block: u32 = 256;
+    let grid: u32 = (n_pairs as u32).div_ceil(block);
+    let cfg = LaunchCfg::one_d(grid, block);
+    B::launch(&kernel, stream, cfg, args)?;
+    Ok(())
+}
+
+/// Block-level top-K + softmax-normalize over a length-`vocab` F32 logit
+/// vector. Single-block kernel: launches one 256-thread block on
+/// `stream` regardless of `vocab` (the kernel grid-strides over the
+/// logit reads internally).
+/// Shapes:
+/// - `logits` `[vocab]` F32 — the LM-head output for one token, in
+///   place where the forward kernel left it.
+/// - `out_ids` `[k]` i32 — sorted-descending-by-prob token ids.
+/// - `out_probs` `[k]` F32 — softmax-normalised probabilities,
+///   renormalised so the kept K sum to 1.
+///   Args:
+/// - `inv_temp` — `1.0 / temperature` (caller passes `1.0` when
+///   `temperature <= 0`; the kernel applies the multiply uniformly).
+/// - `k` ≤ [`SAMPLER_K_OUT_MAX`].
+/// # Errors
+/// - `k <= 0` or `k > SAMPLER_K_OUT_MAX`.
+/// - kernel-launch dispatch failure.
+pub fn topk_softmax_f32<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
+    bufs: crate::SamplerTopkSoftmaxBuffers,
+    knobs: crate::SamplerTopkSoftmaxKnobs,
+) -> Result<()> {
+    let crate::SamplerTopkSoftmaxBuffers { logits, out_ids, out_probs } = bufs;
+    let crate::SamplerTopkSoftmaxKnobs { vocab, k, inv_temp } = knobs;
+    if k == 0 {
+        bail!("sampler::topk_softmax_f32: k must be >= 1");
+    }
+    if k > SAMPLER_K_OUT_MAX {
+        bail!(
+            "sampler::topk_softmax_f32: k {k} > SAMPLER_K_OUT_MAX {SAMPLER_K_OUT_MAX} \
+             (bump SAMPLER_K_OUT_MAX in the .cu and the wrapper if a higher K is \
+             genuinely needed; the single-block layout caps at 4096 candidates total)"
+        );
+    }
+    let module = reg.expect_module("sampler_topk_softmax_f32")?;
+    let kernel = B::kernel(module, "flambeau_sampler_topk_softmax_f32")?;
+
+    let vocab_i = vocab as i32;
+    let k_i = k as i32;
+    let l_ptr: u64 = logits.as_usize() as u64;
+    let i_ptr: u64 = out_ids.as_usize() as u64;
+    let p_ptr: u64 = out_probs.as_usize() as u64;
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&l_ptr);
+    args.push_arg(&i_ptr);
+    args.push_arg(&p_ptr);
+    args.push_arg(&vocab_i);
+    args.push_arg(&k_i);
+    args.push_arg(&inv_temp);
+    let cfg = LaunchCfg::one_d(1, 256);
+    B::launch(&kernel, stream, cfg, args)?;
+    Ok(())
+}

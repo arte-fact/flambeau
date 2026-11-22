@@ -1,14 +1,14 @@
-//! Parity test for #120 — `mmvq_f16_direct` (F16-store MMVQ) vs the
-//! legacy `mmvq + cast_f32_to_f16` two-launch path.
+//! Parity test — `mmvq_f16_direct` (F16-output entry) vs the
+//! `mmvq + cast_f32_to_f16` two-launch path.
 //!
-//! Same `(weights, x)` fed through both paths; max abs F16 diff on the
-//! output must be 0 (the F16 store is bit-identical to F32 → cast since
-//! both apply the same final-store rounding mode — modulo the
-//! `f16_direct` path's saturating clamp, which only differs from the
-//! cast when |F32 acc| > 65504, a regime our small-magnitude
-//! deterministic test weights don't reach).
+//! Both paths run the same kernel (the m = 1 dispatch row's recipe; the F16
+//! entry differs only in its final store), so on finite accumulators below
+//! 65504 the F16 outputs must be bit-identical; above it the direct path
+//! saturates to ±65504 where the cast gives ±inf. Accuracy against a float
+//! reference is the sweep's job, with the dispatch row's cert tolerance.
 //!
-//! Covers Q4_0, Q4_1, Q8_0. Skips when no HIP device is present.
+//! Covers every dtype whose m = 1 kernel has an F16 entry
+//! (`mmvq_f16_supported`). Skips when no HIP device is present.
 
 #![cfg(feature = "hip")]
 #![expect(clippy::undocumented_unsafe_blocks, reason = "test fixture")]
@@ -17,7 +17,7 @@ use anyhow::Result;
 use flambeau_backend_hip::{device_count, HipDevice};
 use flambeau_core::{CopyDirection, Device, DevicePtr, QDtype, Stream};
 use flambeau_ops::hip::cast::cast_f32_to_f16;
-use flambeau_ops::hip::qmatmul::{mmvq, mmvq_f16_direct};
+use flambeau_ops::hip::qmatmul::{mmvq, mmvq_f16_direct, mmvq_f16_supported};
 use flambeau_ops::OpsRegistry;
 use half::f16;
 
@@ -616,6 +616,10 @@ fn run_parity(dev: &HipDevice, dtype: QDtype, n_rows: usize, k: usize) -> Result
         unsafe { std::slice::from_raw_parts(act.as_ptr() as *const u8, act_bytes_len) };
 
     let reg = OpsRegistry::new(dev)?;
+    if !mmvq_f16_supported(&reg, dtype) {
+        eprintln!("{dtype:?}: m = 1 kernel has no F16-output entry — skip");
+        return Ok(());
+    }
     let stream = dev.default_stream();
     let w_dev = upload_bytes(dev, &w_bytes);
     let act_dev = upload_bytes(dev, act_bytes);
@@ -625,7 +629,7 @@ fn run_parity(dev: &HipDevice, dtype: QDtype, n_rows: usize, k: usize) -> Result
     let dst_f16_direct = dev.alloc(n_rows * 2).unwrap();
 
     mmvq(
-        flambeau_ops::OpCtx { reg: &reg, stream },
+        &reg, stream,
         flambeau_ops::MmvqBuffers {
             weights: w_dev,
             act_q8_1: act_dev,
@@ -636,7 +640,7 @@ fn run_parity(dev: &HipDevice, dtype: QDtype, n_rows: usize, k: usize) -> Result
     )?;
     cast_f32_to_f16(&reg, stream, dst_f32, dst_f16_via_cast, n_rows)?;
     mmvq_f16_direct(
-        flambeau_ops::OpCtx { reg: &reg, stream },
+        &reg, stream,
         flambeau_ops::MmvqBuffers {
             weights: w_dev,
             act_q8_1: act_dev,
@@ -737,10 +741,7 @@ fn mmvq_f16_direct_matches_cast() -> Result<()> {
         QDtype::Q2_K,
         QDtype::Q3_K,
         QDtype::Q4_K,
-        // Q5_K F16-direct has a 1-row F16-rounding bug; dropped from
-        // ctx::QuantWeight::supports_decode_to_f16 so the production fast
-        // path no longer reaches this kernel. Re-enable when the kernel is
-        // fixed.
+        QDtype::Q5_K,
         QDtype::Q6_K,
         QDtype::Q8_K,
         QDtype::IQ1_S,

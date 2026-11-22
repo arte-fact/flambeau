@@ -7,6 +7,7 @@
 // (block-quant unpack math, softmax math) stay in kernels-shared/include.
 
 #include <hip/hip_runtime.h>
+#include "mmq_prefetch.cuh"
 
 #ifndef WARP_SIZE
 #define WARP_SIZE 64
@@ -149,6 +150,50 @@ static __device__ __forceinline__ float gfx906_fast_exp(float x) {
 static __device__ __forceinline__ int gfx906_dp4a(int a, int b, int c) {
     return __builtin_amdgcn_sdot4(a, b, c, false);
 }
+
+// Neutral primitive names for the backend-neutral kernels-shared templates
+// (mmvq.cuh / quant_traits.cuh), mirroring what kernels-cuda/sm_80.cuh exposes.
+// The arch-specific bodies stay above; only the names cross into shared code.
+static __device__ __forceinline__ float warp_reduce_sum(float x)         { return gfx906_warp_reduce_sum(x); }
+static __device__ __forceinline__ float half_warp_reduce_sum(float x)    { return gfx906_half_warp_reduce_sum(x); }
+static __device__ __forceinline__ float quarter_warp_reduce_sum(float x) { return gfx906_quarter_warp_reduce_sum(x); }
+static __device__ __forceinline__ float eighth_warp_reduce_sum(float x)  { return gfx906_eighth_warp_reduce_sum(x); }
+static __device__ __forceinline__ int   dp4a(int a, int b, int c)        { return gfx906_dp4a(a, b, c); }
+static __device__ __forceinline__ float fast_exp(float x)                { return gfx906_fast_exp(x); }
+static __device__ __forceinline__ float fast_rcp(float x)                { return gfx906_rcp(x); }
+
+// Byte-select permute for codebook LUTs (IQ4_NL/XS). out.byte[i] =
+// src8[sel.byte[i]] where src8 = {b.0..3 (low), a.0..3 (high)}; selector bytes
+// are 0..7 (the LUTs never use the 8..15 special selectors). sm_80.cuh mirrors
+// this via __byte_perm with the selector repacked to nibbles.
+static __device__ __forceinline__ unsigned int byte_perm(unsigned int a, unsigned int b, unsigned int sel) {
+    return __builtin_amdgcn_perm(a, b, sel);
+}
+
+// Map the 8 packed 4-bit indices of `q4` through a 16-entry int8 table packed
+// little-endian in t0..t3: `lo` gets the low nibble of each byte, `hi` the high
+// nibble. Per 4 values: two permutes gather the low / high octet of the table,
+// a third selects between them on bit 3 of each index.
+static __device__ __forceinline__ unsigned int lut16_s8_x4(
+    unsigned int q, unsigned int t0, unsigned int t1, unsigned int t2, unsigned int t3) {
+    const unsigned int v_low  = byte_perm(t1, t0, q & 0x07070707u);
+    const unsigned int v_high = byte_perm(t3, t2, q & 0x07070707u);
+    const unsigned int mask   = 0x03020100u | ((q & 0x08080808u) >> 1);
+    return byte_perm(v_high, v_low, mask);
+}
+static __device__ __forceinline__ void lut16_s8_nibbles(
+    unsigned int q4, unsigned int t0, unsigned int t1, unsigned int t2, unsigned int t3,
+    int& lo, int& hi) {
+    lo = (int) lut16_s8_x4(q4 & 0x0F0F0F0Fu, t0, t1, t2, t3);
+    hi = (int) lut16_s8_x4((q4 >> 4) & 0x0F0F0F0Fu, t0, t1, t2, t3);
+}
+
+// Neutral L2-prefetch seam for the LDS-tiled MMQ kernels. gfx906 issues real
+// global_load_dword hints (mmq_prefetch.cuh); sm_80.cuh provides no-ops. The
+// shared kernel calls these names so the prefetch stays a backend detail.
+static __device__ __forceinline__ int  mmq_prefetch_y_next(const int* p)                { return gfx906_prefetch_y_next(p); }
+static __device__ __forceinline__ int  mmq_prefetch_x_next(const char* b, int o, int s) { return gfx906_prefetch_x_next(b, o, s); }
+static __device__ __forceinline__ void mmq_prefetch_consume(int v)                      { gfx906_prefetch_consume(v); }
 
 #else  // non-HIP fallback, should never be reached in V1
 

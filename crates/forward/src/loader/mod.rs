@@ -27,7 +27,8 @@ pub use gdn_layer::{
     gdn_tp_mode_for, load_gdn_layer, per_rank_gdn_dims, GdnLayerSpec, GdnTpMode,
 };
 pub use gdn_shard::{
-    upload_f32_array_sharded, upload_gdn_fused_qkv_f32, upload_gdn_fused_qkv_quant,
+    gdn_v_head_runs, upload_f32_heads, upload_gdn_fused_qkv_f32, upload_gdn_fused_qkv_quant,
+    upload_head_cols_quant, upload_head_rows_quant,
 };
 pub use globals::{load_embedding, load_lm_head, EmbeddingSpec, LmHeadSpec};
 pub use moe::{
@@ -41,8 +42,8 @@ pub use primitives::{
     wrap_quant,
 };
 pub use shard::{
-    upload_col_sharded_quant, upload_quant_weight, upload_router_f16, upload_row_sharded_quant,
-    ShardSpec,
+    upload_col_sharded_quant, upload_quant_input_halves, upload_quant_weight, upload_router_f16,
+    upload_row_sharded_quant, ShardSpec,
 };
 
 /// How a matmul weight gets uploaded.
@@ -57,6 +58,26 @@ impl ShardMode {
         match self {
             ShardMode::Replicated => 1,
             ShardMode::Tp { n_ranks, .. } => n_ranks,
+        }
+    }
+}
+
+/// Load-time knobs shared by every arch.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LoadOptions {
+    /// Clamps the GGUF `context_length` so per-layer KV slabs do not
+    /// allocate for the full 128–256k context.
+    pub ctx_cap: Option<usize>,
+    /// Upload a draft head the GGUF embeds (e.g. qwen35 `nextn`). Off
+    /// when speculative decoding is off: the head is never read then.
+    pub draft_head: bool,
+}
+
+impl LoadOptions {
+    pub fn with_ctx_cap(ctx_cap: usize) -> Self {
+        Self {
+            ctx_cap: Some(ctx_cap),
+            draft_head: false,
         }
     }
 }

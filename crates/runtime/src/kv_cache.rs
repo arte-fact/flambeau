@@ -1,7 +1,7 @@
 //! Typed KV cache layouts — architectural rule 6: "KV cache layout is a
 //! type, not a runtime enum."
-//! ships `KvCache<F16Contig, D>` — the baseline F16 layout that
-//! mirrors llama.cpp's default (K and V stored separately, both contiguous
+//! ships `KvCache<F16Contig, D>` — the baseline F16 layout
+//! (K and V stored separately, both contiguous
 //! in `[max_tokens, n_kv_heads, head_dim]` order). The attention decode /
 //! prefill kernels consume `k_buffer()` / `v_buffer()` at `current_tokens`.
 //! Follow-ups (own files, own types):
@@ -234,7 +234,7 @@ impl<L: CacheLayout, D: Device> KvCache<L, D> {
         Ok(())
     }
 
-    /// 6.a-i5b2 — compute the (k_dst, v_dst, total_bytes) an append
+    /// Compute the (k_dst, v_dst, total_bytes) an append
     /// of `n_new` rows would target WITHOUT mutating any state. Used by
     /// backend-specific graph-capture helpers (e.g.
     /// `flambeau_backend_hip::kv_cache_append_hip_slot`) that need to
@@ -259,7 +259,7 @@ impl<L: CacheLayout, D: Device> KvCache<L, D> {
         Ok((k_dst, v_dst, total_bytes))
     }
 
-    /// 6.a-i5b2 — advance the logical tail by `n_new` rows after a
+    /// Advance the logical tail by `n_new` rows after a
     /// caller-driven append (via `compute_append_dsts` + an external
     /// memcpy, typically under graph capture). Callers that use the
     /// stock `append` path do NOT call this — `append` bumps the tail

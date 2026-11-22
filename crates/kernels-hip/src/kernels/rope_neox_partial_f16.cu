@@ -2,7 +2,7 @@
 // Qwen3.5/3.6/3-Next full-attention layers use a **partial** RoPE that
 // rotates only the first `rotated_dims` of `head_dim`, with the pair layout
 // split (not interleaved): pair indices are `(i, i + rotated_dims/2)`.
-// This mirrors llama.cpp's `rope_multi` kernel (the non-vision, non-imrope
+// This follows llama.cpp's `rope_multi` kernel (the non-vision, non-imrope
 // path) for the text-only case where all MROPE sections point at the same
 // position ID — mathematically equivalent to plain partial NeoX RoPE.
 // For each (token, head, pair_i ∈ 0..rotated_dims/2):

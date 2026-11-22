@@ -50,7 +50,7 @@ pub struct GgufTokenizer {
     /// model emits `</think>` after a short answer and then duplicates
     /// the response in a confused-reasoning loop.
     pub always_stop_ids: Vec<u32>,
-    /// **P1.6a** — Fill-in-the-Middle special-token ids, when the
+    /// Fill-in-the-Middle special-token ids, when the
     /// vocab carries them. `None` for chat-only models. Populated from
     /// the vocab sweep at load time using each FIM family's canonical
     /// surface form (Qwen-Coder `<|fim_prefix|>`, StarCoder
@@ -58,9 +58,8 @@ pub struct GgufTokenizer {
     pub fim: Option<FimTokens>,
     /// Tokenizer-mandated `add_bos`, overriding the GGUF
     /// `tokenizer.ggml.add_bos_token` flag. Gemma 4 sets this to
-    /// `true` regardless of the file's stored value (mirrors
-    /// llama.cpp PR #21500). Servers that prepend BOS should consult
-    /// this rather than the raw GGUF flag.
+    /// `true` regardless of the file's stored value. Servers that
+    /// prepend BOS should consult this rather than the raw GGUF flag.
     pub force_add_bos: bool,
 }
 
@@ -186,9 +185,8 @@ pub fn load_from_gguf(file: &GgufFile) -> Result<GgufTokenizer> {
     }
 
     // Gemma 4 BPE: byte_fallback=true so single-byte fallback tokens
-    // decode correctly (mirrors llama.cpp PR #21488). GPT-2 BPE has
-    // no byte fallback (byte-level encoding handles all bytes via
-    // ByteLevel pretokenizer).
+    // decode correctly. GPT-2 BPE has no byte fallback (byte-level
+    // encoding handles all bytes via ByteLevel pretokenizer).
     let bpe = BPE::builder()
         .vocab_and_merges(vocab, merges)
         .byte_fallback(is_gemma4)
@@ -212,9 +210,8 @@ pub fn load_from_gguf(file: &GgufFile) -> Result<GgufTokenizer> {
     tok.with_pre_tokenizer(Some(pre_tok));
     if is_gemma4 {
         // Sequence(ByteFallback, Metaspace) — undoes byte-fallback
-        // bytes back to UTF-8 then ▁ back to space. Mirrors
-        // SentencePiece-with-bytefallback decoders (llama.cpp PR
-        // #21488 byte-token handling).
+        // bytes back to UTF-8 then ▁ back to space. Matches
+        // SentencePiece-with-bytefallback decoders.
         let bf = decoders::byte_fallback::ByteFallback::new();
         let ms = Metaspace::new('▁', PrependScheme::Never, true);
         let seq = decoders::sequence::Sequence::new(vec![
@@ -240,9 +237,10 @@ pub fn load_from_gguf(file: &GgufFile) -> Result<GgufTokenizer> {
 
     // Special tokens. Register them so encode/decode honours them as
     // single ids rather than splitting into byte-level fragments.
-    // llama.cpp's `token_type == 3` or `4` flags control tokens, but GGUF
-    // doesn't always reliably surface that; we use a heuristic: any vocab
-    // entry wrapped in `<|...|>` (Qwen/ChatML convention) is a special token.
+    // Primary source is `tokenizer.ggml.token_type` (CONTROL = 3,
+    // USER_DEFINED = 4), as llama.cpp does: it covers non-`<|...|>` markers
+    // such as Qwen's `<think>` / `<tool_call>` and Mistral's `[INST]`. The
+    // `<|...|>` sweep below is the fallback for GGUFs without token types.
     let bos_id = file.metadata_u32("tokenizer.ggml.bos_token_id");
     let eos_id = file.metadata_u32("tokenizer.ggml.eos_token_id");
     let pad_id = file.metadata_u32("tokenizer.ggml.padding_token_id");
@@ -255,7 +253,21 @@ pub fn load_from_gguf(file: &GgufFile) -> Result<GgufTokenizer> {
             }
         }
     }
-    // Sweep vocab for `<|...|>` bracket-style control tokens.
+    if let Some(types) = file
+        .metadata
+        .get("tokenizer.ggml.token_type")
+        .and_then(|v| v.as_array())
+    {
+        for (id, (t, v)) in types.iter().zip(tokens_arr.iter()).enumerate() {
+            if matches!(t.as_u32(), Some(3 | 4)) {
+                if let Some(s) = v.as_str() {
+                    if !s.is_empty() && added_ids.insert(id as u32) {
+                        added.push(AddedToken::from(s.to_owned(), /*special=*/ true));
+                    }
+                }
+            }
+        }
+    }
     for (id, v) in tokens_arr.iter().enumerate() {
         if let Some(s) = v.as_str() {
             if s.starts_with("<|")
@@ -376,10 +388,10 @@ pub fn load_from_gguf(file: &GgufFile) -> Result<GgufTokenizer> {
             _ => None,
         })
         .unwrap_or(false);
-    // PR #21500: gemma4 always forces add_bos=true regardless of the
-    // GGUF stored flag. 4 of 5 audited GGUFs have add_bos_token=false
-    // (see `certs/research/gemma4_recon.md` tokenizer findings), so
-    // this override is mandatory for parity with llama.cpp.
+    // Gemma4 always forces add_bos=true regardless of the GGUF stored
+    // flag. 4 of 5 audited GGUFs have add_bos_token=false (see
+    // `certs/research/gemma4_recon.md` tokenizer findings), so this
+    // override is mandatory for parity with llama.cpp.
     let force_add_bos = if is_gemma4 { true } else { raw_add_bos };
 
     Ok(GgufTokenizer {
@@ -398,10 +410,10 @@ pub fn load_from_gguf(file: &GgufFile) -> Result<GgufTokenizer> {
 /// Pretokenizer for Gemma 4. Llama.cpp's `LLAMA_VOCAB_PRE_TYPE_GEMMA4`
 /// regex (`[^\n]+|[\n]+`) splits on newline groups; the rest is
 /// handled by Metaspace (space → ▁) + raw BPE. Newline-only tokens
-/// in the vocab (PR #21343) are handled by Metaspace's split=true
-/// behaviour combined with BPE merge lookup.
+/// in the vocab are handled by Metaspace's split=true behaviour
+/// combined with BPE merge lookup.
 fn gemma4_pre_tok() -> Result<PreTokenizerWrapper> {
-    // PR #21406 / `LLAMA_VOCAB_PRE_TYPE_GEMMA4`: split into "non-newline runs"
+    // `LLAMA_VOCAB_PRE_TYPE_GEMMA4`: split into "non-newline runs"
     // and "newline runs" so BPE merges never cross newline boundaries.
     let split = Split::new(
         SplitPattern::Regex(r"[^\n]+|[\n]+".to_string()),

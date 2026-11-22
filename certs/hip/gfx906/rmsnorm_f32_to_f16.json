@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "impl_id": "rmsnorm_f32_to_f16",
+  "backend": "hip",
+  "arch": "gfx906",
+  "op": "rmsnorm_f32_to_f16",
+  "dtype_weight": "F32",
+  "dtype_activation": "F16",
+  "tolerance_formula": "|err| <= 1e-2 * max(|ref|, sqrt(k))",
+  "results": [
+    {
+      "m": 1,
+      "k": 2048,
+      "n": 1,
+      "seed": 12624887,
+      "max_rel_err": 0.0,
+      "tolerance": 0.01,
+      "pass": true
+    },
+    {
+      "m": 8,
+      "k": 2048,
+      "n": 1,
+      "seed": 12617510,
+      "max_rel_err": 0.0,
+      "tolerance": 0.01,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 5120,
+      "n": 1,
+      "seed": 12591095,
+      "max_rel_err": 0.00008529923,
+      "tolerance": 0.01,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-06-18T11:23:18Z",
+  "rig": "threadreaper-gfx906",
+  "pmc": {
+    "vgpr_count": 10,
+    "sgpr_count": null,
+    "waves_per_simd": 10,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

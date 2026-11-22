@@ -27,7 +27,7 @@ use half::f16;
 use crate::cert::{now_utc_iso8601, Cert, PmcSnapshot, ShapeResult, SCHEMA_VERSION};
 use crate::harness::{alloc_and_upload, max_rel_err_with_floor, rig, seeded_f32_range};
 
-/// (head_dim, n_heads_q, n_heads_kv) — V1 target families.
+/// (head_dim, n_heads_q, n_heads_kv) — target families.
 const SHAPES: &[(usize, usize, usize)] = &[
     (128, 32, 4), // Qwen3.5
     (256, 16, 2), // Qwen3.6
@@ -199,7 +199,11 @@ fn run_shape(
         args.push(&head_dim_i);
         args.push(&n_tokens_i);
         args.push(&scale_f);
-        let cfg = LaunchCfg::one_d(n_heads_q as u32, head_dim as u32);
+        let window_i: i32 = 0;
+        let ring_depth_i: i32 = 0;
+        args.push(&window_i);
+        args.push(&ring_depth_i);
+        let cfg = LaunchCfg::one_d(n_heads_q as u32, (head_dim / 4) as u32);
         unsafe { kernel.launch(stream, cfg, args)? };
         stream.synchronize()?;
     }

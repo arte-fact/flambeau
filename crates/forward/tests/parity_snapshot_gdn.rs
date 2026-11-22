@@ -32,7 +32,7 @@ const CONV_KERNEL: usize = 4;
 const RMS_EPS: f32 = 1e-5;
 
 /// Reference for `forward_one_token(token_id=7, position=0)` on the
-/// synthetic GDN model below, captured against the post-#222 build.
+/// synthetic GDN model below.
 /// Tolerance covers F16/F32 rounding across the recurrent step and
 /// the LM-head matmul.
 const REFERENCE_LOGITS_HEAD16: [f32; 16] = [
@@ -54,7 +54,7 @@ fn parity_snapshot_gdn_single_token() {
     let mut allocs = DeviceAllocs::new(HipDevice::new(0).expect("HipDevice 0 alias"));
 
     let embd = EmbeddingWeights {
-        token_embd: allocs.upload_f16(&det_signal(VOCAB * HIDDEN, 1)),
+        token_embd: allocs.upload_f16(&det_signal(VOCAB * HIDDEN, 1)).into(),
         vocab_size: VOCAB,
         hidden: HIDDEN,
         post_scale: None,
@@ -97,6 +97,7 @@ fn parity_snapshot_gdn_single_token() {
     };
 
     let cfg = ScratchConfig {
+        mtp: None,
         hidden: HIDDEN,
         intermediate: 0,
         q_width: 0,

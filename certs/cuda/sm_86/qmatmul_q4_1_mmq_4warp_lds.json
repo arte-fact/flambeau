@@ -1,0 +1,130 @@
+{
+  "schema_version": 1,
+  "impl_id": "qmatmul_q4_1_mmq_4warp_lds",
+  "backend": "cuda",
+  "arch": "sm_86",
+  "op": "qmatmul_mmq",
+  "dtype_weight": "Q4_1",
+  "dtype_activation": "Q8_1_MMQ",
+  "tolerance_formula": "|err| <= 3e-2 * max(|ref|, sqrt(k))",
+  "results": [
+    {
+      "m": 128,
+      "k": 2048,
+      "n": 64,
+      "seed": 13532696877580351022,
+      "max_rel_err": 0.00023096474,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 128,
+      "k": 4096,
+      "n": 64,
+      "seed": 8618649535198502446,
+      "max_rel_err": 0.0002283901,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 128,
+      "k": 2048,
+      "n": 128,
+      "seed": 13532697021376991470,
+      "max_rel_err": 0.00029186692,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 128,
+      "k": 4096,
+      "n": 128,
+      "seed": 8618649678995142894,
+      "max_rel_err": 0.00028657913,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 256,
+      "k": 2048,
+      "n": 64,
+      "seed": 13532696880023710126,
+      "max_rel_err": 0.00028650375,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 256,
+      "k": 4096,
+      "n": 64,
+      "seed": 8618649537641861550,
+      "max_rel_err": 0.00023262948,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 256,
+      "k": 2048,
+      "n": 128,
+      "seed": 13532697023820350574,
+      "max_rel_err": 0.00035474476,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 256,
+      "k": 4096,
+      "n": 128,
+      "seed": 8618649681438501998,
+      "max_rel_err": 0.00025965273,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 4096,
+      "k": 2048,
+      "n": 64,
+      "seed": 13532696953324483246,
+      "max_rel_err": 0.00030551196,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 4096,
+      "k": 4096,
+      "n": 64,
+      "seed": 8618649610942634670,
+      "max_rel_err": 0.0002720058,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 4096,
+      "k": 2048,
+      "n": 128,
+      "seed": 13532697097121123694,
+      "max_rel_err": 0.00033945072,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 4096,
+      "k": 4096,
+      "n": 128,
+      "seed": 8618649754739275118,
+      "max_rel_err": 0.00031986833,
+      "tolerance": 0.03,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-06-17T10:23:45Z",
+  "rig": "threadreaper-sm_86",
+  "pmc": {
+    "vgpr_count": 128,
+    "sgpr_count": null,
+    "waves_per_simd": null,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

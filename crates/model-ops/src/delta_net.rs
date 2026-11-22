@@ -9,7 +9,7 @@
 //!
 //! Decode pipeline (single token):
 //! - fused rmsnorm(x_in) + Q8_1 quant
-//! - `attn_qkv` + `attn_gate` (fused mmvq_q8_0 / mmvq_q4_0_gate_up when
+//! - `attn_qkv` + `attn_gate` (fused mmvq_q8_0 / mmvq_q4_0_gate_up_t128 when
 //!   both same dtype, else separate mmvq per branch)
 //! - `ssm_alpha` + `ssm_beta` (fused mmvq_q8_0 if both Q8_0, else separate)
 //! - assemble conv input + causal conv1d + shift conv history
@@ -40,9 +40,9 @@
 //!    MMQ at L≥128).
 
 use anyhow::{bail, Context, Result};
-use flambeau_backend_hip::{HipDevice, HipEvent, HipStream};
+use flambeau_backend_hip::HipDevice;
 use flambeau_core::op::QDtype;
-use flambeau_core::{CopyDirection, Device, DevicePtr};
+use flambeau_core::{CopyDirection, Device, DevicePtr, Event};
 use flambeau_ops::Ops;
 
 use crate::driver_utils::RawAllocTracker;
@@ -53,8 +53,8 @@ use crate::weight_handle::WeightHandle;
 /// partial into a row-parallel AR + residual-add. The four args are
 /// `(partial_f32_ptr, n_elems, device, stream)` — same shape as the
 /// engine's `ar_sum_f32` hook.
-pub type GdnArPartialCallback<'a> =
-    &'a mut dyn FnMut(DevicePtr, usize, &HipDevice, &HipStream) -> Result<()>;
+pub type GdnArPartialCallback<'a, D = HipDevice> =
+    &'a mut dyn FnMut(DevicePtr, usize, &D, &<D as Device>::Stream) -> Result<()>;
 
 /// Borrowed-by-value view over a caller-owned GDN decode scratch.
 #[derive(Copy, Clone)]
@@ -329,13 +329,22 @@ pub struct DeltaNetDims {
     pub conv_kernel: usize,
 }
 
-/// Per-call HIP context (device + stream) shared by every GDN driver
-/// method. Lifetime-borrowed; not Copy because `&HipDevice` references
-/// the cluster-owned device handle.
-#[derive(Copy, Clone)]
-pub struct BackendCtx<'a> {
-    pub device: &'a HipDevice,
-    pub stream: &'a HipStream,
+/// Per-call backend context (device + stream) shared by every GDN
+/// driver method. Generic over the `Device` seam; defaults to
+/// `HipDevice` so existing callers stay green. `Copy`/`Clone` are
+/// hand-written — deriving would impose a spurious `D: Copy` bound and
+/// the fields are shared references, always copyable.
+pub struct BackendCtx<'a, D: Device = HipDevice> {
+    pub device: &'a D,
+    pub stream: &'a D::Stream,
+}
+
+impl<D: Device> Copy for BackendCtx<'_, D> {}
+
+impl<D: Device> Clone for BackendCtx<'_, D> {
+    fn clone(&self) -> Self {
+        *self
+    }
 }
 
 /// Single-slot decode I/O pointers consumed by
@@ -361,11 +370,33 @@ pub struct GdnDecodeBatchedBuffers {
 }
 
 /// Prefill-only sequence handle: token count + optional state event
-/// the state-step kernel waits on before reading `state`.
-#[derive(Copy, Clone)]
-pub struct GdnPrefillSeq<'a> {
+/// the state-step kernel waits on before reading `state`. Generic over
+/// the `Device` seam (for the `Event` assoc type); defaults to
+/// `HipDevice`. `Copy`/`Clone` hand-written for the same reason as
+/// [`BackendCtx`].
+pub struct GdnPrefillSeq<'a, D: Device = HipDevice> {
     pub n_tokens: usize,
-    pub state_event: Option<&'a HipEvent>,
+    pub state_event: Option<&'a D::Event>,
+    /// Speculative verify: keep every token's state (see [`GdnKStates`])
+    /// instead of updating `state` in place.
+    pub kstates: Option<GdnKStates>,
+}
+
+/// Per-token state slots of one layer for a speculative verify batch: the
+/// input state is the layer's live state when `*rs_idx == 0`, else slot
+/// `*rs_idx - 1` of `states`; the state after token t lands in slot t.
+#[derive(Clone, Copy, Debug)]
+pub struct GdnKStates {
+    pub states: DevicePtr,
+    pub rs_idx: DevicePtr,
+}
+
+impl<D: Device> Copy for GdnPrefillSeq<'_, D> {}
+
+impl<D: Device> Clone for GdnPrefillSeq<'_, D> {
+    fn clone(&self) -> Self {
+        *self
+    }
 }
 
 impl DeltaNetLayer {
@@ -428,7 +459,7 @@ impl DeltaNetLayer {
 
     /// Allocate an [`OwnedDeltaNetLayerDecodeScratch`] sized for `dims`.
     pub fn alloc_decode_scratch(
-        device: &HipDevice,
+        device: &impl Device,
         tracker: &mut RawAllocTracker,
         dims: DeltaNetScratchDims,
     ) -> Result<OwnedDeltaNetLayerDecodeScratch> {
@@ -483,7 +514,7 @@ impl DeltaNetLayer {
     /// (per-slot state and conv-history base ptrs) live separately —
     /// owned by the caller's pool because they index per-layer state.
     pub fn alloc_decode_batched_scratch(
-        device: &HipDevice,
+        device: &impl Device,
         tracker: &mut RawAllocTracker,
         dims: DeltaNetScratchDims,
         max_slots: usize,
@@ -542,7 +573,7 @@ impl DeltaNetLayer {
     /// `(K-1) + max_tokens` rows so that one prefill chunk plus the
     /// trailing history fits in `conv_input`.
     pub fn alloc_prefill_scratch(
-        device: &HipDevice,
+        device: &impl Device,
         tracker: &mut RawAllocTracker,
         dims: DeltaNetScratchDims,
         max_tokens: usize,
@@ -624,13 +655,13 @@ impl DeltaNetLayer {
     /// ssm_out mmvq and the F16 cast. Under TP the v2 composite
     /// supplies a callback that AR-sums across ranks; under non-TP
     /// topologies pass `None` (equivalent to `forward_decode`).
-    pub fn forward_decode_with_ar_hook<O: Ops>(
+    pub fn forward_decode_with_ar_hook<D: Device, O: Ops>(
         &self,
         ops: &O,
-        ctx: BackendCtx<'_>,
+        ctx: BackendCtx<'_, D>,
         buf: GdnDecodeBuffers,
         scratch: DeltaNetLayerDecodeScratch,
-        ar_partial_callback: Option<GdnArPartialCallback<'_>>,
+        ar_partial_callback: Option<GdnArPartialCallback<'_, D>>,
     ) -> Result<()> {
         let BackendCtx { device, stream } = ctx;
         let GdnDecodeBuffers {
@@ -907,14 +938,14 @@ impl DeltaNetLayer {
     /// Activation inputs/outputs `x_in_base` and `delta_out_base` are
     /// slot-major `[n_slots, hidden]` F16. The AR callback fires once
     /// per slot on its `ssm_out_f32[slot]` partial.
-    pub fn forward_decode_with_ar_hook_batched_slots<O: Ops>(
+    pub fn forward_decode_with_ar_hook_batched_slots<D: Device, O: Ops>(
         &self,
         ops: &O,
-        ctx: BackendCtx<'_>,
+        ctx: BackendCtx<'_, D>,
         buf: GdnDecodeBatchedBuffers,
         scratch: DeltaNetLayerDecodeBatchedScratch,
         n_slots: usize,
-        ar_partial_callback: Option<GdnArPartialCallback<'_>>,
+        ar_partial_callback: Option<GdnArPartialCallback<'_, D>>,
     ) -> Result<()> {
         let BackendCtx { device, stream } = ctx;
         let GdnDecodeBatchedBuffers {
@@ -1348,14 +1379,14 @@ impl DeltaNetLayer {
     /// Like `forward_prefill` but with an AR hook on the `ssm_out_f32`
     /// partial buffer between the row-parallel ssm_out qmatmul and the
     /// F32→F16 cast. Mirrors [`Self::forward_decode_with_ar_hook`].
-    pub fn forward_prefill_with_ar_hook<O: Ops>(
+    pub fn forward_prefill_with_ar_hook<D: Device, O: Ops>(
         &self,
         ops: &O,
-        ctx: BackendCtx<'_>,
+        ctx: BackendCtx<'_, D>,
         buf: GdnDecodeBuffers,
         scratch: DeltaNetLayerPrefillScratch,
-        seq: GdnPrefillSeq<'_>,
-        ar_partial_callback: Option<GdnArPartialCallback<'_>>,
+        seq: GdnPrefillSeq<'_, D>,
+        ar_partial_callback: Option<GdnArPartialCallback<'_, D>>,
     ) -> Result<()> {
         let BackendCtx { device, stream } = ctx;
         let GdnDecodeBuffers {
@@ -1367,6 +1398,7 @@ impl DeltaNetLayer {
         let GdnPrefillSeq {
             n_tokens,
             state_event,
+            kstates,
         } = seq;
         if n_tokens == 0 {
             bail!("DeltaNetLayer::forward_prefill called with n_tokens = 0");
@@ -1389,8 +1421,8 @@ impl DeltaNetLayer {
         let qk_size = num_k_heads * head_k_dim;
         let v_size = num_v_heads * head_v_dim;
 
-        // 1. rmsnorm(x_in) → F16 scratch, then quantise to BOTH Q8_1
-        // layouts (std + DS4) so qmatmul can dispatch MMQ at L≥128.
+        // 1. rmsnorm(x_in) → F16 scratch, then quantise to the Q8_1 layouts
+        // (std, DS4) the four hidden-input projections read at M = L.
         ops.rmsnorm_f16(
             flambeau_ops::NormBuffers {
                 input: x_in,
@@ -1404,10 +1436,30 @@ impl DeltaNetLayer {
             self.rms_norm_eps,
         )
         .context("gdn prefill attn_norm")?;
-        ops.quantize_f16_q8_1(scratch.x_norm_f16, scratch.x_q8_1, n_tokens * hidden)
-            .context("gdn prefill x_norm → Q8_1 (std)")?;
-        ops.quantize_f16_q8_1_mmq(scratch.x_norm_f16, scratch.x_q8_1_mmq, hidden, n_tokens)
-            .context("gdn prefill x_norm → Q8_1 (MMQ DS4)")?;
+        let x_reads_mmq: [bool; 4] = [
+            (self.attn_qkv.dtype, conv_channels),
+            (self.attn_gate.dtype, d_inner),
+            (self.ssm_alpha.dtype, num_v_heads),
+            (self.ssm_beta.dtype, num_v_heads),
+        ]
+        .map(|(dtype, cols)| {
+            ops.qmatmul_reads_mmq_activation(
+                flambeau_ops::MatmulShape {
+                    m: n_tokens,
+                    k: hidden,
+                    n: cols,
+                },
+                dtype,
+            )
+        });
+        if x_reads_mmq.iter().any(|&mmq| !mmq) {
+            ops.quantize_f16_q8_1(scratch.x_norm_f16, scratch.x_q8_1, n_tokens * hidden)
+                .context("gdn prefill x_norm → Q8_1 (std)")?;
+        }
+        if x_reads_mmq.iter().any(|&mmq| mmq) {
+            ops.quantize_f16_q8_1_mmq(scratch.x_norm_f16, scratch.x_q8_1_mmq, hidden, n_tokens)
+                .context("gdn prefill x_norm → Q8_1 (MMQ DS4)")?;
+        }
 
         // 2..5. Hidden-input projections at M = L. qmatmul auto-
         // dispatches MMVQ vs MMQ based on M and weight dtype.
@@ -1570,28 +1622,50 @@ impl DeltaNetLayer {
             ev.stream_wait(stream)
                 .context("gdn prefill state_step stream_wait")?;
         }
-        ops.gdn_state_step_alphabeta_f32_s128(
-            flambeau_ops::GdnStepAlphaBetaBuffers {
-                q: scratch.q_norm_f32,
-                k: scratch.k_norm_f32,
-                v: scratch.v_f32,
-                alpha_in: scratch.alpha_f32,
-                beta_in: scratch.beta_f32,
-                ssm_dt_bias: self.ssm_dt_bias,
-                ssm_a: self.ssm_a,
-                state_in: state,
-                state_out: state,
-                attn_out: scratch.state_out,
-            },
-            flambeau_ops::GdnStepShape {
-                b: 1,
-                h_v: num_v_heads,
-                l: n_tokens,
-                n_rep,
-                rep_inner_layout: self.rep_inner_layout,
-            },
-        )
-        .context("gdn prefill gdn_state_step_alphabeta_f32_s128")?;
+        let step_shape = flambeau_ops::GdnStepShape {
+            b: 1,
+            h_v: num_v_heads,
+            l: n_tokens,
+            n_rep,
+            rep_inner_layout: self.rep_inner_layout,
+        };
+        match kstates {
+            Some(ks) => ops
+                .gdn_state_step_alphabeta_f32_s128_kstates(
+                    flambeau_ops::GdnStepKStatesBuffers {
+                        q: scratch.q_norm_f32,
+                        k: scratch.k_norm_f32,
+                        v: scratch.v_f32,
+                        alpha_in: scratch.alpha_f32,
+                        beta_in: scratch.beta_f32,
+                        ssm_dt_bias: self.ssm_dt_bias,
+                        ssm_a: self.ssm_a,
+                        state_live: state,
+                        kstates: ks.states,
+                        rs_idx: ks.rs_idx,
+                        attn_out: scratch.state_out,
+                    },
+                    step_shape,
+                )
+                .context("gdn prefill gdn_state_step_alphabeta_f32_s128_kstates")?,
+            None => ops
+                .gdn_state_step_alphabeta_f32_s128(
+                    flambeau_ops::GdnStepAlphaBetaBuffers {
+                        q: scratch.q_norm_f32,
+                        k: scratch.k_norm_f32,
+                        v: scratch.v_f32,
+                        alpha_in: scratch.alpha_f32,
+                        beta_in: scratch.beta_f32,
+                        ssm_dt_bias: self.ssm_dt_bias,
+                        ssm_a: self.ssm_a,
+                        state_in: state,
+                        state_out: state,
+                        attn_out: scratch.state_out,
+                    },
+                    step_shape,
+                )
+                .context("gdn prefill gdn_state_step_alphabeta_f32_s128")?,
+        }
         if let Some(ev) = state_event {
             ev.record(stream).context("gdn prefill state_step record")?;
         }
@@ -1611,8 +1685,8 @@ impl DeltaNetLayer {
         )
         .context("gdn prefill ssm_norm (rmsnorm_f32)")?;
 
-        // 13+14. swiglu(z, out_normed) → F32, then dual-quantise to
-        // both Q8_1 layouts so the ssm_out matmul auto-dispatches.
+        // 13+14. swiglu(z, out_normed) → F32, then quantise to the Q8_1
+        // layout the ssm_out matmul reads at M = L.
         if v_size != d_inner {
             bail!("GDN layout: num_v_heads * head_v_dim ({v_size}) != d_inner ({d_inner})");
         }
@@ -1623,10 +1697,18 @@ impl DeltaNetLayer {
             n_tokens * d_inner,
         )
         .context("gdn prefill swiglu_f32(z, out_normed)")?;
-        ops.quantize_q8_1(scratch.gated_f32, scratch.gated_q8_1, n_tokens * d_inner)
-            .context("gdn prefill quantise gated → Q8_1 (std)")?;
-        ops.quantize_q8_1_mmq(scratch.gated_f32, scratch.gated_q8_1_mmq, d_inner, n_tokens)
-            .context("gdn prefill quantise gated → Q8_1 (MMQ DS4)")?;
+        let out_shape = flambeau_ops::MatmulShape {
+            m: n_tokens,
+            k: d_inner,
+            n: hidden,
+        };
+        if ops.qmatmul_reads_mmq_activation(out_shape, self.ssm_out.dtype) {
+            ops.quantize_q8_1_mmq(scratch.gated_f32, scratch.gated_q8_1_mmq, d_inner, n_tokens)
+                .context("gdn prefill quantise gated → Q8_1 (MMQ DS4)")?;
+        } else {
+            ops.quantize_q8_1(scratch.gated_f32, scratch.gated_q8_1, n_tokens * d_inner)
+                .context("gdn prefill quantise gated → Q8_1 (std)")?;
+        }
 
         // 15. ssm_out projection at M = L.
         ops.qmatmul(

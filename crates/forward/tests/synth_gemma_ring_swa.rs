@@ -66,6 +66,7 @@ fn build_scratch_cfg(ring: bool, layout: KvLayout, max_slots: usize) -> ScratchC
     let q_width = N_HEADS * HEAD_DIM;
     let kv_width = N_KV_HEADS * HEAD_DIM;
     ScratchConfig {
+        mtp: None,
         hidden: HIDDEN,
         intermediate: 256,
         q_width,
@@ -295,7 +296,7 @@ fn ring_vs_full_mixed(layout: KvLayout, label: &str) {
 
 #[test]
 fn gemma_ring_swa_mixed_matches_full_depth() {
-    // standard_attn_mixed on a ring layer (the #142 follow-up).
+    // standard_attn_mixed on a ring layer.
     ring_vs_full_mixed(KvLayout::F16Contig, "ring-swa mixed");
 }
 
@@ -323,6 +324,7 @@ fn splitk_ring_vs_full(layout: KvLayout, label: &str) {
     let run = |ring: bool, resid: DevicePtr| -> Vec<f32> {
         let stream = device.default_stream();
         let cfg = ScratchConfig {
+            mtp: None,
             hidden: HIDDEN,
             intermediate: 256,
             q_width,

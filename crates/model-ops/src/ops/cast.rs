@@ -1,7 +1,7 @@
 //! F16 ↔ F32 casts.
 
 use anyhow::bail;
-use flambeau_ops::{HipOps, Ops};
+use flambeau_ops::Ops;
 
 use crate::dtype::{F16, F32};
 use crate::error::Result;
@@ -12,7 +12,7 @@ pub fn cast_f32_to_f16(
     input: &Tensor<F32>,
     output: &mut Tensor<F16>,
     n: usize,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     if input.n_elems < n {
         bail!(
@@ -34,7 +34,7 @@ pub fn cast_f16_to_f32(
     input: &Tensor<F16>,
     output: &mut Tensor<F32>,
     n: usize,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     if input.n_elems < n {
         bail!(
@@ -54,6 +54,7 @@ pub fn cast_f16_to_f32(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flambeau_ops::HipOps;
     use crate::testing::{
         alloc, assert_close_f16, assert_close_f32, download, free, test_device, test_ops_registry,
         upload,

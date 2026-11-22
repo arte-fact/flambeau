@@ -7,7 +7,7 @@
 //! `window_size > 0`, else 0.
 
 use anyhow::bail;
-use flambeau_ops::{HipOps, Ops};
+use flambeau_ops::Ops;
 
 use crate::dtype::F16;
 use crate::error::Result;
@@ -22,7 +22,7 @@ pub fn attn_prefill_f16(
     out: &mut Tensor<F16>,
     shape: flambeau_ops::AttnPrefillShape,
     knobs: flambeau_ops::AttnKnobs,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     let flambeau_ops::AttnPrefillShape {
         n_q_tokens,
@@ -146,6 +146,7 @@ fn cpu_attn_prefill(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flambeau_ops::HipOps;
     use crate::testing::{
         alloc, assert_close_f16, download, free, test_device, test_ops_registry, upload,
     };

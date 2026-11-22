@@ -21,6 +21,6 @@ mod traits;
 pub use logits_sink::LogitsSink;
 #[cfg(feature = "hip")]
 pub use traits::{
-    BatchSlot, MixedBatchDecodes, MixedBatchPrefill, Model, ReasoningMarkers, ReasoningStyle,
-    Session, SessionContext,
+    BatchSlot, MixedBatchDecodes, MixedBatchPrefill, Model, MtpSampleFn, ReasoningMarkers,
+    ReasoningStyle, SampleFactory, Session, SessionContext,
 };

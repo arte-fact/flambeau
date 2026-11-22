@@ -1,24 +1,21 @@
 #![cfg(feature = "hip")]
 
 use std::io::Write;
-use std::path::PathBuf;
 
 use flambeau_forward::{Session, Topology};
 use flambeau_quant::GgufFile;
 use flambeau_qwen35_v2::Qwen35V2;
 
-const MODEL_PATH: &str = "/artefact/models/Qwen3.5-9B-Q4_1.gguf";
+const MODEL_FILE: &str = "Qwen3.5-9B-Q4_1.gguf";
 
 const PROMPT: &[u32] = &[248045, 846, 198, 20206];
 
 #[test]
 #[ignore = "parity dump — run via scripts/parity/v2_vs_legacy.sh"]
 fn parity_dump_v2() {
-    let path = PathBuf::from(MODEL_PATH);
-    if !path.exists() {
-        eprintln!("SKIP: {MODEL_PATH} not present");
+    let Some(path) = flambeau_test_models::model("parity_dump_v2", MODEL_FILE) else {
         return;
-    }
+    };
     let out_path =
         std::env::var("FLAMBEAU_PARITY_OUT").expect("set FLAMBEAU_PARITY_OUT to the dump path");
 
@@ -33,7 +30,9 @@ fn parity_dump_v2() {
                 max_slots: 1,
                 paged_kv_pages: None,
                 kv_layout: flambeau_forward::KvLayout::F16Contig,
-            },
+                        mtp_max_draft: 0,
+                        decode_graph: true,
+        },
         )
         .expect("Session SD");
 

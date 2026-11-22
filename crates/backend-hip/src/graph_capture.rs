@@ -1,4 +1,4 @@
-//! 6.a-i3 — thread-local capture-state recorder.
+//! Thread-local capture-state recorder.
 //! While a capture is active on a thread, every `HipKernel::launch` call
 //! appends a record to the thread-local state. `KernelArgs::push_slot`
 //! attaches a logical [`ScalarSlot`] tag to a pushed arg so post-capture
@@ -8,73 +8,18 @@
 //! (kernel_node_idx, arg_index, arity) triple — enough for
 //! [`crate::HipGraphExec::set_slot`] to build a fresh `kernelParams`
 //! pointer array and call `hipGraphExecKernelNodeSetParams`.
-//! Scope of i3 is infra + a small unit test. Forward-path integration
-//! lands in 6.a-i4 (`pos`-bearing kernels in `forward_layer_prefill`).
+//! Scope here is infra + a small unit test. Forward-path integration
+//! handles `pos`-bearing kernels in `forward_layer_prefill`.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
 
-/// A logical handle to an updateable scalar kernel parameter. Obtained
-/// via [`ScalarSlot::new`] and passed to [`super::module::KernelArgs::push_slot`]
-/// at capture time to tag the arg as updateable.
-/// The numeric id is process-global and monotonically increasing. Scopes
-/// can reset by using a fresh HipGraphExec — slots from an old exec are
-/// meaningless to a new one.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct ScalarSlot {
-    id: u32,
-}
-
-/// 6.a-i5b — handle to an updateable memcpy-node's parameters
-/// (typically the dst pointer, since src + count are usually fixed in
-/// our KV-cache-append use case). Obtained via [`MemcpySlot::new`];
-/// tagged at capture time by passing it to
-/// [`super::HipDevice::memcpy_async_slot`] or equivalent helper.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct MemcpySlot {
-    id: u32,
-}
-
-// Slot ids share one namespace — ScalarSlot and MemcpySlot can never
-// collide because they're type-distinct at compile time, but drawing
-// from one counter keeps IDs unique across a process.
-static NEXT_SLOT_ID: AtomicU32 = AtomicU32::new(1);
-
-impl ScalarSlot {
-    /// Allocate a fresh slot id. Cheap — just an atomic fetch-add.
-    pub fn new() -> Self {
-        let id = NEXT_SLOT_ID.fetch_add(1, Ordering::Relaxed);
-        Self { id }
-    }
-
-    pub fn id(&self) -> u32 {
-        self.id
-    }
-}
-
-impl Default for ScalarSlot {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl MemcpySlot {
-    pub fn new() -> Self {
-        let id = NEXT_SLOT_ID.fetch_add(1, Ordering::Relaxed);
-        Self { id }
-    }
-
-    pub fn id(&self) -> u32 {
-        self.id
-    }
-}
-
-impl Default for MemcpySlot {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// The slot id types are backend-neutral (a process-unique id); they live in
+// `core` so the portable op surface and both backends' graph executors share
+// one definition. Re-exported here so existing `graph_capture::ScalarSlot` /
+// `flambeau_backend_hip::ScalarSlot` paths keep resolving. The HIP-specific
+// capture machinery (records, SlotMap) stays below.
+pub use flambeau_core::{MemcpySlot, ScalarSlot};
 
 /// Per-launch record captured during an active graph capture. Indexes
 /// in `tagged_slots` are into this launch's own `KernelArgs` slots.
@@ -92,7 +37,7 @@ pub(crate) struct LaunchRecord {
 #[derive(Debug, Default)]
 pub(crate) struct CaptureState {
     pub launches: Vec<LaunchRecord>,
-    /// 6.a-i5b — memcpy issues observed during this capture, in
+    /// Memcpy issues observed during this capture, in
     /// dispatch order. Each entry records whether the caller tagged the
     /// memcpy with a [`MemcpySlot`] and the initial (dst, src, count,
     /// kind) so post-capture we can seed the exec's memcpy shadow.
@@ -168,7 +113,7 @@ pub(crate) fn record_launch(arity: usize, tagged: &[(ScalarSlot, usize)]) {
     });
 }
 
-/// 6.a-i5b — called by `HipDevice::memcpy_async*` before submitting
+/// Called by `HipDevice::memcpy_async*` before submitting
 /// a memcpy. If capture is active, appends a [`MemcpyRecord`] so
 /// post-capture we can zip records with memcpy-type graph nodes.
 /// `slot=None` means the caller isn't interested in updating this
@@ -201,7 +146,7 @@ pub(crate) fn record_memcpy(
 pub struct SlotMap {
     /// slot -> (kernel_node_idx, arg_index, launch_arity)
     entries: HashMap<ScalarSlot, SlotBinding>,
-    /// 6.a-i5b — memcpy-slot bindings. memcpy_node_idx indexes into
+    /// Memcpy-slot bindings. memcpy_node_idx indexes into
     /// the exec's ordered list of memcpy-type graph nodes (SEPARATE
     /// from kernel_nodes — their indices are not interchangeable).
     memcpy_entries: HashMap<MemcpySlot, MemcpyBinding>,

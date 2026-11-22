@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "impl_id": "gdn_assemble_conv_input_f32",
+  "backend": "hip",
+  "arch": "gfx906",
+  "op": "gdn_assemble_conv_input_f32",
+  "dtype_weight": "F32",
+  "dtype_activation": "F32",
+  "tolerance_formula": "exact (copy/split)",
+  "results": [
+    {
+      "m": 512,
+      "k": 4,
+      "n": 1,
+      "seed": 12641778,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 2048,
+      "k": 4,
+      "n": 1,
+      "seed": 12621810,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 1536,
+      "k": 3,
+      "n": 1,
+      "seed": 12628475,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-06-18T13:12:20Z",
+  "rig": "threadreaper-gfx906",
+  "pmc": {
+    "vgpr_count": 5,
+    "sgpr_count": null,
+    "waves_per_simd": 10,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

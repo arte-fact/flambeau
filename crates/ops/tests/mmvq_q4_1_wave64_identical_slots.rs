@@ -1,4 +1,4 @@
-//! #288-v2 finding test — verifies (and documents) that the wave64
+//! Finding test — verifies (and documents) that the wave64
 //! kernel's per-slot outputs differ at f32 LSB scale even when the two
 //! batched activation rows are IDENTICAL.
 //! Result observed on gfx906: 11118 / 14336 outputs differ between
@@ -177,7 +177,7 @@ fn mmvq_q4_1_wave64_identical_slots() -> Result<()> {
     let dst_bytes = n_slots * n_rows * 4;
     let d_dst = alloc_zeroed(&dev, dst_bytes);
     qmatmul(
-        flambeau_ops::OpCtx { reg: &reg, stream },
+        &reg, stream,
         flambeau_ops::QmatmulBuffers {
             weights: d_w,
             act_q8_1: d_act_q8_1,

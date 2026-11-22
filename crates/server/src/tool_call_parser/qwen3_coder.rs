@@ -1,5 +1,5 @@
 //! Qwen3-Coder XML-style tool-call parser.
-//! Happy-path state machine (T2.2). Parses the format that Qwen3-Coder
+//! Happy-path state machine. Parses the format that Qwen3-Coder
 //! and the Unsloth UD Qwen3.6 GGUFs emit:
 //! ```text
 //! <tool_call>
@@ -13,8 +13,7 @@
 //! Emits:
 //! - `ToolCallOpen{ index, name }` at `<function=NAME>`.
 //! - `ToolCallArgumentsDelta{ index, arguments }` once at `</function>`
-//!   with the JSON-encoded parameter object as a **string** (guards
-//!   llama.cpp #20198).
+//!   with the JSON-encoded parameter object as a **string**.
 //! - `ToolCallClose{ index }` at `</tool_call>`.
 //! - `TextDelta(..)` for any free-text content outside tool calls.
 //!   Parameter values are literal strings from `<parameter=K>\n…\n</parameter>`
@@ -22,12 +21,12 @@
 //!   unchanged. Parameter ORDER is preserved in the emitted JSON object
 //!   via `serde_json::Map` (workspace-wide `preserve_order` feature).
 //!   Ambiguous-prefix hardening (buffer-before-emit for partial `<` tag
-//!   starts in free text and inside parameter bodies) is T2.3's scope;
-//!   for T2.2 we use the minimum-viable tail-holdback approach: never
+//!   starts in free text and inside parameter bodies) uses the
+//!   tail-holdback approach: never
 //!   emit the last `MAX_TAG_LEN` bytes of the buffer while in a state
 //!   that might see a tag next, so a tag straddling a chunk boundary
 //!   doesn't get mis-parsed.
-//!   `<think>` interaction is also T2.3; today `<think>` runs inside a
+//!   `<think>` runs inside a
 //!   `Text` state get emitted as normal `TextDelta` (never promoted to a
 //!   tool call) because none of the tool tags start with `<th`.
 
@@ -42,8 +41,8 @@ enum State {
     /// of `<tool_call>` and `<think>`.
     Text,
     /// Inside a `<think>…</think>` block. Tool-call syntax here is
-    /// part of the think content — not promoted to a tool call
-    /// (llama.cpp #20837). Contents surface as `ThinkDelta`.
+    /// part of the think content — not promoted to a tool call.
+    /// Contents surface as `ThinkDelta`.
     InThink,
     /// Saw `<tool_call>`, waiting for `<function=NAME>`.
     InToolCall,
@@ -304,7 +303,7 @@ impl QwenCoderXmlParser {
             self.buf.drain(.."</function>".len());
             // No speculative `\n` drain — step_awaiting_close's leading-
             // whitespace drain handles it.
-            // Emit arguments-as-JSON-string (guards #20198).
+            // Emit arguments-as-JSON-string.
             let args_json =
                 serde_json::to_string(&Value::Object(std::mem::take(&mut self.current_params)))
                     .unwrap_or_else(|_| "{}".to_owned());
@@ -906,7 +905,7 @@ mod tests {
         assert!(p.push("").is_empty());
     }
 
-    // ---- T2.3: think + buffer-before-emit hardening ----
+    // ---- think + buffer-before-emit hardening ----
 
     fn collect_think(evts: &[ParserEvent]) -> String {
         evts.iter()
@@ -929,7 +928,7 @@ mod tests {
 
     #[test]
     fn tool_call_inside_think_block_does_not_fire() {
-        // llama.cpp #20837 guard: a `<tool_call>` mention inside a
+        // A `<tool_call>` mention inside a
         // think block must NOT open a tool call. It stays think text.
         let input = concat!(
             "<think>",
@@ -955,7 +954,7 @@ mod tests {
 
     #[test]
     fn close_think_immediately_followed_by_tool_call() {
-        // llama.cpp #21118 guard: `</think><tool_call>` with NO
+        // `</think><tool_call>` with NO
         // whitespace between them must still parse as think-close
         // followed by tool-call-open.
         let input = concat!(

@@ -5,13 +5,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
-use flambeau_backend_hip::{device_count, HipCluster};
 use flambeau_quant::GgufFile;
 use flambeau_runtime::Registry;
 use tokio::sync::Mutex;
 use tracing::info;
 
-/// mesh topology selector. PP-V1 default; TP engages the
+/// mesh topology selector. PP default; TP engages the
 /// Qwen3MoETpModel loader + the BarP2pAllReduce-based forward path.
 /// `Hybrid` adds a manual PP-of-TP composition where
 /// `pp_size` contiguous layer stages each own a `tp_size`-rank TP
@@ -21,7 +20,7 @@ use tracing::info;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[derive(Default)]
 pub enum MeshMode {
-    /// Pipeline parallelism — V1 default. `LayerAssignment` distributes
+    /// Pipeline parallelism — the default. `LayerAssignment` distributes
     /// whole layers across ranks; one `peer_copy_via_host` per stage
     /// transition.
     #[default]
@@ -38,23 +37,35 @@ pub enum MeshMode {
     Hybrid { pp_size: u32, tp_size: u32 },
 }
 
+/// GPU backend the server runs the model on. Selected by `--backend`.
+/// `Hip` is the multi-topology daily driver; `Cuda` is single-device only
+/// (RTX) — multi-GPU CUDA (PP/TP) is deferred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ServeBackend {
+    #[default]
+    Hip,
+    Cuda,
+}
+
 /// Runtime config for `flambeau serve`.
 #[derive(Debug, Clone)]
 pub struct ServeConfig {
     pub gguf_path: PathBuf,
     pub device_ids: Vec<i32>,
+    /// GPU backend (`--backend hip|cuda`). Defaults to `Hip`.
+    pub backend: ServeBackend,
     pub bind_addr: SocketAddr,
     pub model_id: String,
-    /// mesh topology. Defaults to `Pp` for V1 callers that
+    /// mesh topology. Defaults to `Pp` for callers that
     /// don't set the field explicitly (constructors use struct-update
     /// syntax with `..Default::default()`).
     pub mesh_mode: MeshMode,
-    /// **#230 P2.11a** — optional path to a `qwen3` arch embedding
+    /// Optional path to a `qwen3` arch embedding
     /// GGUF loaded alongside the chat model. `None` disables the
-    /// embedding subsystem; `/v1/embeddings` (#231) returns 503 when
+    /// embedding subsystem; `/v1/embeddings` returns 503 when
     /// unset.
     pub embedding_gguf_path: Option<PathBuf>,
-    /// **#230 P2.11a** — HIP device id for the embedding model. Must
+    /// HIP device id for the embedding model. Must
     /// be one of `device_ids`; the embedding model reuses the
     /// chat-cluster's `HipDevice` handle for the matching rank.
     pub embedding_device_id: Option<i32>,
@@ -64,7 +75,7 @@ pub struct ServeConfig {
     /// Prefill chunk size in tokens. Default 512 is the production sweet
     /// spot across pp/tp/hybrid topologies; tune for short-prompt TTFT.
     pub prefill_ubatch: usize,
-    /// Per-chunk prefill budget used by the K4c mixed-batch scheduler.
+    /// Per-chunk prefill budget used by the mixed-batch scheduler.
     /// Smaller chunks improve short-request TTFT under load
     /// (Sarathi-Serve trade) at the cost of slightly higher long-request
     /// prefill latency. Default 512.
@@ -77,7 +88,7 @@ pub struct ServeConfig {
     /// (correctness only, no VRAM win). Activation also unlocks the
     /// paged decode + prefill attention kernels in `standard_attn`.
     pub paged_kv_pages: Option<usize>,
-    /// #232 admission-control queue depth beyond the inflight pool. 0
+    /// Admission-control queue depth beyond the inflight pool. 0
     /// disables (legacy unbounded queue). Default 16.
     pub max_queue_depth: usize,
     /// Decode-batching coalescence window (microseconds). The leader
@@ -90,6 +101,10 @@ pub struct ServeConfig {
     /// architectural max; many GGUFs ship 262 144 which OOMs the per-rank
     /// KV cache on 16 GB MI50. Only shrinks.
     pub ctx_cap: Option<usize>,
+    /// Max MTP draft tokens per verify step (0 = off).
+    pub mtp: usize,
+    /// Single-token decode graph capture on single-device CUDA sessions.
+    pub decode_graph: bool,
     /// On-device GPU sampler (top-k + softmax + penalties on the head
     /// rank, single DtoH per token). Drops sampler cost from ~12 ms to
     /// ~0 ms on chat workloads.
@@ -97,7 +112,7 @@ pub struct ServeConfig {
     /// Batched-decode scheduler. Coalesces concurrent decode steps via
     /// the inflight-slot leader. Required for N>1 throughput.
     pub batched_decode: bool,
-    /// #229 prompt prefix cache. Caches prompt-prefix KV across requests.
+    /// Prompt prefix cache. Caches prompt-prefix KV across requests.
     pub prefix_cache: bool,
     /// Prefix-cache LRU size in GB. Tune to free VRAM minus model + KV.
     pub prefix_cache_max_gb: f64,
@@ -126,7 +141,7 @@ pub struct ServeConfig {
 /// Blocking serve loop — loads the model, starts the HTTP server, runs
 /// until terminated. Caller owns the tokio runtime.
 pub async fn serve(cfg: ServeConfig, registry: Registry) -> Result<()> {
-    info!(forward_stack = "v2", "flambeau serve: loading model");
+    info!("flambeau serve: loading model");
     info!(?cfg, "flambeau serve config");
 
     let gguf = GgufFile::open(&cfg.gguf_path)
@@ -162,17 +177,27 @@ pub(crate) async fn serve_inner_v2(
     let gguf_arch: &str = &gguf_arch_owned;
 
     let kv_layout = match cfg.kv.as_str() {
+        "auto" => crate::v2_handle::default_kv_layout(gguf_arch),
         "f16" => flambeau_forward::KvLayout::F16Contig,
         "q8" => flambeau_forward::KvLayout::Q8Contig,
         other => anyhow::bail!(
-            "--kv {other}: unknown KV cache layout (supported: f16, q8)"
+            "--kv {other}: unknown KV cache layout (supported: auto, f16, q8)"
         ),
     };
 
-    let n_available = device_count().unwrap_or(0);
+    let (n_available, backend_label) = match cfg.backend {
+        #[cfg(feature = "hip")]
+        ServeBackend::Hip => (flambeau_backend_hip::device_count().unwrap_or(0), "HIP"),
+        #[cfg(not(feature = "hip"))]
+        ServeBackend::Hip => bail!("--backend hip: server built without the `hip` feature"),
+        #[cfg(feature = "cuda")]
+        ServeBackend::Cuda => (flambeau_backend_cuda::device_count().unwrap_or(0), "CUDA"),
+        #[cfg(not(feature = "cuda"))]
+        ServeBackend::Cuda => bail!("--backend cuda: server built without the `cuda` feature"),
+    };
     for d in &cfg.device_ids {
         if *d < 0 || *d >= n_available {
-            bail!("device {d} not available (have {n_available} HIP devices)");
+            bail!("device {d} not available (have {n_available} {backend_label} devices)");
         }
     }
 
@@ -238,6 +263,7 @@ pub(crate) async fn serve_inner_v2(
     let shared_gguf = GgufFile::open(&gguf_path)
         .with_context(|| "v2: re-open GGUF for shared Session".to_string())?;
     let shared_session: Box<dyn crate::v2_handle::V2BatchableSession> = create_v2_shared_session(
+        cfg.backend,
         gguf_arch,
         shared_gguf,
         topology.clone(),
@@ -247,6 +273,8 @@ pub(crate) async fn serve_inner_v2(
             max_slots: inflight_slots,
             paged_kv_pages: cfg.paged_kv_pages,
             kv_layout,
+            mtp_max_draft: cfg.mtp,
+            decode_graph: cfg.decode_graph,
         },
     )
     .with_context(|| format!("v2 shared session ({gguf_arch})"))?;
@@ -263,14 +291,12 @@ pub(crate) async fn serve_inner_v2(
         inflight_pool.push(Mutex::new(conv));
     }
 
-    let cluster: Arc<HipCluster> =
-        Arc::new(HipCluster::new(&cfg.device_ids).context("v2: HipCluster::new (state side)")?);
     let topology_tag =
         crate::serve_common::topology_tag_from_mesh(cfg.mesh_mode, cfg.device_ids.len());
     let prefix_cache = crate::serve_common::build_prefix_cache(&cfg, topology_tag.mesh_kind);
 
     // Embedding endpoint disabled — legacy qwen3-moe `EmbeddingModel`
-    // was removed in #221; v2 reimplementation is a follow-up.
+    // was removed; reimplementation is a follow-up.
     let embedding_rank: Option<usize> = None;
     let embedding: Option<crate::serve_common::EmbeddingHandle> = None;
 
@@ -280,21 +306,30 @@ pub(crate) async fn serve_inner_v2(
         chat_stops,
         shared: Arc::clone(&shared),
         vocab: model_cfg.vocab_size,
+        kv_layout,
     }) as crate::model_handle::LoadedModel;
+    if !kv_layout.supports_multi_slot_decode() && inflight_slots > 1 {
+        info!(
+            ?kv_layout,
+            inflight_slots,
+            "KV layout has no multi-slot decode path: concurrent requests decode one slot per forward \
+             (no scheduler batching, no mixed prefill+decode batches)"
+        );
+    }
 
     let state = crate::serve_common::build_server_state(crate::serve_common::ServerStateInputs {
         model_id: cfg.model_id.clone(),
         model_cfg,
         model,
-        cluster,
         inflight_pool,
         embedding,
         embedding_rank,
         gpu_sampler: false,
-        batched_decode: true,
+        batched_decode: cfg.batched_decode,
         max_queue_depth,
         prefill_ubatch,
         prefill_chunk_tokens: chunk_tokens,
+        mtp_max_draft: cfg.mtp,
         topology_tag,
         prefix_cache,
         boot,
@@ -404,7 +439,42 @@ fn topology_from_mesh(
     }
 }
 
+/// Build the shared session for the chosen backend. The arch `match` lives once
+/// per execution path (worker vs solo), branched on the backend — adding a
+/// backend is generic, not a per-arch duplication.
 fn create_v2_shared_session(
+    backend: ServeBackend,
+    gguf_arch: &str,
+    file: GgufFile,
+    topology: flambeau_forward::Topology,
+    params: flambeau_forward::LaunchParams,
+) -> Result<Box<dyn crate::v2_handle::V2BatchableSession>> {
+    match backend {
+        #[cfg(feature = "hip")]
+        ServeBackend::Hip => create_for_arch_worker(gguf_arch, file, topology, params),
+        #[cfg(not(feature = "hip"))]
+        ServeBackend::Hip => bail!("--backend hip: server built without the `hip` feature"),
+        #[cfg(feature = "cuda")]
+        ServeBackend::Cuda => {
+            let device_id = match &topology {
+                flambeau_forward::Topology::SingleDevice { device } => *device,
+                _ => bail!(
+                    "--backend cuda: only single-device serving is supported \
+                     (multi-GPU CUDA PP/TP is deferred); use one device id"
+                ),
+            };
+            create_for_arch_solo::<flambeau_backend::CudaBackend>(
+                gguf_arch, file, device_id, params,
+            )
+        }
+        #[cfg(not(feature = "cuda"))]
+        ServeBackend::Cuda => bail!("--backend cuda: server built without the `cuda` feature"),
+    }
+}
+
+/// HIP daily-driver path: the worker-thread `Session<A>` (any topology).
+#[cfg(feature = "hip")]
+fn create_for_arch_worker(
     gguf_arch: &str,
     file: GgufFile,
     topology: flambeau_forward::Topology,
@@ -412,17 +482,41 @@ fn create_v2_shared_session(
 ) -> Result<Box<dyn crate::v2_handle::V2BatchableSession>> {
     use flambeau_forward::Session;
     match gguf_arch {
-        "qwen35" => {
-            let s = Session::<flambeau_qwen35_v2::Qwen35V2>::new(file, topology, params)?;
-            Ok(Box::new(s))
-        }
-        "qwen35moe" => {
-            let s = Session::<flambeau_qwen35moe_v2::Qwen35MoeV2>::new(file, topology, params)?;
-            Ok(Box::new(s))
-        }
+        "qwen35" => Ok(Box::new(Session::<flambeau_qwen35_v2::Qwen35V2>::new(
+            file, topology, params,
+        )?)),
+        "qwen35moe" => Ok(Box::new(Session::<flambeau_qwen35moe_v2::Qwen35MoeV2>::new(
+            file, topology, params,
+        )?)),
         "gemma3" | "gemma4" | "gemma4-26b-a4b" | "gemma4-31b" | "gemma4-9b" | "gemma4-2b" => {
-            let s = Session::<flambeau_gemma4_v2::Gemma4V2>::new(file, topology, params)?;
-            Ok(Box::new(s))
+            Ok(Box::new(Session::<flambeau_gemma4_v2::Gemma4V2>::new(
+                file, topology, params,
+            )?))
+        }
+        other => bail!("v2 serve: unsupported GGUF arch `{other}`"),
+    }
+}
+
+/// Single-device path over backend `B`: the inline `SoloSession<B, A>`.
+#[cfg(feature = "cuda")]
+fn create_for_arch_solo<B: flambeau_backend::Backend>(
+    gguf_arch: &str,
+    file: GgufFile,
+    device_id: i32,
+    params: flambeau_forward::LaunchParams,
+) -> Result<Box<dyn crate::v2_handle::V2BatchableSession>> {
+    use flambeau_forward::SoloSession;
+    match gguf_arch {
+        "qwen35" => Ok(Box::new(SoloSession::<B, flambeau_qwen35_v2::Qwen35V2>::new(
+            file, device_id, params,
+        )?)),
+        "qwen35moe" => Ok(Box::new(
+            SoloSession::<B, flambeau_qwen35moe_v2::Qwen35MoeV2>::new(file, device_id, params)?,
+        )),
+        "gemma3" | "gemma4" | "gemma4-26b-a4b" | "gemma4-31b" | "gemma4-9b" | "gemma4-2b" => {
+            Ok(Box::new(SoloSession::<B, flambeau_gemma4_v2::Gemma4V2>::new(
+                file, device_id, params,
+            )?))
         }
         other => bail!("v2 serve: unsupported GGUF arch `{other}`"),
     }
@@ -451,9 +545,8 @@ fn parse_v2_server_model_cfg(
     let prefix = gguf_arch;
     let key = |suffix: &str| format!("{prefix}.{suffix}");
     let num_layers = f
-        .metadata_u32(&key("block_count"))
-        .ok_or_else(|| anyhow::anyhow!("v2 cfg: missing `{}.block_count`", prefix))?
-        as usize;
+        .forward_block_count(prefix)
+        .ok_or_else(|| anyhow::anyhow!("v2 cfg: missing `{}.block_count`", prefix))?;
     let context_length = f
         .metadata_u32(&key("context_length"))
         .ok_or_else(|| anyhow::anyhow!("v2 cfg: missing `{}.context_length`", prefix))?

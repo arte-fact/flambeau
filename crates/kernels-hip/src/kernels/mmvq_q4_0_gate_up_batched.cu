@@ -1,7 +1,7 @@
 // mmvq_q4_0_gate_up_batched — fused (gate, up) Q4_0 MMVQ × N activation cols.
 //
-// K5 — extends `mmvq_q4_0_gate_up_dp4a` (the fused gate+up Q4_0 kernel) with
-// an inner activation-column loop bounded by compile-time N ∈ {2, 3, 4}.
+// Fused gate+up Q4_0 with an inner activation-column loop bounded by
+// compile-time N ∈ {2, 3, 4}.
 // Each block reads ONE gate weight row + ONE up weight row + ONE shared
 // activation strip per col, computing 2N output values (gate_out[c, row] +
 // up_out[c, row] for c in 0..N).

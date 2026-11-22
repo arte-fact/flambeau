@@ -103,3 +103,22 @@ fn multi_device_bind_is_safe() {
         d1.dealloc(p1, 64).unwrap();
     }
 }
+
+#[test]
+fn launch_rejects_a_wrong_argument_count() {
+    use flambeau_backend_hip::{HipModule, KernelArgs, LaunchCfg};
+    let Some(_) = maybe_skip() else { return };
+    let dev = HipDevice::new(0).expect("HipDevice::new(0)");
+    dev.bind().unwrap();
+    let image = flambeau_kernels_hip::hsaco("add_f16").expect("add_f16 compiled");
+    let module = HipModule::load(dev.id(), image).unwrap();
+    let kernel = module.kernel("flambeau_add_f16").unwrap();
+    let n: i32 = 0;
+    let mut args = KernelArgs::new();
+    args.push(&n);
+    // SAFETY: the argument-count check rejects the launch before the driver
+    // reads any argument.
+    let err = unsafe { kernel.launch(dev.default_stream(), LaunchCfg::one_d(1, 64), args) }
+        .expect_err("a 1-argument launch of a 4-parameter kernel must be refused");
+    assert!(err.to_string().contains("1 arguments pushed, the kernel takes 4"), "{err}");
+}

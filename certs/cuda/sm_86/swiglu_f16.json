@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "impl_id": "swiglu_f16",
+  "backend": "cuda",
+  "arch": "sm_86",
+  "op": "swiglu_f16",
+  "dtype_weight": "F16",
+  "dtype_activation": "F16",
+  "tolerance_formula": "|err| <= 5e-3 * max(|ref|, 1e-2) vs F64 oracle (fast __expf)",
+  "results": [
+    {
+      "m": 2048,
+      "k": 1,
+      "n": 1,
+      "seed": 12863407,
+      "max_rel_err": 0.0,
+      "tolerance": 0.005,
+      "pass": true
+    },
+    {
+      "m": 15360,
+      "k": 1,
+      "n": 1,
+      "seed": 14916527,
+      "max_rel_err": 0.0009328358,
+      "tolerance": 0.005,
+      "pass": true
+    },
+    {
+      "m": 4096,
+      "k": 1,
+      "n": 1,
+      "seed": 13209519,
+      "max_rel_err": 0.0,
+      "tolerance": 0.005,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-06-18T10:51:27Z",
+  "rig": "threadreaper-sm_86",
+  "pmc": {
+    "vgpr_count": 16,
+    "sgpr_count": null,
+    "waves_per_simd": null,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

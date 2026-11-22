@@ -3,7 +3,6 @@
 //! auto-picked by `arch::gdn_tp_mode_for` from per-rank geometry.
 
 use anyhow::{bail, Context, Result};
-use flambeau_backend_hip::HipDevice;
 use flambeau_core::{Device, DevicePtr};
 use flambeau_forward::ctx::{
     Activation, AttnWeights, EmbeddingWeights, FfnWeights, GdnWeights, LayerKind, LmHeadWeights,
@@ -12,7 +11,7 @@ use flambeau_forward::ctx::{
 use flambeau_forward::loader::{
     gdn_tp_mode_for, load_dense_attn_layer, load_dense_ffn_layer, load_embedding, load_gdn_layer,
     load_lm_head, per_rank_gdn_dims, DenseAttnLayerSpec, DenseFfnLayerSpec, EmbeddingSpec,
-    GdnLayerSpec, LmHeadSpec, ShardMode,
+    GdnLayerSpec, LmHeadSpec, LoadOptions, ShardMode,
 };
 use flambeau_quant::GgufFile;
 
@@ -27,18 +26,23 @@ pub struct Qwen35V2Model {
     pub gdn: Vec<Option<GdnWeights>>,
     pub ffn: Vec<Option<FfnWeights>>,
     pub lm_head: LmHeadWeights,
+    /// Embedded MTP/nextn draft head (`blk.{num_layers}`), when the GGUF
+    /// carries it. Attn/FFN are sharded by `shard` (TP-aware); `eh_proj`
+    /// halves stay replicated per rank (the post-AR hidden is full on every
+    /// rank, so no AllReduce is needed after eh_proj).
+    pub mtp: Option<flambeau_forward::ctx::MtpWeights>,
 
     pub(crate) allocs: Vec<(DevicePtr, usize)>,
     pub(crate) device_id: i32,
 }
 
 impl Qwen35V2Model {
-    pub fn dispose(&mut self, device: &HipDevice) -> Result<()> {
-        if device.default_stream().device_id() != self.device_id {
+    pub fn dispose(&mut self, device: &impl Device) -> Result<()> {
+        if device.id() != self.device_id {
             bail!(
                 "Qwen35V2Model::dispose: device mismatch (model on {}, called on {})",
                 self.device_id,
-                device.default_stream().device_id()
+                device.id()
             );
         }
         for (ptr, bytes) in self.allocs.drain(..) {
@@ -52,13 +56,13 @@ impl Qwen35V2Model {
 
 fn load_with_shard(
     file: &GgufFile,
-    device: &HipDevice,
+    device: &impl Device,
     shard: ShardMode,
     layer_range: Option<(usize, usize)>,
-    ctx_cap: Option<usize>,
+    opts: LoadOptions,
 ) -> Result<Qwen35V2Model> {
     let mut config = Qwen35V2Config::from_gguf(file).context("parse qwen35 config")?;
-    if let Some(cap) = ctx_cap {
+    if let Some(cap) = opts.ctx_cap {
         if cap > 0 && cap < config.context_length {
             config.context_length = cap;
         }
@@ -238,12 +242,108 @@ fn load_with_shard(
         LmHeadWeights::placeholder(config.vocab_size, config.hidden, config.rms_eps)
     };
 
+    // MTP/nextn draft head: loaded only when requested, the GGUF embeds
+    // it and this rank owns the LM head. The draft block is
+    // `blk.{num_layers}`.
+    let mtp = if mtp_head_wanted(opts, config.nextn_layers, owns_lm_head) {
+        let p = format!("blk.{}", config.num_layers);
+        let nl = |s: &str| format!("{p}.{s}");
+        let attn = load_dense_attn_layer(
+            file,
+            device,
+            &DenseAttnLayerSpec {
+                attn_norm_name: &nl("attn_norm.weight"),
+                post_attn_norm_name: None,
+                attn_q_name: &nl("attn_q.weight"),
+                attn_k_name: &nl("attn_k.weight"),
+                attn_v_name: Some(&nl("attn_v.weight")),
+                attn_output_name: &nl("attn_output.weight"),
+                attn_q_norm_name: Some(&nl("attn_q_norm.weight")),
+                attn_k_norm_name: Some(&nl("attn_k_norm.weight")),
+                attn_v_unit_norm: false,
+                n_heads: config.n_heads,
+                n_kv_heads: config.n_kv_heads,
+                head_dim: config.head_dim,
+                hidden: config.hidden,
+                rotated_dims: config.rotated_dims,
+                rope_theta: config.rope_theta,
+                rope_variant: flambeau_forward::ctx::RopeVariant::NeoxSplit,
+                window_size: 0,
+                rms_eps: config.rms_eps,
+                softmax_scale: None,
+                attn_q_gated: true,
+                kv_share_src: None,
+            },
+            shard,
+            &mut allocs,
+        )?;
+        let ffn = load_dense_ffn_layer(
+            file,
+            device,
+            &DenseFfnLayerSpec {
+                ffn_norm_name: &nl("post_attention_norm.weight"),
+                post_ffn_norm_name: None,
+                ffn_gate_name: &nl("ffn_gate.weight"),
+                ffn_up_name: &nl("ffn_up.weight"),
+                ffn_down_name: &nl("ffn_down.weight"),
+                hidden: config.hidden,
+                intermediate: config.intermediate,
+                activation: Activation::SwiGLU,
+                rms_eps: config.rms_eps,
+            },
+            shard,
+            &mut allocs,
+        )?;
+        let h = config.hidden;
+        let (eh_proj_e, eh_proj_h) = flambeau_forward::loader::upload_quant_input_halves(
+            file,
+            device,
+            &nl("nextn.eh_proj.weight"),
+            h,
+            h,
+            &mut allocs,
+        )?;
+        let enorm = flambeau_forward::loader::upload_dequant_to_f16(
+            file,
+            device,
+            &nl("nextn.enorm.weight"),
+            h,
+            &mut allocs,
+        )?;
+        let hnorm = flambeau_forward::loader::upload_dequant_to_f16(
+            file,
+            device,
+            &nl("nextn.hnorm.weight"),
+            h,
+            &mut allocs,
+        )?;
+        let shared_head_norm = flambeau_forward::loader::upload_dequant_to_f16(
+            file,
+            device,
+            &nl("nextn.shared_head_norm.weight"),
+            h,
+            &mut allocs,
+        )?;
+        Some(flambeau_forward::ctx::MtpWeights {
+            eh_proj_e,
+            eh_proj_h,
+            enorm,
+            hnorm,
+            shared_head_norm,
+            attn,
+            ffn,
+            rms_eps: config.rms_eps,
+        })
+    } else {
+        None
+    };
+
     let layout = ModelLayout {
         num_layers: config.num_layers,
         hidden: config.hidden,
         kv_max_seq_len: config.context_length,
     };
-    let device_id = device.default_stream().device_id();
+    let device_id = device.id();
     Ok(Qwen35V2Model {
         config,
         layout,
@@ -253,6 +353,7 @@ fn load_with_shard(
         gdn,
         ffn,
         lm_head,
+        mtp,
         allocs,
         device_id,
     })
@@ -260,26 +361,48 @@ fn load_with_shard(
 
 pub fn load_from_gguf(
     file: &GgufFile,
-    device: &HipDevice,
+    device: &impl Device,
     layer_range: Option<(usize, usize)>,
-    ctx_cap: Option<usize>,
+    opts: LoadOptions,
 ) -> Result<Qwen35V2Model> {
-    load_with_shard(file, device, ShardMode::Replicated, layer_range, ctx_cap)
+    load_with_shard(file, device, ShardMode::Replicated, layer_range, opts)
 }
 
 pub fn load_tp_shard_from_gguf(
     file: &GgufFile,
-    device: &HipDevice,
+    device: &impl Device,
     rank: usize,
     n_ranks: usize,
     layer_range: Option<(usize, usize)>,
-    ctx_cap: Option<usize>,
+    opts: LoadOptions,
 ) -> Result<Qwen35V2Model> {
     load_with_shard(
         file,
         device,
         ShardMode::Tp { rank, n_ranks },
         layer_range,
-        ctx_cap,
+        opts,
     )
+}
+
+fn mtp_head_wanted(opts: LoadOptions, nextn_layers: usize, owns_lm_head: bool) -> bool {
+    opts.draft_head && nextn_layers > 0 && owns_lm_head
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mtp_head_loads_only_when_requested() {
+        let on = LoadOptions {
+            ctx_cap: None,
+            draft_head: true,
+        };
+        let off = LoadOptions::default();
+        assert!(mtp_head_wanted(on, 1, true));
+        assert!(!mtp_head_wanted(off, 1, true));
+        assert!(!mtp_head_wanted(on, 0, true));
+        assert!(!mtp_head_wanted(on, 1, false));
+    }
 }

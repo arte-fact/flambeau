@@ -1,10 +1,10 @@
-// mmvq_q4_k_r4 — 1.e Q4_K MMVQ, 4 rows per block (wave64).
+// mmvq_q4_k_r4 — Q4_K MMVQ, 4 rows per block (wave64).
 // Quarter-wave per row, 16 lanes each. Compared to `mmvq_q4_k_r2`:
 // r2: 64 threads, 2 rows, 32 lanes/row, 1 byte/lane/sub-block
 // r4: 64 threads, 4 rows, 16 lanes/row, 2 bytes/lane/sub-block
 // Halves block count again (n_rows/4 vs n_rows/2). Targeted at
 // Qwen3-Coder-30B decode where `mmvq_q4_k_r2` is 30 % of wall
-// (0.b profile) on the dense attention Q/K/V/O projections.
+// on the dense attention Q/K/V/O projections.
 // Each row's 16 lanes cover the 32 bytes of each Q4_K sub-block by
 // each handling 2 positions: byte_off + {0, 16}. Otherwise the maths
 // is byte-identical to r2 — same scales, same nibble decode, same

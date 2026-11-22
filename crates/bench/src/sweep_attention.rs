@@ -1,5 +1,5 @@
 //! attention decode (F16 KV, GQA) correctness sweep.
-//! Covers the two V1 head_dim values:
+//! Covers the two target head_dim values:
 //! - head_dim=128, GQA-32/4 — Qwen3.5 family.
 //! - head_dim=256, GQA-16/2 — Qwen3.6 family.
 //!
@@ -27,7 +27,7 @@ use half::f16;
 use crate::cert::{now_utc_iso8601, Cert, PmcSnapshot, ShapeResult, SCHEMA_VERSION};
 use crate::harness::{alloc_and_upload, max_rel_err_with_floor, rig, seeded_f32_range};
 
-/// (head_dim, n_heads_q, n_heads_kv) — V1 target families + tests.
+/// (head_dim, n_heads_q, n_heads_kv) — target families + tests.
 const SHAPES: &[(usize, usize, usize)] = &[
     (64, 4, 1),    // synthetic smoke-test shape (head_dim=64, 1 warp path)
     (128, 32, 4),  // Qwen3.5 / GQA-8
@@ -144,6 +144,7 @@ fn run_shape(
         let d_out_ptr: u64 = d_out.as_usize() as u64;
         let scale_f = scale;
         let window_i: i32 = 0;
+        let ring_depth_i: i32 = 0;
         let mut args = KernelArgs::new();
         args.push(&d_q_ptr);
         args.push(&d_k_ptr);
@@ -155,6 +156,7 @@ fn run_shape(
         args.push(&n_tokens_i);
         args.push(&scale_f);
         args.push(&window_i);
+        args.push(&ring_depth_i);
         let cfg = LaunchCfg::one_d(n_heads_q as u32, head_dim as u32);
         unsafe { kernel.launch(stream, cfg, args)? };
         stream.synchronize()?;

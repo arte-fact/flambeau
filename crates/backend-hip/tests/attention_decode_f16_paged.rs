@@ -169,6 +169,11 @@ fn run_case(case: Case<'_>) -> (Vec<f16>, Vec<f16>) {
     args.push(&head_dim_i);
     args.push(&n_slots_i);
     args.push(&scale);
+    // window_size + ring_depth (no SWA, absolute addressing) — the kernel's
+    // last two params. Push explicitly rather than relying on zero-init.
+    let zero_i: i32 = 0;
+    args.push(&zero_i);
+    args.push(&zero_i);
     let cfg = LaunchCfg {
         grid: (n_heads_q as u32, n_slots as u32, 1),
         block: (head_dim as u32, 1, 1),

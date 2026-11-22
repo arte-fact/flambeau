@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "impl_id": "l2_norm_f32",
+  "backend": "cuda",
+  "arch": "sm_86",
+  "op": "l2_norm_f32",
+  "dtype_weight": "F32",
+  "dtype_activation": "F32",
+  "tolerance_formula": "|err| <= 1e-5 * max(|ref|, 1) vs F64 oracle",
+  "results": [
+    {
+      "m": 16,
+      "k": 128,
+      "n": 1,
+      "seed": 12630270,
+      "max_rel_err": 2.9802322e-8,
+      "tolerance": 0.00001,
+      "pass": true
+    },
+    {
+      "m": 2048,
+      "k": 128,
+      "n": 1,
+      "seed": 14692974,
+      "max_rel_err": 2.9802322e-8,
+      "tolerance": 0.00001,
+      "pass": true
+    },
+    {
+      "m": 16,
+      "k": 256,
+      "n": 1,
+      "seed": 12628862,
+      "max_rel_err": 7.450581e-9,
+      "tolerance": 0.00001,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 512,
+      "n": 1,
+      "seed": 12641783,
+      "max_rel_err": 7.450581e-9,
+      "tolerance": 0.00001,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-06-18T11:01:53Z",
+  "rig": "threadreaper-sm_86",
+  "pmc": {
+    "vgpr_count": 39,
+    "sgpr_count": null,
+    "waves_per_simd": null,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

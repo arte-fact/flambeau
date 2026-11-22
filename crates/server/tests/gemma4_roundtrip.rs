@@ -9,7 +9,8 @@
 //!    `flambeau_server::tool_call_parser::gemma4::Gemma4ToolCallParser`
 //!    and asserts the call name + arguments are recovered.
 //!
-//! Skipped when no gemma4 GGUF is present in `/artefact/models`.
+//! Skipped when no gemma4 GGUF is present in the test models directory
+//! (`flambeau_test_models::models_dir`).
 
 use flambeau_quant::{ChatTemplate, GgufFile};
 use flambeau_server::tool_call_parser::{
@@ -17,22 +18,14 @@ use flambeau_server::tool_call_parser::{
 };
 
 const MODELS: &[&str] = &[
-    "/artefact/models/gemma-4-E4B-it-Q4_0.gguf",
-    "/artefact/models/gemma-4-31B-it-Q4_0.gguf",
-    "/artefact/models/gemma-4-26B-A4B-it-Q8_0.gguf",
+    "gemma-4-E4B-it-Q4_0.gguf",
+    "gemma-4-31B-it-Q4_0.gguf",
+    "gemma-4-26B-A4B-it-Q8_0.gguf",
 ];
-
-fn first_present() -> Option<std::path::PathBuf> {
-    MODELS
-        .iter()
-        .map(std::path::PathBuf::from)
-        .find(|p| p.exists())
-}
 
 #[test]
 fn render_then_parse_recovers_tool_call() {
-    let Some(path) = first_present() else {
-        eprintln!("skipping — no gemma4 GGUF in /artefact/models");
+    let Some(path) = flambeau_test_models::first_model("render_then_parse_recovers_tool_call", MODELS) else {
         return;
     };
     let gguf = GgufFile::open(&path).expect("open GGUF");

@@ -1,4 +1,4 @@
-//! Sarathi-Serve mixed-batch GDN (Phase K2).
+//! Sarathi-Serve mixed-batch GDN.
 //!
 //! Rows `[0..K)` are a prefill chunk for slot `slot_p` (single slot,
 //! K contiguous timesteps). Rows `[K..K+N)` are batched decodes
@@ -14,15 +14,14 @@
 //! AR fires once per phase (twice per layer). Matches the v1 driver
 //! shape (see `project_lever1_mixed_batch_v1`).
 //!
-//! K2 slice: requires both `gdn_prefill_scratch` AND
+//! Requires both `gdn_prefill_scratch` AND
 //! `gdn_decode_batched_scratch` to be configured. Same caller
 //! contract as standard_attn_mixed: prefill rows share `slot_ids[0]`;
 //! decode rows must not collide with slot_p.
 //!
 //! See `doc/MIXED_BATCH_V2_PLAN.md`.
 
-use anyhow::{bail, Result};
-use flambeau_backend_hip::{HipDevice, HipStream};
+use anyhow::{bail, Context, Result};
 use flambeau_core::{Device, DevicePtr};
 use flambeau_model_ops::delta_net::DeltaNetLayer;
 use flambeau_model_ops::WeightHandle;
@@ -39,8 +38,8 @@ fn quant_handle(qw: &QuantWeight, dims: [usize; 2]) -> WeightHandle {
     }
 }
 
-pub fn gdn_layer_mixed_local<H: TopologyHooks>(
-    state: &mut CoreState<'_>,
+pub fn gdn_layer_mixed_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
+    state: &mut CoreState<'_, B>,
     hooks: &mut H,
     input: &Tensor<F16>,
     weights: &GdnWeights,
@@ -79,12 +78,10 @@ pub fn gdn_layer_mixed_local<H: TopologyHooks>(
                 state.layer_idx_offset
             )
         })?;
-    if local_idx >= state.pool.gdn_state.len() {
-        bail!(
-            "gdn_layer_mixed: local_idx {local_idx} >= gdn_state.len {}",
-            state.pool.gdn_state.len()
-        );
-    }
+    let gdn_idx = state
+        .pool
+        .gdn_index(local_idx)
+        .with_context(|| format!("gdn_layer_mixed: layer {layer_idx}"))?;
     let max_slots = state.pool.config.max_slots.max(1);
     for (i, &slot) in slot_ids.iter().enumerate() {
         if slot >= max_slots {
@@ -92,8 +89,9 @@ pub fn gdn_layer_mixed_local<H: TopologyHooks>(
         }
     }
 
+    super::gdn::gdn_rs_make_live(state)?;
     let dims = weights.dims;
-    let layer_state = state.pool.gdn_state[local_idx];
+    let layer_state = state.pool.gdn_state[gdn_idx];
     let state_bytes_per_slot = dims.num_v_heads * dims.head_k_dim * dims.head_v_dim * 4;
     let hist_bytes_per_slot = (dims.conv_kernel - 1) * dims.conv_channels * 4;
 
@@ -164,7 +162,7 @@ pub fn gdn_layer_mixed_local<H: TopologyHooks>(
             .conv_history
             .offset_bytes(slot_p * hist_bytes_per_slot);
         let mut ar_cb =
-            |buf: DevicePtr, n_elems: usize, dev: &HipDevice, stm: &HipStream| -> Result<()> {
+            |buf: DevicePtr, n_elems: usize, dev: &B::Device, stm: &B::Stream| -> Result<()> {
                 hooks.ar_sum_f32(buf, n_elems, dev, stm)
             };
         block.forward_prefill_with_ar_hook(
@@ -183,6 +181,7 @@ pub fn gdn_layer_mixed_local<H: TopologyHooks>(
             flambeau_model_ops::GdnPrefillSeq {
                 n_tokens: k,
                 state_event: None,
+                kstates: None,
             },
             Some(&mut ar_cb),
         )?;
@@ -231,7 +230,7 @@ pub fn gdn_layer_mixed_local<H: TopologyHooks>(
         }
         flambeau_core::Stream::synchronize(state.stream)?;
         let mut ar_cb =
-            |buf: DevicePtr, n_elems: usize, dev: &HipDevice, stm: &HipStream| -> Result<()> {
+            |buf: DevicePtr, n_elems: usize, dev: &B::Device, stm: &B::Stream| -> Result<()> {
                 hooks.ar_sum_f32(buf, n_elems, dev, stm)
             };
         block.forward_decode_with_ar_hook_batched_slots(

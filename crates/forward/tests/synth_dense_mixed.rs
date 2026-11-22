@@ -1,4 +1,4 @@
-//! Phase K1a parity test: `standard_attn_mixed` vs separate
+//! Parity test: `standard_attn_mixed` vs separate
 //! `standard_attn` calls. Runs K prefill rows for slot 0 + N decode rows
 //! for slots 1..=N through the mixed path once, and compares the F16
 //! attention output to the reference path that runs the prefill and
@@ -64,6 +64,7 @@ fn build_scratch_cfg() -> ScratchConfig {
     let q_width = N_HEADS * HEAD_DIM;
     let kv_width = N_KV_HEADS * HEAD_DIM;
     ScratchConfig {
+        mtp: None,
         hidden: HIDDEN,
         intermediate: 256,
         q_width,

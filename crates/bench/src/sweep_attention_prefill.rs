@@ -1,5 +1,5 @@
 //! attention prefill (F16 KV, GQA, causal mask) correctness sweep.
-//! Covers both V1 head_dim values:
+//! Covers both target head_dim values:
 //! - head_dim=128, GQA-32/4 — Qwen3.5 family.
 //! - head_dim=256, GQA-16/2 — Qwen3.6 family.
 //!
@@ -28,7 +28,7 @@ use half::f16;
 use crate::cert::{now_utc_iso8601, Cert, PmcSnapshot, ShapeResult, SCHEMA_VERSION};
 use crate::harness::{alloc_and_upload, max_rel_err_with_floor, rig, seeded_f32_range};
 
-/// (head_dim, n_heads_q, n_heads_kv) — V1 target families + gemma4.
+/// (head_dim, n_heads_q, n_heads_kv) — target families + gemma4.
 const SHAPES: &[(usize, usize, usize)] = &[
     (128, 32, 4),  // Qwen3.5
     (256, 16, 2),  // Qwen3.6
@@ -175,6 +175,7 @@ fn run_shape(
         let q_off_i = q_offset as i32;
         let scale_f = scale;
         let window_i: i32 = 0;
+        let ring_depth_i: i32 = 0;
         let d_q_ptr: u64 = d_q.as_usize() as u64;
         let d_k_ptr: u64 = d_k.as_usize() as u64;
         let d_v_ptr: u64 = d_v.as_usize() as u64;
@@ -192,6 +193,7 @@ fn run_shape(
         args.push(&q_off_i);
         args.push(&scale_f);
         args.push(&window_i);
+        args.push(&ring_depth_i);
         let cfg = LaunchCfg {
             grid: (n_q_tokens as u32, n_heads_q as u32, 1),
             block: (head_dim as u32, 1, 1),
@@ -422,6 +424,7 @@ fn run_shape_flash_tile(
         let q_off_i = q_offset as i32;
         let scale_f = scale;
         let window_i: i32 = 0;
+        let ring_depth_i: i32 = 0;
         let d_q_ptr: u64 = d_q.as_usize() as u64;
         let d_k_ptr: u64 = d_k.as_usize() as u64;
         let d_v_ptr: u64 = d_v.as_usize() as u64;
@@ -438,6 +441,7 @@ fn run_shape_flash_tile(
         args.push(&q_off_i);
         args.push(&scale_f);
         args.push(&window_i);
+        args.push(&ring_depth_i);
         // Grid = (ceil(n_q / BR=4), H_q, 1); Block = (WARP_SIZE=64, BR=4, 1).
         const BR: u32 = 4;
         const WARP: u32 = 64;

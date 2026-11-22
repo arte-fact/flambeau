@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "impl_id": "attention_prefill_flash_tile_q8_kv",
+  "backend": "hip",
+  "arch": "gfx906",
+  "op": "attention_prefill_flash_tile_q8_kv",
+  "dtype_weight": "F16",
+  "dtype_activation": "Q8_0",
+  "tolerance_formula": "|err| <= 3e-2 * max(|ref|, 1) vs F64 dequant oracle (Q8 envelope)",
+  "results": [
+    {
+      "m": 6,
+      "k": 64,
+      "n": 10,
+      "seed": 12641464,
+      "max_rel_err": 0.0,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 8,
+      "k": 128,
+      "n": 12,
+      "seed": 12638630,
+      "max_rel_err": 0.000061035156,
+      "tolerance": 0.03,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-06-18T14:11:56Z",
+  "rig": "threadreaper-gfx906",
+  "pmc": {
+    "vgpr_count": 46,
+    "sgpr_count": null,
+    "waves_per_simd": 5,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

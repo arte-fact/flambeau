@@ -80,7 +80,6 @@ pub trait ForwardCtx {
     /// slot_id MUST NOT appear in the decode slot_ids[K..].
     ///
     /// Default impl bails — only the engine ctx implements this today.
-    /// See `doc/MIXED_BATCH_V2_PLAN.md` Phase K1.
     fn standard_attn_mixed(
         &mut self,
         input: &Tensor<F16>,
@@ -111,7 +110,7 @@ pub trait ForwardCtx {
     /// once per phase (twice per layer) — matches the v1 driver shape
     /// (see `project_lever1_mixed_batch_v1`).
     ///
-    /// Default impl bails. See `doc/MIXED_BATCH_V2_PLAN.md` Phase K2.
+    /// Default impl bails.
     fn gdn_layer_mixed(
         &mut self,
         input: &Tensor<F16>,
@@ -203,6 +202,144 @@ pub trait ForwardCtx {
     ) -> Box<dyn Iterator<Item = usize> + 'a>;
 
     fn logits(&self) -> &[f32];
+
+    /// RMSNorm row `row` of `resid` (the pre-head residual) with `norm` and
+    /// write the F16 result to `dst` — the MTP anchor (`h_nextn`).
+    /// Default impl bails — only the engine ctx supports it.
+    fn capture_hidden_from(
+        &mut self,
+        _resid: &Tensor<F16>,
+        _row: usize,
+        _norm: &Tensor<F16>,
+        _eps: f32,
+        _dst: &mut Tensor<F16>,
+    ) -> Result<()> {
+        anyhow::bail!("capture_hidden_from: not implemented on this ctx")
+    }
+
+    /// MTP draft chain: pair `anchor_token` (at `start_pos`) with
+    /// `anchor_h`, the target hidden of `start_pos - 1`, and run the nextn
+    /// layer for up to `n_draft` steps, each later step consuming the
+    /// previously drafted token and the draft layer's own hidden. Sampled
+    /// draft tokens are appended to `drafts`. The draft layer uses KV slab
+    /// `mtp_layer_idx` from `start_pos` on for slot `slot_id`.
+    /// Default impl bails — only the engine ctx supports it.
+    #[allow(clippy::too_many_arguments)]
+    fn mtp_draft(
+        &mut self,
+        _w: &MtpWeights,
+        _lm_head: &LmHeadWeights,
+        _embedding: &EmbeddingWeights,
+        _anchor_token: u32,
+        _anchor_h: &Tensor<F16>,
+        _start_pos: usize,
+        _slot_id: usize,
+        _mtp_layer_idx: usize,
+        _n_draft: usize,
+        _sample: &mut flambeau_runtime::MtpSampler,
+        _drafts: &mut Vec<MtpDraft>,
+    ) -> Result<()> {
+        anyhow::bail!("mtp_draft: not implemented on this ctx")
+    }
+
+    /// Like `output_head`, but emits logits for ALL `n_rows` rows of
+    /// `input` (needed to verify a batch of MTP drafts in one forward).
+    /// Default impl falls back to `output_head` when `n_rows == 1`.
+    /// MTP verification under a greedy plan: the LM head over the first
+    /// `n_rows` rows of `input`, then each row's [`flambeau_runtime::MtpArgmax`]
+    /// draw on device. `Some(tokens)` leaves the logits on device; `None`
+    /// when the plan does not fit the
+    /// device scratch, the logits then being on the host as after
+    /// [`Self::output_head_all`].
+    fn output_head_argmax_rows(
+        &mut self,
+        _input: &Tensor<F16>,
+        _lm_head: &LmHeadWeights,
+        _slot_ids: &[usize],
+        _n_rows: usize,
+        _plan: &flambeau_runtime::MtpArgmax,
+    ) -> Result<Option<Vec<u32>>> {
+        anyhow::bail!("output_head_argmax_rows: not implemented on this ctx")
+    }
+
+    fn output_head_all(
+        &mut self,
+        input: &Tensor<F16>,
+        lm_head: &LmHeadWeights,
+        slot_ids: &[usize],
+        n_rows: usize,
+    ) -> Result<()> {
+        if n_rows > 1 {
+            anyhow::bail!("output_head_all: not implemented on this ctx")
+        }
+        self.output_head(input, lm_head, slot_ids)
+    }
+
+    /// Snapshot the GDN recurrent state of `slot_id` to host bytes (for
+    /// MTP verify rollback). Default bails.
+    fn gdn_snapshot(&mut self, _slot_id: usize) -> Result<Vec<u8>> {
+        anyhow::bail!("gdn_snapshot: not implemented on this ctx")
+    }
+
+    /// Restore the GDN recurrent state of `slot_id` from a snapshot.
+    /// Default bails.
+    fn gdn_restore(&mut self, _slot_id: usize, _snap: &[u8]) -> Result<()> {
+        anyhow::bail!("gdn_restore: not implemented on this ctx")
+    }
+
+    /// Device pointer of the pool's MTP anchor buffer (F16 `[hidden]`).
+    /// NULL when MTP is off.
+    fn mtp_anchor_ptr(&self) -> flambeau_core::DevicePtr {
+        flambeau_core::DevicePtr::NULL
+    }
+
+    /// Stage target hiddens for [`Self::mtp_catchup`]: an optional lead
+    /// row, then `output_norm` of the first `n_rows` rows of `resid`. Call
+    /// before the anchor buffer or `resid` is overwritten.
+    fn mtp_stage_hidden(
+        &mut self,
+        _lm_head: &LmHeadWeights,
+        _resid: &Tensor<F16>,
+        _n_rows: usize,
+        _lead: crate::core::composites::MtpLead,
+    ) -> Result<()> {
+        anyhow::bail!("mtp_stage_hidden: not implemented on this ctx")
+    }
+
+    /// Rewrite the draft layer's KV rows at `positions` from `tokens`
+    /// paired with the staged target hiddens.
+    fn mtp_catchup(
+        &mut self,
+        _w: &MtpWeights,
+        _embedding: &EmbeddingWeights,
+        _tokens: &[u32],
+        _positions: &[usize],
+        _slot_id: usize,
+        _mtp_layer_idx: usize,
+    ) -> Result<()> {
+        anyhow::bail!("mtp_catchup: not implemented on this ctx")
+    }
+
+    /// Toggle the GDN verify mode: while on, a multi-row GDN pass of one
+    /// sequence keeps every row's recurrent state (and its conv inputs), so
+    /// [`Self::gdn_select_rows`] can roll back to a row prefix.
+    fn mtp_spec_rows(&mut self, _on: bool) {}
+
+    /// After a verify of `n_rows` rows under [`Self::mtp_spec_rows`], make
+    /// the recurrent state of `slot_id` the one after its first `n_keep` rows
+    /// (every GDN layer this ctx owns). Moves the device state index; no
+    /// copy of the state, no sync.
+    fn gdn_select_rows(&mut self, _slot_id: usize, _n_keep: usize, _n_rows: usize) -> Result<()> {
+        anyhow::bail!("gdn_select_rows: not implemented on this ctx")
+    }
+
+    /// Record that the MTP anchor buffer holds the target hidden of
+    /// `(slot, position)`; `None` invalidates it.
+    fn mtp_set_pending(&mut self, _pending: Option<(usize, usize)>) {}
+
+    fn mtp_pending(&self) -> Option<(usize, usize)> {
+        None
+    }
 }
 
 /// Runtime-tagged quant weight handle. Holds the device pointer plus
@@ -224,7 +361,7 @@ impl QuantWeight {
         act_q8_1_mmq: &Tensor<flambeau_model_ops::Q8_1>,
         output: &mut Tensor<flambeau_model_ops::F32>,
         shape: flambeau_ops::MatmulShape,
-        ops: &flambeau_ops::HipOps<'_>,
+        ops: &impl flambeau_ops::Ops,
     ) -> Result<()> {
         if output.n_elems < shape.m * shape.n {
             anyhow::bail!(
@@ -236,7 +373,7 @@ impl QuantWeight {
                 shape.m * shape.n
             );
         }
-        <flambeau_ops::HipOps<'_> as flambeau_ops::Ops>::qmatmul(
+        flambeau_ops::Ops::qmatmul(
             ops,
             flambeau_ops::QmatmulBuffers {
                 weights: self.ptr,
@@ -249,36 +386,24 @@ impl QuantWeight {
         )
     }
 
-    /// True iff `dtype` has an F16-direct MMVQ kernel registered in
-    /// `ops.mmvq_f16_direct`. Callers gate the fused-cast fast path on
-    /// this; unsupported dtypes (F16, BF16) keep the F32+cast pair.
-    pub fn supports_decode_to_f16(&self) -> bool {
-        use flambeau_core::op::QDtype;
-        // Q5_K's F16-direct kernel diverges from F32+cast in 1/12288 rows
-        // (mmvq_f16_direct_parity caught it); kept on the slow F32+cast
-        // pair until the kernel is fixed.
-        matches!(
-            self.dtype,
-            QDtype::Q4_0
-                | QDtype::Q4_1
-                | QDtype::Q5_0
-                | QDtype::Q5_1
-                | QDtype::Q8_0
-                | QDtype::Q2_K
-                | QDtype::Q3_K
-                | QDtype::Q4_K
-                | QDtype::Q6_K
-                | QDtype::Q8_K
-                | QDtype::IQ1_S
-                | QDtype::IQ1_M
-                | QDtype::IQ2_XXS
-                | QDtype::IQ2_XS
-                | QDtype::IQ2_S
-                | QDtype::IQ3_XXS
-                | QDtype::IQ3_S
-                | QDtype::IQ4_NL
-                | QDtype::IQ4_XS
-        )
+    /// Whether this projection's auto-dispatched `qmatmul` at `shape` reads
+    /// the DS4 144-B mmq activation (`true`) or the standard 36-B Q8_1
+    /// activation (`false`). Composites that pre-quantise both layouts use
+    /// this to skip the dead one; the answer comes from the same dispatch
+    /// that launches, so it never disagrees with the kernel actually run.
+    pub fn reads_mmq_activation(
+        &self,
+        shape: flambeau_ops::MatmulShape,
+        ops: &impl flambeau_ops::Ops,
+    ) -> bool {
+        ops.qmatmul_reads_mmq_activation(shape, self.dtype)
+    }
+
+    /// True when the m = 1 MMVQ kernel for this weight's dtype has an
+    /// F16-output entry (`ops.mmvq_f16_supported`). Callers gate the
+    /// fused-cast fast path on this; otherwise they keep the F32+cast pair.
+    pub fn supports_decode_to_f16(&self, ops: &impl flambeau_ops::Ops) -> bool {
+        ops.mmvq_f16_supported(self.dtype)
     }
 
     /// Decode-only (`m=1`) MMVQ writing directly into an F16
@@ -291,7 +416,7 @@ impl QuantWeight {
         output: &mut Tensor<flambeau_model_ops::F16>,
         k: usize,
         n: usize,
-        ops: &flambeau_ops::HipOps<'_>,
+        ops: &impl flambeau_ops::Ops,
     ) -> Result<()> {
         if output.n_elems < n {
             anyhow::bail!(
@@ -300,7 +425,7 @@ impl QuantWeight {
                 output.n_elems,
             );
         }
-        <flambeau_ops::HipOps<'_> as flambeau_ops::Ops>::mmvq_f16_direct(
+        flambeau_ops::Ops::mmvq_f16_direct(
             ops,
             flambeau_ops::MmvqBuffers {
                 weights: self.ptr,
@@ -313,8 +438,21 @@ impl QuantWeight {
     }
 }
 
+/// Device copy of `token_embd`: dequantized to F16 at load, or kept in its
+/// GGUF dtype and dequantized row by row on gather.
+pub enum EmbeddingTable {
+    F16(Tensor<F16>),
+    Quant(QuantWeight),
+}
+
+impl From<Tensor<F16>> for EmbeddingTable {
+    fn from(t: Tensor<F16>) -> Self {
+        Self::F16(t)
+    }
+}
+
 pub struct EmbeddingWeights {
-    pub token_embd: Tensor<F16>,
+    pub token_embd: EmbeddingTable,
     pub vocab_size: usize,
     pub hidden: usize,
     /// Optional post-embed scalar multiply applied in-place
@@ -323,6 +461,13 @@ pub struct EmbeddingWeights {
 }
 
 impl EmbeddingWeights {
+    /// Whether `embed` can read token ids that are already on the device
+    /// outside decode-graph capture (the quantized gather kernel exists on
+    /// every backend; the F16 table copies rows from host token ids).
+    pub fn gathers_device_ids(&self) -> bool {
+        matches!(self.token_embd, EmbeddingTable::Quant(_))
+    }
+
     /// NULL-ptr placeholder for PP ranks that don't own layer 0.
     /// `PpForwardCtx::embed` only dereferences the weights on the
     /// first rank; non-first ranks peer-receive into the residual
@@ -331,7 +476,9 @@ impl EmbeddingWeights {
         Self {
             // SAFETY: NULL ptr + 0 elems makes the tensor opaque;
             // safe construction since no read ever fires on it.
-            token_embd: unsafe { Tensor::<F16>::from_raw(flambeau_core::DevicePtr::NULL, 0) },
+            token_embd: EmbeddingTable::F16(unsafe {
+                Tensor::<F16>::from_raw(flambeau_core::DevicePtr::NULL, 0)
+            }),
             vocab_size,
             hidden,
             post_scale: None,
@@ -395,6 +542,34 @@ pub struct AttnWeights {
     /// projection bytes are computed but discarded (cheaper than
     /// branching the composite). `None` ⇒ normal own-KV path.
     pub kv_share_src: Option<usize>,
+}
+
+/// One drafted token with its draft distribution (for rejection sampling).
+pub struct MtpDraft {
+    pub token: u32,
+    /// q(token) under the draft distribution.
+    pub q: f32,
+    /// Full draft distribution (id, prob), top-k truncated.
+    pub dist: Vec<(u32, f32)>,
+}
+
+/// Weights of the embedded MTP/nextn draft head (GGUF `blk.{n_layer}.nextn.*`
+/// plus the draft block's attn/ffn tensors). The draft block is a full-attention
+/// decoder layer whose input is `eh_proj(concat(enorm(e_tok), hnorm(h_tgt)))`
+/// and whose logits go through the shared LM head after `shared_head_norm`.
+/// Loaded only when the GGUF reports `nextn_predict_layers > 0`.
+pub struct MtpWeights {
+    /// `nextn.eh_proj` `[2*hidden, hidden]` split along the input dim, each
+    /// half `[hidden, hidden]` in the GGUF dtype: `eh_proj_e` multiplies the
+    /// normed token embedding, `eh_proj_h` the normed target hidden.
+    pub eh_proj_e: QuantWeight,
+    pub eh_proj_h: QuantWeight,
+    pub enorm: Tensor<F16>,
+    pub hnorm: Tensor<F16>,
+    pub shared_head_norm: Tensor<F16>,
+    pub attn: AttnWeights,
+    pub ffn: FfnWeights,
+    pub rms_eps: f32,
 }
 
 pub struct FfnWeights {

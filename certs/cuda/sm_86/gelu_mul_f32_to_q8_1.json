@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "impl_id": "gelu_mul_f32_to_q8_1",
+  "backend": "cuda",
+  "arch": "sm_86",
+  "op": "gelu_mul_f32_to_q8_1",
+  "dtype_weight": "F32",
+  "dtype_activation": "Q8_1",
+  "tolerance_formula": "|dequant - oracle| <= 5e-3 * max(|oracle|, 1) (Q8_1 step + tanhf)",
+  "results": [
+    {
+      "m": 32,
+      "k": 1,
+      "n": 1,
+      "seed": 12642793,
+      "max_rel_err": 0.0005211495,
+      "tolerance": 0.005,
+      "pass": true
+    },
+    {
+      "m": 256,
+      "k": 1,
+      "n": 1,
+      "seed": 12604041,
+      "max_rel_err": 0.000519868,
+      "tolerance": 0.005,
+      "pass": true
+    },
+    {
+      "m": 4096,
+      "k": 1,
+      "n": 1,
+      "seed": 13250441,
+      "max_rel_err": 0.0006601587,
+      "tolerance": 0.005,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-07-08T09:39:42Z",
+  "rig": "threadreaper-sm_86",
+  "pmc": {
+    "vgpr_count": 16,
+    "sgpr_count": null,
+    "waves_per_simd": null,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

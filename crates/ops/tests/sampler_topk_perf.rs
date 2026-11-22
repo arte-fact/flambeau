@@ -14,7 +14,7 @@ use anyhow::Result;
 use flambeau_backend_hip::{device_count, HipDevice};
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_ops::hip::sampling::topk_softmax_f32;
-use flambeau_ops::{OpCtx, SamplerTopkSoftmaxBuffers, SamplerTopkSoftmaxKnobs};
+use flambeau_ops::{SamplerTopkSoftmaxBuffers, SamplerTopkSoftmaxKnobs};
 use flambeau_ops::OpsRegistry;
 
 fn dev_or_skip() -> Option<HipDevice> {
@@ -89,7 +89,7 @@ fn perf_v151424_k256() -> Result<()> {
     // Warmup
     for _ in 0..5 {
         topk_softmax_f32(
-            OpCtx { reg: &reg, stream: dev.default_stream() },
+            &reg, dev.default_stream(),
             SamplerTopkSoftmaxBuffers { logits: d_logits, out_ids: d_ids, out_probs: d_probs },
             SamplerTopkSoftmaxKnobs { vocab, k, inv_temp },
         )?;
@@ -102,7 +102,7 @@ fn perf_v151424_k256() -> Result<()> {
     for _ in 0..n {
         let t0 = Instant::now();
         topk_softmax_f32(
-            OpCtx { reg: &reg, stream: dev.default_stream() },
+            &reg, dev.default_stream(),
             SamplerTopkSoftmaxBuffers { logits: d_logits, out_ids: d_ids, out_probs: d_probs },
             SamplerTopkSoftmaxKnobs { vocab, k, inv_temp },
         )?;

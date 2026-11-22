@@ -11,8 +11,7 @@
 
 #![cfg(feature = "hip")]
 
-use anyhow::{anyhow, bail, Context, Result};
-use flambeau_backend_hip::{HipDevice, HipStream};
+use anyhow::{anyhow, bail, Result};
 use flambeau_core::op::QDtype;
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_quant::{GgmlDType, QK8_0};
@@ -22,7 +21,7 @@ use half::f16;
 /// on the default stream. Synchronises before returning. Used by every
 /// per-stage scratch-builder for buffers that must start at zero
 /// (residual streams, partial accumulators).
-pub fn alloc_zeroed(device: &HipDevice, bytes: usize) -> Result<DevicePtr> {
+pub fn alloc_zeroed(device: &impl Device, bytes: usize) -> Result<DevicePtr> {
     let p = device
         .alloc(bytes)
         .map_err(|e| anyhow!("alloc {bytes}: {e}"))?;
@@ -48,7 +47,7 @@ pub fn alloc_zeroed(device: &HipDevice, bytes: usize) -> Result<DevicePtr> {
 /// models that apply an "unlearned" RMSNorm (norm-with-unit-weight) —
 /// the V-norm pass in gemma4's full-attn layer is the canonical
 /// caller.
-pub fn upload_f16_ones(device: &HipDevice, n: usize) -> Result<DevicePtr> {
+pub fn upload_f16_ones(device: &impl Device, n: usize) -> Result<DevicePtr> {
     let ones: Vec<f16> = vec![f16::from_f32(1.0); n];
     let bytes = ones.len() * 2;
     let p = device
@@ -177,75 +176,6 @@ pub struct TokenEmbdSrc {
     pub hidden: usize,
 }
 
-pub fn embed_token_host(
-    device: &HipDevice,
-    stream: &HipStream,
-    src: TokenEmbdSrc,
-    token_id: u32,
-    out_f16_dev: DevicePtr,
-) -> Result<()> {
-    let TokenEmbdSrc {
-        ptr: token_embd_ptr,
-        dtype: token_embd_dtype,
-        bytes: token_embd_bytes,
-        vocab,
-        hidden,
-    } = src;
-    if (token_id as usize) >= vocab {
-        bail!("token_id {token_id} >= vocab {vocab}");
-    }
-    let row_bytes = row_bytes_for_dtype(token_embd_dtype, hidden)?;
-    let offset = (token_id as usize) * row_bytes;
-    if offset + row_bytes > token_embd_bytes {
-        bail!(
-            "token_embd row out of bounds: token_id={token_id} row_bytes={row_bytes} \
-             total_bytes={token_embd_bytes}"
-        );
-    }
-    let src = token_embd_ptr.offset_bytes(offset);
-
-    // 1. Download the row's raw bytes.
-    let mut row_raw = vec![0u8; row_bytes];
-    // SAFETY: src points at >= row_bytes valid device bytes; row_raw
-    // owns row_bytes host bytes.
-    unsafe {
-        device.memcpy_async(
-            stream,
-            CopyDirection::DeviceToHost,
-            DevicePtr(row_raw.as_mut_ptr() as usize),
-            src,
-            row_bytes,
-        )?;
-    }
-    stream.synchronize()?;
-
-    // 2. Dequantise on host. F16 fast-path avoids the F32 round-trip.
-    let row_f16: Vec<f16> = if token_embd_dtype == GgmlDType::F16 {
-        bytemuck::cast_slice::<u8, f16>(&row_raw).to_vec()
-    } else {
-        let row_f32 = flambeau_quant::dequantize_to_vec(token_embd_dtype, &row_raw, hidden)
-            .with_context(|| format!("dequant token_embd row {token_id}"))?;
-        row_f32.into_iter().map(f16::from_f32).collect()
-    };
-    drop(row_raw);
-
-    // 3. Upload to the F16 scratch slot.
-    let upload_bytes = hidden * 2;
-    // SAFETY: out_f16_dev has hidden*2 valid bytes; row_f16 outlives
-    // the bounded sync.
-    unsafe {
-        device.memcpy_async(
-            stream,
-            CopyDirection::HostToDevice,
-            out_f16_dev,
-            DevicePtr(row_f16.as_ptr() as usize),
-            upload_bytes,
-        )?;
-    }
-    stream.synchronize()?;
-    Ok(())
-}
-
 /// Tracks `(DevicePtr, bytes)` pairs for every raw allocation made
 /// while building a per-rank stage's scratch / weight buffers, so
 /// the stage's `dispose(device)` can walk them in one place. Mirrors
@@ -267,7 +197,7 @@ impl RawAllocTracker {
 
     /// Allocate `bytes` on `device`, zero-fill, and record the
     /// `(ptr, bytes)` pair for later dispose. Returns the new ptr.
-    pub fn alloc_zeroed_tracked(&mut self, device: &HipDevice, bytes: usize) -> Result<DevicePtr> {
+    pub fn alloc_zeroed_tracked(&mut self, device: &impl Device, bytes: usize) -> Result<DevicePtr> {
         let p = alloc_zeroed(device, bytes)?;
         self.allocs.push((p, bytes));
         Ok(p)
@@ -283,14 +213,14 @@ impl RawAllocTracker {
     /// Allocate + track an F32 buffer of `n` elements (4 B / elem).
     /// Returns `(ptr, bytes)` — the `(DevicePtr, usize)` pair used by
     /// stage-scratch structs.
-    pub fn alloc_f32(&mut self, device: &HipDevice, n: usize) -> Result<(DevicePtr, usize)> {
+    pub fn alloc_f32(&mut self, device: &impl Device, n: usize) -> Result<(DevicePtr, usize)> {
         let bytes = n * 4;
         let ptr = self.alloc_zeroed_tracked(device, bytes)?;
         Ok((ptr, bytes))
     }
 
     /// Allocate + track an F16 buffer of `n` elements (2 B / elem).
-    pub fn alloc_f16(&mut self, device: &HipDevice, n: usize) -> Result<(DevicePtr, usize)> {
+    pub fn alloc_f16(&mut self, device: &impl Device, n: usize) -> Result<(DevicePtr, usize)> {
         let bytes = n * 2;
         let ptr = self.alloc_zeroed_tracked(device, bytes)?;
         Ok((ptr, bytes))
@@ -298,7 +228,7 @@ impl RawAllocTracker {
 
     /// Allocate + track a Q8_0 buffer of `n` elements
     /// (`(n / 32) * 34` B; asserts `n % 32 == 0`).
-    pub fn alloc_q8_0(&mut self, device: &HipDevice, n: usize) -> Result<(DevicePtr, usize)> {
+    pub fn alloc_q8_0(&mut self, device: &impl Device, n: usize) -> Result<(DevicePtr, usize)> {
         if n % 32 != 0 {
             bail!("alloc_q8_0: n={n} not a multiple of 32");
         }
@@ -309,7 +239,7 @@ impl RawAllocTracker {
 
     /// Allocate + track a Q8_1 buffer of `n` elements
     /// (`(n / 32) * 36` B; asserts `n % 32 == 0`).
-    pub fn alloc_q8_1(&mut self, device: &HipDevice, n: usize) -> Result<(DevicePtr, usize)> {
+    pub fn alloc_q8_1(&mut self, device: &impl Device, n: usize) -> Result<(DevicePtr, usize)> {
         if n % 32 != 0 {
             bail!("alloc_q8_1: n={n} not a multiple of 32");
         }
@@ -321,7 +251,7 @@ impl RawAllocTracker {
     /// Allocate + track an `i32` scratch of `n` elements (4 B / elem).
     /// Used for `positions`, `expert_ids`, and other small index
     /// buffers.
-    pub fn alloc_i32(&mut self, device: &HipDevice, n: usize) -> Result<(DevicePtr, usize)> {
+    pub fn alloc_i32(&mut self, device: &impl Device, n: usize) -> Result<(DevicePtr, usize)> {
         let bytes = n * 4;
         let ptr = self.alloc_zeroed_tracked(device, bytes)?;
         Ok((ptr, bytes))
@@ -330,20 +260,11 @@ impl RawAllocTracker {
     /// Allocate + track a Q8_1_MMQ buffer of `n` elements. The 4-warp
     /// LDS-tiled MMQ kernels read Q8_1 in 128-elem super-blocks
     /// (`BlockQ8_1Mmq`, 144 B). Asserts `n % 128 == 0`.
-    pub fn alloc_q8_1_mmq(&mut self, device: &HipDevice, n: usize) -> Result<(DevicePtr, usize)> {
+    pub fn alloc_q8_1_mmq(&mut self, device: &impl Device, n: usize) -> Result<(DevicePtr, usize)> {
         if n % 128 != 0 {
             bail!("alloc_q8_1_mmq: n={n} not a multiple of 128");
         }
         let bytes = (n / 128) * std::mem::size_of::<flambeau_quant::BlockQ8_1Mmq>();
-        let ptr = self.alloc_zeroed_tracked(device, bytes)?;
-        Ok((ptr, bytes))
-    }
-
-    /// Allocate + track a `u64` scratch of `n` elements (8 B / elem).
-    /// Used for batched-decode per-slot pointer tables (`slot_k_ptrs`,
-    /// `slot_v_ptrs`).
-    pub fn alloc_u64(&mut self, device: &HipDevice, n: usize) -> Result<(DevicePtr, usize)> {
-        let bytes = n * 8;
         let ptr = self.alloc_zeroed_tracked(device, bytes)?;
         Ok((ptr, bytes))
     }
@@ -356,24 +277,9 @@ impl RawAllocTracker {
         self.disposed
     }
 
-    /// Drain the tracked allocs and mark the tracker disposed without
-    /// freeing any of them. Use when the caller has taken ownership of
-    /// the (`ptr`, `bytes`) pairs via [`UploadedTensor`] (or similar)
-    /// and is tracking them on its own — e.g. qwen3-moe's per-shard
-    /// byte counter + DeviceTensor list, or gemma4's PP `raw:
-    /// &mut Vec<(DevicePtr, usize)>`. Returns the drained alloc list
-    /// so the caller can integrate it.
-    ///
-    /// After this call the tracker behaves as if `dispose` had been
-    /// called — `Drop` won't log, subsequent `dispose` is a no-op.
-    pub fn forget_allocs(&mut self) -> Vec<(DevicePtr, usize)> {
-        self.disposed = true;
-        std::mem::take(&mut self.allocs)
-    }
-
     /// Free every tracked allocation on `device` and mark disposed.
     /// Idempotent — a second call is a no-op.
-    pub fn dispose(&mut self, device: &HipDevice) -> Result<()> {
+    pub fn dispose(&mut self, device: &impl Device) -> Result<()> {
         if self.disposed {
             return Ok(());
         }

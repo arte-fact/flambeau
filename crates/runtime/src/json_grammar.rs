@@ -1,4 +1,4 @@
-//! Minimal JSON state machine for **P0.1** response_format=json_object.
+//! Minimal JSON state machine for response_format=json_object.
 //! Tracks a streaming JSON value as bytes are appended to it. After each
 //! token the model proposes, the sampler decodes the candidate's bytes,
 //! attempts to advance the state, and rejects (zeros out) candidates
@@ -105,7 +105,7 @@ impl JsonState {
         !self.invalid && self.finished && self.stack.is_empty()
     }
 
-    /// **#236 P0.1b** — `true` once a top-level JSON value has been
+    /// `true` once a top-level JSON value has been
     /// opened (any `{`, `[`, string-quote, number digit, or literal
     /// keyword). Stays `true` for the rest of the parse, even after
     /// the value closes (`is_complete()` then also returns `true`).

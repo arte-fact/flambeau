@@ -9,6 +9,8 @@ description = "qwen35moe MoE hybrid (GDN + full-attn-gated + routed-MoE FFN + sh
 [features]
 default = []
 hip = ["dep:flambeau-backend-hip", "flambeau-forward/hip", "flambeau-model-ops/hip", "flambeau-ops/hip"]
+# CUDA alongside hip on the dual rig; the lib is backend-generic (`Arch` over `ForwardCtx`).
+cuda = ["dep:flambeau-backend-cuda", "flambeau-forward/cuda", "flambeau-model-ops/cuda", "flambeau-ops/cuda"]
 
 [dependencies]
 flambeau-core = { path = "../../core" }
@@ -17,11 +19,15 @@ flambeau-model-ops = { path = "../../model-ops" }
 flambeau-ops = { path = "../../ops" }
 flambeau-forward = { path = "../../forward" }
 flambeau-backend-hip = { path = "../../backend-hip", optional = true }
+flambeau-backend-cuda = { path = "../../backend-cuda", optional = true }
 anyhow.workspace = true
 thiserror.workspace = true
 half.workspace = true
 bytemuck.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+flambeau-test-models = { path = "../../test-models" }
 
 [lints]
 workspace = true

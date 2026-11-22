@@ -1,0 +1,498 @@
+//! RMSNorm — F16→F16 and fused F16→Q8_1.
+//! Both kernels use 256 threads/row, one block per row. Layout of the Q8_1
+//! output is the GGUF-standard `[d (fp16), s (fp16), qs[32] (i8)]` block.
+
+use anyhow::Result;
+use flambeau_core::{LaunchArgs, LaunchCfg};
+use flambeau_core::DevicePtr;
+
+use crate::sig::{NormBuffers, NormFusedAddBuffers, NormResidualBuffers, NormShape};
+
+/// `y[i] = (x[i] / sqrt(mean(x*x) + eps)) * weight[i]`. Row-wise over `m`
+/// rows of `k` elements each. All tensors F16, row-major, contiguous.
+pub fn rmsnorm_f16<B: flambeau_core::KernelBackend>(reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream, buf: NormBuffers, shape: NormShape, eps: f32) -> Result<()> {
+    let module = reg.expect_module("rmsnorm_f16")?;
+    let kernel = B::kernel(module, "flambeau_rmsnorm_f16")?;
+
+    let m_i = shape.m as i32;
+    let k_i = shape.k as i32;
+    let x_ptr: u64 = buf.input.as_usize() as u64;
+    let w_ptr: u64 = buf.weight.as_usize() as u64;
+    let y_ptr: u64 = buf.output.as_usize() as u64;
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&x_ptr);
+    args.push_arg(&w_ptr);
+    args.push_arg(&y_ptr);
+    args.push_arg(&m_i);
+    args.push_arg(&k_i);
+    args.push_arg(&eps);
+    let cfg = LaunchCfg::one_d(shape.m as u32, 256);
+    B::launch(&kernel, stream, cfg, args)?;
+    Ok(())
+}
+
+/// Per-head V unit RMSNorm in place. `v` is F16
+/// `[n_tokens, n_kv_heads, head_dim]`, normalised per (token, head)
+/// group of `head_dim` elements with unit weights (no learnable
+/// gamma). `head_dim` must be ≤ 512 and divisible by 64.
+pub fn v_unit_norm_per_head_f16<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
+    v: DevicePtr,
+    n_tokens: usize,
+    n_kv_heads: usize,
+    head_dim: usize,
+    eps: f32,
+) -> Result<()> {
+    if head_dim == 0 || head_dim > 512 || (head_dim % 64) != 0 {
+        anyhow::bail!(
+            "v_unit_norm_per_head_f16: head_dim={head_dim} unsupported (need 64..=512, multiple of 64)"
+        );
+    }
+    let module = reg.expect_module("v_unit_norm_per_head_f16")?;
+    let kernel = B::kernel(module, "flambeau_v_unit_norm_per_head_f16")?;
+
+    let n_kv_heads_i = n_kv_heads as i32;
+    let head_dim_i = head_dim as i32;
+    let v_ptr: u64 = v.as_usize() as u64;
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&v_ptr);
+    args.push_arg(&n_kv_heads_i);
+    args.push_arg(&head_dim_i);
+    args.push_arg(&eps);
+    let cfg = LaunchCfg {
+        grid: (n_kv_heads as u32, n_tokens as u32, 1),
+        block: (head_dim as u32, 1, 1),
+        shared_bytes: 0,
+    };
+    B::launch(&kernel, stream, cfg, args)?;
+    Ok(())
+}
+
+/// Fused `mid = x_in + delta; mid_norm = rmsnorm(mid) * weight`. Replaces
+/// `add_f16` + `rmsnorm_f16` pair at the attention-residual epilogue. Both
+/// `mid` and `mid_norm` are needed downstream.
+pub fn rmsnorm_f16_add_residual<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
+    buf: NormFusedAddBuffers,
+    shape: NormShape,
+    eps: f32,
+) -> Result<()> {
+    let module = reg.expect_module("rmsnorm_f16_add_residual")?;
+    let kernel = B::kernel(module, "flambeau_rmsnorm_f16_add_residual")?;
+
+    let m_i = shape.m as i32;
+    let k_i = shape.k as i32;
+    let x_ptr: u64 = buf.x_in.as_usize() as u64;
+    let d_ptr: u64 = buf.delta.as_usize() as u64;
+    let w_ptr: u64 = buf.weight.as_usize() as u64;
+    let m_ptr: u64 = buf.mid.as_usize() as u64;
+    let n_ptr: u64 = buf.mid_norm.as_usize() as u64;
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&x_ptr);
+    args.push_arg(&d_ptr);
+    args.push_arg(&w_ptr);
+    args.push_arg(&m_ptr);
+    args.push_arg(&n_ptr);
+    args.push_arg(&m_i);
+    args.push_arg(&k_i);
+    args.push_arg(&eps);
+    let cfg = LaunchCfg::one_d(shape.m as u32, 256);
+    B::launch(&kernel, stream, cfg, args)?;
+    Ok(())
+}
+
+/// Fused RMSNorm + Q8_1-quantize. Saves the round-trip to HBM between
+/// norm-out and the next matmul's activation-quantize step (candle D1).
+/// Output is `m * (k / 32)` `flambeau_block_q8_1` blocks, layout matching
+/// `flambeau_quant::BlockQ8_1`. `buf.output` is the Q8_1 destination.
+pub fn rmsnorm_quant_q8_1<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
+    buf: NormBuffers,
+    shape: NormShape,
+    eps: f32,
+) -> Result<()> {
+    let module = reg.expect_module("rmsnorm_q8_1_fused")?;
+    let kernel = B::kernel(module, "flambeau_rmsnorm_q8_1_fused")?;
+
+    let m_i = shape.m as i32;
+    let k_i = shape.k as i32;
+    let x_ptr: u64 = buf.input.as_usize() as u64;
+    let w_ptr: u64 = buf.weight.as_usize() as u64;
+    let y_ptr: u64 = buf.output.as_usize() as u64;
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&x_ptr);
+    args.push_arg(&w_ptr);
+    args.push_arg(&y_ptr);
+    args.push_arg(&m_i);
+    args.push_arg(&k_i);
+    args.push_arg(&eps);
+    // One block per row: at decode (m = 1) the block is the whole launch, so
+    // it takes the widest block to keep the row's loads in flight.
+    let cfg = LaunchCfg::one_d(shape.m as u32, 1024);
+    B::launch(&kernel, stream, cfg, args)?;
+    Ok(())
+}
+
+/// F32 per-row RMSNorm — F32 weight, F32 input, F32 output. Same math as
+/// [`rmsnorm_f16`] but keeps precision in F32 across the GDN ssm_norm step
+/// (applied per-head on the F32 state-step output).
+pub fn rmsnorm_f32<B: flambeau_core::KernelBackend>(reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream, buf: NormBuffers, shape: NormShape, eps: f32) -> Result<()> {
+    let module = reg.expect_module("rmsnorm_f32")?;
+    let kernel = B::kernel(module, "flambeau_rmsnorm_f32")?;
+    let m_i = shape.m as i32;
+    let k_i = shape.k as i32;
+    let x_ptr: u64 = buf.input.as_usize() as u64;
+    let w_ptr: u64 = buf.weight.as_usize() as u64;
+    let y_ptr: u64 = buf.output.as_usize() as u64;
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&x_ptr);
+    args.push_arg(&w_ptr);
+    args.push_arg(&y_ptr);
+    args.push_arg(&m_i);
+    args.push_arg(&k_i);
+    args.push_arg(&eps);
+    let cfg = LaunchCfg::one_d(shape.m as u32, 256);
+    B::launch(&kernel, stream, cfg, args)?;
+    Ok(())
+}
+
+/// F32-in / F16-out fused RMSNorm. Replaces the `cast_f32_to_f16 +
+/// rmsnorm_f16` two-launch pair at gemma4's post-attn / post-ffn norm
+/// site (caller still owns AR + residual_add). Reads F32 input, F16
+/// weight, writes F16 output in one pass.
+pub fn rmsnorm_f32_to_f16<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
+    buf: NormBuffers,
+    shape: NormShape,
+    eps: f32,
+) -> Result<()> {
+    let module = reg.expect_module("rmsnorm_f32_to_f16")?;
+    let kernel = B::kernel(module, "flambeau_rmsnorm_f32_to_f16")?;
+    let m_i = shape.m as i32;
+    let k_i = shape.k as i32;
+    let x_ptr: u64 = buf.input.as_usize() as u64;
+    let w_ptr: u64 = buf.weight.as_usize() as u64;
+    let y_ptr: u64 = buf.output.as_usize() as u64;
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&x_ptr);
+    args.push_arg(&w_ptr);
+    args.push_arg(&y_ptr);
+    args.push_arg(&m_i);
+    args.push_arg(&k_i);
+    args.push_arg(&eps);
+    let cfg = LaunchCfg::one_d(shape.m as u32, 256);
+    B::launch(&kernel, stream, cfg, args)?;
+    Ok(())
+}
+
+/// Fused: `resid_out = resid_in + rmsnorm_f32_to_f16(x, weight, eps)`.
+/// Replaces the (`rmsnorm_f32_to_f16` → `add_f16`) pair on the gemma4
+/// post-attn / post-ffn paths. One pass over each row; `resid_out`
+/// may alias `resid_in` for in-place. Same launch shape as
+/// `rmsnorm_f32_to_f16`.
+pub fn rmsnorm_f32_to_f16_add_residual<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
+    buf: NormResidualBuffers,
+    shape: NormShape,
+    eps: f32,
+) -> Result<()> {
+    let module = reg.expect_module("rmsnorm_f32_to_f16")?;
+    let kernel = B::kernel(module, "flambeau_rmsnorm_f32_to_f16_add_residual")?;
+    let m_i = shape.m as i32;
+    let k_i = shape.k as i32;
+    let x_ptr: u64 = buf.input.as_usize() as u64;
+    let w_ptr: u64 = buf.weight.as_usize() as u64;
+    let r_in_ptr: u64 = buf.resid_in.as_usize() as u64;
+    let r_out_ptr: u64 = buf.resid_out.as_usize() as u64;
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&x_ptr);
+    args.push_arg(&w_ptr);
+    args.push_arg(&r_in_ptr);
+    args.push_arg(&r_out_ptr);
+    args.push_arg(&m_i);
+    args.push_arg(&k_i);
+    args.push_arg(&eps);
+    let cfg = LaunchCfg::one_d(shape.m as u32, 256);
+    B::launch(&kernel, stream, cfg, args)?;
+    Ok(())
+}
+
+/// F16-input sibling of [`rmsnorm_f32_to_f16_add_residual`]. Reads an
+/// F16 delta (caller has cast / AR-summed already), rmsnorms with an
+/// F16 weight, adds to `resid_in`, writes `resid_out`. `resid_out`
+/// may alias `resid_in` for in-place. Same launch shape.
+pub fn rmsnorm_f16_to_f16_add_residual<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
+    buf: NormResidualBuffers,
+    shape: NormShape,
+    eps: f32,
+) -> Result<()> {
+    let module = reg.expect_module("rmsnorm_f32_to_f16")?;
+    let kernel = B::kernel(module, "flambeau_rmsnorm_f16_to_f16_add_residual")?;
+    let m_i = shape.m as i32;
+    let k_i = shape.k as i32;
+    let x_ptr: u64 = buf.input.as_usize() as u64;
+    let w_ptr: u64 = buf.weight.as_usize() as u64;
+    let r_in_ptr: u64 = buf.resid_in.as_usize() as u64;
+    let r_out_ptr: u64 = buf.resid_out.as_usize() as u64;
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&x_ptr);
+    args.push_arg(&w_ptr);
+    args.push_arg(&r_in_ptr);
+    args.push_arg(&r_out_ptr);
+    args.push_arg(&m_i);
+    args.push_arg(&k_i);
+    args.push_arg(&eps);
+    let cfg = LaunchCfg::one_d(shape.m as u32, 256);
+    B::launch(&kernel, stream, cfg, args)?;
+    Ok(())
+}
+
+/// L2 normalization along the last dimension. `y[i] = x[i] / sqrt(sum(x^2) + eps)`.
+/// F32 in/out. Used by GDN on Q and K before the recurrent state update.
+/// Launch: one block/row, 256 threads.
+pub fn l2_norm_f32<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
+    x: DevicePtr,
+    y: DevicePtr,
+    n_rows: usize,
+    k: usize,
+    eps: f32,
+) -> Result<()> {
+    let module = reg.expect_module("l2_norm_f32")?;
+    let kernel = B::kernel(module, "flambeau_l2_norm_f32")?;
+    let n_rows_i = n_rows as i32;
+    let k_i = k as i32;
+    let eps_f = eps;
+    let x_ptr: u64 = x.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&x_ptr);
+    args.push_arg(&y_ptr);
+    args.push_arg(&n_rows_i);
+    args.push_arg(&k_i);
+    args.push_arg(&eps_f);
+    let cfg = LaunchCfg::one_d(n_rows as u32, 256);
+    B::launch(&kernel, stream, cfg, args)?;
+    Ok(())
+}
+
+/// Stand-alone activation quantise: F32 → Q8_1 blocks. Used for the
+/// first-layer input before RMSNorm's fused variant is in play, and any time
+/// we need to quantise an existing F32 tensor on device.
+/// `n_elems` must be a multiple of 32 (QK8_1). Launches one block per Q8_1
+/// super-block, 32 threads/block.
+pub fn quantize_q8_1<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
+    x_f32: DevicePtr,
+    y_q8_1: DevicePtr,
+    n_elems: usize,
+) -> Result<()> {
+    assert_eq!(n_elems % 32, 0, "quantize_q8_1 expects n_elems % 32 == 0");
+    let module = reg.expect_module("quantize_q8_1")?;
+    let kernel = B::kernel(module, "flambeau_quantize_row_q8_1")?;
+
+    let n_i = n_elems as i32;
+    let x_ptr: u64 = x_f32.as_usize() as u64;
+    let y_ptr: u64 = y_q8_1.as_usize() as u64;
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&x_ptr);
+    args.push_arg(&y_ptr);
+    args.push_arg(&n_i);
+    let n_blocks = (n_elems / 32) as u32;
+    let cfg = LaunchCfg::one_d(n_blocks, 32);
+    B::launch(&kernel, stream, cfg, args)?;
+    Ok(())
+}
+
+/// 8 — F32 activation → BlockQ8_1Mmq (DS4 layout) for the 4-warp
+/// LDS-tiled MMQ prefill path. Output is `[n_big_blocks, total_b]`
+/// row-major of 144 B blocks (128 F32 elements per block). Grid =
+/// `(ncols/128, total_b)`, block = 128 threads.
+pub fn quantize_q8_1_mmq<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
+    x_f32: DevicePtr,
+    y_q8_1_mmq: DevicePtr,
+    ncols: usize,
+    total_b: usize,
+) -> Result<()> {
+    assert_eq!(ncols % 128, 0, "quantize_q8_1_mmq expects ncols % 128 == 0");
+    let module = reg.expect_module("quantize_q8_1_mmq")?;
+    let kernel = B::kernel(module, "flambeau_quantize_q8_1_mmq")?;
+    let ncols_i = ncols as i32;
+    let total_b_i = total_b as i32;
+    let x_ptr: u64 = x_f32.as_usize() as u64;
+    let y_ptr: u64 = y_q8_1_mmq.as_usize() as u64;
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&x_ptr);
+    args.push_arg(&y_ptr);
+    args.push_arg(&ncols_i);
+    args.push_arg(&total_b_i);
+    let cfg = LaunchCfg {
+        grid: ((ncols / 128) as u32, total_b as u32, 1),
+        block: (128, 1, 1),
+        shared_bytes: 0,
+    };
+    B::launch(&kernel, stream, cfg, args)?;
+    Ok(())
+}
+
+/// F16 sibling of [`quantize_q8_1_mmq`]. Used by the forward prefill path
+/// after rmsnorm (which emits F16) to produce the DS4 layout for
+/// `mmq_q4_1_4warp_lds` and future K-quant turbo kernels.
+pub fn quantize_f16_q8_1_mmq<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
+    x_f16: DevicePtr,
+    y_q8_1_mmq: DevicePtr,
+    ncols: usize,
+    total_b: usize,
+) -> Result<()> {
+    assert_eq!(
+        ncols % 128,
+        0,
+        "quantize_f16_q8_1_mmq expects ncols % 128 == 0"
+    );
+    let module = reg.expect_module("quantize_f16_q8_1_mmq")?;
+    let kernel = B::kernel(module, "flambeau_quantize_f16_q8_1_mmq")?;
+    let ncols_i = ncols as i32;
+    let total_b_i = total_b as i32;
+    let x_ptr: u64 = x_f16.as_usize() as u64;
+    let y_ptr: u64 = y_q8_1_mmq.as_usize() as u64;
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&x_ptr);
+    args.push_arg(&y_ptr);
+    args.push_arg(&ncols_i);
+    args.push_arg(&total_b_i);
+    let cfg = LaunchCfg {
+        grid: ((ncols / 128) as u32, total_b as u32, 1),
+        block: (128, 1, 1),
+        shared_bytes: 0,
+    };
+    B::launch(&kernel, stream, cfg, args)?;
+    Ok(())
+}
+
+/// F16 sibling of [`quantize_q8_1`]. Used by the full-attention forward to
+/// skip the host-roundtrip F16→F32 placeholder between swiglu and the
+/// output-projection MMVQ.
+pub fn quantize_f16_q8_1<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
+    x_f16: DevicePtr,
+    y_q8_1: DevicePtr,
+    n_elems: usize,
+) -> Result<()> {
+    assert_eq!(
+        n_elems % 32,
+        0,
+        "quantize_f16_q8_1 expects n_elems % 32 == 0"
+    );
+    let module = reg.expect_module("quantize_f16_q8_1")?;
+    let kernel = B::kernel(module, "flambeau_quantize_row_f16_q8_1")?;
+    let n_i = n_elems as i32;
+    let x_ptr: u64 = x_f16.as_usize() as u64;
+    let y_ptr: u64 = y_q8_1.as_usize() as u64;
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&x_ptr);
+    args.push_arg(&y_ptr);
+    args.push_arg(&n_i);
+    let n_blocks = (n_elems / 32) as u32;
+    let cfg = LaunchCfg::one_d(n_blocks, 32);
+    B::launch(&kernel, stream, cfg, args)?;
+    Ok(())
+}
+
+/// F16 → Q8_0 row-quantise. Used to convert K/V
+/// projection output (F16) to Q8_0 blocks for `KvCache<Q8Contig>`. Same
+/// shape as [`quantize_f16_q8_1`] but writes 18 B / 32 elems (no `s`
+/// field).
+pub fn quantize_f16_q8_0<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
+    x_f16: DevicePtr,
+    y_q8_0: DevicePtr,
+    n_elems: usize,
+) -> Result<()> {
+    quantize_f16_q8_0_slots(reg, stream, x_f16, y_q8_0, n_elems, None)
+}
+
+/// Graph-captureable variant of [`quantize_f16_q8_0`]. With `dst_slot=None`
+/// the behaviour is byte-identical to the wrapper; with `Some`, the `y_q8_0`
+/// destination-pointer kernel arg is tagged via `LaunchArgs::push_slot` so a
+/// captured graph can rebind the per-token cache-write destination per replay.
+pub fn quantize_f16_q8_0_slots<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
+    x_f16: DevicePtr,
+    y_q8_0: DevicePtr,
+    n_elems: usize,
+    dst_slot: Option<flambeau_core::ScalarSlot>,
+) -> Result<()> {
+    assert_eq!(
+        n_elems % 32,
+        0,
+        "quantize_f16_q8_0 expects n_elems % 32 == 0"
+    );
+    let module = reg.expect_module("quantize_f16_q8_0")?;
+    let kernel = B::kernel(module, "flambeau_quantize_row_f16_q8_0")?;
+    let n_i = n_elems as i32;
+    let x_ptr: u64 = x_f16.as_usize() as u64;
+    let y_ptr: u64 = y_q8_0.as_usize() as u64;
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&x_ptr);
+    match dst_slot {
+        Some(s) => args.push_slot(&y_ptr, s),
+        None => args.push_arg(&y_ptr),
+    }
+    args.push_arg(&n_i);
+    let n_blocks = (n_elems / 32) as u32;
+    let cfg = LaunchCfg::one_d(n_blocks, 32);
+    B::launch(&kernel, stream, cfg, args)?;
+    Ok(())
+}
+
+/// Device-position variant of [`quantize_f16_q8_0`]. Quantizes one decode row of
+/// `n_elems` F16 into `n_elems / 32` Q8_0 blocks, written at physical cache row
+/// `ring_depth > 0 ? position % ring_depth : position`, with `position` read
+/// on-device from `pos_ptr[0]`. `y_q8_0_base` is the UNSLID cache slab base, so a
+/// captured decode graph advances the Q8 KV write cursor with no rebind.
+/// CUDA-only kernel (`quantize_f16_q8_0_dpos`).
+pub fn quantize_f16_q8_0_dpos<B: flambeau_core::KernelBackend>(
+    reg: &crate::Registry<B>,
+    stream: &<B::Device as flambeau_core::Device>::Stream,
+    x_f16: DevicePtr,
+    y_q8_0_base: DevicePtr,
+    n_elems: usize,
+    ring_depth: i32,
+    pos_ptr: DevicePtr,
+) -> Result<()> {
+    assert_eq!(n_elems % 32, 0, "quantize_f16_q8_0_dpos expects n_elems % 32 == 0");
+    let module = reg.expect_module("quantize_f16_q8_0_dpos")?;
+    let kernel = B::kernel(module, "flambeau_quantize_row_f16_q8_0_dpos")?;
+    let n_i = n_elems as i32;
+    let x_ptr: u64 = x_f16.as_usize() as u64;
+    let y_ptr: u64 = y_q8_0_base.as_usize() as u64;
+    let pos_p: u64 = pos_ptr.as_usize() as u64;
+    let mut args = <B::Args<'_>>::default();
+    args.push_arg(&x_ptr);
+    args.push_arg(&y_ptr);
+    args.push_arg(&n_i);
+    args.push_arg(&ring_depth);
+    args.push_arg(&pos_p);
+    let n_blocks = (n_elems / 32) as u32;
+    let cfg = LaunchCfg::one_d(n_blocks, 32);
+    B::launch(&kernel, stream, cfg, args)?;
+    Ok(())
+}

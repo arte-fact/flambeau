@@ -103,7 +103,13 @@ impl WorkerRole {
     }
 }
 
-enum Command {
+/// Sampler closure: logits row -> (sampled token, full truncated dist).
+pub(crate) type SampleFn = flambeau_runtime::MtpSampler;
+/// Factory rebuilding the sampler from a seed — every TP rank must draw
+/// the SAME draft tokens, so all ranks build their sampler from `seed`.
+pub type SampleFactory = std::sync::Arc<dyn Fn(u64) -> SampleFn + Send + Sync>;
+
+pub(crate) enum Command {
     Forward {
         tokens: Vec<u32>,
         positions: Vec<usize>,
@@ -142,11 +148,22 @@ enum Command {
         slot_id: usize,
         reply: SyncSender<Result<()>>,
     },
+    /// Greedy MTP cycle (single-device role only). Returns
+    /// (accepted draft tokens, logits at the last accepted position (empty when the cycle drew on device)).
+    MtpStep {
+        token: u32,
+        position: usize,
+        slot_id: usize,
+        n_draft: usize,
+        sample_factory: SampleFactory,
+        seed: u64,
+        reply: SyncSender<Result<(Vec<u32>, Vec<f32>)>>,
+    },
     Shutdown,
 }
 
 pub struct WorkerHandle<A: Arch> {
-    cmd_tx: mpsc::Sender<Command>,
+    pub(crate) cmd_tx: mpsc::Sender<Command>,
     thread: Option<JoinHandle<()>>,
     _phantom: PhantomData<A>,
 }
@@ -194,10 +211,12 @@ impl<A: Arch> WorkerHandle<A> {
                         let _ = reply.send(res);
                     }
                     Command::ResetKv { reply } => {
+                        state.pool.mtp_pending = None;
                         let res = state.pool.reset_gdn_state(&state.device);
                         let _ = reply.send(res);
                     }
                     Command::ResetKvSlot { slot_id, reply } => {
+                        state.pool.mtp_pending = None;
                         let res = state.pool.reset_gdn_state_slot(slot_id, &state.device);
                         let _ = reply.send(res);
                     }
@@ -218,6 +237,7 @@ impl<A: Arch> WorkerHandle<A> {
                         rank,
                         reply,
                     } => {
+                        state.pool.mtp_pending = None;
                         let res = match snaps.get(rank) {
                             Some(bytes) => state.pool.restore_slot_bytes(
                                 slot_id,
@@ -228,6 +248,82 @@ impl<A: Arch> WorkerHandle<A> {
                             None => Err(anyhow::anyhow!(
                                 "RestoreKvSlot: snapshot has {} rank buffers, rank {rank} missing",
                                 snaps.len()
+                            )),
+                        };
+                        let _ = reply.send(res);
+                    }
+                    Command::MtpStep {
+                        token,
+                        position,
+                        slot_id,
+                        n_draft,
+                        sample_factory,
+                        seed,
+                        reply,
+                    } => {
+                        let mut sample = (sample_factory)(seed);
+                        let res = match &role {
+                            WorkerRole::Sd => {
+                                let mut ctx = SingleDeviceForwardCtx::new(
+                                    &state.device,
+                                    state.device.default_stream(),
+                                    &state.reg,
+                                    &mut state.pool,
+                                );
+                                let mut out_logits = Vec::new();
+                                A::mtp_cycle(
+                                    &state.model,
+                                    &mut ctx,
+                                    token,
+                                    position,
+                                    slot_id,
+                                    n_draft,
+                                    &mut sample,
+                                    seed,
+                                    &mut out_logits,
+                                )
+                                .map(|emitted| (emitted, out_logits))
+                            }
+                            WorkerRole::Tp {
+                                rank,
+                                n_ranks,
+                                ar,
+                                bar,
+                            } => {
+                                let ar_callback = if let Some(bc) = bar {
+                                    make_bar_ar_callback(Arc::clone(bc), *rank)
+                                } else {
+                                    make_ar_callback(Arc::clone(ar), *rank)
+                                };
+                                let hooks = TpHooks {
+                                    rank: *rank,
+                                    n_ranks: *n_ranks,
+                                    ar_callback,
+                                    bar: bar.as_ref().map(Arc::clone),
+                                };
+                                let mut ctx = TpForwardCtx::new(
+                                    &state.device,
+                                    state.device.default_stream(),
+                                    &state.reg,
+                                    &mut state.pool,
+                                    hooks,
+                                );
+                                let mut out_logits = Vec::new();
+                                A::mtp_cycle(
+                                    &state.model,
+                                    &mut ctx,
+                                    token,
+                                    position,
+                                    slot_id,
+                                    n_draft,
+                                    &mut sample,
+                                    seed,
+                                    &mut out_logits,
+                                )
+                                .map(|emitted| (emitted, out_logits))
+                            }
+                            _ => Err(anyhow::anyhow!(
+                                "MTP step: PP/hybrid topology not supported"
                             )),
                         };
                         let _ = reply.send(res);
@@ -300,7 +396,7 @@ impl<A: Arch> WorkerHandle<A> {
         Ok(reply_rx)
     }
 
-    /// Sarathi-Serve mixed-batch forward dispatch (Phase K4). Routes
+    /// Sarathi-Serve mixed-batch forward dispatch. Routes
     /// to `Arch::forward_mixed` which is wired only for archs that
     /// support it (qwen35-v2, qwen35moe-v2 today).
     pub fn send_forward_mixed(
@@ -435,11 +531,17 @@ fn init_rank<A: Arch>(
         max_slots,
         paged_kv_pages,
         kv_layout,
+        mtp_max_draft,
+        decode_graph: _,
     } = params;
     let device = HipDevice::new(device_id).context("HipDevice::new")?;
     device.bind().context("device.bind")?;
     let shard = role.shard();
-    let model = A::load(file, &device, shard, role.layer_slice(), ctx_cap).context("Arch::load")?;
+    let opts = crate::loader::LoadOptions {
+        ctx_cap,
+        draft_head: mtp_max_draft > 0,
+    };
+    let model = A::load(file, &device, shard, role.layer_slice(), opts).context("Arch::load")?;
     let mut cfg = A::scratch_config(
         &model,
         shard,
@@ -447,6 +549,7 @@ fn init_rank<A: Arch>(
         max_slots,
         paged_kv_pages,
         kv_layout,
+        mtp_max_draft,
     );
     if let Some((ls, le)) = role.layer_slice() {
         cfg.num_layers = le - ls;

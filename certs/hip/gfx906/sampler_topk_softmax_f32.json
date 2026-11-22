@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "impl_id": "sampler_topk_softmax_f32",
+  "backend": "hip",
+  "arch": "gfx906",
+  "op": "sampler_topk_softmax_f32",
+  "dtype_weight": "F32",
+  "dtype_activation": "F32",
+  "tolerance_formula": "indices exact + full-vocab probs |err| <= 1e-4 vs CPU oracle",
+  "results": [
+    {
+      "m": 1000,
+      "k": 50,
+      "n": 1,
+      "seed": 12631080,
+      "max_rel_err": 1.8626451e-9,
+      "tolerance": 0.0001,
+      "pass": true
+    },
+    {
+      "m": 50000,
+      "k": 256,
+      "n": 1,
+      "seed": 13369534,
+      "max_rel_err": 5.820766e-11,
+      "tolerance": 0.0001,
+      "pass": true
+    },
+    {
+      "m": 151000,
+      "k": 100,
+      "n": 1,
+      "seed": 15192570,
+      "max_rel_err": 1.3096724e-10,
+      "tolerance": 0.0001,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-06-18T12:14:38Z",
+  "rig": "threadreaper-gfx906",
+  "pmc": {
+    "vgpr_count": 42,
+    "sgpr_count": null,
+    "waves_per_simd": 6,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

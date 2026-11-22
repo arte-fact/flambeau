@@ -3,7 +3,7 @@
 //! dtype. Supports `head_dim ∈ {64, 128, 256, 512}`.
 
 use anyhow::bail;
-use flambeau_ops::{HipOps, Ops};
+use flambeau_ops::Ops;
 
 use crate::dtype::{F16, Q8_0};
 use crate::error::Result;
@@ -16,7 +16,7 @@ pub fn attn_prefill_q8_kv(
     out: &mut Tensor<F16>,
     shape: flambeau_ops::AttnPrefillShape,
     knobs: flambeau_ops::AttnKnobs,
-    ops: &HipOps<'_>,
+    ops: &impl Ops,
 ) -> Result<()> {
     let flambeau_ops::AttnPrefillShape {
         n_q_tokens,

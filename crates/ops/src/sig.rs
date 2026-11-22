@@ -8,18 +8,45 @@
 //!
 //! See `doc/CLIPPY_STRUCT_REFACTOR_PLAN.md` for the phased migration.
 
-use crate::OpsRegistry;
-use flambeau_backend_hip::HipStream;
 use flambeau_core::device::DevicePtr;
 
 /// Launch context handed to every `crates/ops/src/hip/*` free-fn wrapper.
 /// Both fields are short-lived borrows shared across every kernel launch
 /// in a forward pass — the registry owns the loaded modules, the stream
-/// is the queue the launch enqueues onto.
+/// is the queue the launch enqueues onto. HIP-specific (names `HipStream` +
+/// `OpsRegistry`); the portable `Ops` trait does not take it — impls hold
+/// the `(registry, stream)` pair internally.
+#[cfg(feature = "hip")]
+use crate::OpsRegistry;
+#[cfg(feature = "hip")]
+use flambeau_backend_hip::HipStream;
+
+#[cfg(feature = "hip")]
 #[derive(Copy, Clone)]
 pub struct OpCtx<'a> {
     pub reg: &'a OpsRegistry,
     pub stream: &'a HipStream,
+}
+
+/// Backend-portable shape for every `indexed_moe_mmq_*` / `indexed_moe_mmvq_*`
+/// method on the [`crate::Ops`] trait. Pure `usize` POD — lives here so a CUDA
+/// `Ops` impl needs no HIP module path.
+#[derive(Copy, Clone, Debug)]
+pub struct MoeShape {
+    /// Output row count (gate/up: `inter`; down: `hidden`).
+    pub n_rows: usize,
+    /// Y activation row axis.
+    pub n_tokens: usize,
+    /// Experts per token; 1 for the down kernels.
+    pub top_k: usize,
+    /// Super-blocks per weight row (= K / QK_K).
+    pub n_sb_per_row: usize,
+    /// Total experts across the MoE layer.
+    pub n_experts: usize,
+    /// Upper bound on `padded_total` (= `total_pairs + n_experts * 8` for
+    /// the pad-to-8 sort). Kernel early-exits past the on-device
+    /// actual padded_total.
+    pub padded_total_upper_bound: usize,
 }
 
 // --- matmul / mmvq families -------------------------------------------------
@@ -101,7 +128,7 @@ pub struct MmvqGateUpBatchShape {
 
 // --- attention family -------------------------------------------------------
 
-use flambeau_backend_hip::ScalarSlot;
+use flambeau_core::ScalarSlot;
 
 #[derive(Copy, Clone, Debug)]
 pub struct AttnBuffers {
@@ -173,6 +200,19 @@ pub struct AttnDecodeBatchedShape {
 }
 
 #[derive(Copy, Clone, Debug)]
+pub struct AttnDecodeBatchedSplitkShape {
+    pub n_heads_q: usize,
+    pub n_heads_kv: usize,
+    pub head_dim: usize,
+    pub n_slots: usize,
+    /// Max KV length across the batched slots; drives `n_chunks =
+    /// max_n_tokens_kv.div_ceil(chunk_size)`. Per-slot lengths (device-side
+    /// `n_tokens_kv`) clamp each chunk, so shorter slots emit empty partials.
+    pub max_n_tokens_kv: usize,
+    pub chunk_size: usize,
+}
+
+#[derive(Copy, Clone, Debug)]
 pub struct AttnDecodePagedShape {
     pub n_heads_q: usize,
     pub n_heads_kv: usize,
@@ -195,6 +235,47 @@ pub struct AttnSplitkShape {
     pub chunk_base: usize,
 }
 
+/// Shape for `attention_decode_f16_splitk_dpos`. The per-token `n_tokens_kv` /
+/// `chunk_base` are computed on-device from `position` (read from a device
+/// buffer) using the baked [`AttnDposKnobs`] regime, so only the capture-time
+/// grid (`n_chunks`) and `chunk_size` are host constants here.
+#[derive(Copy, Clone, Debug)]
+pub struct AttnVecDposShape {
+    pub n_heads_q: usize,
+    pub n_heads_kv: usize,
+    pub head_dim: usize,
+    /// gridDim.y: KV tiles strided over this many blocks per head; above 1
+    /// each writes a split-K partial and the shared combine runs.
+    pub n_par: usize,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct AttnSplitkDposShape {
+    pub n_heads_q: usize,
+    pub n_heads_kv: usize,
+    pub head_dim: usize,
+    /// Split-K grid.y baked at capture.
+    pub n_chunks: usize,
+    pub chunk_size: usize,
+}
+
+/// Baked regime knobs for `attention_decode_f16_splitk_dpos`. The kernel selects
+/// the KV-addressing regime from these constants + the device `position`:
+/// `slide_row_stride > 0` ⇒ SWA in-band slid; else `ring_depth > 0` ⇒ SWA ring;
+/// else global / pre-window.
+#[derive(Copy, Clone, Debug)]
+pub struct AttnDposKnobs {
+    pub scale: f32,
+    /// SWA window radius (`0` for a global layer). Used by the ring and slid
+    /// regimes; ignored in the global/pre-window regime.
+    pub window: i32,
+    /// Ring-buffer slab depth in rows (`0` = absolute addressing / slid).
+    pub ring_depth: i32,
+    /// KV-cache row stride in BYTES for the SWA in-band slide (`0` = no slide).
+    /// Matches the host `kv.bytes_per_row`.
+    pub slide_row_stride: i32,
+}
+
 #[derive(Copy, Clone, Debug)]
 pub struct AttnPrefillShape {
     pub n_q_tokens: usize,
@@ -214,6 +295,17 @@ pub struct AttnPrefillPagedShape {
     pub n_k_tokens: usize,
     pub q_offset: usize,
     pub page_size: usize,
+}
+
+/// Decode-attention path chosen by the backend's `[[attention_decode]]` row.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum AttnDecodeVariant {
+    /// Single-pass kernel up to `SPLITK_MIN_TOKENS_KV` KV rows, split-K
+    /// (flash-decoding chunk + combine) above.
+    SplitK,
+    /// `attention_decode_q8_kv_vec_dpos` (Q8_0 KV, global layers, head_dim
+    /// 128 / 256) at every KV tail; other layers keep the SplitK path.
+    VecDpos,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -242,6 +334,44 @@ pub struct AttnPrefillSlots {
     pub q_off: ScalarSlot,
 }
 
+/// Graph-capture slots for `attention_decode_f16_splitk_slots`. Tags the two
+/// per-token scalars the split-K chunk kernel reads — `n_tokens_kv` (KV tail)
+/// and `chunk_base` (SWA window start). The derived `n_chunks` grid stays
+/// fixed within a capture regime; a token that would change `n_chunks` needs
+/// recapture, not a slot update. `k_ptr` / `v_ptr` additionally tag the chunk
+/// kernel's K/V cache pointer args for the SWA SlideBand, where the caller
+/// slides the cache pointer per token (`None` everywhere else).
+#[derive(Copy, Clone, Debug)]
+pub struct AttnSplitkSlots {
+    pub n_tokens_kv: ScalarSlot,
+    pub chunk_base: ScalarSlot,
+    pub k_ptr: Option<ScalarSlot>,
+    pub v_ptr: Option<ScalarSlot>,
+}
+
+/// Graph-capture slot for `attention_decode_q8_kv_slots`. Mirrors
+/// [`AttnDecodeSlots`] for the Q8_0-KV single-pass decode kernel.
+#[derive(Copy, Clone, Debug)]
+pub struct AttnDecodeQ8Slots {
+    pub n_tokens_kv: ScalarSlot,
+}
+
+/// Graph-capture slots for `attention_decode_q8_kv_splitk_slots`. The Q8_0-KV
+/// sibling of [`AttnSplitkSlots`].
+#[derive(Copy, Clone, Debug)]
+pub struct AttnDecodeQ8SplitkSlots {
+    pub n_tokens_kv: ScalarSlot,
+    pub chunk_base: ScalarSlot,
+}
+
+/// Graph-capture slot for `kv_append_v_unit_norm_f16_slots`. Tags the
+/// `write_pos` cache-row offset the fused V-unit-norm append kernel reads as a
+/// scalar arg, so a captured graph can advance the write cursor per replay.
+#[derive(Copy, Clone, Debug)]
+pub struct KvAppendSlots {
+    pub write_pos: ScalarSlot,
+}
+
 // --- MoE family ------------------------------------------------------------
 
 /// Single-weight MoE MMVQ buffers — `weights` is the contiguous
@@ -268,35 +398,9 @@ pub struct MoeMmvqGateUpBuffers {
     pub up_out: DevicePtr,
 }
 
-/// Single-weight MoE MMVQ with a sorted-pair token-index reorder for
-/// expert-major launch ordering — same buffer set as
-/// [`MoeMmvqBuffers`] plus the sorted pair index array.
-#[derive(Copy, Clone, Debug)]
-pub struct MoeMmvqSortedBuffers {
-    pub weights: DevicePtr,
-    pub act: DevicePtr,
-    pub expert_ids: DevicePtr,
-    pub sorted_pair_idx: DevicePtr,
-    pub dst: DevicePtr,
-}
-
-/// Fused gate + up MoE MMVQ with sorted-pair token-index reorder —
-/// extends [`MoeMmvqGateUpBuffers`] with the sorted pair index array.
-#[derive(Copy, Clone, Debug)]
-pub struct MoeMmvqGateUpSortedBuffers {
-    pub gate_w: DevicePtr,
-    pub up_w: DevicePtr,
-    pub act: DevicePtr,
-    pub expert_ids: DevicePtr,
-    pub sorted_pair_idx: DevicePtr,
-    pub gate_out: DevicePtr,
-    pub up_out: DevicePtr,
-}
-
-/// Fused gate + up MoE MMQ tile8 buffers — same shape as
-/// [`MoeMmvqGateUpSortedBuffers`] plus a `padded_offsets` ptr that
-/// encodes per-block starting position within the padded sorted
-/// expert-major batch.
+/// Fused gate + up MoE MMQ tile8 buffers: gate/up weights, activation,
+/// expert ids, the padded expert-major pair order, and a `padded_offsets`
+/// ptr that encodes per-block starting position within that order.
 #[derive(Copy, Clone, Debug)]
 pub struct MoeMmqTile8GateUpBuffers {
     pub gate_w: DevicePtr,
@@ -585,6 +689,25 @@ pub struct GdnStepAlphaBetaBatchedSlotsBuffers {
     pub attn_out: DevicePtr,
 }
 
+/// Buffers for [`Ops::gdn_state_step_alphabeta_f32_s128_kstates`]: the
+/// input state is `state_live` when `rs_idx[0] == 0`, else `kstates` slot
+/// `rs_idx[0] - 1`; the state after token t is written to `kstates` slot t
+/// (`h_v * 128 * 128` f32 per slot), and `state_live` is never written.
+#[derive(Copy, Clone, Debug)]
+pub struct GdnStepKStatesBuffers {
+    pub q: DevicePtr,
+    pub k: DevicePtr,
+    pub v: DevicePtr,
+    pub alpha_in: DevicePtr,
+    pub beta_in: DevicePtr,
+    pub ssm_dt_bias: DevicePtr,
+    pub ssm_a: DevicePtr,
+    pub state_live: DevicePtr,
+    pub kstates: DevicePtr,
+    pub rs_idx: DevicePtr,
+    pub attn_out: DevicePtr,
+}
+
 /// Shared shape carrier for the three GDN state-step variants.
 #[derive(Copy, Clone, Debug)]
 pub struct GdnStepShape {
@@ -652,6 +775,21 @@ pub struct GdnSplitQkvShape {
 // Sampling penalty aggregates.
 // ---------------------------------------------------------------------------
 
+/// Buffers for [`Ops::argmax_f32`]: `logits` (adjusted in place by the
+/// sparse `(add_ids, add_vals)` list, then the `(token, count)` pairs of
+/// `penalty_counts`), the per-block winners `part_v` / `part_i`
+/// (`ARGMAX_PARTS` each) and the winning index `out`.
+#[derive(Copy, Clone, Debug)]
+pub struct ArgmaxBuffers {
+    pub logits: DevicePtr,
+    pub add_ids: DevicePtr,
+    pub add_vals: DevicePtr,
+    pub penalty_counts: DevicePtr,
+    pub part_v: DevicePtr,
+    pub part_i: DevicePtr,
+    pub out: DevicePtr,
+}
+
 /// Buffers for [`Ops::apply_penalties_f32`].
 #[derive(Copy, Clone, Debug)]
 pub struct PenaltyBuffers {
@@ -665,54 +803,6 @@ pub struct PenaltyKnobs {
     pub repetition: f32,
     pub presence: f32,
     pub frequency: f32,
-}
-
-// ---------------------------------------------------------------------------
-// MoE Q4_K turbo aggregates — used by `indexed_moe_mmq_q4_k_*_turbo` and the
-// bucket-sorted `indexed_moe_mmq_q4_k` paths.
-// ---------------------------------------------------------------------------
-
-/// Buffers for [`Ops::indexed_moe_mmq_q4_k_gate_up_turbo`].
-#[derive(Copy, Clone, Debug)]
-pub struct MoeMmqQ4KGateUpTurboBuffers {
-    pub gate_w: DevicePtr,
-    pub up_w: DevicePtr,
-    pub y_mmq: DevicePtr,
-    pub expert_ids: DevicePtr,
-    pub sorted_pair_idx_padded: DevicePtr,
-    pub padded_offsets: DevicePtr,
-    pub gate_out: DevicePtr,
-    pub up_out: DevicePtr,
-}
-
-/// Buffers for [`Ops::indexed_moe_mmq_q4_k_down_turbo`].
-#[derive(Copy, Clone, Debug)]
-pub struct MoeMmqQ4KDownTurboBuffers {
-    pub down_w: DevicePtr,
-    pub y_mmq: DevicePtr,
-    pub expert_ids: DevicePtr,
-    pub sorted_pair_idx_padded: DevicePtr,
-    pub padded_offsets: DevicePtr,
-    pub dst: DevicePtr,
-}
-
-/// Buffers for the bucket-sorted [`Ops::indexed_moe_mmq_q4_k`].
-#[derive(Copy, Clone, Debug)]
-pub struct MoeMmqQ4KBuffers {
-    pub w: DevicePtr,
-    pub y: DevicePtr,
-    pub bucket_expert: DevicePtr,
-    pub bucket_slots: DevicePtr,
-    pub dst: DevicePtr,
-}
-
-/// Shape for the bucket-sorted [`Ops::indexed_moe_mmq_q4_k`].
-#[derive(Copy, Clone, Debug)]
-pub struct MoeMmqQ4KShape {
-    pub n_rows: usize,
-    pub n_sb_per_row: usize,
-    pub top_k: usize,
-    pub n_buckets: usize,
 }
 
 // ---------------------------------------------------------------------------

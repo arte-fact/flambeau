@@ -4,36 +4,23 @@
 //! points where topologies actually differ.
 
 use anyhow::Result;
-use flambeau_backend_hip::{HipDevice, HipStream};
+use flambeau_backend::{Backend, HipBackend};
 use flambeau_core::DevicePtr;
 
-/// Buffer set for [`TopologyHooks::ar_residual_rmsnorm_f16`].
-#[derive(Copy, Clone, Debug)]
-pub struct ArResidualRmsNormHookBuffers {
-    pub residual_inout: DevicePtr,
-    pub partial_f16: DevicePtr,
-    pub rms_weight: DevicePtr,
-    pub out_norm: DevicePtr,
-}
+// The AR-epilogue buffer sets are the backend-neutral `FusedAllReduce` seam
+// types; the topology hooks below are the forward-engine view of the same
+// contract, re-exported so existing `crate::core::…` paths are unchanged.
+pub use flambeau_runtime::{ArPostAttnRmsNormHookBuffers, ArResidualRmsNormHookBuffers};
 
-/// Buffer set for [`TopologyHooks::ar_postattn_residual_rmsnorm_f32_to_f16`].
-#[derive(Copy, Clone, Debug)]
-pub struct ArPostAttnRmsNormHookBuffers {
-    pub proj_local_f32: DevicePtr,
-    pub post_norm_w_f16: DevicePtr,
-    pub resid_in_f16: DevicePtr,
-    pub resid_out_f16: DevicePtr,
-}
-
-pub trait TopologyHooks {
+pub trait TopologyHooks<B: Backend = HipBackend> {
     /// In-place reduce-sum across ranks. Called after row-parallel
     /// matmuls (attn output_proj, ffn down).
     fn ar_sum_f32(
         &mut self,
         buf: DevicePtr,
         n_elems: usize,
-        device: &HipDevice,
-        stream: &HipStream,
+        device: &B::Device,
+        stream: &B::Stream,
     ) -> Result<()> {
         let _ = (buf, n_elems, device, stream);
         Ok(())
@@ -60,8 +47,8 @@ pub trait TopologyHooks {
         residual_inout: DevicePtr,
         partial_f16: DevicePtr,
         n_elems: usize,
-        device: &HipDevice,
-        stream: &HipStream,
+        device: &B::Device,
+        stream: &B::Stream,
     ) -> Result<()> {
         let _ = (residual_inout, partial_f16, n_elems, device, stream);
         anyhow::bail!(
@@ -89,8 +76,8 @@ pub trait TopologyHooks {
         &mut self,
         buf: DevicePtr,
         n_elems: usize,
-        device: &HipDevice,
-        stream: &HipStream,
+        device: &B::Device,
+        stream: &B::Stream,
     ) -> Result<()> {
         let _ = (buf, n_elems, device, stream);
         anyhow::bail!(
@@ -104,8 +91,8 @@ pub trait TopologyHooks {
         bufs: ArResidualRmsNormHookBuffers,
         n_elems: usize,
         eps: f32,
-        device: &HipDevice,
-        stream: &HipStream,
+        device: &B::Device,
+        stream: &B::Stream,
     ) -> Result<()> {
         let _ = (bufs, n_elems, eps, device, stream);
         anyhow::bail!(
@@ -132,8 +119,8 @@ pub trait TopologyHooks {
         n_rows: usize,
         n: usize,
         eps: f32,
-        device: &HipDevice,
-        stream: &HipStream,
+        device: &B::Device,
+        stream: &B::Stream,
     ) -> Result<()> {
         let _ = (bufs, n_rows, n, eps, device, stream);
         anyhow::bail!(
@@ -145,4 +132,6 @@ pub trait TopologyHooks {
 
 pub struct NoopHooks;
 
-impl TopologyHooks for NoopHooks {}
+// No-op on every backend (solo / single-device runs): the trait methods all have
+// default bodies, so the empty impl is backend-generic.
+impl<B: Backend> TopologyHooks<B> for NoopHooks {}

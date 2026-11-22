@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "impl_id": "attention_decode_q8_kv",
+  "backend": "cuda",
+  "arch": "sm_86",
+  "op": "attention_decode_q8_kv",
+  "dtype_weight": "Q8_0",
+  "dtype_activation": "F16",
+  "tolerance_formula": "|err| <= 3e-2 * max(|ref|, 1) vs F64 dequant oracle (Q8 envelope)",
+  "results": [
+    {
+      "m": 1,
+      "k": 128,
+      "n": 16,
+      "seed": 12646007,
+      "max_rel_err": 0.00012207031,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 64,
+      "n": 24,
+      "seed": 12646711,
+      "max_rel_err": 0.00012207031,
+      "tolerance": 0.03,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-11-21T09:41:38Z",
+  "rig": "threadreaper-sm_86",
+  "pmc": {
+    "vgpr_count": 36,
+    "sgpr_count": null,
+    "waves_per_simd": null,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

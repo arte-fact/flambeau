@@ -5,7 +5,10 @@ members = [
   "crates/quant",
   "crates/kernels-shared",
   "crates/kernels-hip",
+  "crates/kernels-cuda",
   "crates/backend-hip",
+  "crates/backend-cuda",
+  "crates/backend",
   "crates/ops",
   "crates/model-ops",
   "crates/forward",
@@ -17,6 +20,7 @@ members = [
   "crates/server-core",
   "crates/server",
   "crates/cli",
+  "crates/test-models",
 ]
 
 [workspace.package]
@@ -99,4 +103,7 @@ redundant_lifetimes = "warn"
 # than it helps.
 trivial_numeric_casts = "allow"
 unsafe_op_in_unsafe_fn = "warn"
+# `cfg(unverified)` keeps null-result kernels compiled out of the runtime
+# (architectural rule 10).
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(unverified)'] }
 unused_lifetimes = "warn"

@@ -1,4 +1,4 @@
-//! Phase K2 parity test: `gdn_layer_mixed` vs separate `gdn_layer`
+//! Parity test: `gdn_layer_mixed` vs separate `gdn_layer`
 //! calls. Runs K prefill rows for slot 0 + N decode rows for slots
 //! 1..=N through the mixed path once, and compares the F16 GDN delta
 //! outputs to a reference path that runs the prefill and the
@@ -71,6 +71,7 @@ fn build_gdn_weights(allocs: &mut DeviceAllocs, dims: GdnDims) -> GdnWeights {
 
 fn build_scratch_cfg(dims: GdnDims) -> ScratchConfig {
     ScratchConfig {
+        mtp: None,
         hidden: HIDDEN,
         intermediate: 0,
         q_width: 0,

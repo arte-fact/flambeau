@@ -443,6 +443,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
+name = "flambeau-backend"
+version = "0.1.0-dev"
+dependencies = [
+ "anyhow",
+ "flambeau-backend-cuda",
+ "flambeau-backend-hip",
+ "flambeau-core",
+ "flambeau-ops",
+ "flambeau-runtime",
+]
+
+[[package]]
+name = "flambeau-backend-cuda"
+version = "0.1.0-dev"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "flambeau-core",
+ "flambeau-kernels-cuda",
+ "flambeau-runtime",
+ "half",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "flambeau-backend-hip"
 version = "0.1.0-dev"
 dependencies = [
@@ -463,9 +489,12 @@ version = "0.1.0-dev"
 dependencies = [
  "anyhow",
  "bytemuck",
+ "flambeau-backend-cuda",
  "flambeau-backend-hip",
  "flambeau-core",
+ "flambeau-kernels-cuda",
  "flambeau-kernels-hip",
+ "flambeau-ops",
  "flambeau-quant",
  "flambeau-runtime",
  "half",
@@ -508,6 +537,8 @@ version = "0.1.0-dev"
 dependencies = [
  "anyhow",
  "bytemuck",
+ "flambeau-backend",
+ "flambeau-backend-cuda",
  "flambeau-backend-hip",
  "flambeau-core",
  "flambeau-model-ops",
@@ -524,15 +555,28 @@ version = "0.1.0-dev"
 dependencies = [
  "anyhow",
  "bytemuck",
+ "flambeau-backend",
+ "flambeau-backend-cuda",
  "flambeau-backend-hip",
  "flambeau-core",
  "flambeau-forward",
  "flambeau-model-ops",
  "flambeau-ops",
  "flambeau-quant",
+ "flambeau-test-models",
  "half",
  "thiserror 2.0.18",
  "tracing",
+]
+
+[[package]]
+name = "flambeau-kernels-cuda"
+version = "0.1.0-dev"
+dependencies = [
+ "anyhow",
+ "flambeau-kernels-shared",
+ "rayon",
+ "sha2",
 ]
 
 [[package]]
@@ -540,6 +584,7 @@ name = "flambeau-kernels-hip"
 version = "0.1.0-dev"
 dependencies = [
  "anyhow",
+ "flambeau-kernels-shared",
  "rayon",
  "sha2",
 ]
@@ -547,6 +592,10 @@ dependencies = [
 [[package]]
 name = "flambeau-kernels-shared"
 version = "0.1.0-dev"
+dependencies = [
+ "serde",
+ "toml",
+]
 
 [[package]]
 name = "flambeau-model-ops"
@@ -554,6 +603,7 @@ version = "0.1.0-dev"
 dependencies = [
  "anyhow",
  "bytemuck",
+ "flambeau-backend-cuda",
  "flambeau-backend-hip",
  "flambeau-core",
  "flambeau-ops",
@@ -567,8 +617,10 @@ name = "flambeau-ops"
 version = "0.1.0-dev"
 dependencies = [
  "anyhow",
+ "flambeau-backend-cuda",
  "flambeau-backend-hip",
  "flambeau-core",
+ "flambeau-kernels-cuda",
  "flambeau-kernels-hip",
  "flambeau-quant",
  "half",
@@ -583,6 +635,7 @@ dependencies = [
  "bytemuck",
  "byteorder",
  "flambeau-core",
+ "flambeau-test-models",
  "half",
  "libc",
  "memmap2",
@@ -601,12 +654,16 @@ version = "0.1.0-dev"
 dependencies = [
  "anyhow",
  "bytemuck",
+ "flambeau-backend",
+ "flambeau-backend-cuda",
  "flambeau-backend-hip",
  "flambeau-core",
  "flambeau-forward",
  "flambeau-model-ops",
  "flambeau-ops",
  "flambeau-quant",
+ "flambeau-runtime",
+ "flambeau-test-models",
  "half",
  "serde_json",
  "thiserror 2.0.18",
@@ -619,12 +676,14 @@ version = "0.1.0-dev"
 dependencies = [
  "anyhow",
  "bytemuck",
+ "flambeau-backend-cuda",
  "flambeau-backend-hip",
  "flambeau-core",
  "flambeau-forward",
  "flambeau-model-ops",
  "flambeau-ops",
  "flambeau-quant",
+ "flambeau-test-models",
  "half",
  "thiserror 2.0.18",
  "tracing",
@@ -653,6 +712,8 @@ version = "0.1.0-dev"
 dependencies = [
  "anyhow",
  "axum",
+ "flambeau-backend",
+ "flambeau-backend-cuda",
  "flambeau-backend-hip",
  "flambeau-core",
  "flambeau-forward",
@@ -663,6 +724,7 @@ dependencies = [
  "flambeau-qwen35moe-v2",
  "flambeau-runtime",
  "flambeau-server-core",
+ "flambeau-test-models",
  "half",
  "serde",
  "serde_json",
@@ -678,10 +740,13 @@ name = "flambeau-server-core"
 version = "0.1.0-dev"
 dependencies = [
  "anyhow",
- "flambeau-backend-hip",
  "flambeau-model-ops",
  "flambeau-runtime",
 ]
+
+[[package]]
+name = "flambeau-test-models"
+version = "0.1.0-dev"
 
 [[package]]
 name = "fnv"
