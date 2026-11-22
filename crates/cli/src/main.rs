@@ -1116,6 +1116,7 @@ fn sweep(root: &std::path::Path, arch: &str, op: Option<&str>, dtype: &str) -> R
                     "IQ4_XS_lds_tiled_x8" => (vec![MmqDtype::Iq4XsLdsTiledX8], SweepSpec::v1_4_prefill),
                     "Q4_K" | "Q4_K_lds_tiled_y64" => (vec![MmqDtype::Q4KLdsTiledY64], SweepSpec::v1_4_prefill),
                     "Q4_K_lds_tiled_y64_x8" => (vec![MmqDtype::Q4KLdsTiledY64X8], SweepSpec::v1_4_prefill),
+                    "Q4_K_lds_tiled_y64_x16" => (vec![MmqDtype::Q4KLdsTiledY64X16], SweepSpec::v1_4_prefill),
                     "Q3_K" | "Q3_K_lds_tiled" => (vec![MmqDtype::Q3KLdsTiled], SweepSpec::v1_4_prefill),
                     "Q3_K_lds_tiled_x8" => (vec![MmqDtype::Q3KLdsTiledX8], SweepSpec::v1_4_prefill),
                     "IQ4_NL" | "IQ4_NL_lds_tiled" => (vec![MmqDtype::Iq4NlLdsTiled], SweepSpec::v1_4_prefill),
@@ -1173,6 +1174,7 @@ fn sweep(root: &std::path::Path, arch: &str, op: Option<&str>, dtype: &str) -> R
                             | MmqDtype::Iq4XsLdsTiledX8
                             | MmqDtype::Q4KLdsTiledY64
                             | MmqDtype::Q4KLdsTiledY64X8
+                            | MmqDtype::Q4KLdsTiledY64X16
                             | MmqDtype::Q3KLdsTiled
                             | MmqDtype::Q3KLdsTiledX8
                             | MmqDtype::Iq4NlLdsTiled

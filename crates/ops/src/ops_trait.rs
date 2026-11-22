@@ -116,11 +116,10 @@ pub trait Ops {
         dtype_weight: QDtype,
     ) -> Result<()>;
 
-    /// Q4_K r4 MMVQ for the wide-vocab LM head at decode: each block
-    /// owns 4 output rows, halving the block count over r2. `n_rows` is
-    /// the vocab; `n_superblocks` is `k / 256`. The 4-row amortisation
-    /// only pays off at vocab ≥ 131072 with `k % 256 == 0` — the caller
-    /// gates on that and falls back to `qmatmul` otherwise.
+    /// Q4_K r4 MMVQ: each block owns 4 output rows. `n_superblocks` is
+    /// `k / 256`.
+    // why: 2.0x slower than the m = 1 dispatch row on gfx906 at the Q4_K head shapes (262144x3840, 131072x5120).
+    #[cfg(unverified)]
     fn mmvq_q4_k_r4(
         &self,
         buf: crate::MmvqBuffers,

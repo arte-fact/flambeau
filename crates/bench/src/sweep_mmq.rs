@@ -72,6 +72,7 @@ pub enum Dtype {
     Q6KLdsTiledX8,
     Iq4XsLdsTiledX8,
     Q4KLdsTiledY64X8,
+    Q4KLdsTiledY64X16,
     Q3KLdsTiledX8,
     Iq4NlLdsTiledX8,
     /// Wave64 Q8_K MMQ. MMQ_Y=64, TILE_N=8, 64 threads. DP4A inner.
@@ -114,6 +115,7 @@ fn tile_shape(dtype: Dtype) -> (u32, u32) {
         | Dtype::Q4KLdsTiledY64X8
         | Dtype::Q3KLdsTiledX8
         | Dtype::Iq4NlLdsTiledX8 => (64, 8),
+        Dtype::Q4KLdsTiledY64X16 => (64, 16),
         Dtype::Q5KLdsTiled
         | Dtype::Q6KLdsTiled
         | Dtype::Iq4XsLdsTiled
@@ -149,6 +151,7 @@ impl Dtype {
                 | Dtype::Q6KLdsTiledX8
                 | Dtype::Iq4XsLdsTiledX8
                 | Dtype::Q4KLdsTiledY64X8
+                | Dtype::Q4KLdsTiledY64X16
                 | Dtype::Q3KLdsTiledX8
                 | Dtype::Iq4NlLdsTiledX8
         )
@@ -163,7 +166,7 @@ impl Dtype {
             Dtype::Q4_0Wave64 | Dtype::Q4_04Warp => "Q4_0",
             Dtype::Q5_0Wave64 => "Q5_0",
             Dtype::Q5_1Wave64 => "Q5_1",
-            Dtype::Q4KLdsTiledY64 | Dtype::Q4KLdsTiledY64X8 => "Q4_K",
+            Dtype::Q4KLdsTiledY64 | Dtype::Q4KLdsTiledY64X8 | Dtype::Q4KLdsTiledY64X16 => "Q4_K",
             Dtype::Q5KLdsTiled | Dtype::Q5KLdsTiledX8 => "Q5_K",
             Dtype::Q6KLdsTiled | Dtype::Q6KLdsTiledX8 => "Q6_K",
             Dtype::Q8KWave64 => "Q8_K",
@@ -190,7 +193,7 @@ impl Dtype {
             Dtype::Q4_0Wave64 | Dtype::Q4_04Warp => GgmlDType::Q4_0,
             Dtype::Q5_0Wave64 => GgmlDType::Q5_0,
             Dtype::Q5_1Wave64 => GgmlDType::Q5_1,
-            Dtype::Q4KLdsTiledY64 | Dtype::Q4KLdsTiledY64X8 => GgmlDType::Q4K,
+            Dtype::Q4KLdsTiledY64 | Dtype::Q4KLdsTiledY64X8 | Dtype::Q4KLdsTiledY64X16 => GgmlDType::Q4K,
             Dtype::Q5KLdsTiled | Dtype::Q5KLdsTiledX8 => GgmlDType::Q5K,
             Dtype::Q6KLdsTiled | Dtype::Q6KLdsTiledX8 => GgmlDType::Q6K,
             Dtype::Q8KWave64 => GgmlDType::Q8K,
@@ -225,6 +228,7 @@ impl Dtype {
             Dtype::Iq4XsLdsTiledX8 => "qmatmul_iq4_xs_mmq_lds_tiled_x8_gfx906",
             Dtype::Q4KLdsTiledY64 => "qmatmul_q4_K_mmq_lds_tiled_y64_gfx906",
             Dtype::Q4KLdsTiledY64X8 => "qmatmul_q4_K_mmq_lds_tiled_y64_x8_gfx906",
+            Dtype::Q4KLdsTiledY64X16 => "qmatmul_q4_K_mmq_lds_tiled_y64_x16_gfx906",
             Dtype::Q3KLdsTiled => "qmatmul_q3_K_mmq_lds_tiled_gfx906",
             Dtype::Q3KLdsTiledX8 => "qmatmul_q3_K_mmq_lds_tiled_x8_gfx906",
             Dtype::Iq4NlLdsTiled => "qmatmul_iq4_nl_mmq_lds_tiled_gfx906",
@@ -259,6 +263,7 @@ impl Dtype {
             Dtype::Iq4XsLdsTiledX8 => "mmq_iq4_xs_lds_tiled_x8",
             Dtype::Q4KLdsTiledY64 => "mmq_q4_K_lds_tiled_y64",
             Dtype::Q4KLdsTiledY64X8 => "mmq_q4_K_lds_tiled_y64_x8",
+            Dtype::Q4KLdsTiledY64X16 => "mmq_q4_K_lds_tiled_y64_x16",
             Dtype::Q3KLdsTiled => "mmq_q3_K_lds_tiled",
             Dtype::Q3KLdsTiledX8 => "mmq_q3_K_lds_tiled_x8",
             Dtype::Iq4NlLdsTiled => "mmq_iq4_nl_lds_tiled",
@@ -293,6 +298,7 @@ impl Dtype {
             Dtype::Iq4XsLdsTiledX8 => "flambeau_mmq_iq4_xs_lds_tiled_x8_q8_1",
             Dtype::Q4KLdsTiledY64 => "flambeau_mmq_q4_K_lds_tiled_y64_q8_1",
             Dtype::Q4KLdsTiledY64X8 => "flambeau_mmq_q4_K_lds_tiled_y64_x8_q8_1",
+            Dtype::Q4KLdsTiledY64X16 => "flambeau_mmq_q4_K_lds_tiled_y64_x16_q8_1",
             Dtype::Q3KLdsTiled => "flambeau_mmq_q3_K_lds_tiled_q8_1",
             Dtype::Q3KLdsTiledX8 => "flambeau_mmq_q3_K_lds_tiled_x8_q8_1",
             Dtype::Iq4NlLdsTiled => "flambeau_mmq_iq4_nl_lds_tiled_q8_1",
@@ -320,7 +326,7 @@ impl Dtype {
             Dtype::Q5KLdsTiled | Dtype::Q5KLdsTiledX8
             | Dtype::Q6KLdsTiled | Dtype::Q6KLdsTiledX8
             | Dtype::Iq4XsLdsTiled | Dtype::Iq4XsLdsTiledX8
-            | Dtype::Q4KLdsTiledY64 | Dtype::Q4KLdsTiledY64X8
+            | Dtype::Q4KLdsTiledY64 | Dtype::Q4KLdsTiledY64X8 | Dtype::Q4KLdsTiledY64X16
             | Dtype::Q3KLdsTiled | Dtype::Q3KLdsTiledX8
             | Dtype::Iq4NlLdsTiled | Dtype::Iq4NlLdsTiledX8
             | Dtype::Q8_0LdsTiled => 256,
@@ -349,7 +355,7 @@ impl Dtype {
             Dtype::Q4_0Wave64 | Dtype::Q4_04Warp => std::mem::size_of::<BlockQ4_0>(),
             Dtype::Q5_0Wave64 => std::mem::size_of::<BlockQ5_0>(),
             Dtype::Q5_1Wave64 => std::mem::size_of::<BlockQ5_1>(),
-            Dtype::Q4KLdsTiledY64 | Dtype::Q4KLdsTiledY64X8 => std::mem::size_of::<BlockQ4K>(),
+            Dtype::Q4KLdsTiledY64 | Dtype::Q4KLdsTiledY64X8 | Dtype::Q4KLdsTiledY64X16 => std::mem::size_of::<BlockQ4K>(),
             Dtype::Q5KLdsTiled | Dtype::Q5KLdsTiledX8 => std::mem::size_of::<BlockQ5K>(),
             Dtype::Q6KLdsTiled | Dtype::Q6KLdsTiledX8 => std::mem::size_of::<BlockQ6K>(),
             Dtype::Q8KWave64 => std::mem::size_of::<BlockQ8K>(),
@@ -390,6 +396,7 @@ impl Dtype {
             | Dtype::Q4KLdsTiledY64X8
             | Dtype::Q3KLdsTiledX8
             | Dtype::Iq4NlLdsTiledX8 => "lds_tiled_x8",
+            Dtype::Q4KLdsTiledY64X16 => "lds_tiled_y64_x16",
             Dtype::Q8KWave64
             | Dtype::Q2KWave64
             | Dtype::Iq3SWave64
@@ -534,12 +541,13 @@ impl SweepSpec {
 
 /// The 27B-class FFN projections (hidden 5120, intermediate 17408) the
 /// LDS-tiled rows serve at prefill: up/gate `k = 5120 → n = 17408` and down
-/// `k = 17408 → n = 5120`, from the first batched width the rows take to a
-/// full ubatch, a partial final tile (33) included.
+/// `k = 17408 → n = 5120`, from the first batched width any row takes (2) to
+/// a full ubatch, with each small-batch band start (5, 9) and a partial final
+/// tile (33).
 fn ffn_17408_shapes() -> Vec<Shape> {
     let mut v = Vec::new();
     for (k, n) in [(5120, 17408), (17408, 5120)] {
-        for m in [3, 8, 16, 32, 33, 64, 512] {
+        for m in [2, 3, 5, 8, 9, 16, 32, 33, 64, 512] {
             v.push(Shape { m, k, n });
         }
     }
@@ -661,7 +669,7 @@ fn run_shape(
             | Dtype::Q5KLdsTiled | Dtype::Q5KLdsTiledX8
             | Dtype::Q6KLdsTiled | Dtype::Q6KLdsTiledX8
             | Dtype::Iq4XsLdsTiled | Dtype::Iq4XsLdsTiledX8
-            | Dtype::Q4KLdsTiledY64 | Dtype::Q4KLdsTiledY64X8
+            | Dtype::Q4KLdsTiledY64 | Dtype::Q4KLdsTiledY64X8 | Dtype::Q4KLdsTiledY64X16
             | Dtype::Q3KLdsTiled | Dtype::Q3KLdsTiledX8
             | Dtype::Iq4NlLdsTiled | Dtype::Iq4NlLdsTiledX8
             | Dtype::Q8_0LdsTiled
@@ -799,6 +807,7 @@ fn run_shape(
                 Dtype::Iq4XsLdsTiledX8 => 4 * (8 * 36 + 4688),
                 Dtype::Q4KLdsTiledY64 => 4 * (64 * 36 + 2440),
                 Dtype::Q4KLdsTiledY64X8 => 4 * (8 * 36 + 2440),
+                Dtype::Q4KLdsTiledY64X16 => 4 * (16 * 36 + 2440),
                 Dtype::Q3KLdsTiled => 4 * (64 * 36 + 4488),
                 Dtype::Q3KLdsTiledX8 => 4 * (8 * 36 + 4488),
                 Dtype::Iq4NlLdsTiled => 4 * (64 * 36 + 4688),
@@ -962,7 +971,7 @@ fn tame_weight_scales(dtype: Dtype, mut raw: Vec<u8>) -> Vec<u8> {
                 block[2..4].copy_from_slice(&m.to_bits().to_le_bytes());
                 let _ = QK5_1;
             }
-            Dtype::Q4KLdsTiledY64 | Dtype::Q4KLdsTiledY64X8 => {
+            Dtype::Q4KLdsTiledY64 | Dtype::Q4KLdsTiledY64X8 | Dtype::Q4KLdsTiledY64X16 => {
                 // Q4_K: d(fp16), dmin(fp16), scales[12], qs[128]. Tame d/dmin
                 // so the reference stays well-conditioned (same shaping the
                 // MMVQ sweep uses).
@@ -1102,7 +1111,7 @@ fn cert_tol(dtype: Dtype, _k: usize) -> f32 {
         Dtype::Q5KLdsTiled | Dtype::Q5KLdsTiledX8
         | Dtype::Q6KLdsTiled | Dtype::Q6KLdsTiledX8
         | Dtype::Iq4XsLdsTiled | Dtype::Iq4XsLdsTiledX8
-        | Dtype::Q4KLdsTiledY64 | Dtype::Q4KLdsTiledY64X8
+        | Dtype::Q4KLdsTiledY64 | Dtype::Q4KLdsTiledY64X8 | Dtype::Q4KLdsTiledY64X16
         | Dtype::Q3KLdsTiled | Dtype::Q3KLdsTiledX8
         | Dtype::Iq4NlLdsTiled | Dtype::Iq4NlLdsTiledX8 => 5e-2,
         Dtype::Iq3SWave64

@@ -27,8 +27,19 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         arch: "gfx906",
         dtype_weight: QDtype::Q4_K,
         dtype_activation: QDtype::Q8_1,
-        m_range: (1, 2),
+        m_range: (1, 1),
         cert_rel_path: "certs/hip/gfx906/qmatmul_q4_k_mmvq_dp4a_t128_vdr2.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul",
+        // Row-tiled batched dp4a MMVQ: 8 weight rows per block share one LDS-staged activation strip.
+        impl_id: "qmatmul_q4_k_mmvq_dp4a_row_tile_batched",
+        backend: "hip",
+        arch: "gfx906",
+        dtype_weight: QDtype::Q4_K,
+        dtype_activation: QDtype::Q8_1,
+        m_range: (2, 4),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q4_k_mmvq_dp4a_row_tile_batched.json",
     },
     // native IQ4 MMVQ. r2 multi-row is the decode default
     // (parity tested 4..16 rows × 256..5120 K). MMQ + MoE indexed
@@ -184,8 +195,19 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         arch: "gfx906",
         dtype_weight: QDtype::Q5_K,
         dtype_activation: QDtype::Q8_1,
-        m_range: (1, 2),
+        m_range: (1, 1),
         cert_rel_path: "certs/hip/gfx906/qmatmul_q5_k_mmvq_dp4a_t128_vdr2.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul",
+        // Row-tiled batched dp4a MMVQ: 8 weight rows per block share one LDS-staged activation strip.
+        impl_id: "qmatmul_q5_k_mmvq_dp4a_row_tile_batched",
+        backend: "hip",
+        arch: "gfx906",
+        dtype_weight: QDtype::Q5_K,
+        dtype_activation: QDtype::Q8_1,
+        m_range: (2, 7),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q5_k_mmvq_dp4a_row_tile_batched.json",
     },
     // Dormant nw1_r2 baseline — preserved for A/B regression checks.
     // m_range=(MAX,MAX) keeps shape-dispatch from picking it; the cert
@@ -210,7 +232,7 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         arch: "gfx906",
         dtype_weight: QDtype::Q5_K,
         dtype_activation: QDtype::Q8_1,
-        m_range: (3, 32),
+        m_range: (8, 32),
         cert_rel_path: "certs/hip/gfx906/qmatmul_q5_K_mmq_lds_tiled_x8_gfx906.json",
     },
     KernelDescriptor {
@@ -268,7 +290,7 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         arch: "gfx906",
         dtype_weight: QDtype::Q3_K,
         dtype_activation: QDtype::Q8_1,
-        m_range: (1, 2),
+        m_range: (1, 1),
         cert_rel_path: "certs/hip/gfx906/qmatmul_q3_K_mmvq_r2_dp4a_gfx906.json",
     },
     // MMQ (prefill): m ≥ 32. Owns the short prefill-chunk tail (e.g. a 554-tok
@@ -369,7 +391,29 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         arch: "gfx906",
         dtype_weight: QDtype::Q4_K,
         dtype_activation: QDtype::Q8_1,
-        m_range: (3, 32),
+        m_range: (5, 8),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q4_K_mmq_lds_tiled_y64_x8_gfx906.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul",
+        // 16-column tile of the generic LDS-tiled MMQ: one pass serves 9..16 columns.
+        impl_id: "qmatmul_q4_K_mmq_lds_tiled_y64_x16_gfx906",
+        backend: "hip",
+        arch: "gfx906",
+        dtype_weight: QDtype::Q4_K,
+        dtype_activation: QDtype::Q8_1,
+        m_range: (9, 16),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q4_K_mmq_lds_tiled_y64_x16_gfx906.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul",
+        // 8-column tile beyond the 16-column band.
+        impl_id: "qmatmul_q4_K_mmq_lds_tiled_y64_x8_gfx906",
+        backend: "hip",
+        arch: "gfx906",
+        dtype_weight: QDtype::Q4_K,
+        dtype_activation: QDtype::Q8_1,
+        m_range: (17, 32),
         cert_rel_path: "certs/hip/gfx906/qmatmul_q4_K_mmq_lds_tiled_y64_x8_gfx906.json",
     },
     KernelDescriptor {
@@ -435,7 +479,7 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         arch: "gfx906",
         dtype_weight: QDtype::Q3_K,
         dtype_activation: QDtype::Q8_1,
-        m_range: (3, 32),
+        m_range: (2, 32),
         cert_rel_path: "certs/hip/gfx906/qmatmul_q3_K_mmq_lds_tiled_x8_gfx906.json",
     },
     KernelDescriptor {

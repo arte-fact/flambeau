@@ -396,14 +396,46 @@ mod tests {
         assert_eq!(d.impl_id, "qmatmul_q8_0_mmq_lds_tiled_gfx906");
     }
 
+    fn impl_at(dtype: QDtype, m: usize) -> &'static str {
+        dispatch_qmatmul(&cfg(dtype, QDtype::Q8_1, m)).unwrap().impl_id
+    }
+
     #[test]
-    fn small_batch_tile_owns_m_3_to_32() {
-        for m in [3, 8, 32] {
-            let d = dispatch_qmatmul(&cfg(QDtype::Q5_K, QDtype::Q8_1, m)).unwrap();
-            assert_eq!(d.impl_id, "qmatmul_q5_K_mmq_lds_tiled_x8_gfx906");
+    fn small_batch_bands_q5_k() {
+        assert_eq!(impl_at(QDtype::Q5_K, 1), "qmatmul_q5_k_mmvq_dp4a_t128_vdr2");
+        for m in [2, 7] {
+            assert_eq!(impl_at(QDtype::Q5_K, m), "qmatmul_q5_k_mmvq_dp4a_row_tile_batched");
         }
-        let d = dispatch_qmatmul(&cfg(QDtype::Q5_K, QDtype::Q8_1, 33)).unwrap();
-        assert_eq!(d.impl_id, "qmatmul_q5_K_mmq_lds_tiled_gfx906");
+        for m in [8, 32] {
+            assert_eq!(impl_at(QDtype::Q5_K, m), "qmatmul_q5_K_mmq_lds_tiled_x8_gfx906");
+        }
+        assert_eq!(impl_at(QDtype::Q5_K, 33), "qmatmul_q5_K_mmq_lds_tiled_gfx906");
+    }
+
+    #[test]
+    fn small_batch_bands_q4_k() {
+        assert_eq!(impl_at(QDtype::Q4_K, 1), "qmatmul_q4_k_mmvq_dp4a_t128_vdr2");
+        for (m, id) in [
+            (2, "qmatmul_q4_k_mmvq_dp4a_row_tile_batched"),
+            (4, "qmatmul_q4_k_mmvq_dp4a_row_tile_batched"),
+            (5, "qmatmul_q4_K_mmq_lds_tiled_y64_x8_gfx906"),
+            (8, "qmatmul_q4_K_mmq_lds_tiled_y64_x8_gfx906"),
+            (9, "qmatmul_q4_K_mmq_lds_tiled_y64_x16_gfx906"),
+            (16, "qmatmul_q4_K_mmq_lds_tiled_y64_x16_gfx906"),
+            (17, "qmatmul_q4_K_mmq_lds_tiled_y64_x8_gfx906"),
+            (32, "qmatmul_q4_K_mmq_lds_tiled_y64_x8_gfx906"),
+            (33, "qmatmul_q4_K_mmq_lds_tiled_y64_gfx906"),
+        ] {
+            assert_eq!(impl_at(QDtype::Q4_K, m), id, "m = {m}");
+        }
+    }
+
+    #[test]
+    fn small_batch_bands_q3_k() {
+        assert_eq!(impl_at(QDtype::Q3_K, 1), "qmatmul_q3_K_mmvq_r2_dp4a_gfx906");
+        for m in [2, 32] {
+            assert_eq!(impl_at(QDtype::Q3_K, m), "qmatmul_q3_K_mmq_lds_tiled_x8_gfx906");
+        }
     }
 
     #[test]

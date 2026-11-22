@@ -74,40 +74,17 @@ pub fn output_head_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
     let act_mmq_null = unsafe { Tensor::<Q8_1>::from_raw(DevicePtr::NULL, 0) };
     let mut logits_f32 =
         unsafe { Tensor::<F32>::from_raw(state.pool.logits_f32_dev, n_emit * vocab) };
-    // Q4_K LM-head at decode (n_emit=1) gets r4 — halves block count over
-    // r2, which is the dispatch default for typical hidden-size matmuls.
-    // At vocab=131072+ the per-block work is small enough that r4's 4-row
-    // amortisation pays off where it doesn't at hidden-sized n. Measured
-    // +2.6% prefill / +1.1% decode on E4B-Q4_0.
-    use flambeau_core::op::QDtype;
-    let use_r4_lmhead = n_emit == 1
-        && lm_head.lm_head.dtype == QDtype::Q4_K
-        && vocab >= 131072
-        && hidden % 256 == 0;
-    if use_r4_lmhead {
-        let n_superblocks = hidden / 256;
-        ops.mmvq_q4_k_r4(
-            flambeau_ops::MmvqBuffers {
-                weights: lm_head.lm_head.ptr,
-                act_q8_1: state.pool.norm_q8_1,
-                dst: state.pool.logits_f32_dev,
-            },
-            vocab,
-            n_superblocks,
-        )?;
-    } else {
-        lm_head.lm_head.qmatmul(
-            &norm_q8_1,
-            &act_mmq_null,
-            &mut logits_f32,
-            flambeau_ops::MatmulShape {
-                m: n_emit,
-                k: hidden,
-                n: vocab,
-            },
-            &ops,
-        )?;
-    }
+    lm_head.lm_head.qmatmul(
+        &norm_q8_1,
+        &act_mmq_null,
+        &mut logits_f32,
+        flambeau_ops::MatmulShape {
+            m: n_emit,
+            k: hidden,
+            n: vocab,
+        },
+        &ops,
+    )?;
 
     if let Some(cap) = lm_head.final_logit_softcap {
         let mut logits_inplace =

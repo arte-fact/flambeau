@@ -82,6 +82,8 @@ pub const KERNEL_STEMS: &[&str] = &[
     "mmvq_q5_k_dp4a_t128_vdr2_batched",
     "mmvq_iq4_xs_dp4a_t128_vdr4",
     "mmvq_iq4_xs_dp4a_t128_vdr4_batched",
+    // why: 2.0x slower than the m = 1 dispatch row on gfx906 at the Q4_K head shapes (262144x3840, 131072x5120).
+    #[cfg(unverified)]
     "mmvq_q4_k_r4",
     "mmvq_q5_k",
     "mmvq_q5_k_r2",
@@ -198,7 +200,6 @@ pub const KERNEL_STEMS: &[&str] = &[
     "mmq_iq4_nl_lds_tiled_x8",
     #[cfg(feature = "bench")]
     "mmq_q5_K_lds_tiled_x16",
-    #[cfg(feature = "bench")]
     "mmq_q4_K_lds_tiled_y64_x16",
     #[cfg(feature = "bench")]
     "mmq_q3_K_lds_tiled_x16",

@@ -53,10 +53,18 @@ notes   = "Runtime intercept: DP4A VDR=2 variant (mmvq_q8_0_dp4a_vdr2, +19% deco
 [[qmatmul]]
 dtype   = "Q4_K"
 dtype_q = "Q8_1"
-shape   = { m = "1..2", k = "any", n = "any" }
+shape   = { m = "1", k = "any", n = "any" }
 impl    = "qmatmul_q4_k_mmvq_dp4a_t128_vdr2"
 cert    = "certs/hip/gfx906/qmatmul_q4_k_mmvq_dp4a_t128_vdr2.json"
-notes   = "Single-row dp4a in llama.cpp's mul_mat_vec_q GCN layout: 128 threads per row, 16 threads per super-block, each loading two ints of one sub-block pair's qs (and qh) once and dotting both nibbles, 16 weights, 8 super-blocks per pass. The 256-thread kernel mmvq_q4_k_dp4a (still used by the F16-output decode path) uses 32 threads per super-block, each loading the same qs ints as a neighbour and the block header again (MemUnitBusy ~90 % against 61-74 % for llama.cpp). m = 2 goes to the row-tiled batched kernel ahead of this table."
+notes   = "Single-row dp4a in llama.cpp's mul_mat_vec_q GCN layout: 128 threads per row, 16 threads per super-block, each loading two ints of one sub-block pair's qs (and qh) once and dotting both nibbles, 16 weights, 8 super-blocks per pass. The 256-thread kernel mmvq_q4_k_dp4a (still used by the F16-output decode path) uses 32 threads per super-block, each loading the same qs ints as a neighbour and the block header again (MemUnitBusy ~90 % against 61-74 % for llama.cpp)."
+
+[[qmatmul]]
+dtype   = "Q4_K"
+dtype_q = "Q8_1"
+shape   = { m = "2..4", k = "any", n = "any" }
+impl    = "qmatmul_q4_k_mmvq_dp4a_row_tile_batched"
+cert    = "certs/hip/gfx906/qmatmul_q4_k_mmvq_dp4a_row_tile_batched.json"
+notes   = "Row-tiled batched dp4a MMVQ: 8 weight rows per block share one LDS-staged activation strip, each weight int decoded once for every column (standard Q8_1 activation). qmatmul-bench, Qwen3.8-27B verify shapes weighted (coord/mmq-few-resultats.md): beats the 8-column LDS tile at m = 2..4 (21 746 vs 23 993 us at m = 4) and loses from m = 5 (24 167 vs 24 012), m = 6 (26 536 vs 24 015), m = 8 (33 965 vs 24 073)."
 
 [[qmatmul]]
 dtype   = "IQ4_XS"
@@ -229,18 +237,26 @@ notes   = "128-thread single-row Q4_1 DP4A MMVQ. Half the threads per block of t
 [[qmatmul]]
 dtype   = "Q5_K"
 dtype_q = "Q8_1"
-shape   = { m = "1..2", k = "any", n = "any" }
+shape   = { m = "1", k = "any", n = "any" }
 impl    = "qmatmul_q5_k_mmvq_dp4a_t128_vdr2"
 cert    = "certs/hip/gfx906/qmatmul_q5_k_mmvq_dp4a_t128_vdr2.json"
-notes   = "Single-row dp4a in llama.cpp's mul_mat_vec_q GCN layout: 128 threads per row, 16 threads per super-block, each loading two ints of one sub-block pair's qs (and qh) once and dotting both nibbles, 16 weights, 8 super-blocks per pass. The 256-thread row (qmatmul_q5_k_mmvq_dp4a) used 32 threads per super-block, each loading the same qs ints as a neighbour and the block header again (MemUnitBusy ~90 % against 61-74 % for llama.cpp); it is kept as the reference. m = 2 goes to the row-tiled batched kernel ahead of this table."
+notes   = "Single-row dp4a in llama.cpp's mul_mat_vec_q GCN layout: 128 threads per row, 16 threads per super-block, each loading two ints of one sub-block pair's qs (and qh) once and dotting both nibbles, 16 weights, 8 super-blocks per pass. The 256-thread row (qmatmul_q5_k_mmvq_dp4a) used 32 threads per super-block, each loading the same qs ints as a neighbour and the block header again (MemUnitBusy ~90 % against 61-74 % for llama.cpp); it is kept as the reference."
+
+[[qmatmul]]
+dtype   = "Q5_K"
+dtype_q = "Q8_1"
+shape   = { m = "2..7", k = "any", n = "any" }
+impl    = "qmatmul_q5_k_mmvq_dp4a_row_tile_batched"
+cert    = "certs/hip/gfx906/qmatmul_q5_k_mmvq_dp4a_row_tile_batched.json"
+notes   = "Row-tiled batched dp4a MMVQ: 8 weight rows per block share one LDS-staged activation strip, each weight int decoded once for every column (standard Q8_1 activation). qmatmul-bench, Qwen3.8-27B verify shapes weighted (coord/mmq-few-resultats.md): beats the 8-column LDS tile at m = 2..6 (26 001 vs 33 911 us at m = 5) and loses at m = 8 (37 376 vs 34 385); m = 7 not measured, kept on the row tile."
 
 [[qmatmul_mmq]]
 dtype   = "Q5_K"
 dtype_q = "Q8_1"
-shape   = { m = "3..32", k = "any", n = "any" }
+shape   = { m = "8..32", k = "any", n = "any" }
 impl    = "qmatmul_q5_K_mmq_lds_tiled_x8_gfx906"
 cert    = "certs/hip/gfx906/qmatmul_q5_K_mmq_lds_tiled_x8_gfx906.json"
-notes   = "8-column tile (MMQ_Y=64, MMQ_X=8) of the generic LDS-tiled MMQ (mmq_lds_tiled.cuh). One pass over the weights serves up to 8 activation rows, so a small-batch forward (speculative-decode verify) costs ~3 decode steps instead of one per row. Owns m=3..32. For this dtype m=3..8 is served ahead of the table by the row-tiled batched dp4a MMVQ direct call (qmatmul_*_mmvq_dp4a_row_tile_batched); the tile stays the fallback."
+notes   = "8-column tile (MMQ_Y=64, MMQ_X=8) of the generic LDS-tiled MMQ (mmq_lds_tiled.cuh). One pass over the weights serves up to 8 activation rows, so a small-batch forward (speculative-decode verify) costs ~3 decode steps instead of one per row. Owns m=8..32, the row tile below (coord/mmq-few-resultats.md); at m = 9..16 two tiles still beat the 16-column tile (47 614 vs 53 646 us at m = 9)."
 
 [[qmatmul_mmq]]
 dtype   = "Q5_K"
@@ -277,7 +293,7 @@ notes   = "Q2_K MMVQ r2 multi-row (64 threads wave64, 2 rows/block). Half-warp D
 [[qmatmul]]
 dtype   = "Q3_K"
 dtype_q = "Q8_1"
-shape   = { m = "1..2", k = "any", n = "any" }
+shape   = { m = "1", k = "any", n = "any" }
 impl    = "qmatmul_q3_K_mmvq_r2_dp4a_gfx906"
 cert    = "certs/hip/gfx906/qmatmul_q3_K_mmvq_r2_dp4a_gfx906.json"
 notes   = "DP4A 256-thread Q3_K MMVQ port of llama.cpp vec_dot_q3_K_q8_1_impl_mmvq. 64 threads per super-block, BLOCKS_PER_ITER=4. Two DP4A calls per element-group (one for low 2 bits, one for hmask high bit) — sidesteps the int32 borrow that would corrupt a direct __vsubss4 on gfx906. Replaces nw1_r2 which did per-element scalar FP32 multiplies (51.7 % of UD-Q3_K_XL wall at 670 us/call)."
@@ -343,10 +359,26 @@ notes   = "Wave64 MMQ for Q5_1. Q5_0 wave64 5th-bit ladder + Q4_1 wave64 d/m red
 [[qmatmul_mmq]]
 dtype   = "Q4_K"
 dtype_q = "Q8_1"
-shape   = { m = "3..32", k = "any", n = "any" }
+shape   = { m = "5..8", k = "any", n = "any" }
 impl    = "qmatmul_q4_K_mmq_lds_tiled_y64_x8_gfx906"
 cert    = "certs/hip/gfx906/qmatmul_q4_K_mmq_lds_tiled_y64_x8_gfx906.json"
-notes   = "8-column tile (MMQ_Y=64, MMQ_X=8) of the generic LDS-tiled MMQ (mmq_lds_tiled.cuh). One pass over the weights serves up to 8 activation rows, so a small-batch forward (speculative-decode verify) costs ~3 decode steps instead of one per row. Owns m=3..32. For this dtype m=3..8 is served ahead of the table by the row-tiled batched dp4a MMVQ direct call (qmatmul_*_mmvq_dp4a_row_tile_batched); the tile stays the fallback."
+notes   = "8-column tile (MMQ_Y=64, MMQ_X=8) of the generic LDS-tiled MMQ (mmq_lds_tiled.cuh). One pass over the weights serves up to 8 activation rows, so a small-batch forward (speculative-decode verify) costs ~3 decode steps instead of one per row. Owns m=5..8 and 17..32: the row tile below, the 16-column tile at 9..16 (coord/mmq-few-resultats.md)."
+
+[[qmatmul_mmq]]
+dtype   = "Q4_K"
+dtype_q = "Q8_1"
+shape   = { m = "9..16", k = "any", n = "any" }
+impl    = "qmatmul_q4_K_mmq_lds_tiled_y64_x16_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_q4_K_mmq_lds_tiled_y64_x16_gfx906.json"
+notes   = "16-column tile (MMQ_Y=64, MMQ_X=16) of the generic LDS-tiled MMQ: one pass over the weights serves 9..16 columns where the 8-column tile needs two. qmatmul-bench, Qwen3.8-27B verify shapes weighted (coord/mmq-few-resultats.md): 31 268 vs 40 962 us at m = 9, 32 224 vs 41 518 at m = 16. Above 16 not measured: the 8-column tile keeps 17..32."
+
+[[qmatmul_mmq]]
+dtype   = "Q4_K"
+dtype_q = "Q8_1"
+shape   = { m = "17..32", k = "any", n = "any" }
+impl    = "qmatmul_q4_K_mmq_lds_tiled_y64_x8_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_q4_K_mmq_lds_tiled_y64_x8_gfx906.json"
+notes   = "8-column tile above the 16-column band (see its m = 5..8 row)."
 
 [[qmatmul_mmq]]
 dtype   = "Q4_K"
@@ -391,10 +423,10 @@ notes   = "Q2_K MMQ wave64. Affine quant: y = d*scale*raw - dmin*min. 4-bit (sca
 [[qmatmul_mmq]]
 dtype   = "Q3_K"
 dtype_q = "Q8_1"
-shape   = { m = "3..32", k = "any", n = "any" }
+shape   = { m = "2..32", k = "any", n = "any" }
 impl    = "qmatmul_q3_K_mmq_lds_tiled_x8_gfx906"
 cert    = "certs/hip/gfx906/qmatmul_q3_K_mmq_lds_tiled_x8_gfx906.json"
-notes   = "8-column tile (MMQ_Y=64, MMQ_X=8) of the generic LDS-tiled MMQ (mmq_lds_tiled.cuh). One pass over the weights serves up to 8 activation rows, so a small-batch forward (speculative-decode verify) costs ~3 decode steps instead of one per row. Owns m=3..32."
+notes   = "8-column tile (MMQ_Y=64, MMQ_X=8) of the generic LDS-tiled MMQ (mmq_lds_tiled.cuh). One pass over the weights serves up to 8 activation rows, so a small-batch forward (speculative-decode verify) costs ~3 decode steps instead of one per row. Owns m=2..32: at m = 2 it beats two single-row r2 launches (2 054 vs 3 105 us, coord/mmq-few-resultats.md)."
 
 [[qmatmul_mmq]]
 dtype   = "Q3_K"

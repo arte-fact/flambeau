@@ -172,6 +172,8 @@ impl<B: KernelBackend> Ops for OpsImpl<'_, B> {
         crate::launch::qmatmul::mmvq(self.reg, self.stream, buf, shape, dtype_weight)
     }
 
+    // why: 2.0x slower than the m = 1 dispatch row on gfx906 at the Q4_K head shapes (262144x3840, 131072x5120).
+    #[cfg(unverified)]
     fn mmvq_q4_k_r4(
         &self,
         buf: crate::MmvqBuffers,

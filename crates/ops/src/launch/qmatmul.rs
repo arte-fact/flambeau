@@ -490,9 +490,7 @@ pub fn mmvq_q4_0_batched<B: flambeau_core::KernelBackend>(
 fn rowtile_batched_k_owns(dtype_weight: QDtype, m: usize, k: usize) -> bool {
     matches!(
         dtype_weight,
-        QDtype::Q4_K
-            | QDtype::Q5_K
-            | QDtype::Q6_K
+        QDtype::Q6_K
             | QDtype::IQ4_XS
             | QDtype::IQ3_S
             | QDtype::IQ3_XXS
@@ -501,8 +499,9 @@ fn rowtile_batched_k_owns(dtype_weight: QDtype, m: usize, k: usize) -> bool {
         && k % flambeau_quant::QK_K == 0
 }
 
-/// Row-tiled batched dp4a MMVQ for the 256-element super-block dtypes (Q4_K,
-/// Q5_K, Q6_K, IQ4_XS, IQ3_S, IQ3_XXS, IQ2_S), `n_slots` ∈ [2, 8]: 8 weight rows per block share one
+/// Row-tiled batched dp4a MMVQ for the 256-element super-block dtypes still
+/// served ahead of the dispatch table (Q6_K, IQ4_XS, IQ3_S, IQ3_XXS, IQ2_S),
+/// `n_slots` ∈ [2, 8]: 8 weight rows per block share one
 /// LDS-staged activation strip and each weight int is decoded once for every
 /// column. Standard Q8_1 activation, slot-major `dst`.
 pub fn mmvq_dp4a_row_tile_batched_k<B: flambeau_core::KernelBackend>(
@@ -518,30 +517,6 @@ pub fn mmvq_dp4a_row_tile_batched_k<B: flambeau_core::KernelBackend>(
         bail!("mmvq_dp4a_row_tile_batched_k: n_slots={n_slots} outside [2, 8]");
     }
     let (stem, entries): (_, [&'static str; 7]) = match dtype {
-        QDtype::Q4_K => (
-            "mmvq_q4_k_dp4a_batched",
-            [
-                "flambeau_mmvq_q4_k_dp4a_q8_1_batched_n2",
-                "flambeau_mmvq_q4_k_dp4a_q8_1_batched_n3",
-                "flambeau_mmvq_q4_k_dp4a_q8_1_batched_n4",
-                "flambeau_mmvq_q4_k_dp4a_q8_1_batched_n5",
-                "flambeau_mmvq_q4_k_dp4a_q8_1_batched_n6",
-                "flambeau_mmvq_q4_k_dp4a_q8_1_batched_n7",
-                "flambeau_mmvq_q4_k_dp4a_q8_1_batched_n8",
-            ],
-        ),
-        QDtype::Q5_K => (
-            "mmvq_q5_k_dp4a_batched",
-            [
-                "flambeau_mmvq_q5_k_dp4a_q8_1_batched_n2",
-                "flambeau_mmvq_q5_k_dp4a_q8_1_batched_n3",
-                "flambeau_mmvq_q5_k_dp4a_q8_1_batched_n4",
-                "flambeau_mmvq_q5_k_dp4a_q8_1_batched_n5",
-                "flambeau_mmvq_q5_k_dp4a_q8_1_batched_n6",
-                "flambeau_mmvq_q5_k_dp4a_q8_1_batched_n7",
-                "flambeau_mmvq_q5_k_dp4a_q8_1_batched_n8",
-            ],
-        ),
         QDtype::IQ4_XS => (
             "mmvq_iq4_xs_dp4a_batched",
             [
@@ -1243,25 +1218,39 @@ pub fn mmvq_batched_shape(impl_id: &str) -> Option<(u32, u32)> {
         .map(|recipe| (recipe.threads, recipe.rows_per_block))
 }
 
-/// The `<base>_n1` .. `<base>_n8` entry names of a batched MMVQ cell.
+/// The `<base>_n1` .. `<base>_n8` entry names of a batched MMVQ cell; with
+/// `from 2`, a cell instantiated for 2..8 columns only.
 macro_rules! batched_entries {
     ($base:literal) => {
         [
-            concat!($base, "_n1"),
-            concat!($base, "_n2"),
-            concat!($base, "_n3"),
-            concat!($base, "_n4"),
-            concat!($base, "_n5"),
-            concat!($base, "_n6"),
-            concat!($base, "_n7"),
-            concat!($base, "_n8"),
+            Some(concat!($base, "_n1")),
+            Some(concat!($base, "_n2")),
+            Some(concat!($base, "_n3")),
+            Some(concat!($base, "_n4")),
+            Some(concat!($base, "_n5")),
+            Some(concat!($base, "_n6")),
+            Some(concat!($base, "_n7")),
+            Some(concat!($base, "_n8")),
+        ]
+    };
+    ($base:literal, from 2) => {
+        [
+            None,
+            Some(concat!($base, "_n2")),
+            Some(concat!($base, "_n3")),
+            Some(concat!($base, "_n4")),
+            Some(concat!($base, "_n5")),
+            Some(concat!($base, "_n6")),
+            Some(concat!($base, "_n7")),
+            Some(concat!($base, "_n8")),
         ]
     };
 }
 
-/// Per batched-MMVQ stem, its entry for 1..=`MMVQ_BATCH_MAX` columns. Each
-/// name is `<recipe.entry>_n<cols>` (checked by `recipe_table_tests`).
-const MMVQ_BATCHED_ENTRIES: &[(&str, [&str; MMVQ_BATCH_MAX])] = &[
+/// Per batched-MMVQ stem, its entry for 1..=`MMVQ_BATCH_MAX` columns (`None`
+/// where the cell has none). Each name is `<recipe.entry>_n<cols>` (checked by
+/// `recipe_table_tests`).
+const MMVQ_BATCHED_ENTRIES: &[(&str, [Option<&str>; MMVQ_BATCH_MAX])] = &[
     ("mmvq_q8_0_dp4a_vdr2_batched", batched_entries!("flambeau_mmvq_q8_0_dp4a_vdr2_batched_q8_1")),
     ("mmvq_iq4_nl_dp4a_t128_vdr2_batched", batched_entries!("flambeau_mmvq_iq4_nl_dp4a_t128_vdr2_batched_q8_1")),
     ("mmvq_iq3_s_dp4a_t128_vdr2_batched", batched_entries!("flambeau_mmvq_iq3_s_dp4a_t128_vdr2_batched_q8_1")),
@@ -1270,6 +1259,8 @@ const MMVQ_BATCHED_ENTRIES: &[(&str, [&str; MMVQ_BATCH_MAX])] = &[
     ("mmvq_q4_k_dp4a_t128_vdr2_batched", batched_entries!("flambeau_mmvq_q4_k_dp4a_t128_vdr2_batched_q8_1")),
     ("mmvq_q5_k_dp4a_t128_vdr2_batched", batched_entries!("flambeau_mmvq_q5_k_dp4a_t128_vdr2_batched_q8_1")),
     ("mmvq_iq4_xs_dp4a_t128_vdr4_batched", batched_entries!("flambeau_mmvq_iq4_xs_dp4a_t128_vdr4_batched_q8_1")),
+    ("mmvq_q4_k_dp4a_batched", batched_entries!("flambeau_mmvq_q4_k_dp4a_q8_1_batched", from 2)),
+    ("mmvq_q5_k_dp4a_batched", batched_entries!("flambeau_mmvq_q5_k_dp4a_q8_1_batched", from 2)),
 ];
 
 /// The dispatched batched-MMVQ recipe of `dtype_weight` at `m` columns, or
@@ -1324,7 +1315,10 @@ fn mmvq_batched_launch<B: flambeau_core::KernelBackend>(
     let mut c0 = 0;
     while c0 < n_slots {
         let cols = (n_slots - c0).min(MMVQ_BATCH_MAX);
-        let kernel = B::kernel(module, entries[cols - 1])?;
+        let entry = entries[cols - 1].ok_or_else(|| {
+            anyhow!("batched MMVQ stem {} has no {cols}-column entry", recipe.stem)
+        })?;
+        let kernel = B::kernel(module, entry)?;
         let a_ptr: u64 = act_q8_1.offset_bytes(c0 * act_col_bytes).as_usize() as u64;
         let d_ptr: u64 = dst.offset_bytes(c0 * dst_col_bytes).as_usize() as u64;
         let mut args = <B::Args<'_>>::default();
@@ -1665,7 +1659,7 @@ fn mmq_lds_x64_params(stem: &str) -> Result<(u32, u32)> {
         "mmq_q3_K_lds_tiled" => (256, 4 * (64 * 36 + 4488)),
         "mmq_iq4_nl_lds_tiled" => (32, 4 * (64 * 36 + 4688)),
         "mmq_q8_0_lds_tiled" => (32, 4 * (64 * 36 + 4688)),
-        // 8-column small-batch tiles.
+        // 8- and 16-column small-batch tiles.
         "mmq_q5_K_lds_tiled_x8" => (256, 4 * (8 * 36 + 4488)),
         "mmq_q6_K_lds_tiled_x8" => (256, 4 * (8 * 36 + 4490)),
         "mmq_iq4_xs_lds_tiled_x8" => (256, 4 * (8 * 36 + 4688)),
@@ -1674,7 +1668,6 @@ fn mmq_lds_x64_params(stem: &str) -> Result<(u32, u32)> {
         "mmq_iq4_nl_lds_tiled_x8" => (32, 4 * (8 * 36 + 4688)),
         #[cfg(feature = "bench")]
         "mmq_q5_K_lds_tiled_x16" | "mmq_q3_K_lds_tiled_x16" => (256, 4 * (16 * 36 + 4488)),
-        #[cfg(feature = "bench")]
         "mmq_q4_K_lds_tiled_y64_x16" => (256, 4 * (16 * 36 + 2440)),
         other => bail!("mmq_lds_x64_params: no entry for stem {other}"),
     })
@@ -1705,15 +1698,16 @@ const BENCH_QMATMUL_ALIASES: &[(&str, &str)] = &[
     ("bench:q5_k_lds_x8", "qmatmul_q5_K_mmq_lds_tiled_x8_gfx906"),
     ("bench:q3_k_lds_x64", "qmatmul_q3_K_mmq_lds_tiled_gfx906"),
     ("bench:q4_k_lds_x64", "qmatmul_q4_K_mmq_lds_tiled_y64_gfx906"),
+    ("bench:q4_k_lds_x16", "qmatmul_q4_K_mmq_lds_tiled_y64_x16_gfx906"),
     ("bench:q5_k_lds_x64", "qmatmul_q5_K_mmq_lds_tiled_gfx906"),
 ];
 
-/// Bench-only candidates without a registered recipe (uncertified: the
-/// 16-column LDS-tiled cells and the wave64 K-quant MMQ, never dispatched;
-/// and the HIP-only Q4_K r4 MMVQ that `output_head` launches outside the
-/// dispatch table).
+/// Bench-only candidates without a registered recipe (uncertified: the Q3_K
+/// and Q5_K 16-column LDS-tiled cells and the wave64 K-quant MMQ, never
+/// dispatched; and, under `cfg(unverified)`, the HIP-only Q4_K r4 MMVQ).
 #[cfg(feature = "bench")]
 const BENCH_QMATMUL_RECIPES: &[RecipeRow] = &[
+    #[cfg(unverified)]
     RecipeRow {
         ids: &["bench:q4_k_mmvq_r4"],
         recipe: Recipe {
@@ -1748,18 +1742,6 @@ const BENCH_QMATMUL_RECIPES: &[RecipeRow] = &[
             threads: 64,
             rows_per_block: 0,
             mmq_tile: (64, 8),
-        },
-    },
-    RecipeRow {
-        ids: &["bench:q4_k_lds_x16"],
-        recipe: Recipe {
-            kind: RecipeKind::MmqLdsX64,
-            stem: "mmq_q4_K_lds_tiled_y64_x16",
-            entry: "flambeau_mmq_q4_K_lds_tiled_y64_x16_q8_1",
-            entry_f16: None,
-            threads: 0,
-            rows_per_block: 0,
-            mmq_tile: (64, 16),
         },
     },
     RecipeRow {
@@ -2634,6 +2616,42 @@ const QMATMUL_RECIPES: &[RecipeRow] = &[
         },
     },
     RecipeRow {
+        ids: &["qmatmul_q4_K_mmq_lds_tiled_y64_x16_gfx906"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqLdsX64,
+            stem: "mmq_q4_K_lds_tiled_y64_x16",
+            entry: "flambeau_mmq_q4_K_lds_tiled_y64_x16_q8_1",
+            entry_f16: None,
+            threads: 0,
+            rows_per_block: 0,
+            mmq_tile: (64, 16),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_q4_k_mmvq_dp4a_row_tile_batched"],
+        recipe: Recipe {
+            kind: RecipeKind::MmvqBatched,
+            stem: "mmvq_q4_k_dp4a_batched",
+            entry: "flambeau_mmvq_q4_k_dp4a_q8_1_batched",
+            entry_f16: None,
+            threads: 256,
+            rows_per_block: 8,
+            mmq_tile: (0, 0),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_q5_k_mmvq_dp4a_row_tile_batched"],
+        recipe: Recipe {
+            kind: RecipeKind::MmvqBatched,
+            stem: "mmvq_q5_k_dp4a_batched",
+            entry: "flambeau_mmvq_q5_k_dp4a_q8_1_batched",
+            entry_f16: None,
+            threads: 256,
+            rows_per_block: 8,
+            mmq_tile: (0, 0),
+        },
+    },
+    RecipeRow {
         ids: &["qmatmul_q3_K_mmq_lds_tiled_x8_gfx906"],
         recipe: Recipe {
             kind: RecipeKind::MmqLdsX64,
@@ -2981,7 +2999,9 @@ mod recipe_table_tests {
                 .find(|(stem, _)| *stem == row.recipe.stem)
                 .unwrap_or_else(|| panic!("no entry table for {}", row.recipe.stem));
             for (i, e) in entries.iter().enumerate() {
-                assert_eq!(*e, format!("{}_n{}", row.recipe.entry, i + 1));
+                if let Some(e) = e {
+                    assert_eq!(*e, format!("{}_n{}", row.recipe.entry, i + 1));
+                }
             }
         }
     }
