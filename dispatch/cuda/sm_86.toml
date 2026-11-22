@@ -153,10 +153,24 @@ notes   = "autotuned"
 [[qmatmul]]
 dtype   = "Q4_K"
 dtype_q = "Q8_1"
-shape   = { m = ">=2", k = "any", n = "any" }
+shape   = { m = "2", k = "any", n = "any" }
 impl    = "qmatmul_q4_k_mmvq_dp4a_t128_vdr2_batched"
 cert    = "certs/cuda/sm_86/qmatmul_q4_k_mmvq_dp4a_t128_vdr2_batched.json"
 notes   = "batched, 1..8 columns per launch"
+[[qmatmul]]
+dtype   = "Q4_K"
+dtype_q = "Q8_1"
+shape   = { m = "3..24", k = "any", n = "any" }
+impl    = "qmatmul_q4_k_mmq_few_mma"
+cert    = "certs/cuda/sm_86/qmatmul_q4_k_mmq_few_mma.json"
+notes   = "The few-column int8 MMA (mul_mat_q_few port) beats the batched MMVQ from m = 3 on the Qwen3.8-27B verify shapes (weighted, 3 repetitions: 0.966 of C0 at m = 3, 0.782 at m = 5, 0.446 at m = 9, 0.243 at m = 24; 1.029 at m = 2), coord/mmq-few-resultats.md. Reads the few-column activation; a k it does not tile (fewer than 8 super-blocks, not whole ring stages) or a caller without that activation falls back to the batched MMVQ."
+[[qmatmul]]
+dtype   = "Q4_K"
+dtype_q = "Q8_1"
+shape   = { m = ">=25", k = "any", n = "any" }
+impl    = "qmatmul_q4_k_mmvq_dp4a_t128_vdr2_batched"
+cert    = "certs/cuda/sm_86/qmatmul_q4_k_mmvq_dp4a_t128_vdr2_batched.json"
+notes   = "batched above the few-column band"
 
 [[qmatmul]]
 dtype   = "Q5_0"

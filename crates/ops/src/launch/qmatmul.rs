@@ -1716,7 +1716,6 @@ enum RecipeKind {
     /// activation columns on sm_80+. Reads the B-fragment activation layout
     /// ([`ActLayout::Few`]) through `act_q8_1_mmq`; one entry per column-group
     /// count (`<entry>_c<ncg>_t1`), dynamic shared memory. CUDA-only.
-    #[cfg_attr(not(feature = "bench"), allow(dead_code))]
     MmqFew,
 }
 
@@ -1820,27 +1819,15 @@ const BENCH_QMATMUL_ALIASES: &[(&str, &str)] = &[
     ("bench:q3_k_lds_x64", "qmatmul_q3_K_mmq_lds_tiled_gfx906"),
     ("bench:q4_k_lds_x64", "qmatmul_q4_K_mmq_lds_tiled_y64_gfx906"),
     ("bench:q4_k_lds_x16", "qmatmul_q4_K_mmq_lds_tiled_y64_x16_gfx906"),
+    ("bench:q4_k_few_mma", "qmatmul_q4_k_mmq_few_mma"),
     ("bench:q5_k_lds_x64", "qmatmul_q5_K_mmq_lds_tiled_gfx906"),
 ];
 
-/// Bench-only candidates without a dispatch row: the few-column Q4_K MMA
-/// (sm_80+, swept, band not yet measured); uncertified, the Q3_K and Q5_K
-/// 16-column LDS-tiled cells and the wave64 K-quant MMQ; and, under
-/// `cfg(unverified)`, the HIP-only Q4_K r4 MMVQ.
+/// Bench-only candidates without a dispatch row (uncertified: the Q3_K and
+/// Q5_K 16-column LDS-tiled cells and the wave64 K-quant MMQ; and, under
+/// `cfg(unverified)`, the HIP-only Q4_K r4 MMVQ).
 #[cfg(feature = "bench")]
 const BENCH_QMATMUL_RECIPES: &[RecipeRow] = &[
-    RecipeRow {
-        ids: &["qmatmul_q4_k_mmq_few_mma", "bench:q4_k_few_mma"],
-        recipe: Recipe {
-            kind: RecipeKind::MmqFew,
-            stem: "mmq_few_q4_k_mma",
-            entry: "flambeau_mmq_few_q4_k_mma",
-            entry_f16: None,
-            threads: 0,
-            rows_per_block: 0,
-            mmq_tile: (0, 0),
-        },
-    },
     #[cfg(unverified)]
     RecipeRow {
         ids: &["bench:q4_k_mmvq_r4"],
@@ -2746,6 +2733,18 @@ const QMATMUL_RECIPES: &[RecipeRow] = &[
         },
     },
     RecipeRow {
+        ids: &["qmatmul_q4_k_mmq_few_mma"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqFew,
+            stem: "mmq_few_q4_k_mma",
+            entry: "flambeau_mmq_few_q4_k_mma",
+            entry_f16: None,
+            threads: 0,
+            rows_per_block: 0,
+            mmq_tile: (0, 0),
+        },
+    },
+    RecipeRow {
         ids: &["qmatmul_q4_K_mmq_lds_tiled_y64_x16_gfx906"],
         recipe: Recipe {
             kind: RecipeKind::MmqLdsX64,
@@ -3226,6 +3225,27 @@ mod recipe_table_tests {
         for d in flambeau_backend_hip::QMATMUL_GFX906 {
             assert!(super::Recipe::from_impl_id(d.impl_id).is_ok(), "no recipe for {}", d.impl_id);
         }
+    }
+
+    /// The sm_86 Q4_K few-column band and its fallbacks, as callers see them.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn sm86_q4_k_few_column_layouts() {
+        use super::{qmatmul_act_layout, ActLayout, FewScale};
+        use flambeau_core::QDtype;
+        let at = |m, k| {
+            qmatmul_act_layout::<flambeau_backend_cuda::CudaKernels>(
+                crate::MatmulShape { m, k, n: 5120 },
+                QDtype::Q4_K,
+            )
+        };
+        assert_eq!(at(5, 5120), ActLayout::Few(FewScale::Ds4));
+        assert_eq!(at(24, 17408), ActLayout::Few(FewScale::Ds4));
+        assert_eq!(at(17, 5120 + 256), ActLayout::Few(FewScale::Ds4), "3 groups: 1 unit per stage");
+        assert_eq!(at(5, 5120 + 256), ActLayout::Q8_1, "odd super-blocks at 2 units per stage");
+        assert_eq!(at(5, 1792), ActLayout::Q8_1, "fewer than 8 super-blocks");
+        assert_eq!(at(2, 5120), ActLayout::Q8_1);
+        assert_eq!(at(25, 5120), ActLayout::Q8_1);
     }
 
     #[cfg(feature = "cuda")]

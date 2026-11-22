@@ -146,6 +146,20 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn q4_k_few_column_band() {
+        let at = |m| {
+            let cfg = QMatMulCfg { dtype_weight: QDtype::Q4_K, dtype_activation: QDtype::Q8_1, m, k: 5120, n: 5120 };
+            dispatch_qmatmul(&cfg).unwrap().impl_id
+        };
+        assert_eq!(at(1), "qmatmul_q4_k_mmvq_dp4a_t128_vdr2");
+        assert_eq!(at(2), "qmatmul_q4_k_mmvq_dp4a_t128_vdr2_batched");
+        for m in [3, 8, 9, 24] {
+            assert_eq!(at(m), "qmatmul_q4_k_mmq_few_mma", "m = {m}");
+        }
+        assert_eq!(at(25), "qmatmul_q4_k_mmvq_dp4a_t128_vdr2_batched");
+    }
+
     /// The runtime dispatches from the Rust tables, cert-check reads the TOML:
     /// they must name the same rows.
     #[test]
@@ -166,12 +180,17 @@ mod tests {
         }
     }
 
+    /// Every registered (impl_id, cert path). A dispatched impl that serves
+    /// several m bands (one row each) is registered once.
     fn registered() -> impl Iterator<Item = (&'static str, &'static str)> {
-        QMATMUL_SM86
+        let dispatched: std::collections::BTreeSet<_> = QMATMUL_SM86
             .iter()
             .chain(ATTENTION_DECODE_SM86)
             .chain(ATTENTION_PREFILL_SM86)
             .map(|d| (d.impl_id, d.cert_rel_path))
+            .collect();
+        dispatched
+            .into_iter()
             .chain(DIRECT_CALL_KERNELS_SM86.iter().map(|d| (d.impl_id, d.cert_rel_path)))
             .chain(BENCH_REFERENCE_KERNELS_SM86.iter().map(|d| (d.impl_id, d.cert_rel_path)))
     }
