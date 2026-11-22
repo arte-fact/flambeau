@@ -222,7 +222,8 @@ pub const KERNEL_STEMS: &[&str] = &[
     "mmq_few_q4_k_mma",
     #[cfg(feature = "bench")]
     "mmq_few_q5_k_mma",
-
+    #[cfg(feature = "bench")]
+    "mmq_few_q3_k_mma",
     "cast_f32_f16",
     "cast_f16_f32",
     // Norm / pointwise.

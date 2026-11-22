@@ -1823,8 +1823,8 @@ const BENCH_QMATMUL_ALIASES: &[(&str, &str)] = &[
     ("bench:q5_k_lds_x64", "qmatmul_q5_K_mmq_lds_tiled_gfx906"),
 ];
 
-/// Bench-only candidates without a dispatch row: the Q5_K few-column MMA
-/// (swept, band not yet measured); uncertified, the Q3_K and
+/// Bench-only candidates without a dispatch row: the Q5_K and Q3_K
+/// few-column MMA (swept, band not yet measured); uncertified, the Q3_K and
 /// Q5_K 16-column LDS-tiled cells and the wave64 K-quant MMQ; and, under
 /// `cfg(unverified)`, the HIP-only Q4_K r4 MMVQ.
 #[cfg(feature = "bench")]
@@ -1835,6 +1835,18 @@ const BENCH_QMATMUL_RECIPES: &[RecipeRow] = &[
             kind: RecipeKind::MmqFew,
             stem: "mmq_few_q5_k_mma",
             entry: "flambeau_mmq_few_q5_k_mma",
+            entry_f16: None,
+            threads: 0,
+            rows_per_block: 0,
+            mmq_tile: (0, 0),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_q3_k_mmq_few_mma", "bench:q3_k_few_mma"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqFew,
+            stem: "mmq_few_q3_k_mma",
+            entry: "flambeau_mmq_few_q3_k_mma",
             entry_f16: None,
             threads: 0,
             rows_per_block: 0,
@@ -2991,6 +3003,7 @@ fn mmq_lds_x64_launch<B: flambeau_core::KernelBackend>(
 const MMQ_FEW_FALLBACK: &[(&str, &str)] = &[
     ("mmq_few_q4_k_mma", "qmatmul_q4_k_mmvq_dp4a_t128_vdr2_batched"),
     ("mmq_few_q5_k_mma", "qmatmul_q5_k_mmvq_dp4a_t128_vdr2_batched"),
+    ("mmq_few_q3_k_mma", "qmatmul_q3_k_mmvq_dp4a_t128_vdr2_batched"),
 ];
 
 fn few_fallback(recipe: Recipe) -> Result<Recipe> {
@@ -3038,6 +3051,14 @@ const MMQ_FEW_ENTRIES: &[(&str, [&str; 3])] = &[
             "flambeau_mmq_few_q5_k_mma_c3_t1",
         ],
     ),
+    (
+        "mmq_few_q3_k_mma",
+        [
+            "flambeau_mmq_few_q3_k_mma_c1_t1",
+            "flambeau_mmq_few_q3_k_mma_c2_t1",
+            "flambeau_mmq_few_q3_k_mma_c3_t1",
+        ],
+    ),
 ];
 
 /// Ring row stride (bytes) of the few-column MMQ for `units` super-blocks of
@@ -3079,6 +3100,7 @@ fn mmq_few_launch<B: flambeau_core::KernelBackend>(
     let unit_bytes = match dtype_weight {
         QDtype::Q4_K => std::mem::size_of::<flambeau_quant::BlockQ4K>(),
         QDtype::Q5_K => std::mem::size_of::<flambeau_quant::BlockQ5K>(),
+        QDtype::Q3_K => std::mem::size_of::<flambeau_quant::BlockQ3K>(),
         other => bail!("mmq_few: no few-column decoder for {other:?}"),
     };
     let nunits = k / flambeau_quant::QK_K;

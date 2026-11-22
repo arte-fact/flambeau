@@ -70,6 +70,7 @@ const CUDA_ONLY_STEMS: &[&str] = &[
     "quantize_f32_q8_1_few",
     "mmq_few_q4_k_mma",
     "mmq_few_q5_k_mma",
+    "mmq_few_q3_k_mma",
 ];
 
 #[test]

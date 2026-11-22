@@ -12,7 +12,7 @@
 // (quantize_q8_1_few.cuh), so a lane's B fragments are plain int4 loads. The
 // 4 warp partials are summed in shared memory at the end.
 //
-// A type whose super-block is not a multiple of 16 bytes is
+// A type whose super-block is not a multiple of 16 bytes (Q3_K: 110) is
 // copied from the 16-byte boundary before it, the last chunk cut to the bytes
 // needed (no read past them), and decoded at the row's offset in the ring.
 //
@@ -207,6 +207,93 @@ struct DecQ45K {
 #pragma unroll
             for (int l = 0; l < 4; ++l) {
                 sum[c][l] += d[l / 2] * sum_d[c][l] - dmin[l / 2] * sum_m[c][l];
+            }
+        }
+    }
+};
+
+// The 6-bit scales 4·ksc .. 4·ksc + 3 of a Q3_K super-block, minus 32, as
+// int8 bytes.
+__device__ __forceinline__ int unpack_scales_q3_k(const uint8_t* scales, int ksc) {
+    const int sc_low = (load_b2(scales, ksc % 2) >> (4 * (ksc / 2))) & 0x0F0F0F0F;
+    const int sc_high = ((load_b2(scales, 2) >> (2 * ksc)) << 4) & 0x30303030;
+    return __vsub4(sc_low | sc_high, 0x20202020);
+}
+
+// Q3_K (110-B super-block: hmask[32], qs[64], scales[12], d), D4 activation.
+// A scale per 16 values: one k = 16 MMA per half sub-block.
+struct DecQ3K {
+    static constexpr int UNIT_BYTES = 110;
+
+    template <int NCG>
+    static __device__ __forceinline__ void vec_dot(
+        const char* const (&x)[2], const YFrag (&yf)[NCG], float (&sum)[NCG][4]) {
+        const int t = threadIdx.x % 4;
+
+        int hm[2][2];
+        int sc[2][4];
+        float d[2];
+#pragma unroll
+        for (int r = 0; r < 2; ++r) {
+            const uint8_t* bx = (const uint8_t*) x[r];
+            hm[r][0] = ~load_b2(bx, t);  // a set bit means 4 is subtracted
+            hm[r][1] = ~load_b2(bx + 16, t);
+#pragma unroll
+            for (int ksc = 0; ksc < 4; ++ksc) {
+                sc[r][ksc] = unpack_scales_q3_k(bx + 96, ksc);
+            }
+            d[r] = __half2float(*(const __half*) (bx + 108));
+        }
+
+        float sum_d[NCG][4] = {{0.0f}};
+#pragma unroll
+        for (int n = 0; n < 2; ++n) {
+            int qs[2][2];
+#pragma unroll
+            for (int r = 0; r < 2; ++r) {
+                const uint8_t* q = (const uint8_t*) x[r] + 32 + 32 * n;
+                qs[r][0] = load_b2(q, t);
+                qs[r][1] = load_b2(q + 16, t);
+            }
+#pragma unroll
+            for (int j = 0; j < 4; ++j) {
+                const int s = 4 * n + j;
+                flambeau_mma::tile_i16_k16 lo;
+                flambeau_mma::tile_i16_k16 hi;
+#pragma unroll
+                for (int r = 0; r < 2; ++r) {
+                    lo.x[r] = __vsub4((qs[r][0] >> (2 * j)) & 0x03030303, ((hm[r][0] >> s) & 0x01010101) << 2);
+                    hi.x[r] = __vsub4((qs[r][1] >> (2 * j)) & 0x03030303, ((hm[r][1] >> s) & 0x01010101) << 2);
+                }
+                // Scales 2s and 2s + 1 (first and second 16 values) of rows g, g + 8.
+                const int sc0 = sc[0][s / 2] >> (16 * (s % 2));
+                const int sc1 = sc[1][s / 2] >> (16 * (s % 2));
+                const int sc_lo[2] = {(int8_t) sc0, (int8_t) sc1};
+                const int sc_hi[2] = {(int8_t) (sc0 >> 8), (int8_t) (sc1 >> 8)};
+#pragma unroll
+                for (int c = 0; c < NCG; ++c) {
+                    const int2 bq = get_b(yf[c], s);
+                    flambeau_mma::tile_i8_k16 b_lo;
+                    flambeau_mma::tile_i8_k16 b_hi;
+                    b_lo.x[0] = bq.x;
+                    b_hi.x[0] = bq.y;
+                    flambeau_mma::tile_i16 c_lo;
+                    flambeau_mma::tile_i16 c_hi;
+                    flambeau_mma::mma_k16(c_lo, lo, b_lo);
+                    flambeau_mma::mma_k16(c_hi, hi, b_hi);
+                    const float2 dy = get_d_d4(yf[c], s);
+                    sum_d[c][0] += dy.x * (float) (c_lo.x[0] * sc_lo[0] + c_hi.x[0] * sc_hi[0]);
+                    sum_d[c][1] += dy.y * (float) (c_lo.x[1] * sc_lo[0] + c_hi.x[1] * sc_hi[0]);
+                    sum_d[c][2] += dy.x * (float) (c_lo.x[2] * sc_lo[1] + c_hi.x[2] * sc_hi[1]);
+                    sum_d[c][3] += dy.y * (float) (c_lo.x[3] * sc_lo[1] + c_hi.x[3] * sc_hi[1]);
+                }
+            }
+        }
+#pragma unroll
+        for (int c = 0; c < NCG; ++c) {
+#pragma unroll
+            for (int l = 0; l < 4; ++l) {
+                sum[c][l] += d[l / 2] * sum_d[c][l];
             }
         }
     }

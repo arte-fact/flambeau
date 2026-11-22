@@ -1,10 +1,10 @@
-//! Few-column int8 MMA (`mmq_few_{q4_k,q5_k}_mma`) correctness sweep. The
+//! Few-column int8 MMA (`mmq_few_{q4_k,q5_k,q3_k}_mma`) correctness sweep. The
 //! activation is quantised on the host into the few-column layout
 //! ([`flambeau_quant::q8_1_few`], with the scale record the type reads), so
 //! the cert isolates the matmul; the reference is an f64 dot product of the
 //! dequantised weights with the dequantised activation. Columns 1..24 (every
 //! column-group count, partial groups included), K at 8..68 super-blocks, a
-//! row count off the 16-row tile.
+//! row count off the 16-row tile; Q3_K rows are not 16-byte aligned.
 //!
 //! Backend-generic; emits the CUDA (sm_86) certs. CUDA-only kernels.
 
@@ -17,7 +17,7 @@ use flambeau_core::{CopyDirection, Device, DevicePtr, LaunchCfg, Stream};
 use flambeau_quant::q8_1_few::{
     few_ds_offset, few_qs_offset, quantize_f16_q8_1_few, FewScale, FEW_NCOLS, FEW_UNIT_GROUP_BYTES,
 };
-use flambeau_quant::{dequantize_to_vec, BlockQ4K, BlockQ5K, GgmlDType, QK8_1, QK_K};
+use flambeau_quant::{dequantize_to_vec, BlockQ3K, BlockQ4K, BlockQ5K, GgmlDType, QK8_1, QK_K};
 use half::f16;
 
 use crate::backend::{BenchBackend, LaunchArgs};
@@ -71,6 +71,20 @@ const Q5_K: FewType = FewType {
     scale: FewScale::Ds4,
 };
 
+const Q3_K: FewType = FewType {
+    name: "Q3_K",
+    stem: "mmq_few_q3_k_mma",
+    entries: [
+        "flambeau_mmq_few_q3_k_mma_c1_t1",
+        "flambeau_mmq_few_q3_k_mma_c2_t1",
+        "flambeau_mmq_few_q3_k_mma_c3_t1",
+    ],
+    impl_id: "qmatmul_q3_k_mmq_few_mma",
+    ggml: GgmlDType::Q3K,
+    block_bytes: std::mem::size_of::<BlockQ3K>(),
+    scale: FewScale::D4,
+};
+
 /// Q4_K sweep.
 /// # Errors
 /// Propagates device / launch / cert-write failures.
@@ -83,6 +97,13 @@ pub fn run_sweep_q4_k<B: BenchBackend>(repo_root: &Path, arch: &str) -> Result<C
 /// Propagates device / launch / cert-write failures.
 pub fn run_sweep_q5_k<B: BenchBackend>(repo_root: &Path, arch: &str) -> Result<Cert> {
     run::<B>(Q5_K, repo_root, arch)
+}
+
+/// Q3_K sweep.
+/// # Errors
+/// Propagates device / launch / cert-write failures.
+pub fn run_sweep_q3_k<B: BenchBackend>(repo_root: &Path, arch: &str) -> Result<Cert> {
+    run::<B>(Q3_K, repo_root, arch)
 }
 
 fn run<B: BenchBackend>(ty: FewType, repo_root: &Path, arch: &str) -> Result<Cert> {
@@ -149,11 +170,23 @@ fn weights(ty: FewType, seed: u64, n: usize, k: usize) -> Vec<u8> {
         })
         .collect();
     for b in raw.chunks_exact_mut(ty.block_bytes) {
-        // Q4_K / Q5_K: d, dmin first.
-        let d = f16::from_f32((f32::from(b[0]) / 255.0) * 0.1 + 0.01);
-        let dmin = f16::from_f32((f32::from(b[1]) / 255.0) * 0.05);
-        b[0..2].copy_from_slice(&d.to_le_bytes());
-        b[2..4].copy_from_slice(&dmin.to_le_bytes());
+        match ty.ggml {
+            GgmlDType::Q3K => {
+                // hmask[32], qs[64], scales[12], d: 6-bit scales kept small.
+                for s in &mut b[96..108] {
+                    *s %= 32;
+                }
+                let d = f16::from_f32((f32::from(b[108]) / 255.0) * 0.05 + 0.005);
+                b[108..110].copy_from_slice(&d.to_le_bytes());
+            }
+            _ => {
+                // Q4_K / Q5_K: d, dmin first.
+                let d = f16::from_f32((f32::from(b[0]) / 255.0) * 0.1 + 0.01);
+                let dmin = f16::from_f32((f32::from(b[1]) / 255.0) * 0.05);
+                b[0..2].copy_from_slice(&d.to_le_bytes());
+                b[2..4].copy_from_slice(&dmin.to_le_bytes());
+            }
+        }
     }
     raw
 }

@@ -78,4 +78,29 @@ static __device__ __forceinline__ void mma(tile_i16& d, const tile_i16& a, const
 #endif
 }
 
+// M16 x K16 s8 operand of m16n8k16: x[0] row g, x[1] row g + 8, both the
+// K values [4t, 4t + 4) of the calling lane (g, t).
+struct tile_i16_k16 {
+    static constexpr int ne = 2;
+    int x[ne] = {0, 0};
+};
+
+// N8 x K16 s8 operand (B) of m16n8k16: column g, K values [4t, 4t + 4).
+struct tile_i8_k16 {
+    static constexpr int ne = 1;
+    int x[ne] = {0};
+};
+
+// D += A @ B over K=16. s8 x s8 -> s32; D in the tile_i16 accumulator layout.
+static __device__ __forceinline__ void mma_k16(tile_i16& d, const tile_i16_k16& a, const tile_i8_k16& b) {
+#if __CUDA_ARCH__ >= 800
+    asm("mma.sync.aligned.m16n8k16.row.col.s32.s8.s8.s32 "
+        "{%0, %1, %2, %3}, {%4, %5}, {%6}, {%0, %1, %2, %3};"
+        : "+r"(d.x[0]), "+r"(d.x[1]), "+r"(d.x[2]), "+r"(d.x[3])
+        : "r"(a.x[0]), "r"(a.x[1]), "r"(b.x[0]));
+#else
+    (void) d; (void) a; (void) b;
+#endif
+}
+
 }  // namespace flambeau_mma
