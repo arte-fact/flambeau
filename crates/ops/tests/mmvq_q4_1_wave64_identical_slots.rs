@@ -182,7 +182,7 @@ fn mmvq_q4_1_wave64_identical_slots() -> Result<()> {
             weights: d_w,
             act_q8_1: d_act_q8_1,
             act_q8_1_mmq: DevicePtr(0),
-            act_q8_1_few: flambeau_core::DevicePtr::NULL,
+            act_q8_1_few: flambeau_ops::FewAct::NONE,
             dst: d_dst,
         },
         flambeau_ops::MatmulShape { m: n_slots, k, n: n_rows },

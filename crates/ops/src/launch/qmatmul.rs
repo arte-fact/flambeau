@@ -177,10 +177,11 @@ pub fn qmatmul<B: flambeau_core::KernelBackend>(
         return Ok(());
     }
 
-    let mut recipe = resolve_dispatch_recipe::<B>(dtype_weight, m, k, n)?;
-    if recipe.kind == RecipeKind::MmqFew && act_q8_1_few.as_usize() == 0 {
-        recipe = few_fallback(recipe)?;
-    }
+    let recipe = resolve_few_activation(
+        resolve_dispatch_recipe::<B>(dtype_weight, m, k, n)?,
+        dtype_weight,
+        act_q8_1_few,
+    )?;
     launch_recipe(
         reg,
         stream,
@@ -305,7 +306,7 @@ fn launch_recipe<B: flambeau_core::KernelBackend>(
             reg,
             stream,
             recipe,
-            crate::MmvqBuffers { weights, act_q8_1: act_q8_1_few, dst },
+            crate::MmvqBuffers { weights, act_q8_1: act_q8_1_few.ptr, dst },
             shape,
             dtype_weight,
         ),
@@ -398,10 +399,13 @@ pub struct ActLayouts {
 }
 
 impl ActLayouts {
-    /// Whether some projection of the set reads `layout`.
+    /// Whether the set's activation must be produced in `layout`. A set
+    /// reading both few-column scale records keeps Ds4 (see
+    /// [`Self::few_scale`]); its D4 readers fall back to the batched MMVQ,
+    /// so the standard layout is read too.
     pub fn reads(self, layout: ActLayout) -> bool {
         match layout {
-            ActLayout::Q8_1 => self.q8_1,
+            ActLayout::Q8_1 => self.q8_1 || (self.few_d4 && self.few_ds4),
             ActLayout::Mmq => self.mmq,
             ActLayout::Few(FewScale::D4) => self.few_d4,
             ActLayout::Few(FewScale::Ds4) => self.few_ds4,
@@ -413,14 +417,14 @@ impl ActLayouts {
         self.few_d4 || self.few_ds4
     }
 
-    /// The scale record of the few-column activation the set reads, if any.
-    /// One activation buffer holds one record: a set reading both is refused.
-    pub fn few_scale(self) -> Result<Option<FewScale>> {
+    /// The scale record of the set's few-column activation, if any. One
+    /// buffer holds one record: a set reading both keeps Ds4 (Q4_K, Q5_K),
+    /// and `qmatmul` sends the D4 readers to their batched fallback.
+    pub fn few_scale(self) -> Option<FewScale> {
         match (self.few_d4, self.few_ds4) {
-            (false, false) => Ok(None),
-            (true, false) => Ok(Some(FewScale::D4)),
-            (false, true) => Ok(Some(FewScale::Ds4)),
-            (true, true) => bail!("one activation read in both few-column scale records"),
+            (false, false) => None,
+            (true, false) => Some(FewScale::D4),
+            (_, true) => Some(FewScale::Ds4),
         }
     }
 }
@@ -1820,39 +1824,16 @@ const BENCH_QMATMUL_ALIASES: &[(&str, &str)] = &[
     ("bench:q4_k_lds_x64", "qmatmul_q4_K_mmq_lds_tiled_y64_gfx906"),
     ("bench:q4_k_lds_x16", "qmatmul_q4_K_mmq_lds_tiled_y64_x16_gfx906"),
     ("bench:q4_k_few_mma", "qmatmul_q4_k_mmq_few_mma"),
+    ("bench:q5_k_few_mma", "qmatmul_q5_k_mmq_few_mma"),
+    ("bench:q3_k_few_mma", "qmatmul_q3_k_mmq_few_mma"),
     ("bench:q5_k_lds_x64", "qmatmul_q5_K_mmq_lds_tiled_gfx906"),
 ];
 
-/// Bench-only candidates without a dispatch row: the Q5_K and Q3_K
-/// few-column MMA (swept, band not yet measured); uncertified, the Q3_K and
+/// Bench-only candidates without a dispatch row (uncertified): the Q3_K and
 /// Q5_K 16-column LDS-tiled cells and the wave64 K-quant MMQ; and, under
 /// `cfg(unverified)`, the HIP-only Q4_K r4 MMVQ.
 #[cfg(feature = "bench")]
 const BENCH_QMATMUL_RECIPES: &[RecipeRow] = &[
-    RecipeRow {
-        ids: &["qmatmul_q5_k_mmq_few_mma", "bench:q5_k_few_mma"],
-        recipe: Recipe {
-            kind: RecipeKind::MmqFew,
-            stem: "mmq_few_q5_k_mma",
-            entry: "flambeau_mmq_few_q5_k_mma",
-            entry_f16: None,
-            threads: 0,
-            rows_per_block: 0,
-            mmq_tile: (0, 0),
-        },
-    },
-    RecipeRow {
-        ids: &["qmatmul_q3_k_mmq_few_mma", "bench:q3_k_few_mma"],
-        recipe: Recipe {
-            kind: RecipeKind::MmqFew,
-            stem: "mmq_few_q3_k_mma",
-            entry: "flambeau_mmq_few_q3_k_mma",
-            entry_f16: None,
-            threads: 0,
-            rows_per_block: 0,
-            mmq_tile: (0, 0),
-        },
-    },
     #[cfg(unverified)]
     RecipeRow {
         ids: &["bench:q4_k_mmvq_r4"],
@@ -2770,6 +2751,30 @@ const QMATMUL_RECIPES: &[RecipeRow] = &[
         },
     },
     RecipeRow {
+        ids: &["qmatmul_q5_k_mmq_few_mma"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqFew,
+            stem: "mmq_few_q5_k_mma",
+            entry: "flambeau_mmq_few_q5_k_mma",
+            entry_f16: None,
+            threads: 0,
+            rows_per_block: 0,
+            mmq_tile: (0, 0),
+        },
+    },
+    RecipeRow {
+        ids: &["qmatmul_q3_k_mmq_few_mma"],
+        recipe: Recipe {
+            kind: RecipeKind::MmqFew,
+            stem: "mmq_few_q3_k_mma",
+            entry: "flambeau_mmq_few_q3_k_mma",
+            entry_f16: None,
+            threads: 0,
+            rows_per_block: 0,
+            mmq_tile: (0, 0),
+        },
+    },
+    RecipeRow {
         ids: &["qmatmul_q4_K_mmq_lds_tiled_y64_x16_gfx906"],
         recipe: Recipe {
             kind: RecipeKind::MmqLdsX64,
@@ -3005,6 +3010,17 @@ const MMQ_FEW_FALLBACK: &[(&str, &str)] = &[
     ("mmq_few_q5_k_mma", "qmatmul_q5_k_mmvq_dp4a_t128_vdr2_batched"),
     ("mmq_few_q3_k_mma", "qmatmul_q3_k_mmvq_dp4a_t128_vdr2_batched"),
 ];
+
+/// A few-column recipe whose caller produced no few-column activation, or
+/// one holding the other scale record (a site shared with readers of the
+/// other record keeps Ds4), runs the batched MMVQ on the standard layout.
+fn resolve_few_activation(recipe: Recipe, dtype_weight: QDtype, few: crate::FewAct) -> Result<Recipe> {
+    if recipe.kind == RecipeKind::MmqFew && few.ptr_for(few_scale(dtype_weight)).as_usize() == 0 {
+        few_fallback(recipe)
+    } else {
+        Ok(recipe)
+    }
+}
 
 fn few_fallback(recipe: Recipe) -> Result<Recipe> {
     let id = MMQ_FEW_FALLBACK
@@ -3292,10 +3308,11 @@ mod recipe_table_tests {
         }
     }
 
-    /// The sm_86 Q4_K few-column band and its fallbacks, as callers see them.
+    /// The sm_86 few-column bands (Q4_K, Q5_K, Q3_K) and their fallbacks,
+    /// as callers see them.
     #[cfg(feature = "cuda")]
     #[test]
-    fn sm86_q4_k_few_column_layouts() {
+    fn sm86_few_column_layouts() {
         use super::{qmatmul_act_layout, ActLayout, FewScale};
         use flambeau_core::QDtype;
         let at = |m, k| {
@@ -3311,6 +3328,72 @@ mod recipe_table_tests {
         assert_eq!(at(5, 1792), ActLayout::Q8_1, "fewer than 8 super-blocks");
         assert_eq!(at(2, 5120), ActLayout::Q8_1);
         assert_eq!(at(25, 5120), ActLayout::Q8_1);
+        let q5 = |m| {
+            qmatmul_act_layout::<flambeau_backend_cuda::CudaKernels>(
+                crate::MatmulShape { m, k: 5120, n: 5120 },
+                QDtype::Q5_K,
+            )
+        };
+        assert_eq!(q5(3), ActLayout::Q8_1);
+        assert_eq!(q5(4), ActLayout::Few(FewScale::Ds4));
+        assert_eq!(q5(24), ActLayout::Few(FewScale::Ds4));
+        assert_eq!(q5(25), ActLayout::Q8_1);
+        let q3 = |m| {
+            qmatmul_act_layout::<flambeau_backend_cuda::CudaKernels>(
+                crate::MatmulShape { m, k: 5120, n: 5120 },
+                QDtype::Q3_K,
+            )
+        };
+        assert_eq!(q3(2), ActLayout::Q8_1);
+        assert_eq!(q3(3), ActLayout::Few(FewScale::D4));
+        assert_eq!(q3(24), ActLayout::Few(FewScale::D4));
+        assert_eq!(q3(25), ActLayout::Q8_1);
+    }
+
+    /// A site read by a D4 reader (Q3_K) and a Ds4 reader (Q4_K) at once:
+    /// its few-column buffer holds Ds4, it also produces the standard
+    /// layout, and the D4 reader falls back to its batched MMVQ on it.
+    #[test]
+    fn mixed_few_scale_site() {
+        use super::{
+            resolve_few_activation, ActLayout, ActLayouts, FewScale, Recipe, RecipeKind,
+        };
+        use flambeau_core::{DevicePtr, QDtype};
+        let site: ActLayouts =
+            [ActLayout::Few(FewScale::D4), ActLayout::Few(FewScale::Ds4)].into_iter().collect();
+        assert_eq!(site.few_scale(), Some(FewScale::Ds4));
+        assert!(site.reads(ActLayout::Q8_1));
+        let single: ActLayouts = [ActLayout::Few(FewScale::D4)].into_iter().collect();
+        assert_eq!(single.few_scale(), Some(FewScale::D4));
+        assert!(!single.reads(ActLayout::Q8_1));
+
+        let buf = DevicePtr(0x1000);
+        let few = crate::FewAct::new(buf, site.few_scale());
+        assert_eq!(few.ptr_for(FewScale::Ds4).as_usize(), 0x1000);
+        assert_eq!(few.ptr_for(FewScale::D4).as_usize(), 0);
+        assert_eq!(crate::FewAct::NONE.ptr_for(FewScale::Ds4).as_usize(), 0);
+
+        let resolve = |id, dtype| {
+            let r = resolve_few_activation(Recipe::from_impl_id(id).unwrap(), dtype, few).unwrap();
+            (r.kind, r.stem)
+        };
+        assert_eq!(
+            resolve("qmatmul_q4_k_mmq_few_mma", QDtype::Q4_K),
+            (RecipeKind::MmqFew, "mmq_few_q4_k_mma")
+        );
+        assert_eq!(
+            resolve("qmatmul_q3_k_mmq_few_mma", QDtype::Q3_K).0,
+            RecipeKind::MmvqBatched,
+            "a D4 reader of a Ds4 buffer falls back"
+        );
+        let d4 = crate::FewAct::new(buf, single.few_scale());
+        let r = resolve_few_activation(
+            Recipe::from_impl_id("qmatmul_q3_k_mmq_few_mma").unwrap(),
+            QDtype::Q3_K,
+            d4,
+        )
+        .unwrap();
+        assert_eq!(r.kind, RecipeKind::MmqFew);
     }
 
     #[cfg(feature = "cuda")]

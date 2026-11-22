@@ -1124,7 +1124,7 @@ impl DeltaNetLayer {
                     weights: self.ssm_alpha.ptr,
                     act_q8_1: scratch.x_q8_1,
                     act_q8_1_mmq: scratch.x_q8_1,
-                    act_q8_1_few: flambeau_core::DevicePtr::NULL,
+                    act_q8_1_few: flambeau_ops::FewAct::NONE,
                     dst: scratch.alpha_f32,
                 },
                 flambeau_ops::MatmulShape {
@@ -1140,7 +1140,7 @@ impl DeltaNetLayer {
                     weights: self.ssm_beta.ptr,
                     act_q8_1: scratch.x_q8_1,
                     act_q8_1_mmq: scratch.x_q8_1,
-                    act_q8_1_few: flambeau_core::DevicePtr::NULL,
+                    act_q8_1_few: flambeau_ops::FewAct::NONE,
                     dst: scratch.beta_f32,
                 },
                 flambeau_ops::MatmulShape {
@@ -1334,7 +1334,7 @@ impl DeltaNetLayer {
                     weights: self.ssm_out.ptr,
                     act_q8_1: scratch.gated_q8_1,
                     act_q8_1_mmq: scratch.gated_q8_1,
-                    act_q8_1_few: flambeau_core::DevicePtr::NULL,
+                    act_q8_1_few: flambeau_ops::FewAct::NONE,
                     dst: scratch.ssm_out_f32,
                 },
                 flambeau_ops::MatmulShape {
@@ -1482,21 +1482,18 @@ impl DeltaNetLayer {
             ops.quantize_f16_q8_1_mmq(scratch.x_norm_f16, scratch.x_q8_1_mmq, hidden, n_tokens)
                 .context("gdn prefill x_norm → Q8_1 (MMQ DS4)")?;
         }
-        let x_few = match x_layouts.few_scale()? {
-            Some(scale) => {
-                ops.quantize_q8_1_few(
-                    flambeau_ops::FewSource::F16,
-                    scratch.x_norm_f16,
-                    scratch.x_q8_1_few,
-                    hidden,
-                    n_tokens,
-                    scale,
-                )
-                .context("gdn prefill x_norm → few-column Q8_1")?;
-                scratch.x_q8_1_few
-            }
-            None => DevicePtr::NULL,
-        };
+        let x_few = flambeau_ops::FewAct::new(scratch.x_q8_1_few, x_layouts.few_scale());
+        if let Some(scale) = x_few.scale {
+            ops.quantize_q8_1_few(
+                flambeau_ops::FewSource::F16,
+                scratch.x_norm_f16,
+                scratch.x_q8_1_few,
+                hidden,
+                n_tokens,
+                scale,
+            )
+            .context("gdn prefill x_norm → few-column Q8_1")?;
+        }
 
         // 2..5. Hidden-input projections at M = L. qmatmul auto-
         // dispatches MMVQ vs MMQ based on M and weight dtype.
@@ -1747,12 +1744,12 @@ impl DeltaNetLayer {
             flambeau_ops::ActLayout::Mmq => {
                 ops.quantize_q8_1_mmq(scratch.gated_f32, scratch.gated_q8_1_mmq, d_inner, n_tokens)
                     .context("gdn prefill quantise gated → Q8_1 (MMQ DS4)")?;
-                DevicePtr::NULL
+                flambeau_ops::FewAct::NONE
             }
             flambeau_ops::ActLayout::Q8_1 => {
                 ops.quantize_q8_1(scratch.gated_f32, scratch.gated_q8_1, n_tokens * d_inner)
                     .context("gdn prefill quantise gated → Q8_1 (std)")?;
-                DevicePtr::NULL
+                flambeau_ops::FewAct::NONE
             }
             flambeau_ops::ActLayout::Few(scale) => {
                 ops.quantize_q8_1_few(
@@ -1764,7 +1761,7 @@ impl DeltaNetLayer {
                     scale,
                 )
                 .context("gdn prefill quantise gated → few-column Q8_1")?;
-                scratch.gated_q8_1_few
+                flambeau_ops::FewAct::new(scratch.gated_q8_1_few, Some(scale))
             }
         };
 

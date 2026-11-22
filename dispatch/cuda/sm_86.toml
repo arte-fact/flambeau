@@ -114,10 +114,24 @@ notes   = "autotuned"
 [[qmatmul]]
 dtype   = "Q3_K"
 dtype_q = "Q8_1"
-shape   = { m = ">=2", k = "any", n = "any" }
+shape   = { m = "2", k = "any", n = "any" }
 impl    = "qmatmul_q3_k_mmvq_dp4a_t128_vdr2_batched"
 cert    = "certs/cuda/sm_86/qmatmul_q3_k_mmvq_dp4a_t128_vdr2_batched.json"
 notes   = "batched, 1..8 columns per launch"
+[[qmatmul]]
+dtype   = "Q3_K"
+dtype_q = "Q8_1"
+shape   = { m = "3..24", k = "any", n = "any" }
+impl    = "qmatmul_q3_k_mmq_few_mma"
+cert    = "certs/cuda/sm_86/qmatmul_q3_k_mmq_few_mma.json"
+notes   = "The few-column int8 MMA beats the batched MMVQ from m = 3 on the Qwen3.8-27B verify shapes (weighted, 3 repetitions: 403 vs 554 us at m = 3, 404 vs 542 at m = 5, 574 vs 2 178 at m = 24; 402 vs 379 at m = 2), coord/mmq-few-resultats.md. Reads the D4 scale record: at a site shared with a Q4_K or Q5_K reader the few-column activation holds Ds4, and this row falls back to the batched MMVQ there, as it does for a k it does not tile."
+[[qmatmul]]
+dtype   = "Q3_K"
+dtype_q = "Q8_1"
+shape   = { m = ">=25", k = "any", n = "any" }
+impl    = "qmatmul_q3_k_mmvq_dp4a_t128_vdr2_batched"
+cert    = "certs/cuda/sm_86/qmatmul_q3_k_mmvq_dp4a_t128_vdr2_batched.json"
+notes   = "batched above the few-column band"
 
 [[qmatmul]]
 dtype   = "Q4_0"
@@ -198,10 +212,24 @@ notes   = "autotuned"
 [[qmatmul]]
 dtype   = "Q5_K"
 dtype_q = "Q8_1"
-shape   = { m = ">=2", k = "any", n = "any" }
+shape   = { m = "2..3", k = "any", n = "any" }
 impl    = "qmatmul_q5_k_mmvq_dp4a_t128_vdr2_batched"
 cert    = "certs/cuda/sm_86/qmatmul_q5_k_mmvq_dp4a_t128_vdr2_batched.json"
 notes   = "batched, 1..8 columns per launch"
+[[qmatmul]]
+dtype   = "Q5_K"
+dtype_q = "Q8_1"
+shape   = { m = "4..24", k = "any", n = "any" }
+impl    = "qmatmul_q5_k_mmq_few_mma"
+cert    = "certs/cuda/sm_86/qmatmul_q5_k_mmq_few_mma.json"
+notes   = "The few-column int8 MMA beats the batched MMVQ on the Qwen3.8-27B verify shapes (weighted, 3 repetitions: 6 313 vs 6 784 us at m = 4, 6 331 vs 7 510 at m = 5, 7 713 vs 32 004 at m = 24), coord/mmq-few-resultats.md. m = 3 stays batched: the kernel-only lead there (0.9 %) is smaller than the cost of a second activation quantisation at a site shared with another dtype. Same Ds4 few-column activation and fallbacks as the Q4_K row."
+[[qmatmul]]
+dtype   = "Q5_K"
+dtype_q = "Q8_1"
+shape   = { m = ">=25", k = "any", n = "any" }
+impl    = "qmatmul_q5_k_mmvq_dp4a_t128_vdr2_batched"
+cert    = "certs/cuda/sm_86/qmatmul_q5_k_mmvq_dp4a_t128_vdr2_batched.json"
+notes   = "batched above the few-column band"
 
 [[qmatmul]]
 dtype   = "Q6_K"

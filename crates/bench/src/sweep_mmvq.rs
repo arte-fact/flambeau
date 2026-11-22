@@ -1603,7 +1603,7 @@ fn run_shape_batched_via<B: BenchBackend>(
                 weights: d_x,
                 act_q8_1: d_y_q8_1,
                 act_q8_1_mmq: DevicePtr::NULL,
-                act_q8_1_few: DevicePtr::NULL,
+                act_q8_1_few: flambeau_ops::FewAct::NONE,
                 dst: d_dst,
             },
             flambeau_ops::MatmulShape { m: n_slots, k, n: m },

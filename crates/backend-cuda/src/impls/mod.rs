@@ -160,6 +160,36 @@ mod tests {
         assert_eq!(at(25), "qmatmul_q4_k_mmvq_dp4a_t128_vdr2_batched");
     }
 
+    #[test]
+    fn q3_k_few_column_band() {
+        let at = |m| {
+            let cfg = QMatMulCfg { dtype_weight: QDtype::Q3_K, dtype_activation: QDtype::Q8_1, m, k: 5120, n: 5120 };
+            dispatch_qmatmul(&cfg).unwrap().impl_id
+        };
+        assert_eq!(at(1), "qmatmul_q3_k_mmvq_dp4a_t128_vdr2");
+        for m in [2, 25] {
+            assert_eq!(at(m), "qmatmul_q3_k_mmvq_dp4a_t128_vdr2_batched", "m = {m}");
+        }
+        for m in [3, 8, 9, 24] {
+            assert_eq!(at(m), "qmatmul_q3_k_mmq_few_mma", "m = {m}");
+        }
+    }
+
+    #[test]
+    fn q5_k_few_column_band() {
+        let at = |m| {
+            let cfg = QMatMulCfg { dtype_weight: QDtype::Q5_K, dtype_activation: QDtype::Q8_1, m, k: 5120, n: 5120 };
+            dispatch_qmatmul(&cfg).unwrap().impl_id
+        };
+        assert_eq!(at(1), "qmatmul_q5_k_mmvq_dp4a_t128_vdr2");
+        for m in [2, 3, 25] {
+            assert_eq!(at(m), "qmatmul_q5_k_mmvq_dp4a_t128_vdr2_batched", "m = {m}");
+        }
+        for m in [4, 8, 9, 24] {
+            assert_eq!(at(m), "qmatmul_q5_k_mmq_few_mma", "m = {m}");
+        }
+    }
+
     /// The runtime dispatches from the Rust tables, cert-check reads the TOML:
     /// they must name the same rows.
     #[test]

@@ -63,14 +63,40 @@ pub struct MmvqBuffers {
 /// read by the MMVQ paths; `act_q8_1_mmq` (DS4 144 B) by the MMQ recipes;
 /// `act_q8_1_few` (few-column B fragments) by the few-column MMQ. A layout
 /// the caller did not produce is `DevicePtr::NULL`: the MMQ recipes refuse
-/// it, the few-column MMQ falls back to the batched MMVQ.
+/// it, the few-column MMQ falls back to the batched MMVQ, as it does when
+/// the few-column activation holds the other scale record.
 #[derive(Copy, Clone, Debug)]
 pub struct QmatmulBuffers {
     pub weights: DevicePtr,
     pub act_q8_1: DevicePtr,
     pub act_q8_1_mmq: DevicePtr,
-    pub act_q8_1_few: DevicePtr,
+    pub act_q8_1_few: FewAct,
     pub dst: DevicePtr,
+}
+
+/// A few-column activation buffer and the scale record it holds.
+#[derive(Copy, Clone, Debug)]
+pub struct FewAct {
+    pub ptr: DevicePtr,
+    pub scale: Option<crate::FewScale>,
+}
+
+impl FewAct {
+    pub const NONE: Self = Self { ptr: DevicePtr::NULL, scale: None };
+
+    /// `ptr` holding `scale`, or `NONE` when the set reads no few-column layout.
+    pub fn new(ptr: DevicePtr, scale: Option<crate::FewScale>) -> Self {
+        match scale {
+            Some(_) => Self { ptr, scale },
+            None => Self::NONE,
+        }
+    }
+
+    /// The buffer for a reader of `scale`; `DevicePtr::NULL` when it holds
+    /// none or the other record.
+    pub fn ptr_for(self, scale: crate::FewScale) -> DevicePtr {
+        if self.scale == Some(scale) { self.ptr } else { DevicePtr::NULL }
+    }
 }
 
 /// Fused K+V MMVQ buffers for the `mmvq_q4_0_kv_f16dst` dispatcher.

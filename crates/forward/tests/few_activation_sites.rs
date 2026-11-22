@@ -4,13 +4,15 @@
 //! site must be listed here on purpose, never fall back silently.
 //!
 //! Reads the sources: every `QuantWeight::qmatmul` call (third argument: the
-//! few-column tensor) and every `act_q8_1_few:` field of a `QmatmulBuffers`
-//! literal (or parameter).
+//! few-column activation) and every `act_q8_1_few:` field of a
+//! `QmatmulBuffers` literal (or parameter). A second table pins where each
+//! wired activation's scale record comes from: a site shared by several
+//! projections takes `ActLayouts::few_scale` (Ds4 when its readers need both
+//! records; the D4 readers then fall back), never a hand-picked record.
 
 use std::path::{Path, PathBuf};
 
-const NULL_TENSOR: &str = "&Tensor::null()";
-const NULL_PTR: &str = "flambeau_core::DevicePtr::NULL";
+const NONE: &str = "flambeau_ops::FewAct::NONE";
 
 /// (file under `crates/`, few-column argument of each site in source order).
 const SITES: &[(&str, &[&str])] = &[
@@ -18,25 +20,41 @@ const SITES: &[(&str, &[&str])] = &[
         "forward/src/core/composites/dense_ffn.rs",
         &["act_norm_few", "act_norm_few", "act_gated_few"],
     ),
-    ("forward/src/core/composites/moe_ffn.rs", &[NULL_TENSOR, NULL_TENSOR]),
-    ("forward/src/core/composites/mtp.rs", &["&act_few", NULL_TENSOR]),
-    ("forward/src/core/composites/output_head.rs", &[NULL_TENSOR]),
+    ("forward/src/core/composites/moe_ffn.rs", &[NONE, NONE]),
+    ("forward/src/core/composites/mtp.rs", &["few", NONE]),
+    ("forward/src/core/composites/output_head.rs", &[NONE]),
     (
         "forward/src/core/composites/standard_attn.rs",
         &["act_norm_few", "act_norm_few", "act_norm_few", "act_norm_few", "act_attn_out_few"],
     ),
     (
         "forward/src/core/composites/standard_attn_mixed.rs",
-        &[NULL_TENSOR, NULL_TENSOR, NULL_TENSOR, NULL_TENSOR, NULL_TENSOR],
+        &[NONE, NONE, NONE, NONE, NONE],
     ),
-    // QuantWeight::qmatmul: its parameter, then the field it fills.
-    ("forward/src/ctx.rs", &["&Tensor<flambeau_model_ops::Q8_1>", "act_q8_1_few.ptr"]),
+    // QuantWeight::qmatmul: its parameter (the field is filled by shorthand).
+    ("forward/src/ctx.rs", &["flambeau_ops::FewAct"]),
     (
         "model-ops/src/delta_net.rs",
-        &[NULL_PTR, NULL_PTR, NULL_PTR, "x_few", "x_few", "x_few", "x_few", "gated_few"],
+        &[NONE, NONE, NONE, "x_few", "x_few", "x_few", "x_few", "gated_few"],
     ),
-    ("model-ops/src/shared_expert.rs", &[NULL_PTR, NULL_PTR, NULL_PTR]),
-    ("model-ops/src/ops/qmatmul.rs", &[NULL_PTR]),
+    ("model-ops/src/shared_expert.rs", &[NONE, NONE, NONE]),
+    ("model-ops/src/ops/qmatmul.rs", &[NONE]),
+];
+
+/// (file under `crates/`, the scale argument of each `FewAct::new` in source
+/// order). Shared sites take their `ActLayouts`' record; single-reader sites
+/// the record of their one layout.
+const SCALE_SOURCES: &[(&str, &[&str])] = &[
+    ("model-ops/src/ops/quantize.rs", &["scale"]),
+    ("model-ops/src/delta_net.rs", &["x_layouts.few_scale()", "Some(scale)"]),
+];
+
+/// Files that produce a few-column activation through
+/// `quantize_f16_for_layouts`, with the layouts argument of each call.
+const LAYOUT_SOURCES: &[(&str, &[&str])] = &[
+    ("forward/src/core/composites/dense_ffn.rs", &["norm_layouts", "down_layout.into()"]),
+    ("forward/src/core/composites/mtp.rs", &["layout.into()"]),
+    ("forward/src/core/composites/standard_attn.rs", &["layouts", "out_layout.into()"]),
 ];
 
 fn crates_dir() -> PathBuf {
@@ -132,4 +150,30 @@ fn no_unlisted_site() {
         .filter(|f| !f.contains("/tests/") && !SITES.iter().any(|(listed, _)| listed == f))
         .collect();
     assert!(unlisted.is_empty(), "quantised-matmul sites in unlisted files: {unlisted:?}");
+}
+
+/// The `index`-th top-level argument of every call of `name(` in `src`.
+fn nth_args(src: &str, name: &str, index: usize) -> Vec<String> {
+    src.match_indices(name)
+        .map(|(at, _)| call_args(src, at + name.len()))
+        .filter(|args| args.len() > index)
+        .map(|args| args[index].clone())
+        .collect()
+}
+
+#[test]
+fn few_scale_comes_from_the_site_layouts() {
+    let root = crates_dir();
+    for (file, expected) in SCALE_SOURCES {
+        let src = std::fs::read_to_string(root.join(file)).unwrap();
+        assert_eq!(nth_args(&src, "FewAct::new(", 1), *expected, "{file}: few-column scale source changed");
+    }
+    for (file, expected) in LAYOUT_SOURCES {
+        let src = std::fs::read_to_string(root.join(file)).unwrap();
+        assert_eq!(
+            nth_args(&src, "quantize_f16_for_layouts(", 1),
+            *expected,
+            "{file}: few-column layouts source changed"
+        );
+    }
 }

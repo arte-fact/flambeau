@@ -119,7 +119,7 @@ fn eh_proj_half<B: flambeau_backend::Backend>(
     let mut act = pool(state.pool.norm_q8_1);
     let mut act_mmq = pool(mmq_ptr);
     let mut act_few = pool(few_ptr);
-    flambeau_model_ops::quantize_f16_for_layouts(
+    let few = flambeau_model_ops::quantize_f16_for_layouts(
         x,
         layout.into(),
         &mut act,
@@ -129,7 +129,7 @@ fn eh_proj_half<B: flambeau_backend::Backend>(
         n,
         &ops,
     )?;
-    w.qmatmul(&act, &act_mmq, &act_few, out, shape, &ops)
+    w.qmatmul(&act, &act_mmq, few, out, shape, &ops)
 }
 
 /// The draft layer up to and including attention for `tokens.len()` rows:
@@ -290,7 +290,7 @@ pub fn mtp_draft_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
         lm_head.lm_head.qmatmul(
             &q,
             &act_null,
-            &Tensor::null(),
+            flambeau_ops::FewAct::NONE,
             &mut logits_dev,
             flambeau_ops::MatmulShape {
                 m: 1,

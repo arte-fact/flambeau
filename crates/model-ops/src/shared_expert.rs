@@ -534,7 +534,7 @@ impl SharedExpert {
                 weights: self.ffn_gate_shexp.ptr,
                 act_q8_1: scratch.x_q8_1,
                 act_q8_1_mmq: x_q8_1_mmq,
-                act_q8_1_few: flambeau_core::DevicePtr::NULL,
+                act_q8_1_few: flambeau_ops::FewAct::NONE,
                 dst: scratch.gate_f32,
             },
             flambeau_ops::MatmulShape {
@@ -550,7 +550,7 @@ impl SharedExpert {
                 weights: self.ffn_up_shexp.ptr,
                 act_q8_1: scratch.x_q8_1,
                 act_q8_1_mmq: x_q8_1_mmq,
-                act_q8_1_few: flambeau_core::DevicePtr::NULL,
+                act_q8_1_few: flambeau_ops::FewAct::NONE,
                 dst: scratch.up_f32,
             },
             flambeau_ops::MatmulShape {
@@ -598,7 +598,7 @@ impl SharedExpert {
                 weights: self.ffn_down_shexp.ptr,
                 act_q8_1: scratch.activated_q8_1,
                 act_q8_1_mmq: activated_q8_1_mmq,
-                act_q8_1_few: flambeau_core::DevicePtr::NULL,
+                act_q8_1_few: flambeau_ops::FewAct::NONE,
                 dst: down_out_f32,
             },
             flambeau_ops::MatmulShape {

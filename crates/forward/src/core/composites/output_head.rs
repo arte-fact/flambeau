@@ -77,7 +77,7 @@ pub fn output_head_local<B: flambeau_backend::Backend, H: TopologyHooks<B>>(
     lm_head.lm_head.qmatmul(
         &norm_q8_1,
         &act_mmq_null,
-        &Tensor::null(),
+        flambeau_ops::FewAct::NONE,
         &mut logits_f32,
         flambeau_ops::MatmulShape {
             m: n_emit,

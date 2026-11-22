@@ -57,7 +57,7 @@ pub use sig::{
     AttnPrefillPagedShape, AttnPrefillShape, AttnPrefillSlots, AttnSplitkDposShape,
     AttnSplitkPartials,
     AttnSplitkShape, AttnSplitkSlots, KvAppendSlots,
-    MatmulShape, MmvqBatchShape, MmvqBuffers, MmvqGateUpBatchShape,
+    FewAct, MatmulShape, MmvqBatchShape, MmvqBuffers, MmvqGateUpBatchShape,
     MmvqGateUpBuffers, MmvqGateUpShape, MmvqShape, MoeMmvqBuffers, MoeMmvqGateUpBuffers,
     MoeMmqTile8DownBuffers, MoeMmqTile8GateUpBuffers, MoeMmvqShape,
     KvAppendBatchedSlotsBuffers, KvAppendBatchedSlotsShape, KvAppendBuffers,

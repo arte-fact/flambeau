@@ -235,7 +235,7 @@ fn qmatmul_dispatch(
             weights: weight_ptr,
             act_q8_1: act_q8_1_ptr,
             act_q8_1_mmq: act_q8_1_mmq_ptr,
-            act_q8_1_few: flambeau_core::DevicePtr::NULL,
+            act_q8_1_few: flambeau_ops::FewAct::NONE,
             dst: output.ptr,
         },
         shape,

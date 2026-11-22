@@ -102,7 +102,7 @@ fn qmatmul_m1_vs_m5_per_dtype() {
                     qmatmul(
                         &reg,
                         stream,
-                        QmatmulBuffers { weights: w, act_q8_1: y, act_q8_1_mmq: DevicePtr::NULL, act_q8_1_few: DevicePtr::NULL, dst },
+                        QmatmulBuffers { weights: w, act_q8_1: y, act_q8_1_mmq: DevicePtr::NULL, act_q8_1_few: flambeau_ops::FewAct::NONE, dst },
                         MatmulShape { m, k, n },
                         dtype,
                     )
@@ -172,7 +172,7 @@ fn batched_columns_match_single_column_calls() {
                 weights: w,
                 act_q8_1: y.offset_bytes(c * col_bytes),
                 act_q8_1_mmq: DevicePtr::NULL,
-                act_q8_1_few: flambeau_core::DevicePtr::NULL,
+                act_q8_1_few: flambeau_ops::FewAct::NONE,
                 dst,
             };
             qmatmul(&reg, stream, bufs, MatmulShape { m: 1, k, n }, dtype).unwrap();
@@ -180,7 +180,7 @@ fn batched_columns_match_single_column_calls() {
         }
         let scale = reference.iter().fold(0.0f32, |a, v| a.max(v.abs())).max(1e-6);
         for m in [2usize, 5, 8, M_MAX] {
-            let bufs = QmatmulBuffers { weights: w, act_q8_1: y, act_q8_1_mmq: DevicePtr::NULL, act_q8_1_few: DevicePtr::NULL, dst };
+            let bufs = QmatmulBuffers { weights: w, act_q8_1: y, act_q8_1_mmq: DevicePtr::NULL, act_q8_1_few: flambeau_ops::FewAct::NONE, dst };
             qmatmul(&reg, stream, bufs, MatmulShape { m, k, n }, dtype).unwrap();
             let got = download(&dev, dst, m * n);
             let err = got

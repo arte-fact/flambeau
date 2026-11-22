@@ -98,14 +98,6 @@ pub const DIRECT_CALL_KERNELS_SM86: &[DirectCallKernel] = &[
 /// references: a bench sweep (or autotune) is the only caller.
 pub const BENCH_REFERENCE_KERNELS_SM86: &[DirectCallKernel] = &[
     DirectCallKernel {
-        impl_id: "qmatmul_q5_k_mmq_few_mma",
-        cert_rel_path: "certs/cuda/sm_86/qmatmul_q5_k_mmq_few_mma.json",
-    },
-    DirectCallKernel {
-        impl_id: "qmatmul_q3_k_mmq_few_mma",
-        cert_rel_path: "certs/cuda/sm_86/qmatmul_q3_k_mmq_few_mma.json",
-    },
-    DirectCallKernel {
         impl_id: "apply_per_expert_scale_f32",
         cert_rel_path: "certs/cuda/sm_86/apply_per_expert_scale_f32.json",
     },

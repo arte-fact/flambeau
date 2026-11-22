@@ -117,7 +117,13 @@ pub fn run<K: KernelBackend>(
                     weights,
                     act_q8_1: act,
                     act_q8_1_mmq: act_mmq,
-                    act_q8_1_few: act_few,
+                    act_q8_1_few: flambeau_ops::FewAct::new(
+                        act_few,
+                        match layout {
+                            flambeau_ops::ActLayout::Few(scale) => Some(scale),
+                            _ => None,
+                        },
+                    ),
                     dst,
                 };
                 let launch = || qmatmul_bench::<K>(reg, stream, &id, buf, shape, qdtype);
