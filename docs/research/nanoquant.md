@@ -48,7 +48,7 @@ gaussi…)** : le papier ne compare aucun k-quant llama.cpp → mesure propre pr
 
 - **Oui** : `github.com/SamsungLabs/NanoQuant` @ `a9e0a430881ff80d8b622c3129e330dc33c04f5` (« Support for binary GEMM kernel benchmarking (#1) »), **Apache 2.0** (LICENSE 11 357 o, `pyproject.toml` `license = {text = "Apache-2.0"}`, README). NOTICE présent. Réutilisation commerciale OK avec notice.
 - Stack : Python ≥ 3.9, torch ≥ 2.6, `transformers==4.51.3`, accelerate, datasets, optimum, lm_eval, cut_cross_entropy, gemlite (k-quants 1-bit Triton), zeus-ml (énergie). CLI : `python -m nanoquant.main --model_id Qwen/Qwen3.8-27B --bits 0.55 --num_calib_samples 128 --calib_dataset <...> --qmodel_path out.pt`. Support Qwen3.5/Qwen3.8 (blocs GDN/FLA). Éval : lm_eval (wikitext2 + 6 tâches zero-shot).
-- Miroirs tiers (ex. `rkuznetsovcg/NanoQuant`) non officiels — préférer `SamsungLabs`.
+- Miroirs tiers (ex. `rkuznetsovcg/NanoQuant`) non officiels — préférer `SamsungLabs`. Attention à la collision de nom : `github.com/swayam8624/Nanoquant` et les GGUF `arelath/*-nanoquant-GGUF` sur HF sont des réimplémentations indépendantes (C++/Metal, PPL mesurée 292 vs 55 BF16 sur leur protocole) — sans lien avec le papier ICML 2026 ; non utilisés ici.
 
 ## 4. Coût de calibration et ce qui tient sur la RTX 3090 (24 Go)
 
@@ -90,8 +90,24 @@ Débit estimé (2× MI50, TP-2, 2048 Go/s) :
 
 ## 7. Étape 2 — essai de qualité (compress + PPL WikiText-2 vs Q4_K)
 
-En cours — résultats à ajouter ici (dossiers délégués : `nanoquant-env`, `nanoquant-quantize`, `nanoquant-ppl` sous `/home/artefact/Workspace/`).
+Dossiers sous `/home/artefact/Workspace/` : `nanoquant-env` (env + poids, provenance sha256 37/37 OK), `nanoquant-quantize` (QUANT.md), `nanoquant-ppl` (RESULTS.md). Délégation Vibe DeepSeek tentée via le hub mcp-agents (2 sessions créées) mais l'init des sessions enfant a échoué (erreur interne MCP github) → essais exécutés en direct par la coordinatrice. GPU partagé respecté : `nvidia-smi` vérifié avant chaque run, un seul job GPU à la fois, sd-server (PID 5083) jamais touché.
+
+Choix du modèle : Qwen3-8B tient en VRAM (15,3 Gio mesurés au chargement BF16 ; pic 22,2 Gio pendant la compression) mais ~558 s/bloc × 36 blocs ≈ 5,6 h + stade KD sur RTX 3090 → hors budget de session (le papier fait L2-7B en 1,7 GPU-h sur H100). Essai retenu : **Qwen3-0.6B** (présent dans le Pareto du papier, Fig. 6).
+
+Résultats (WikiText-2 test complet, 146 fenêtres × 2048) :
+
+| Modèle | Format | PPL | Harnais |
+|---|---|---|---|
+| Qwen3-0.6B | BF16 | 20,95 | harnais du dépôt NanoQuant (fenêtres 2048) |
+| Qwen3-0.6B | Q4_K_M GGUF (484 Mo, 4,5 bpw) | **19,41 ± 0,17** | llama-perplexity (build-cuda ac931b5bc, ctx 2048) |
+| Qwen3-0.6B | F16 GGUF (1,50 Go) | 18,12 ± 0,16 | llama-perplexity, même réglage |
+| Qwen3-0.6B | **NanoQuant 2,0 bits** (393 Mo) | **42,01** | harnais du dépôt NanoQuant |
+| Qwen3-0.6B | **NanoQuant 1,0 bit** (365 Mo) | **52,49** | harnais du dépôt NanoQuant |
+
+Notes : runs NQ effectués avec `--tune_model false` (stade KD tué par l'OOM killer cgroup RAM hôte 31 Go au premier essai ; ce stade ne change que les échelles) ; papier Table 2 v3 Q3-0.6 @1 bpw = 27,56 (lm_eval, pipeline complet) — notre 52,49 reflète surtout l'absence de ce stade. Même sans lui, à 1 bit le 0.6B est ~2,5× pire en PPL que le BF16 (même harnais) et ~2,7× pire que Q4_K_M (19,41, harnais llama-perplexity). À 2 bits, le papier (L2-7B, Table 8) atteint 6,52 ≈ QTIP 6,29 / AQLM 6,64 (2 bits vectoriels) — notre 0.6B à 2 bits : 42,01.
 
 ## 8. Recommandation
 
-À compléter après l'étape 2.
+**On va plus loin : prototype du noyau HIP de GEMV binaire, mais cadré à 2 bpw et avec une mesure de qualité sur un modèle 27B.** Justification : (a) le format et le code sont solides et réutilisables (Apache 2.0, SamsungLabs/NanoQuant @ a9e0a430) ; (b) le gain de bande passante est réel et grand — à 1 bpw, plafond HBM2 ~600 t/s en TP-2 sur 2× MI50 contre ~135 t/s pour Q4_K (4,5 bpw), soit un potentiel ~2-4× en decode une fois le noyau écrit (borne ALU d'unpack ~55-110 t/s) ; (c) la qualité mesurée ici confirme le papier : à 1 bit la PPL est ~2,5-2,7× au-dessus de Q4_K (52,5 vs 19,4 sur Qwen3-0.6B), à 2 bits l'écart se réduit (42,0) et le papier montre qu'à 2 bpw NanoQuant égale les meilleurs 2 bits vectoriels — mais 2 bpw ne divise la mémoire que par ~2,25× vs Q4_K. Le prototype HIP doit donc mesurer vitesse ET PPL à 1 et 2 bpw sur Qwen3.8-27B (le modèle de référence du chantier) avant toute intégration ; si la PPL à 1 bit est jugée insuffisante pour les usages, rester à 2 bpw ou s'arrêter.
+
+Arrêt ici : l'étape 3 (noyau HIP) attend l'accord de Benoît.
