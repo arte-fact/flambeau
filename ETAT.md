@@ -49,11 +49,41 @@ diagnostics: `~/Workspace/flambeau-exp/ETAT.md` on threadripper, with the result
   `real_gguf_cuda_parity` (12B Q4_K) diverges from llama.cpp at the fifth token — the suspect
   is the MMA prefill attention on sm_86.
 
+## Workstream: NanoQuant, sub-1-bit quantization (draft PR #5, branch `research/nanoquant`)
+
+The ICML 2026 paper (`SamsungLabs/NanoQuant` @ `a9e0a430`, Apache-2.0) factorises every linear
+layer as `W ≈ diag(s1)·U±1·V±1ᵀ·diag(s2)`: two binary low-rank factors, a per-layer rank derived
+from the bit budget, packed `uint32` bitfields and two FP16 scale vectors. Note, measures,
+design and traps: `docs/research/nanoquant.md` on the branch.
+
+- **Done.** Feasibility note for gfx906; quality trial on Qwen3-0.6B against Q4_K_M; a two-stage
+  binary GEMV prototype (28.65 t/s on one MI50, weights only, 57.3 t/s TP-2); and the **2 bpw
+  format wired into the real decode path** — `GgmlDType::NQ2` (wire id 40) plus `QDtype::NQ2`
+  and the loader mapping, CPU dequant, Q8_1 stage-1 kernel, `qmatmul_nq2_mmvq_gfx906` dispatch
+  row with its gfx906 cert, `scripts/nq_pt_to_gguf.py`, and an e2e example validated at 3.5e-4
+  against the CPU dequant on a real GGUF tensor.
+- **Measures, Qwen3-0.6B, one MI50.** NQ2 2 bpw: 145 t/s at m = 1 (Q4_K_M 411) — launch-bound at
+  this size, not bandwidth-bound. Quality on the same `llama-perplexity` harness: NQ2 2 bpw
+  **35.05 ± 0.34**, Q4_K_M **19.41 ± 0.17**, F16 18.12. At 0.6B the NQ2 GGUF (710 MB) is even
+  larger than Q4_K_M (484 MB), because embed and lm_head stay F16; the size win only appears at
+  27B scale (~9 GB against 15.2 GB, weights only).
+- **Conclusion of the branch.** The kernel and the loader are not the blocker; quality is (×1.8
+  in perplexity at 2 bpw).
+- **Direction approved by Benoît on 2026-11-25: keep going, through ShamAN-Q** (arXiv
+  2609.38521v1), which keeps the same deployment format — same binary blob, same two scales — so
+  this kernel and loader are reused as they are and only the calibration changes (dense Kronecker
+  curvature, non-uniform rank). Next lot: compress Qwen3-0.6B in ShamAN-Q at ~1–2 bpw with a
+  perplexity target below 25 on the same harness, then re-measure the Flambeau path; no 27B run
+  before that.
+- Nothing is merged: the branch is a draft PR. Merging stays Benoît's call.
+
 ## Decisions waiting for Benoît
 
 - Merge of PR #3 (reserved to him) and whether `feature/cuda-decouple-chantier-ecarts` is
   deleted.
 - Whether the workstream resumes, and in which order: V5 measurement first, or the gemma bugs.
+- NanoQuant: answered on 2026-11-25 — continue, through ShamAN-Q (see the section above). The
+  draft PR #5 still waits for a merge decision.
 
 Provisional decisions taken by the team, which he may reverse: push V2 on
 `feature/cuda-decouple`; MI50 thermal guard relaxed to ≤ 56 °C; sm_86 few-MMA bands Q4_K 3..24,
