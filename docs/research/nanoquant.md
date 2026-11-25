@@ -141,6 +141,32 @@ Notes : runs NQ effectués avec `--tune_model false` (stade KD tué par l'OOM ki
 
 **Note archi** : le registry Flambeau ne connaît pas `qwen3` dense (archs : gemma4, qwen35, qwen35moe, qwen3moe, qwen3next — tous hybrides GDN, MoE ou attention gatée `attn_q_gated`), donc pas de run `serve` sur le 0.6B NQ2 ; le test e2e est fait au niveau op via le vrai `qmatmul()`. Un run serveur complet demanderait un petit modèle qwen35 quantisé NQ2.
 
+## 6bis. Étape 5 — ShamAN-Q @ ~1 bpw sur Qwen3-0.6B (en cours, branche `research/nanoquant`)
+
+**Disponibilité du code** : arXiv:2609.38521v1 (Mei et al., IonQ, 2026-09-29) — le papier dit que le code est « fourni avec l'article » et « intended to be open sourced as part of the publication » ; au 2026-11-25 aucun dépôt public (`github.com/jonathanmei/shaman` 404, e-print arXiv = source LaTeX seul). → **réimplémentation du delta §4** sur la base du code NanoQuant @ a9e0a430, patch local documenté dans `nanoquant-env/nanoquant-src/SHAMAN.md` : `src/nanoquant/core/shaman.py` (courbure de Kronecker dense KL-Shampoo 3 passes + shrinkage γ=0,2, transport + tempering spectral p=½, solves de Sylvester Mahalanobis dans la base propre conjointe avec α=ρ+λ, allocation de rang non uniforme « hand table » à parité de bits, statistique d'entrée fraîche par groupe + refresh tous les Δ=7 blocs). SVID, duals, extraction d'échelles, packing, TuneFP/TuneLatentSTE inchangés → **format de déploiement identique**, le noyau HIP et le chargeur NQ2 faits en §7bis sont réutilisables tels quels.
+
+**Écarts documentés** (hardware) : eigendecompositions en fp32 (le papier rapporte lui-même que fp32 ne change pas la PPL, 16,66 vs 16,72 à 1,7B) ; α_k = ρ_k + λ exactement comme le papier (la variante ρ·mean(diag) du code NanoQuant diverge sur le système de Sylvester — vérifié sur jouet) ; jitter croissant autour de `eigh` sur les matrices quasi-signe (LAPACK error 15).
+
+**Ablations du papier** (1,7B, rangs uniformes, 0,986 bpw) : repro NanoQuant 18,76 → NKP dense non temperé 19,21 → +tempering p=½ **17,46** → +fresh/refresh 17,28 → KL-Shampoo non temperé 17,04 → +tempering **16,72** (ShamAN-Q). Tempering = plus gros gain individuel ; allocation de rang non uniforme = hors bruit. Table principale : ShamAN-Q 0,6B @ ≈1 bpw = **22,96** (harnais papier) vs NanoQuant repro 29,21 ; @0,8 bpw = 27,51.
+
+**Vérifs locales** : solver testé sur matrice jouet (recon ~0,94 en métrique dense, 0,84 en métrique identité vs 0,79 NanoQuant ; chemin transposé OK) ; allocateur de rang : 0,97 bpw atteint à bits=1.0 (parité), ratio profondeur bloc27/bloc0 ≈ 1,9 ≈ e^0,6 ; smoke 4 blocs/16 éch. (run `run-0.6B-shaman-1.0-smoke.log`, RC=0) : erreurs de recon ADMM normalisées 0,39–0,45, conforme au ‖E‖≈0,4–0,5‖W‖ annoncé à 1 bit.
+
+**Bug de jauge du point fixe KL trouvé et corrigé** : l'itération de Jacobi détermine (A, G) à une constante près (cA, G/c) et collapsait l'échelle vers ~0 (tr(A)/n ≈ 0, cond ~10³) ; jauge tr(A) = n appliquée à chaque passe avec G compensé (le produit A⊗G, invariant, est préservé). Vérifié sur données synthétiques H = A0⊗G0 : le point fixe retrouve le vrai cond (~73 vs 72 cible) ; sur le modèle réel, cond de la covariance clippée brute ~10³¹ → cond KL post-shrinkage 917–9208 selon les couches.
+
+**Run complet @ bits=1.0 (jauge corrigée)** : Qwen3-0.6B, 128 éch. WikiText-2 × 2048, `--tune_model false`, RTX 3090, RC=0 — log `nanoquant-quantize/run-0.6B-shaman-1.0-g2.log`, checkpoint `Qwen3-0.6B-SHAMAN-1.0-g2.pt` (365 Mo), GGUF `nanoquant-ppl/Qwen3-0.6B-SHAMAN-g2-NQ2{,-dequant-f16}.gguf` (0,97 bpw effectif). **PPL WikiText-2 (llama-perplexity ac931b5bc, `-c 2048 -ngl 99 -b 512`, 145 chunks)** :
+
+| Modèle | bpw | PPL WT2 |
+|---|---|---|
+| F16 | 16 | 18,12 ± 0,16 |
+| Q4_K_M | 4,5 | 19,41 ± 0,17 |
+| NanoQuant | 2,0 | 35,05 ± 0,34 |
+| **ShamAN-Q** | **2,0** | **à venir** |
+| NanoQuant | 1,0 | 51,86 ± 0,54 |
+| **ShamAN-Q (sans jauge)** | 0,97 | 54,44 ± 0,56 |
+| **ShamAN-Q (jauge corrigée)** | **0,97** | **46,22 ± 0,45** |
+
+→ Le gain directionnel du papier est reproduit sur notre harnais : ShamAN-Q bat NanoQuant au même bpw (46,2 vs 51,9, −11 % ; le papier rapporte −21 %, 29,21 → 22,96 sur son propre harnais). **La cible PPL < 25 n'est pas atteinte** — à noter que notre harnais est systématiquement plus sévère que celui du papier dès NanoQuant pur (51,9 vs 27,6 à 1 bpw, écart déjà noté en §7bis, dû entre autres au stade KD tué : `--tune_model false`). Run @ 2,0 bpw en cours pour la comparaison au même nombre de bits.
+
 ## 8. Recommandation
 
 **Intégration faite à 2 bpw (§7bis) : le noyau HIP binaire est en place et branché dans le vrai dispatch `qmatmul` de Flambeau, validé bit-à-bit contre le convertisseur Python et correct sur MI50 (3,5e-4 via le chemin réel).** Bilan : à 0,6B, NQ2 2 bpw fait 145 t/s contre 411 t/s en Q4_K_M sur 1 MI50 (chemin NQ2 dominé par les lancements à petite échelle ; à 27B la projection reste ~57 t/s TP-2 weights-only vs 29,6 t/s Q4_K end-to-end, avec 7× moins de trafic poids). Côté qualité, sur le même harness llama-perplexity : NQ2 2 bpw = **35,05** vs Q4_K_M = 19,41 vs F16 = 18,12 — le 2 bpw reste ~1,8× pire en PPL que Q4_K, et à 0,6B le GGUF NQ2 (710 Mo) est même plus gros que le Q4_K_M (484 Mo) car embed + lm_head restent en F16 — le gain de taille n’apparaît qu’à l’échelle 27B (~9 Go vs 15,2 Go en Q4_K, poids seuls 2 bpw ≈ 6,75 Go vs 14,4 Go quantisés).

@@ -153,7 +153,15 @@ def build_nq2(sd, hf_base):
     dout, r = int(ushape[0]), int(ushape[1])
     r2, din = int(vshape[0]), int(vshape[1])
     assert r == r2, (hf_base, r, r2)
-    assert nq2_rank(dout, din) == r, (hf_base, r, nq2_rank(dout, din))
+    # Uniform-bit NanoQuant checkpoints satisfy nq2_rank(dout, din) == r.
+    # ShamAN-Q (arXiv:2609.38521) uses non-uniform per-layer ranks (hand-table
+    # allocator): the blob's rank then comes from the checkpoint shapes, not
+    # from the dims. NOTE: the Flambeau NQ2 loader (crates/quant/src/gguf.rs)
+    # currently derives r from dims via nq2_rank — ShamAN-Q GGUFs therefore need
+    # the follow-up of storing r in the blob header before the HIP path can
+    # run them; the dequant-F16 GGUF cross-check is unaffected.
+    if nq2_rank(dout, din) != r:
+        print(f"  note: {hf_base}: non-uniform rank r={r} (uniform rule would give {nq2_rank(dout, din)})")
     wpr = (r + 31) // 32
     assert up.shape == (dout, wpr), (hf_base, up.shape, dout, wpr)
     # V: (r, din) bits -> transpose (din, r) -> pack -> (din, wpr)
