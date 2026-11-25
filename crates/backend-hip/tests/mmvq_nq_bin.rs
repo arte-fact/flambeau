@@ -3,8 +3,8 @@
 //! `kernels-hip/src/kernels/mmvq_nq_bin.cu`) on MI50 vs a CPU f64 reference
 //! that dequantises Ŵ = diag(s1)·U·Vᵀ·diag(s2) explicitly.
 //!
-//! U, V are random ±1 matrices packed lsb_first (bit=1 → +1, bit=0 → −1),
-//! matching the paper's "−1→0, +1→1" packing; s1, s2 and x are fp16.
+//! U, V are random ±1 matrices packed lsb_first with the repo convention
+//! (bit set = −1, bit clear = +1, as in pack_binary_gemv); s1, s2, x are fp16.
 
 #![expect(
     clippy::undocumented_unsafe_blocks,
@@ -49,13 +49,13 @@ impl Rng {
 }
 
 /// Pack a (rows × cols) ±1 matrix into row-major u32 words, lsb_first:
-/// bit b of word kw = (col kw*32+b == +1) ? 1 : 0.
+/// bit b of word kw = (col kw*32+b == -1) ? 1 : 0  (repo convention).
 fn pack_signs(mat: &[i8], rows: usize, cols: usize) -> Vec<u32> {
     let wpr = cols.div_ceil(32);
     let mut out = vec![0u32; rows * wpr];
     for r in 0..rows {
         for c in 0..cols {
-            if mat[r * cols + c] > 0 {
+            if mat[r * cols + c] == -1 {
                 out[r * wpr + (c >> 5)] |= 1u32 << (c & 31);
             }
         }

@@ -25,7 +25,7 @@ pub use blocks::{
     BlockQ6K, BlockQ8K, BlockQ8_0, BlockQ8_1, BlockQ8_1Mmq, QK8_1_MMQ,
 };
 pub use chat_template::{ChatMessage, ChatTemplate};
-pub use dequant::{dequantize_into, dequantize_to_vec};
+pub use dequant::{dequantize_into, dequantize_nq2, dequantize_to_vec};
 pub use dtype::{GgmlDType, K_SCALE_SIZE, QK4_0, QK4_1, QK5_0, QK5_1, QK8_0, QK8_1, QK_K};
 pub use error::{QuantError, Result};
 pub use gguf::{GgufFile, GgufVersion, TensorInfo, Value, ValueType, DEFAULT_ALIGNMENT};

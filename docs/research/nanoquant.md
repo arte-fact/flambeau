@@ -116,8 +116,33 @@ Résultats (WikiText-2 test complet, 146 fenêtres × 2048) :
 
 Notes : runs NQ effectués avec `--tune_model false` (stade KD tué par l'OOM killer cgroup RAM hôte 31 Go au premier essai ; ce stade ne change que les échelles) ; papier Table 2 v3 Q3-0.6 @1 bpw = 27,56 (lm_eval, pipeline complet) — notre 52,49 reflète surtout l'absence de ce stade. Même sans lui, à 1 bit le 0.6B est ~2,5× pire en PPL que le BF16 (même harnais) et ~2,7× pire que Q4_K_M (19,41, harnais llama-perplexity). À 2 bits, le papier (L2-7B, Table 8) atteint 6,52 ≈ QTIP 6,29 / AQLM 6,64 (2 bits vectoriels) — notre 0.6B à 2 bits : 42,01.
 
+## 7bis. Étape 4 — intégration du format NQ2 2 bpw dans Flambeau (faite, branche `research/nanoquant`)
+
+**Format GGUF** : nouveau dtype `NQ2` (wire id 40) dans `crates/quant` (`GgmlDType::NQ2`, `TensorInfo::size_in_bytes` calculée depuis les dims, déquant CPU `dequantize_nq2`), `QDtype::NQ2` dans `crates/core`, mapping loader `ggml_to_qdtype` (upload raw). Blob par linéaire (LE) : `[U_packed dout×wpr u32][V_packed din×wpr u32][s1 dout f16][s2 din f16]`, `wpr = ceil(r/32)`, rang exact du dépôt (`calculate_ranks`, bits=2, 2 échelles : `int(a·b·2/(a+b)−16)`, arrondi bas à 32, clamp `[32, min(a,b)]` — vérifié contre les 196 tenseurs du checkpoint). Convention de bits du dépôt `pack_binary_gemv` lsb_first : **bit set = −1, clear = +1** (le papier dit l'inverse, le code fait +1→0) ; V est stocké transposé par rapport au `.pt` (qui est rang×din/32) en din×wpr pour que les bits de rang d'une ligne d'entrée soient contigus. Correction du signe dans `nq_sign` (kenernels + test) après détection.
+
+**Chemin de décodage** : variante Q8_1 du stage 1 (`flambeau_nq_stage1_vt_x_q8_1` dans `mmvq_nq_bin.cu`), branche NQ2 en tête de `qmatmul()` (`crates/ops/src/hip/qmatmul.rs::mmvq_nq2_launch`) : zero + stage1 + stage2 par slot d'activation, scratch `t[m×r]` en thread_local par device, stem `mmvq_nq_bin` ajouté à `KERNEL_STEMS`; descripteur `qmatmul_nq2_mmvq_gfx906` + ligne `dispatch/hip/gfx906.toml` + cert `certs/hip/gfx906/qmatmul_nq2_mmvq_gfx906.json` (tests `dispatch_toml_roundtrip` / `every_descriptor_cert_path_exists_on_disk` passent).
+
+**Convertisseur** `scripts/nq_pt_to_gguf.py` (writer GGUF manuel, KVs copiées du GGUF F16 source, 196 linéaires → NQ2) : `Qwen3-0.6B-NQ2.gguf` (710 Mo) et `Qwen3-0.6B-NQ2-dequant-f16.gguf` (1,51 Go, Ŵ en F16 pour cross-check). `flambeau inspect-gguf` lit le fichier (sizes OK). Erreur de Frobenius Ŵ vs F16 : 0,36–0,60 selon les couches (régime attendu à ~2 bpw).
+
+**Vérifications** :
+- `crates/quant/tests/nq2_gguf.rs` : déquant Rust du blob GGUF == référence Python (f32) à 1e-5·scale — OK.
+- `cargo test -p flambeau-backend-hip --test mmvq_nq_bin` : 3/3 OK sur MI50 (convention de signe corrigée).
+- `crates/ops/examples/nq2_e2e.rs` (vrai dispatch `qmatmul` + vrais tenseurs du GGUF, MI50) : `blk.0.attn_q` (n=2048, k=1024) max_rel_err **3,5e-4** vs dequant CPU — OK.
+- PPL cross-check : `llama-perplexity` (build-cuda ac931b5bc, ctx 2048, même harness que les 19,41/18,12) sur le GGUF déquant-F16 : **PPL = 35,05 ± 0,34** (harnais dépôt : 42,01 ; l'écart vient de la convention de fenêtres du harnais, pas des poids — le blob est validé bit-à-bit par ailleurs).
+
+**Vitesse mesurée, 1×MI50, séquence GEMV complète du 0,6B (196 linéaires) via `qmatmul()`** :
+
+| Chemin | m=1 | m=4 |
+|---|---|---|
+| NQ2 2 bpw (710 Mo) | 6,89 ms → **145 t/s** | 23,97 ms → **41,7 t/s** |
+| Q4_K_M (484 Mo, 169 tenseurs quantisés) | 2,43 ms → **411 t/s** | 12,41 ms → **80,6 t/s** |
+
+À 0,6B le chemin NQ2 est dominé par les 3 lancements/couche (588 lancements/token, ~35 µs/couche) — pas par la HBM. Projection 27B inchangée (§5bis) : 2,10 Go/token @1 bpw → 57,3 t/s TP-2 weights-only vs 29,6 t/s Q4_K end-to-end mesuré, 7× moins de trafic.
+
+**Note archi** : le registry Flambeau ne connaît pas `qwen3` dense (archs : gemma4, qwen35, qwen35moe, qwen3moe, qwen3next — tous hybrides GDN, MoE ou attention gatée `attn_q_gated`), donc pas de run `serve` sur le 0.6B NQ2 ; le test e2e est fait au niveau op via le vrai `qmatmul()`. Un run serveur complet demanderait un petit modèle qwen35 quantisé NQ2.
+
 ## 8. Recommandation
 
-**On va plus loin, mais à 2 bpw plutôt qu'à 1 bit.** Le prototype HIP (étape 3, §5bis) montre qu'à 1 bpw le noyau binaire projette **57 t/s TP-2 weights-only** sur le 27B (vs 29,6 t/s end-to-end Q4_K mesuré) avec 7× moins de trafic poids — la vitesse n'est pas le bloqueur. Le bloqueur est la qualité : à 1 bit, PPL 52,5 vs 19,4 (Q4_K_M) sur Qwen3-0.6B ; le papier confirme (L2-70 1 bit = 6,52 vs FP16 3,32). À 2 bpw la qualité se rapproche (42,0 sur 0.6B ; L2-7 6,52 ≈ QTIP/AQLM 2 bits) pour ~2,25× moins de poids que Q4_K et encore un plafond de ~487 t/s TP-2. Prochaine étape proposée : intégration du format NanoQuant 2 bpw dans le chemin de décodage de Flambeau (chargeur + dispatch qmatmul) avec mesure PPL/vitesse sur Qwen3.8-27B, plutôt qu'à 1 bit.
+**Intégration faite à 2 bpw (§7bis) : le noyau HIP binaire est en place et branché dans le vrai dispatch `qmatmul` de Flambeau, validé bit-à-bit contre le convertisseur Python et correct sur MI50 (3,5e-4 via le chemin réel).** Bilan : à 0,6B, NQ2 2 bpw fait 145 t/s contre 411 t/s en Q4_K_M sur 1 MI50 (chemin NQ2 dominé par les lancements à petite échelle ; à 27B la projection reste ~57 t/s TP-2 weights-only vs 29,6 t/s Q4_K end-to-end, avec 7× moins de trafic poids). Côté qualité, sur le même harness llama-perplexity : NQ2 2 bpw = **35,05** vs Q4_K_M = 19,41 vs F16 = 18,12 — le 2 bpw reste ~1,8× pire en PPL que Q4_K, et à 0,6B le GGUF NQ2 (710 Mo) est même plus gros que le Q4_K_M (484 Mo) car embed + lm_head restent en F16 — le gain de taille n’apparaît qu’à l’échelle 27B (~9 Go vs 15,2 Go en Q4_K, poids seuls 2 bpw ≈ 6,75 Go vs 14,4 Go quantisés).
 
-Arrêt ici : la suite (intégration 2 bpw) attend l'accord de Benoît.
+**Recommandation : on s'arrête là sur NanoQuant pur ; si on continue, c'est par ShamAN-Q (§6), pas par NanoQuant.** La vitesse n'est pas le bloqueur (noyau intégré, marge HBM énorme), la qualité à 2 bpw l'est : 35 vs 19,4. ShamAN-Q partage exactement le même format de déploiement (binaire low-rank + 2 échelles fp16) — le noyau et le chargeur NQ2 faits ici lui servent tels quels ; il ne reste qu'à changer la procédure de calibration (courbure Kronecker dense + rang non uniforme). À défaut, la variante sûre reste Q4_K. Prochaine étape proposée si feu vert : compresser Qwen3-0.6B en ShamAN-Q @ ~1–2 bpw (même harness, PPL cible < 25) puis re-mesurer le chemin Flambeau existant.

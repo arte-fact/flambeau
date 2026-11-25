@@ -494,4 +494,18 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         m_range: (32, usize::MAX),
         cert_rel_path: "certs/hip/gfx906/qmatmul_iq1_m_mmq_wave64_gfx906.json",
     },
+    // NanoQuant 2 bpw two-stage binary GEMV (research/nanoquant,
+    // arXiv:2602.06694). ops/src/hip/qmatmul.rs intercepts NQ2 before the
+    // dispatch table, so this row is the table-of-record entry only;
+    // kernels live in the mmvq_nq_bin stem (zero + stage1_q8_1 + stage2).
+    KernelDescriptor {
+        op_name: "QMatMul",
+        impl_id: "qmatmul_nq2_mmvq_gfx906",
+        backend: "hip",
+        arch: "gfx906",
+        dtype_weight: QDtype::NQ2,
+        dtype_activation: QDtype::Q8_1,
+        m_range: (1, usize::MAX),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_nq2_mmvq_gfx906.json",
+    },
 ];

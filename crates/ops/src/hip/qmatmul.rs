@@ -16,8 +16,8 @@
 )]
 
 use anyhow::{anyhow, bail, Result};
-use flambeau_backend_hip::{dispatch_qmatmul, HipStream, KernelArgs, LaunchCfg};
-use flambeau_core::{DevicePtr, QDtype, QMatMulCfg};
+use flambeau_backend_hip::{dispatch_qmatmul, HipDevice, HipStream, KernelArgs, LaunchCfg};
+use flambeau_core::{Device, DevicePtr, QDtype, QMatMulCfg};
 
 use super::OpsRegistry;
 
@@ -60,6 +60,25 @@ pub fn qmatmul(
             return mmq_f16_tile_launch(ctx, bufs, n, m, k);
         }
         return mmq_f16_launch(ctx, bufs, n, m, k);
+    }
+    // NanoQuant 2 bpw — whole-tensor binary low-rank W ≈ diag(s1)·U·Vᵀ·diag(s2)
+    // (arXiv:2602.06694). Two-stage GEMV per activation row via the
+    // mmvq_nq_bin stem; bypasses the dispatch table (the weight blob is not
+    // a block-quant, so block_elems/nb_per_row don't apply). The loader
+    // uploads NQ2 payloads raw (dtype_qmatmul_native).
+    if dtype_weight == QDtype::NQ2 {
+        let _ = act_q8_1_mmq;
+        return mmvq_nq2_launch(
+            ctx,
+            crate::MmvqBuffers {
+                weights,
+                act_q8_1,
+                dst,
+            },
+            m,
+            k,
+            n,
+        );
     }
     // Q4_1 at m ∈ {2, 3, 4}: per-N compile-time batched MMVQ.
     // Sibling of K1's Q4_0 batched path. The first cut of Q4_1 batched
@@ -2523,6 +2542,118 @@ fn mmq_wave64_launch(
     Ok(())
 }
 
+thread_local! {
+    /// Per-device grow-only scratch for the NQ2 stage-1 partials `t[m × r]`
+    /// (f32). Keyed by HIP device id; avoids a hipMalloc/hipFree per matmul.
+    static NQ2_SCRATCH: std::cell::RefCell<std::collections::HashMap<i32, (usize, DevicePtr)>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+fn nq2_scratch(device_id: i32, bytes: usize) -> Result<DevicePtr> {
+    NQ2_SCRATCH.with(|cell| {
+        let mut map = cell.borrow_mut();
+        let entry = map.entry(device_id).or_insert((0, DevicePtr::NULL));
+        if entry.0 < bytes {
+            let dev = HipDevice::new(device_id)?;
+            let ptr = dev.alloc(bytes)?;
+            entry.0 = bytes;
+            entry.1 = ptr;
+        }
+        Ok(entry.1)
+    })
+}
+
+/// NanoQuant 2 bpw two-stage GEMV (arXiv:2602.06694, SamsungLabs/NanoQuant
+/// @ a9e0a430). Weight blob layout (uploaded raw by the loader):
+/// `[U packed n×wpr u32][V packed k×wpr u32][s1 n×f16][s2 k×f16]`,
+/// `wpr = ceil(r/32)`, `r = round(n·k·2/(n+k)) − 16`.
+/// Per activation slot i (Q8_1 row at `act_q8_1 + i·(k/32)·36B`):
+/// `t = Vᵀ(s2⊙x)` via `flambeau_nq_stage1_vt_x_q8_1`, then
+/// `y = s1⊙(U·t)` via `flambeau_nq_stage2_u_t` into `dst + i·n·4B`.
+/// `t` is zeroed once per call by `flambeau_nq_zero_f32`.
+fn mmvq_nq2_launch(
+    ctx: crate::OpCtx<'_>,
+    bufs: crate::MmvqBuffers,
+    m: usize,
+    k: usize,
+    n: usize,
+) -> Result<()> {
+    let crate::OpCtx { reg, stream } = ctx;
+    let crate::MmvqBuffers {
+        weights,
+        act_q8_1,
+        dst,
+    } = bufs;
+    assert_eq!(k % 32, 0, "nq2 requires k % 32 == 0 (Q8_1 activation blocks)");
+    let r = flambeau_quant::gguf::nq2_rank(n as u64, k as u64) as usize;
+    let wpr = r.div_ceil(32);
+    let v_off = n * wpr * 4; // U first: [0, n*wpr*4)
+    let s1_off = (n + k) * wpr * 4;
+    let s2_off = s1_off + n * 2;
+    let w_at = |off: usize| weights.offset_bytes(off).as_usize() as u64;
+    let act_row_bytes = (k / 32) * std::mem::size_of::<flambeau_quant::BlockQ8_1>();
+    let dst_row_bytes = n * 4;
+    let t = nq2_scratch(reg.device_id(), m * r * 4)?;
+    let t_base: u64 = t.as_usize() as u64;
+
+    let module = reg.expect_module("mmvq_nq_bin")?;
+    let zero = module.kernel("flambeau_nq_zero_f32")?;
+    let stage1 = module.kernel("flambeau_nq_stage1_vt_x_q8_1")?;
+    let stage2 = module.kernel("flambeau_nq_stage2_u_t")?;
+
+    let tn_i = (m * r) as i32;
+    let tk_i = k as i32;
+    let tr_i = r as i32;
+    let twpr_i = wpr as i32;
+    let tno_i = n as i32;
+
+    // zero t[0..m*r)
+    let mut args = KernelArgs::new();
+    args.push(&t_base);
+    args.push(&tn_i);
+    let zero_cfg = LaunchCfg::one_d(((m * r) as u32).div_ceil(256), 256);
+    unsafe { zero.launch(stream, zero_cfg, args)? };
+
+    // stage 1: grid (ceil(r/256), ceil(k/512)), block 256, LDS 18432 B
+    let s1_cfg = LaunchCfg {
+        grid: ((r as u32).div_ceil(256), (k as u32).div_ceil(512), 1),
+        block: (256, 1, 1),
+        shared_bytes: 512 * 8 * 4 + 512 * 4,
+    };
+    // stage 2: grid ceil(n/8), block 256 (8 half-warps, one row each)
+    let s2_cfg = LaunchCfg::one_d((n as u32).div_ceil(8), 256);
+
+    for i in 0..m {
+        let vp = w_at(v_off);
+        let s2p = w_at(s2_off);
+        let tp = t_base + (i * r * 4) as u64;
+        let yp = act_q8_1.offset_bytes(i * act_row_bytes).as_usize() as u64;
+        let mut args = KernelArgs::new();
+        args.push(&vp);
+        args.push(&yp);
+        args.push(&s2p);
+        args.push(&tp);
+        args.push(&tk_i);
+        args.push(&tr_i);
+        args.push(&twpr_i);
+        unsafe { stage1.launch(stream, s1_cfg, args)? };
+
+        let up = w_at(0);
+        let s1p = w_at(s1_off);
+        let dp = dst.offset_bytes(i * dst_row_bytes).as_usize() as u64;
+        let mut args = KernelArgs::new();
+        args.push(&up);
+        args.push(&tp);
+        args.push(&s1p);
+        args.push(&dp);
+        args.push(&tr_i);
+        args.push(&twpr_i);
+        args.push(&tno_i);
+        unsafe { stage2.launch(stream, s2_cfg, args)? };
+    }
+    Ok(())
+}
+
 fn block_elems(dtype: QDtype) -> usize {
     use flambeau_quant::{QK8_0, QK_K};
     match dtype {
@@ -2545,6 +2676,9 @@ fn block_elems(dtype: QDtype) -> usize {
         // caller's `n_blocks_per_row = k / block_elems` matches the
         // activation side, which is what the F16 MMVQ kernel iterates over.
         QDtype::F16 => 32,
+        // Whole-tensor format; the NQ2 branch in `qmatmul` returns before
+        // any nb_per_row computation, so this is never actually used.
+        QDtype::NQ2 => 1,
         other => panic!("qmatmul weight dtype {other:?} not supported"),
     }
 }

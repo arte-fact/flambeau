@@ -138,6 +138,8 @@ pub enum QDtype {
     IQ2_S,
     IQ1_S,
     IQ1_M,
+    /// NanoQuant 2 bpw binary low-rank (arXiv:2602.06694) — see GgmlDType::NQ2.
+    NQ2,
 }
 
 impl QDtype {
@@ -167,6 +169,7 @@ impl QDtype {
             Self::IQ2_S => "IQ2_S",
             Self::IQ1_S => "IQ1_S",
             Self::IQ1_M => "IQ1_M",
+            Self::NQ2 => "NQ2",
         }
     }
 }

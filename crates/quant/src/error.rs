@@ -64,6 +64,9 @@ pub enum QuantError {
         expected: usize,
         dtype: &'static str,
     },
+
+    #[error("dtype {dtype} has no generic dequantiser (needs tensor dims)")]
+    UnsupportedDtype { dtype: &'static str },
 }
 
 pub type Result<T> = std::result::Result<T, QuantError>;
