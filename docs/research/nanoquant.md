@@ -82,6 +82,16 @@ Débit estimé (2× MI50, TP-2, 2048 Go/s) :
 - NanoQuant 1 bpw 27B : ≈ 27e9/8 + échelles ≈ **3,4 Go/token** → plafond ~600 t/s TP-2. Borne ALU d'unpack (~2–4 ops/bit × 27e9 bits ≈ 5–11e10 ops ; 60 CU × 64 lanes × ~1,6 GHz ≈ 6,1e12 ops/s) → 9–18 ms/token → **55–110 t/s** ;
 - attendu : **~2–4× le Q4_K actuel (29,6 t/s) en decode m = 1**, selon l'efficacité atteinte. À m ≥ 2 le compute par token croît (≈ 4N FLOP @ 1 bpw, 108 GFLOP/token @ 27B → 9000 t/s à 12 TFLOPS fp32, non limitant).
 
+## 5bis. Étape 3 — prototype du noyau HIP binaire (fait, branche `research/nanoquant`)
+
+Fichiers : `crates/kernels-hip/src/kernels/mmvq_nq_bin.cu` (build auto-enregistré par `build.rs`), test `crates/backend-hip/tests/mmvq_nq_bin.rs`, bench `crates/backend-hip/examples/nq_bin_bench.rs`.
+
+- Noyau deux étages : `flambeau_nq_stage1_vt_x` (t = Vᵀ(s2⊙x), grille 2D rang×lignes, tuile LDS de 512 lignes × 256 colonnes de bits chargée coalescée, unpack bit + FMA depuis LDS, `atomicAdd` dans t) puis `flambeau_nq_stage2_u_t` (y = s1⊙(U t), demi-warp par ligne de sortie, reduce `gfx906_half_warp_reduce_sum`).
+- **Correction** : 3 tests vs référence CPU f64 (déquant explicite de Ŵ) — formes (128,256,64), (512,1024,r=100 impair), (4096,4096,r=2032) — erreur rel. max ≤ 6e-6. `cargo test -p flambeau-backend-hip --test mmvq_nq_bin` : 3 passed.
+- **Microbench MI50 (1 GPU, m=1, poids seuls)** — évolution : v1 naïf 1,25 t/s → v2 découpage j-chunks 9,2 t/s → v3 tuile LDS + demi-warp 18,3 t/s → v4 unroll ×4 à accumulateurs indépendants **28,65 t/s sur 1 MI50, soit 57,3 t/s en TP-2** (débit atteint 19-84 Go/s selon les formes, plafond HBM2 1024 Go/s → 487 t/s 1 GPU / 974 t/s TP-2, donc ~17× de marge restante).
+- Projection 27B (Qwen3.8-27B : hidden 5120, ffn 17408, 64 couches, vocab 248320) @ 1 bpw : 2,10 Go/token de poids (vs 15,19 Go en Q4_K, 7,2× moins) → **57,3 t/s TP-2 weights-only projeté**, à comparer aux 29,6 t/s TP-2 end-to-end mesurés pour Q4_K (chantier ETAT) et au plafond Q4_K de 135 t/s TP-2. Le noyau binaire naïf est donc déjà ~2× au-dessus du Q4_K mesuré en vitesse de poids, avec 7× moins de trafic HBM (gros modèles/KV plus gros en VRAM).
+- Le goulot restant est l'unpack/LDS (pas la HBM) : pistes pour la suite — lectures LDS vectorisées, FMA fp16 packé (`v_pk_fma_f16`, 2 signes/poids), tuiles plus grandes, stage 1 sans atomicAdd (réduction en deux passes).
+
 ## 6. Variante ShamAN-Q (arXiv:2609.38521v1, IonQ)
 
 - Remplace la géométrie de reconstruction diagonale de NanoQuant par une **courbure de Kronecker dense** (Shampoo, fit KL sur la Fisher empirique) → perte de Mahalanobis ; les updates ADMM continus deviennent des équations de Sylvester ; projection discrète et **format de déploiement identiques** à NanoQuant.
@@ -108,6 +118,6 @@ Notes : runs NQ effectués avec `--tune_model false` (stade KD tué par l'OOM ki
 
 ## 8. Recommandation
 
-**On va plus loin : prototype du noyau HIP de GEMV binaire, mais cadré à 2 bpw et avec une mesure de qualité sur un modèle 27B.** Justification : (a) le format et le code sont solides et réutilisables (Apache 2.0, SamsungLabs/NanoQuant @ a9e0a430) ; (b) le gain de bande passante est réel et grand — à 1 bpw, plafond HBM2 ~600 t/s en TP-2 sur 2× MI50 contre ~135 t/s pour Q4_K (4,5 bpw), soit un potentiel ~2-4× en decode une fois le noyau écrit (borne ALU d'unpack ~55-110 t/s) ; (c) la qualité mesurée ici confirme le papier : à 1 bit la PPL est ~2,5-2,7× au-dessus de Q4_K (52,5 vs 19,4 sur Qwen3-0.6B), à 2 bits l'écart se réduit (42,0) et le papier montre qu'à 2 bpw NanoQuant égale les meilleurs 2 bits vectoriels — mais 2 bpw ne divise la mémoire que par ~2,25× vs Q4_K. Le prototype HIP doit donc mesurer vitesse ET PPL à 1 et 2 bpw sur Qwen3.8-27B (le modèle de référence du chantier) avant toute intégration ; si la PPL à 1 bit est jugée insuffisante pour les usages, rester à 2 bpw ou s'arrêter.
+**On va plus loin, mais à 2 bpw plutôt qu'à 1 bit.** Le prototype HIP (étape 3, §5bis) montre qu'à 1 bpw le noyau binaire projette **57 t/s TP-2 weights-only** sur le 27B (vs 29,6 t/s end-to-end Q4_K mesuré) avec 7× moins de trafic poids — la vitesse n'est pas le bloqueur. Le bloqueur est la qualité : à 1 bit, PPL 52,5 vs 19,4 (Q4_K_M) sur Qwen3-0.6B ; le papier confirme (L2-70 1 bit = 6,52 vs FP16 3,32). À 2 bpw la qualité se rapproche (42,0 sur 0.6B ; L2-7 6,52 ≈ QTIP/AQLM 2 bits) pour ~2,25× moins de poids que Q4_K et encore un plafond de ~487 t/s TP-2. Prochaine étape proposée : intégration du format NanoQuant 2 bpw dans le chemin de décodage de Flambeau (chargeur + dispatch qmatmul) avec mesure PPL/vitesse sur Qwen3.8-27B, plutôt qu'à 1 bit.
 
-Arrêt ici : l'étape 3 (noyau HIP) attend l'accord de Benoît.
+Arrêt ici : la suite (intégration 2 bpw) attend l'accord de Benoît.
