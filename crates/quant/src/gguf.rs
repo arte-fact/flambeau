@@ -163,6 +163,25 @@ pub struct TensorInfo {
     pub split_idx: u16,
 }
 
+/// NanoQuant 2 bpw rank for a (dout × din) layer, mirroring
+/// SamsungLabs/NanoQuant `utils/utils.py::calculate_ranks` for bits=2.0,
+/// num_scales=2: `r0 = a·b·2/(a+b) − 16`, truncated to int, floored to a
+/// multiple of 32, clamped to `[32, min(a,b)]`.
+pub fn nq2_rank(dout: u64, din: u64) -> u64 {
+    let a = dout.max(din);
+    let b = dout.min(din);
+    let r0 = (a * b * 2) as f64 / (a + b) as f64 - 16.0;
+    let mut r = if r0 <= 0.0 { 0 } else { r0 as u64 }; // int() truncation
+    r = (r / 32) * 32;
+    if r == 0 {
+        r = 32;
+    }
+    if r > b {
+        r = b;
+    }
+    r
+}
+
 impl TensorInfo {
     pub fn elem_count(&self) -> u64 {
         self.dims.iter().product()
@@ -178,6 +197,14 @@ impl TensorInfo {
 
     /// Total bytes occupied by this tensor's payload.
     pub fn size_in_bytes(&self) -> u64 {
+        if self.dtype == GgmlDType::NQ2 {
+            // Whole-tensor NanoQuant blob: dims are [dout, din] after un-reverse.
+            let dout = self.dims[0];
+            let din = self.dims[1];
+            let r = nq2_rank(dout, din);
+            let wpr = r.div_ceil(32);
+            return (dout + din) * wpr * 4 + (dout + din) * 2;
+        }
         let elems = self.elem_count();
         elems / self.block_size() * self.type_size()
     }
@@ -479,6 +506,14 @@ impl GgufFile {
     pub fn dequantize_tensor(&self, name: &str) -> Result<Vec<f32>> {
         let info = self.info(name)?;
         let raw = self.tensor_raw(name)?;
+        if info.dtype == GgmlDType::NQ2 {
+            // dims are [dout, din] after un-reverse.
+            let dout = info.dims[0] as usize;
+            let din = info.dims[1] as usize;
+            let mut out = vec![0.0f32; dout * din];
+            crate::dequant::dequantize_nq2(raw, &mut out, dout, din)?;
+            return Ok(out);
+        }
         let elem_count = info.elem_count() as usize;
         crate::dequant::dequantize_to_vec(info.dtype, raw, elem_count)
     }

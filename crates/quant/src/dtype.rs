@@ -48,6 +48,11 @@ pub enum GgmlDType {
     /// experts in Coder-Next-80B-Q4_0). Not natively supported by V1 kernels;
     /// the loader transparently dequant→Q8_0 at load (mirrors 2 BF16→Q8_0).
     Mxfp4,
+    /// NanoQuant 2 bpw (arXiv:2602.06694): per-layer W ≈ diag(s1)·U·Vᵀ·diag(s2),
+    /// U,V ∈ {±1} bit-packed (32/u32), s1/s2 fp16. Whole tensor = one block.
+    /// Blob layout: [U_packed dout×wpr u32][V_packed din×wpr u32][s1 dout f16][s2 din f16].
+    /// Rank r = round(dout*din*2/(dout+din)) − 16 (2 bpw target).
+    NQ2,
     /// IQ4_XS — 4-bit non-linear quant. 256-element super-block layout:
     /// `[half d, u16 scales_h, u8 scales_l[4], u8 qs[128]]` = 136 B/block.
     /// 8 sub-blocks of 32 elements, each with a 6-bit signed scale split
@@ -150,9 +155,11 @@ impl GgmlDType {
             // can transparently dequant→Q8_0 at upload time. Used by Unsloth
             // Dynamic Quants in qwen3next shared experts.
             39 => Self::Mxfp4,
+            // NanoQuant 2 bpw (private wire id 40; see scripts/nq_pt_to_gguf.py).
+            40 => Self::NQ2,
             // Other IQ quants exist in GGUFs in the wild but are not part of
             // V1's dtype set. Distinct error so loaders reject cleanly.
-            24..=28 | 31..=38 => return Err(DTypeError::UnsupportedWireId(u)),
+            24..=28 | 31..=38 | 41..=u32::MAX => return Err(DTypeError::UnsupportedWireId(u)),
             _ => return Err(DTypeError::UnknownWireId(u)),
         })
     }
@@ -184,6 +191,7 @@ impl GgmlDType {
             Self::Iq4Xs => 23,
             Self::Iq1M => 29,
             Self::Mxfp4 => 39,
+            Self::NQ2 => 40,
         }
     }
 
@@ -215,6 +223,7 @@ impl GgmlDType {
             Self::Iq4Xs => "IQ4_XS",
             Self::Iq1M => "IQ1_M",
             Self::Mxfp4 => "MXFP4",
+            Self::NQ2 => "NQ2",
         }
     }
 
@@ -242,6 +251,8 @@ impl GgmlDType {
             Self::Iq4Nl => QK4_0,
             // MXFP4 uses Q4_0's 32-element block.
             Self::Mxfp4 => QK4_0,
+            // NQ2 is a whole-tensor format; size computed from dims in gguf.rs.
+            Self::NQ2 => 1,
         }
     }
 
@@ -284,6 +295,7 @@ impl GgmlDType {
             Self::Iq1M => QK_K / 8 + QK_K / 16 + QK_K / 32,
             // MXFP4 block: 1 byte E8M0 microscale + 16 bytes nibbles = 17 B.
             Self::Mxfp4 => 1 + QK4_0 / 2,
+            Self::NQ2 => 1,  // placeholder — see TensorInfo::size_in_bytes
         }
     }
 }

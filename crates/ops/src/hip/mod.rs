@@ -227,6 +227,8 @@ pub const KERNEL_STEMS: &[&str] = &[
     "mmq_q8_K_wave64",
     "mmq_q6_K_4warp",
     "mmq_q6_K_wave64",
+    // NanoQuant 2 bpw two-stage binary GEMV (research/nanoquant).
+    "mmvq_nq_bin",
     // Activation quantisation + glue.
     "quantize_q8_1",
     "quantize_q8_1_mmq",

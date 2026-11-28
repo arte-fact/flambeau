@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "impl_id": "qmatmul_nq2_mmvq_gfx906",
+  "backend": "hip",
+  "arch": "gfx906",
+  "op": "qmatmul_mmvq",
+  "dtype_weight": "NQ2",
+  "dtype_activation": "Q8_1",
+  "tolerance_formula": "|err| <= 1e-3 * max(|ref|, sqrt(k))  (NQ2 two-stage binary GEMV, f32 accum)",
+  "results": [
+    {
+      "m": 1,
+      "k": 2048,
+      "n": 2048,
+      "seed": 20260703001,
+      "max_rel_err": 6e-06,
+      "tolerance": 0.001,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 2560,
+      "n": 3072,
+      "seed": 20260703002,
+      "max_rel_err": 5.2e-06,
+      "tolerance": 0.001,
+      "pass": true
+    },
+    {
+      "m": 4,
+      "k": 2048,
+      "n": 2048,
+      "seed": 20260703003,
+      "max_rel_err": 6e-06,
+      "tolerance": 0.001,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 8192,
+      "n": 8192,
+      "seed": 20260703004,
+      "max_rel_err": 4.8e-06,
+      "tolerance": 0.001,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-07-03T12:00:00Z",
+  "rig": "threadripper-gfx906",
+  "pmc": {
+    "vgpr_count": null,
+    "sgpr_count": null,
+    "waves_per_simd": null,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  },
+  "notes": "Measured in crates/backend-hip/tests/mmvq_nq_bin.rs (f64 CPU reference, rel err <= 6e-6 on stage1 t and stage2 y across 3 shapes incl. odd rank and 8B attn shape). Perf projection: 28.65 t/s 1xMI50 / 57.3 t/s TP-2 weights-only at 27B 1bpw; see docs/research/nanoquant.md."
+}

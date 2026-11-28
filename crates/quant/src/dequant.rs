@@ -54,6 +54,12 @@ pub fn dequantize_to_vec(
 /// Returns an error if `raw` is the wrong byte length for `out.len()` of
 /// `dtype`, or if `out.len()` is not a multiple of the dtype's block size.
 pub fn dequantize_into(dtype: GgmlDType, raw: &[u8], out: &mut [f32]) -> Result<(), QuantError> {
+    if dtype == GgmlDType::NQ2 {
+        // Whole-tensor format: block/type sizes are placeholders, and the
+        // rank depends on the matrix shape — callers must go through
+        // `dequantize_nq2` with explicit dims.
+        return Err(QuantError::UnsupportedDtype { dtype: dtype.name() });
+    }
     let elem_count = out.len();
     let block_size = dtype.block_size();
     let type_size = dtype.type_size();
@@ -114,6 +120,77 @@ pub fn dequantize_into(dtype: GgmlDType, raw: &[u8], out: &mut [f32]) -> Result<
         GgmlDType::Iq2S => dequant_iq2_s(raw, out),
         GgmlDType::Iq1S => dequant_iq1_s(raw, out),
         GgmlDType::Iq1M => dequant_iq1_m(raw, out),
+        GgmlDType::NQ2 => unreachable!("guarded above"),
+    }
+    Ok(())
+}
+
+/// NanoQuant 2 bpw whole-tensor dequant (arXiv:2602.06694).
+///
+/// Blob layout (all little-endian):
+/// `[U_packed: dout*wpr u32][V_packed: din*wpr u32][s1: dout f16][s2: din f16]`
+/// with `wpr = ceil(r/32)`, `r = round(dout*din*2/(dout+din)) - 16`.
+/// Bit `k` of row `i` lives in word `k/32`, bit position `k%32` (lsb-first);
+/// bit set = -1, clear = +1 (repo convention: +1→0, -1→1). Padding bits in the last word must be zero.
+/// `out[i*din + j] = s1[i] * s2[j] * sum_k sign(U[i,k]) * sign(V[j,k])`.
+///
+/// The inner sum is evaluated word-wise: for bits a,b in {0,1},
+/// sign(a)*sign(b) = +1 iff a == b, so per 32-bit word the contribution is
+/// `32 - 2*popcount(uw ^ vw)` (last word masked to the valid `r % 32` bits).
+/// # Errors
+/// Returns an error if `out.len() != dout*din` or `raw` is not exactly the
+/// NQ2 blob size for this shape.
+pub fn dequantize_nq2(
+    raw: &[u8],
+    out: &mut [f32],
+    dout: usize,
+    din: usize,
+) -> Result<(), QuantError> {
+    if out.len() != dout * din {
+        return Err(QuantError::ElemCountNotDivisible {
+            elem_count: out.len(),
+            block_size: dout * din,
+            dtype: "NQ2",
+        });
+    }
+    let r = crate::gguf::nq2_rank(dout as u64, din as u64) as usize;
+    let wpr = r.div_ceil(32);
+    let u_len = dout * wpr * 4;
+    let v_len = din * wpr * 4;
+    let expected = u_len + v_len + (dout + din) * 2;
+    if raw.len() != expected {
+        return Err(QuantError::ByteLenMismatch {
+            got: raw.len(),
+            expected,
+            dtype: "NQ2",
+        });
+    }
+    let u_words: &[u32] = bytemuck::cast_slice(&raw[..u_len]);
+    let v_words: &[u32] = bytemuck::cast_slice(&raw[u_len..u_len + v_len]);
+    let s_off = u_len + v_len;
+    let s1: &[f16] = bytemuck::cast_slice(&raw[s_off..s_off + dout * 2]);
+    let s2: &[f16] = bytemuck::cast_slice(&raw[s_off + dout * 2..]);
+    let tail_mask = if r % 32 == 0 {
+        u32::MAX
+    } else {
+        (1u32 << (r % 32)) - 1
+    };
+    for i in 0..dout {
+        let s1i = s1[i].to_f32();
+        let urow = &u_words[i * wpr..(i + 1) * wpr];
+        let orow = &mut out[i * din..(i + 1) * din];
+        for (j, o) in orow.iter_mut().enumerate() {
+            let vrow = &v_words[j * wpr..(j + 1) * wpr];
+            let mut acc = 0i32;
+            for w in 0..wpr {
+                let tail = w == wpr - 1 && tail_mask != u32::MAX;
+                let uw = if tail { urow[w] & tail_mask } else { urow[w] };
+                let vw = if tail { vrow[w] & tail_mask } else { vrow[w] };
+                let valid = if tail { (r % 32) as i32 } else { 32 };
+                acc += valid - 2 * (uw ^ vw).count_ones() as i32;
+            }
+            *o = s1i * s2[j].to_f32() * acc as f32;
+        }
     }
     Ok(())
 }

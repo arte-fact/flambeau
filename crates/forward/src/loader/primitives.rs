@@ -112,6 +112,7 @@ pub fn ggml_to_qdtype(dtype: GgmlDType) -> Result<QDtype> {
         G::Iq3S => QDtype::IQ3_S,
         G::Iq4Nl => QDtype::IQ4_NL,
         G::Iq4Xs => QDtype::IQ4_XS,
+        G::NQ2 => QDtype::NQ2,
         other => bail!("ggml_to_qdtype: {other:?} has no qmatmul kernel; use dequant fallback"),
     })
 }

@@ -68,6 +68,14 @@ cert    = "certs/hip/gfx906/qmatmul_q4_K_mmvq_dp4a_gfx906.json"
 notes   = "Phase 3a — DP4A r2 multi-row port of llama.cpp vec_dot_q4_K_q8_1_impl_vmmq. 64 threads, 2 rows per block, half-warp reduce. Replaces nw1_r2 which did per-element scalar FP32 multiplies (rocprofv3 on Qwen3.6-27B UD-Q4_K_XL pp2: 384 us/call → expected ~100 us/call, the Q5_K/Q6_K dp4a regime). Prior scalar r2 cert kept at certs/hip/gfx906/qmatmul_q4_K_mmvq_nw1_r2_gfx906.json for regression cross-check."
 
 [[qmatmul]]
+dtype   = "NQ2"
+dtype_q = "Q8_1"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "qmatmul_nq2_mmvq_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_nq2_mmvq_gfx906.json"
+notes   = "NanoQuant 2 bpw two-stage binary GEMV (mmvq_nq_bin: zero + stage1_vt_x_q8_1 + stage2_u_t). Intercepted in ops/hip/qmatmul.rs before dispatch; row kept as table of record. research/nanoquant."
+
+[[qmatmul]]
 dtype   = "IQ4_XS"
 dtype_q = "Q8_1"
 shape   = { m = "1..31", k = "any", n = "any" }
